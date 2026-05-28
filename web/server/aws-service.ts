@@ -179,9 +179,22 @@ export async function requestQuotaIncrease(accountId: string, serviceCode: strin
 
 export async function listQuotaRequests(accountId: string) {
   const creds = await assumeToAccount(accountId);
-  const client = new ServiceQuotasClient({ region: DEFAULT_REGION, credentials: creds });
-  const resp = await client.send(new ListRequestedServiceQuotaChangeHistoryCommand({}));
-  return (resp.RequestedQuotas || []).map(r => ({ ...r, _accountId: accountId }));
+  const allRequests: any[] = [];
+  
+  // Query multiple regions to catch all quota requests
+  const regions = ['us-east-1', 'us-east-2', 'us-west-1', 'us-west-2', 'eu-west-1', 'eu-west-2', 'eu-central-1', 'ap-southeast-1', 'ap-southeast-2', 'ap-northeast-1', 'ap-south-1'];
+  
+  const results = await Promise.allSettled(regions.map(async (region) => {
+    const client = new ServiceQuotasClient({ region, credentials: creds });
+    const resp = await client.send(new ListRequestedServiceQuotaChangeHistoryCommand({}));
+    return (resp.RequestedQuotas || []).map(r => ({ ...r, _accountId: accountId, _region: region }));
+  }));
+
+  for (const result of results) {
+    if (result.status === 'fulfilled') allRequests.push(...result.value);
+  }
+
+  return allRequests;
 }
 
 export async function getAccountDetail(accountId: string) {

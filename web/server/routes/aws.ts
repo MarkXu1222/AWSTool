@@ -107,7 +107,7 @@ awsRouter.post('/quotas/sync', async (req: Request, res: Response) => {
             desired_value: r.DesiredValue,
             status: r.Status,
             case_id: r.CaseId || null,
-            region: r.QuotaArn ? r.QuotaArn.split(':')[3] : 'us-east-1',
+            region: r.QuotaArn ? r.QuotaArn.split(':')[3] : (r._region || 'us-east-1'),
             created_at: r.Created ? new Date(r.Created).toISOString() : undefined,
           });
         }
