@@ -40,24 +40,28 @@ body {
   background: #fff !important;
   border-radius: 8px !important;
   overflow: hidden;
+  font-size: 13px !important;
 }
 .ant-table-thead > tr > th {
-  background: #fafafa !important;
-  border-bottom: 2px solid #f0f0f0 !important;
-  color: #333 !important;
+  background: #F9FAFB !important;
+  border-bottom: 1px solid #E5E7EB !important;
+  color: #6B7280 !important;
   font-size: 12px !important;
-  font-weight: 600 !important;
+  font-weight: 500 !important;
   padding: 10px 12px !important;
+  white-space: nowrap;
 }
 .ant-table-tbody > tr > td {
-  padding: 10px 12px !important;
-  border-bottom: 1px solid #f5f5f5 !important;
-}
-.ant-table-tbody > tr:nth-child(even) > td {
-  background: #fafbfc !important;
+  padding: 8px 12px !important;
+  border-bottom: 1px solid #F3F4F6 !important;
+  color: #1F2937 !important;
+  line-height: 1.4;
 }
 .ant-table-tbody > tr:hover > td {
-  background: #e6f4ff !important;
+  background: #F8FAFC !important;
+}
+.ant-table-tbody > tr.ant-table-row-selected > td {
+  background: #EFF6FF !important;
 }
 
 /* === Card 加阴影和圆角 === */
@@ -217,7 +221,60 @@ body {
 /* === Tabs 优化 === */
 .ant-tabs-tab {
   font-weight: 500 !important;
+  color: #6B7280 !important;
+  padding: 10px 4px !important;
 }
 .ant-tabs-tab-active .ant-tabs-tab-btn {
   font-weight: 600 !important;
+  color: #1F2937 !important;
+}
+.ant-tabs-ink-bar {
+  height: 2px !important;
+}
+
+/* === 筛选卡片 === */
+.filter-bar {
+  background: #fff;
+  border: 1px solid #E5E7EB;
+  border-radius: 8px;
+  padding: 12px 16px;
+  margin-bottom: 16px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.filter-bar .ant-select, .filter-bar .ant-btn {
+  height: 32px !important;
+}
+
+/* === 页面标题区 === */
+.page-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 16px;
+}
+.page-header-title {
+  font-size: 18px;
+  font-weight: 600;
+  color: #1F2937;
+  margin: 0;
+}
+.page-header-subtitle {
+  font-size: 12px;
+  color: #9CA3AF;
+  margin-top: 2px;
+}
+
+/* === 表格工具栏 === */
+.table-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+.table-toolbar .ant-input-affix-wrapper {
+  width: 320px !important;
+  max-width: 100%;
 }

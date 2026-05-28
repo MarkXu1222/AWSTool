@@ -117,42 +117,59 @@ const QuotasPage: React.FC = () => {
   ];
 
   return (
-    <Card size="small" title="配额管理" extra={<Button size="small" icon={<DownloadOutlined />} onClick={handleExport}>导出</Button>}>
-      <Space wrap style={{ marginBottom: 12 }}>
-        <Select placeholder="选择账户" style={{ width: 180 }} value={selectedAccount || undefined} onChange={setSelectedAccount}
+    <div>
+      {/* 页面标题区 */}
+      <div className="page-header">
+        <div>
+          <h2 className="page-header-title">配额管理</h2>
+          <p className="page-header-subtitle">管理不同账号、服务和区域下的资源配额</p>
+        </div>
+        <Button size="small" icon={<DownloadOutlined />} onClick={handleExport}>导出</Button>
+      </div>
+
+      {/* 筛选卡片区 */}
+      <div className="filter-bar">
+        <Select placeholder="选择账户" style={{ width: 200 }} value={selectedAccount || undefined} onChange={setSelectedAccount}
           showSearch optionFilterProp="label" size="small"
           options={(() => {
             const grouped: Record<string, any[]> = {};
             accounts.forEach(a => { const p = a._payer || 'other'; if (!grouped[p]) grouped[p] = []; grouped[p].push(a); });
             return Object.entries(grouped).map(([payer, accts]) => ({ label: payer, options: accts.map(a => ({ label: `${a.Name} (${a.Id})`, value: a.Id })) }));
           })()} />
-        <Select style={{ width: 110 }} value={selectedService} onChange={setSelectedService} showSearch optionFilterProp="label" options={SERVICES} size="small" />
-        <Select style={{ width: 155 }} value={selectedRegion} onChange={setSelectedRegion} options={REGIONS.map(r => ({ label: r, value: r }))} size="small" />
+        <Select style={{ width: 120 }} value={selectedService} onChange={setSelectedService} showSearch optionFilterProp="label" options={SERVICES} size="small" />
+        <Select style={{ width: 160 }} value={selectedRegion} onChange={setSelectedRegion} options={REGIONS.map(r => ({ label: r, value: r }))} size="small" />
         <Button type="primary" onClick={fetchQuotas} loading={loading} icon={<ReloadOutlined />} size="small">查询</Button>
-      </Space>
+        <Button size="small" onClick={() => { setSelectedAccount(''); setQuotas([]); }}>重置</Button>
+      </div>
 
-      <Tabs activeKey={activeTab} onChange={(key) => { setActiveTab(key); if (key === 'requests') fetchAccountRequests(); }} items={[
+      {/* Tab + 内容区 */}
+      <Card size="small" bodyStyle={{ padding: '0 16px 16px' }}>
+        <Tabs activeKey={activeTab} onChange={(key) => { setActiveTab(key); if (key === 'requests') fetchAccountRequests(); }} items={[
         {
           key: 'quotas', label: `当前配额 (${filtered.length})`,
           children: (
             <>
-              <Input placeholder="搜索配额名称..." prefix={<SearchOutlined />} value={searchText}
-                onChange={e => setSearchText(e.target.value)} allowClear size="small" style={{ marginBottom: 8, maxWidth: 280 }} />
-              <Table size="small" dataSource={filtered} rowKey="QuotaCode" loading={loading} pagination={{ pageSize: 15, showTotal: t => `共 ${t} 条` }}
-                scroll={{ x: 500 }}
+              <div className="table-toolbar">
+                <Input placeholder="搜索配额名称..." prefix={<SearchOutlined />} value={searchText}
+                  onChange={e => setSearchText(e.target.value)} allowClear size="small" />
+                <span style={{ fontSize: 12, color: '#9CA3AF' }}>{filtered.length} 条</span>
+              </div>
+              <Table size="small" dataSource={filtered} rowKey="QuotaCode" loading={loading}
+                pagination={{ pageSize: 15, showTotal: t => `共 ${t} 条`, size: 'small', showSizeChanger: true }}
+                scroll={{ x: 550 }}
                 locale={{ emptyText: '选择账户和服务后点击「查询」' }}
                 columns={[
-                  { title: '配额名称', dataIndex: 'QuotaName', ellipsis: true },
-                  { title: '当前值', dataIndex: 'Value', width: 80, sorter: (a: any, b: any) => a.Value - b.Value, render: (v: number, r: any) => <strong>{v === Infinity ? '∞' : v}{r.Unit && r.Unit !== 'None' ? ` ${r.Unit}` : ''}</strong> },
-                  { title: '可调', dataIndex: 'Adjustable', width: 50, filters: [{ text: '是', value: true }, { text: '否', value: false }], onFilter: (value: any, r: any) => r.Adjustable === value, render: (a: boolean) => a ? <Tag color="green">是</Tag> : <span style={{ color: '#ccc' }}>否</span> },
-                  { title: '', key: 'act', width: 60, render: (_: any, r: any) => r.Adjustable ? <Button size="small" icon={<ArrowUpOutlined />} onClick={() => { setSelectedQuota(r); form.setFieldsValue({ desiredValue: r.Value * 2 }); setModalOpen(true); }}>提升</Button> : null },
+                  { title: '配额名称', dataIndex: 'QuotaName', ellipsis: { showTitle: true } },
+                  { title: '当前值', dataIndex: 'Value', width: 90, align: 'center', sorter: (a: any, b: any) => a.Value - b.Value, render: (v: number, r: any) => <span style={{ fontWeight: 500 }}>{v === Infinity ? '∞' : v}{r.Unit && r.Unit !== 'None' ? ` ${r.Unit}` : ''}</span> },
+                  { title: '可调', dataIndex: 'Adjustable', width: 60, align: 'center', filters: [{ text: '是', value: true }, { text: '否', value: false }], onFilter: (value: any, r: any) => r.Adjustable === value, render: (a: boolean) => a ? <Tag color="success" style={{ margin: 0 }}>是</Tag> : <span style={{ color: '#D1D5DB' }}>否</span> },
+                  { title: '操作', key: 'act', width: 80, fixed: 'right' as const, render: (_: any, r: any) => r.Adjustable ? <Button size="small" type="link" onClick={() => { setSelectedQuota(r); form.setFieldsValue({ desiredValue: r.Value * 2 }); setModalOpen(true); }}>提升</Button> : null },
                 ]} />
             </>
           ),
         },
         {
           key: 'requests', label: `当前账户请求 (${requests.length})`,
-          children: <Table size="small" dataSource={requests} rowKey="id" columns={requestColumns} scroll={{ x: 700 }} pagination={{ pageSize: 10 }} />,
+          children: <Table size="small" dataSource={requests} rowKey="id" columns={requestColumns} scroll={{ x: 800 }} pagination={{ pageSize: 10, size: 'small' }} />,
         },
         {
           key: 'all-requests', label: `在线查询 (${allRequests.length})`,
@@ -194,6 +211,7 @@ const QuotasPage: React.FC = () => {
         )}
       </Modal>
     </Card>
+    </div>
   );
 };
 
