@@ -105,7 +105,7 @@ const QuotasPage: React.FC = () => {
 
   // 通用请求记录列定义
   const requestColumns = [
-    { title: '账户', dataIndex: 'account_id', width: 90, render: (id: string) => { const a = accounts.find(x => x.Id === id); return a ? <strong style={{ fontSize: 12 }}>{a.Name}</strong> : <code style={{ fontSize: 11 }}>{id}</code>; } },
+    { title: '账户', dataIndex: 'account_id', width: 110, render: (id: string) => { const a = accounts.find(x => x.Id === id); return <span style={{ fontSize: 11 }}><code>{id}</code>{a ? <><br/><strong>{a.Name}</strong></> : ''}</span>; } },
     { title: '配额', dataIndex: 'quota_name', ellipsis: true, width: 180 },
     { title: '服务', dataIndex: 'service_code', width: 60 },
     { title: '区域', dataIndex: 'region', width: 95, render: (r: string) => r || 'us-east-1' },
