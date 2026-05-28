@@ -82,7 +82,8 @@ authRouter.get('/me', (req: Request, res: Response) => {
   if (!authHeader) return res.status(401).json({ error: 'Unauthorized' });
   try {
     const decoded = jwt.verify(authHeader.replace('Bearer ', ''), JWT_SECRET) as any;
-    res.json({ username: decoded.username, role: decoded.role });
+    const user = db.getUser(decoded.username);
+    res.json({ username: decoded.username, role: decoded.role, mfaEnabled: !!user?.mfa_enabled });
   } catch { res.status(401).json({ error: 'Token expired' }); }
 });
 

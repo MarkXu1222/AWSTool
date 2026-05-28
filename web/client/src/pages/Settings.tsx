@@ -20,11 +20,9 @@ const SettingsPage: React.FC<SettingsPageProps> = ({ onLogout }) => {
 
   const checkStatus = async () => {
     try {
-      // Check MFA status from login token stored info
+      // Check MFA from server
       const meRes = await api.me();
-      // Also check from login response stored in localStorage
-      const storedMfa = localStorage.getItem('mfaEnabled');
-      if (storedMfa === 'true') setMfaEnabled(true);
+      if (meRes.mfaEnabled) setMfaEnabled(true);
 
       const connRes = await api.testConnection();
       if (connRes.success) setConnection(connRes.data);
