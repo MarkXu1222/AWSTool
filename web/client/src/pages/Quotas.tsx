@@ -106,42 +106,41 @@ const QuotasPage: React.FC = () => {
   // 通用请求记录列定义
   const requestColumns = [
     {
-      title: '账户', dataIndex: 'account_id', width: 120,
-      render: (id: string) => { const a = accounts.find(x => x.Id === id); return a ? <span><strong>{a.Name}</strong><br/><code style={{ fontSize: 10, color: '#999' }}>{id}</code></span> : <code style={{ fontSize: 11 }}>{id}</code>; },
+      title: '账户', dataIndex: 'account_id', width: 100,
+      render: (id: string) => { const a = accounts.find(x => x.Id === id); return a ? <strong style={{ fontSize: 12 }}>{a.Name}</strong> : <code style={{ fontSize: 11 }}>{id}</code>; },
     },
     { title: '配额', dataIndex: 'quota_name', ellipsis: true },
-    { title: '服务', dataIndex: 'service_code', width: 80 },
-    { title: '区域', dataIndex: 'region', width: 100, render: (r: string) => r || '-' },
-    { title: '当前值', dataIndex: 'current_value', width: 65, render: (v: any) => v != null ? v : <span style={{ color: '#ccc' }}>-</span> },
+    { title: '服务', dataIndex: 'service_code', width: 65 },
+    { title: '当前', dataIndex: 'current_value', width: 50, render: (v: any) => v != null ? v : '-' },
     {
-      title: '期望值', dataIndex: 'desired_value', width: 65,
+      title: '期望', dataIndex: 'desired_value', width: 50,
       render: (v: number, record: any) => {
         const done = record.current_value != null && record.current_value >= v;
-        return <strong style={{ color: done ? '#34c759' : undefined }}>{v}{done ? ' ✓' : ''}</strong>;
+        return <strong style={{ color: done ? '#34c759' : undefined }}>{v}{done ? '✓' : ''}</strong>;
       },
     },
     {
-      title: '状态', dataIndex: 'status', width: 100,
-      filters: [{ text: 'PENDING', value: 'PENDING' }, { text: 'APPROVED', value: 'APPROVED' }, { text: 'DENIED', value: 'DENIED' }, { text: 'CASE_OPENED', value: 'CASE_OPENED' }],
+      title: '状态', dataIndex: 'status', width: 85,
+      filters: [{ text: 'PENDING', value: 'PENDING' }, { text: 'APPROVED', value: 'APPROVED' }, { text: 'DENIED', value: 'DENIED' }],
       onFilter: (value: any, record: any) => record.status === value,
       render: (s: string) => { const c: Record<string, string> = { PENDING: 'orange', CASE_OPENED: 'blue', APPROVED: 'green', DENIED: 'red' }; return <Tag color={c[s] || 'default'}>{s}</Tag>; },
     },
     {
-      title: '时间', dataIndex: 'created_at', width: 140,
+      title: '时间', dataIndex: 'created_at', width: 100,
       sorter: (a: any, b: any) => new Date(a.created_at || 0).getTime() - new Date(b.created_at || 0).getTime(),
       defaultSortOrder: 'descend' as const,
-      render: (d: string) => d ? new Date(d).toLocaleString('zh-CN') : '-',
+      render: (d: string) => d ? <span style={{ fontSize: 11 }}>{new Date(d).toLocaleDateString('zh-CN')}</span> : '-',
     },
   ];
 
   return (
     <Card size="small" title="📊 配额管理" extra={<Button size="small" icon={<DownloadOutlined />} onClick={handleExport}>导出</Button>}>
       <Space wrap style={{ marginBottom: 12 }}>
-        <Select placeholder="选择账户" style={{ width: 200 }} value={selectedAccount || undefined} onChange={setSelectedAccount}
-          showSearch optionFilterProp="label" options={accounts.map(a => ({ label: `${a.Name} (${a.Id})`, value: a.Id }))} />
-        <Select style={{ width: 140 }} value={selectedService} onChange={setSelectedService} showSearch optionFilterProp="label" options={SERVICES} />
-        <Select style={{ width: 130 }} value={selectedRegion} onChange={setSelectedRegion} options={REGIONS.map(r => ({ label: r, value: r }))} />
-        <Button type="primary" onClick={fetchQuotas} loading={loading} icon={<ReloadOutlined />}>查询配额</Button>
+        <Select placeholder="选择账户" style={{ width: 180 }} value={selectedAccount || undefined} onChange={setSelectedAccount}
+          showSearch optionFilterProp="label" options={accounts.map(a => ({ label: `${a.Name} (${a.Id})`, value: a.Id }))} size="small" />
+        <Select style={{ width: 110 }} value={selectedService} onChange={setSelectedService} showSearch optionFilterProp="label" options={SERVICES} size="small" />
+        <Select style={{ width: 120 }} value={selectedRegion} onChange={setSelectedRegion} options={REGIONS.map(r => ({ label: r, value: r }))} size="small" />
+        <Button type="primary" onClick={fetchQuotas} loading={loading} icon={<ReloadOutlined />} size="small">查询</Button>
       </Space>
 
       <Tabs activeKey={activeTab} onChange={(key) => { setActiveTab(key); if (key === 'requests') fetchAccountRequests(); }} items={[
@@ -163,7 +162,7 @@ const QuotasPage: React.FC = () => {
         },
         {
           key: 'requests', label: `当前账户请求 (${requests.length})`,
-          children: <Table size="small" dataSource={requests} rowKey="id" columns={requestColumns} pagination={{ pageSize: 10 }} />,
+          children: <Table size="small" dataSource={requests} rowKey="id" columns={requestColumns} scroll={{ x: 700 }} pagination={{ pageSize: 10 }} />,
         },
         {
           key: 'all-requests', label: `在线查询 (${allRequests.length})`,
@@ -173,7 +172,7 @@ const QuotasPage: React.FC = () => {
                 <Button onClick={fetchAllRequests} loading={allRequestsLoading} type="primary" icon={<ReloadOutlined />}>查询所有账户的提升请求</Button>
                 <span style={{ fontSize: 12, color: '#999' }}>将查询 {accounts.length} 个账户的历史记录</span>
               </Space>
-              <Table size="small" dataSource={allRequests} rowKey="id" columns={requestColumns} loading={allRequestsLoading}
+              <Table size="small" dataSource={allRequests} rowKey="id" columns={requestColumns} scroll={{ x: 700 }} loading={allRequestsLoading}
                 pagination={{ pageSize: 15, showTotal: t => `共 ${t} 条` }} />
             </>
           ),
@@ -186,7 +185,7 @@ const QuotasPage: React.FC = () => {
                 <Button onClick={handleSync} loading={syncLoading} icon={<ReloadOutlined />}>同步最新状态</Button>
                 <span style={{ fontSize: 12, color: '#999' }}>从 AWS 拉取最新状态并更新记录</span>
               </Space>
-              <Table size="small" dataSource={dbRecords} rowKey="id" columns={requestColumns} loading={syncLoading}
+              <Table size="small" dataSource={dbRecords} rowKey="id" columns={requestColumns} scroll={{ x: 700 }} loading={syncLoading}
                 pagination={{ pageSize: 15, showTotal: t => `共 ${t} 条记录` }} />
             </>
           ),

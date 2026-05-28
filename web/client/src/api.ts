@@ -30,8 +30,13 @@ async function request(path: string, options: RequestInit = {}) {
 
 export const api = {
   // Auth
-  login: (username: string, password: string, totpCode?: string) =>
-    request('/auth/login', { method: 'POST', body: JSON.stringify({ username, password, totpCode }) }),
+  login: async (username: string, password: string, totpCode?: string) => {
+    const res = await request('/auth/login', { method: 'POST', body: JSON.stringify({ username, password, totpCode }) });
+    if (res.token) {
+      localStorage.setItem('mfaEnabled', res.mfaEnabled ? 'true' : 'false');
+    }
+    return res;
+  },
   me: () => request('/auth/me'),
   setupMFA: () => request('/auth/mfa/setup', { method: 'POST' }),
   confirmMFA: (secret: string, code: string) =>
