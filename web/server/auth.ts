@@ -7,8 +7,8 @@ import { db } from './db';
 import path from 'path';
 import fs from 'fs';
 
-// Allow 1 step before/after (90 second window) to handle time drift
-authenticator.options = { window: 1 };
+// Allow 2 steps before/after (150 second window) to handle time drift and slow input
+authenticator.options = { window: 2 };
 
 // Load shared config for JWT secret and admin password
 const CONFIG_PATH = path.join(__dirname, '../../config.json');
