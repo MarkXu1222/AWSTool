@@ -7,20 +7,37 @@ import { rateLimit } from 'express-rate-limit';
 import { authRouter, authMiddleware } from './auth';
 import { awsRouter } from './routes/aws';
 import { regionsRouter } from './routes/regions';
+import { migrateEncryptMFASecrets } from './db';
 
 const app = express();
 app.set('trust proxy', 1);
 
-// Gzip compression — reduces JS bundle from 1.28MB to ~400KB
+// Gzip compression
 app.use(compression());
 const configPath = path.join(__dirname, '../../config.json');
 let appConfig: any = {};
 try { appConfig = JSON.parse(require('fs').readFileSync(configPath, 'utf-8')); } catch {}
 const PORT = appConfig.web?.port || process.env.PORT || 3000;
 
+// Migrate plaintext MFA secrets on startup
+migrateEncryptMFASecrets();
+
 // Security
-app.use(helmet({ contentSecurityPolicy: false }));
-app.use(cors({ origin: process.env.CORS_ORIGIN || true, credentials: true }));
+app.use(helmet({
+  contentSecurityPolicy: {
+    directives: {
+      defaultSrc: ["'self'"],
+      scriptSrc: ["'self'", "'unsafe-inline'", "'unsafe-eval'"],
+      styleSrc: ["'self'", "'unsafe-inline'"],
+      imgSrc: ["'self'", "data:", "blob:"],
+      connectSrc: ["'self'"],
+    },
+  },
+}));
+app.use(cors({
+  origin: process.env.CORS_ORIGIN || `http://localhost:${PORT}`,
+  credentials: true,
+}));
 app.use(express.json());
 
 // Request logging

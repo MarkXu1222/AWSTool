@@ -7,14 +7,16 @@ import { createCipheriv, createDecipheriv, randomBytes, createHash } from 'crypt
 
 const DB_PATH = process.env.DB_PATH || path.join(__dirname, '../../data/db.json');
 
-// Encryption key for sensitive fields (MFA secrets)
-// Derive from config jwtSecret or env var
+// Encryption key for sensitive fields (MFA secrets) — independent from JWT
 let ENC_KEY: Buffer;
 try {
   const configPath = path.join(__dirname, '../../config.json');
   const config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
-  const source = config.web?.jwtSecret || process.env.JWT_SECRET || 'default-fallback-key-32chars-xxx';
-  ENC_KEY = createHash('sha256').update(source).digest(); // Always 32 bytes
+  const source = config.web?.encryptionKey  // Dedicated key (preferred)
+    || process.env.ENCRYPTION_KEY
+    || config.web?.jwtSecret                // Fallback for backward compat
+    || 'default-fallback-key-32chars-xxx';
+  ENC_KEY = createHash('sha256').update(source).digest();
 } catch {
   ENC_KEY = createHash('sha256').update('default-fallback-key-32chars-xxx').digest();
 }
@@ -182,3 +184,17 @@ export const db = {
     writeDB(data);
   },
 };
+
+// Migration: encrypt any plaintext MFA secrets on startup
+export function migrateEncryptMFASecrets() {
+  const data = readDB();
+  let changed = false;
+  for (const user of data.users) {
+    if (user.mfa_secret && !user.mfa_secret.includes(':')) {
+      user.mfa_secret = encryptField(user.mfa_secret);
+      changed = true;
+      console.log(`✅ Migrated MFA secret for user: ${user.username}`);
+    }
+  }
+  if (changed) writeDB(data);
+}
