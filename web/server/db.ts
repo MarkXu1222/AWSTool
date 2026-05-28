@@ -87,7 +87,10 @@ export const db = {
     const data = readDB();
     const idx = data.quota_requests.findIndex(r => r.id === record.id);
     if (idx >= 0) {
-      Object.assign(data.quota_requests[idx], record, { updated_at: new Date().toISOString() });
+      // Update all fields including created_at if provided by AWS
+      const existing = data.quota_requests[idx];
+      Object.assign(existing, record);
+      existing.updated_at = new Date().toISOString();
     } else {
       record.created_at = record.created_at || new Date().toISOString();
       record.updated_at = new Date().toISOString();

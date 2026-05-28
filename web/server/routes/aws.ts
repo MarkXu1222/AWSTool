@@ -106,8 +106,8 @@ awsRouter.post('/quotas/sync', async (req: Request, res: Response) => {
             quota_name: r.QuotaName,
             desired_value: r.DesiredValue,
             status: r.Status,
-            case_id: (r as any).CaseId || null,
-            region: (r as any).QuotaArn?.split(':')[3] || 'us-east-1',
+            case_id: r.CaseId || null,
+            region: r.QuotaArn ? r.QuotaArn.split(':')[3] : 'us-east-1',
             created_at: r.Created ? new Date(r.Created).toISOString() : undefined,
           });
         }
