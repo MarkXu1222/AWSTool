@@ -13,6 +13,26 @@ const App: React.FC = () => {
     checkAuth();
   }, []);
 
+  // Auto-logout when JWT expires (check every 60s)
+  useEffect(() => {
+    if (!authenticated) return;
+    const interval = setInterval(() => {
+      const token = localStorage.getItem('token');
+      if (!token) { setAuthenticated(false); return; }
+      try {
+        const payload = JSON.parse(atob(token.split('.')[1]));
+        if (payload.exp && payload.exp * 1000 < Date.now()) {
+          localStorage.removeItem('token');
+          setAuthenticated(false);
+        }
+      } catch {
+        localStorage.removeItem('token');
+        setAuthenticated(false);
+      }
+    }, 60 * 1000);
+    return () => clearInterval(interval);
+  }, [authenticated]);
+
   const checkAuth = async () => {
     const token = localStorage.getItem('token');
     if (!token) { setChecking(false); return; }

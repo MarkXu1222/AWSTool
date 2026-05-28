@@ -58,4 +58,6 @@ export const api = {
     request('/aws/quotas/sync', { method: 'POST', body: JSON.stringify({ accountIds }) }),
   scanResources: (accountId: string, region: string) => request(`/aws/resources/${accountId}/${region}`),
   getAuditLog: () => request('/aws/audit'),
+  changePassword: (currentPassword: string, newPassword: string) =>
+    request('/auth/change-password', { method: 'POST', body: JSON.stringify({ currentPassword, newPassword }) }),
 };

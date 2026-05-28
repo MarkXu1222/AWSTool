@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
-import { Card, Button, message, Alert, Image, Input } from 'antd';
-import { SafetyOutlined, CheckCircleOutlined, LogoutOutlined } from '@ant-design/icons';
+import { Card, Button, message, Alert, Image, Input, Form } from 'antd';
+import { SafetyOutlined, CheckCircleOutlined, LogoutOutlined, LockOutlined } from '@ant-design/icons';
 import { api } from '../api';
 
 interface SettingsPageProps {
@@ -86,6 +86,36 @@ const SettingsPage: React.FC<SettingsPageProps> = ({ onLogout }) => {
             <Button type="primary" icon={<SafetyOutlined />} onClick={setupMFA} loading={loading} block>启用 MFA</Button>
           </div>
         )}
+      </Card>
+
+      <Card size="small" title="🔑 修改密码" style={{ marginBottom: 12 }}>
+        <Form layout="vertical" onFinish={async (values: any) => {
+          if (values.newPassword !== values.confirmPassword) {
+            message.error('两次输入的新密码不一致');
+            return;
+          }
+          try {
+            const res = await api.changePassword(values.currentPassword, values.newPassword);
+            if (res.success) {
+              message.success(res.message || '密码已修改');
+            } else {
+              message.error(res.error || '修改失败');
+            }
+          } catch (e: any) {
+            message.error(e.message || '修改失败');
+          }
+        }}>
+          <Form.Item name="currentPassword" label="当前密码" rules={[{ required: true, message: '请输入当前密码' }]}>
+            <Input.Password prefix={<LockOutlined />} placeholder="当前密码" />
+          </Form.Item>
+          <Form.Item name="newPassword" label="新密码" rules={[{ required: true, message: '请输入新密码' }, { min: 6, message: '密码至少 6 位' }]}>
+            <Input.Password prefix={<LockOutlined />} placeholder="新密码（至少 6 位）" />
+          </Form.Item>
+          <Form.Item name="confirmPassword" label="确认新密码" rules={[{ required: true, message: '请确认新密码' }]}>
+            <Input.Password prefix={<LockOutlined />} placeholder="再次输入新密码" />
+          </Form.Item>
+          <Button type="primary" htmlType="submit" block>修改密码</Button>
+        </Form>
       </Card>
 
       {onLogout && (

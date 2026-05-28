@@ -17,6 +17,18 @@ app.use(helmet({ contentSecurityPolicy: false }));
 app.use(cors({ origin: process.env.CORS_ORIGIN || true, credentials: true }));
 app.use(express.json());
 
+// Request logging
+app.use((req, res, next) => {
+  const start = Date.now();
+  res.on('finish', () => {
+    const duration = Date.now() - start;
+    if (req.path.startsWith('/api/')) {
+      console.log(`${req.method} ${req.path} ${res.statusCode} ${duration}ms`);
+    }
+  });
+  next();
+});
+
 // Rate limiting
 app.use('/api/', rateLimit({
   windowMs: 1 * 60 * 1000, // 1 minute

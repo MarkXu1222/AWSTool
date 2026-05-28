@@ -93,6 +93,28 @@ authRouter.get('/me', (req: Request, res: Response) => {
   } catch { res.status(401).json({ error: 'Token expired' }); }
 });
 
+// Change password
+authRouter.post('/change-password', (req: Request, res: Response) => {
+  const authHeader = req.headers.authorization;
+  if (!authHeader) return res.status(401).json({ error: 'Unauthorized' });
+  try {
+    const decoded = jwt.verify(authHeader.replace('Bearer ', ''), JWT_SECRET) as any;
+    const { currentPassword, newPassword } = req.body;
+    const user = db.getUser(decoded.username);
+    if (!user) return res.status(404).json({ error: 'User not found' });
+    if (!bcrypt.compareSync(currentPassword, user.password_hash)) {
+      return res.status(401).json({ error: '当前密码错误' });
+    }
+    if (!newPassword || newPassword.length < 6) {
+      return res.status(400).json({ error: '新密码至少 6 位' });
+    }
+    const hash = bcrypt.hashSync(newPassword, 12);
+    db.updateUser(user.id, { password_hash: hash });
+    db.addAuditLog(user.id, 'PASSWORD_CHANGE', `User ${decoded.username} changed password`);
+    res.json({ success: true, message: '密码已修改' });
+  } catch { res.status(401).json({ error: 'Invalid token' }); }
+});
+
 // Auth middleware
 export function authMiddleware(req: Request, res: Response, next: NextFunction) {
   const authHeader = req.headers.authorization;
