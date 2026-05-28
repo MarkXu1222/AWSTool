@@ -149,7 +149,12 @@ const QuotasPage: React.FC = () => {
     <Card size="small" title="配额管理" extra={<Button size="small" icon={<DownloadOutlined />} onClick={handleExport}>导出</Button>}>
       <Space wrap style={{ marginBottom: 12 }}>
         <Select placeholder="选择账户" style={{ width: 180 }} value={selectedAccount || undefined} onChange={setSelectedAccount}
-          showSearch optionFilterProp="label" options={accounts.map(a => ({ label: `${a.Name} (${a.Id})`, value: a.Id }))} size="small" />
+          showSearch optionFilterProp="label" size="small"
+          options={(() => {
+            const grouped: Record<string, any[]> = {};
+            accounts.forEach(a => { const p = a._payer || 'other'; if (!grouped[p]) grouped[p] = []; grouped[p].push(a); });
+            return Object.entries(grouped).map(([payer, accts]) => ({ label: payer, options: accts.map(a => ({ label: `${a.Name} (${a.Id})`, value: a.Id })) }));
+          })()} />
         <Select style={{ width: 110 }} value={selectedService} onChange={setSelectedService} showSearch optionFilterProp="label" options={SERVICES} size="small" />
         <Select style={{ width: 120 }} value={selectedRegion} onChange={setSelectedRegion} options={REGIONS.map(r => ({ label: r, value: r }))} size="small" />
         <Button type="primary" onClick={fetchQuotas} loading={loading} icon={<ReloadOutlined />} size="small">查询</Button>

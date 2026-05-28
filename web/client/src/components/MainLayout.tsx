@@ -69,6 +69,7 @@ const MainLayout: React.FC<MainLayoutProps> = ({ onLogout }) => {
             onClick={({ key }) => setCurrentPage(key)} style={{ border: 'none' }} />
           <div style={{ position: 'absolute', bottom: 16, left: 12 }}>
             <p style={{ fontSize: 11, color: '#999', marginBottom: 4 }}>{username}</p>
+            <p style={{ fontSize: 10, color: '#ccc', marginBottom: 6 }}>v0.1.0</p>
             <Button size="small" icon={<LogoutOutlined />} onClick={onLogout} danger>登出</Button>
           </div>
         </Sider>

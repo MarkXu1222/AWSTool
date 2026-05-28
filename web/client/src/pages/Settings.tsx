@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Card, Button, message, Alert, Image, Input, Form, Table, Tag, Modal, Select, Space, Popconfirm } from 'antd';
+import { Card, Button, message, Alert, Image, Input, Form, Table, Tag, Modal, Select, Space, Popconfirm, Tabs } from 'antd';
 import { SafetyOutlined, CheckCircleOutlined, LogoutOutlined, LockOutlined, UserAddOutlined, DeleteOutlined } from '@ant-design/icons';
 import { api } from '../api';
 
@@ -86,81 +86,77 @@ const SettingsPage: React.FC<SettingsPageProps> = ({ onLogout }) => {
 
   return (
     <div style={{ maxWidth: 600 }}>
-      <Card size="small" title="连接状态" style={{ marginBottom: 12 }}>
-        {connection.length === 0 && checking && <span style={{ color: '#999' }}>检查中...</span>}
-        {connection.map((c, i) => (
-          <Alert key={i} type={c.ok ? 'success' : 'error'} showIcon
-            message={`${c.name}: ${c.ok ? '✅ ' + c.account : '❌ ' + c.error}`} style={{ marginBottom: 4 }} />
-        ))}
-      </Card>
-
-      {/* User Management */}
-      <Card size="small" title="用户管理" style={{ marginBottom: 12 }}
-        extra={<Button size="small" icon={<UserAddOutlined />} onClick={() => setAddUserOpen(true)}>添加用户</Button>}>
-        <Table size="small" dataSource={users} rowKey="id" pagination={false}
-          columns={[
-            { title: '用户名', dataIndex: 'username', render: (u: string) => <strong>{u}</strong> },
-            { title: '角色', dataIndex: 'role', width: 80, render: (r: string) => <Tag color={r === 'admin' ? 'red' : 'blue'}>{r}</Tag> },
-            { title: 'MFA', dataIndex: 'mfa_enabled', width: 60, render: (m: boolean) => m ? '✅' : '❌' },
-            {
-              title: '操作', width: 130,
-              render: (_: any, record: any) => (
-                <Space size="small">
-                  <Button size="small" onClick={() => { setResetPwdOpen(record); resetForm.resetFields(); }}>重置密码</Button>
-                  <Popconfirm title="确定删除？" onConfirm={() => handleDeleteUser(record.id)} okText="删除" cancelText="取消">
-                    <Button size="small" danger icon={<DeleteOutlined />} />
-                  </Popconfirm>
-                </Space>
-              ),
-            },
-          ]} />
-      </Card>
-
-      {/* MFA */}
-      <Card size="small" title={<span><SafetyOutlined /> MFA 双因素认证</span>} style={{ marginBottom: 12 }}>
-        {mfaEnabled ? (
-          <Alert type="success" showIcon icon={<CheckCircleOutlined />} message="MFA 已启用 ✅" description="每次登录需要动态验证码" />
-        ) : qrCode ? (
-          <div>
-            <p style={{ marginBottom: 8 }}>用 Authenticator 扫码：</p>
-            <div style={{ textAlign: 'center' }}><Image src={qrCode} width={180} /></div>
-            <p style={{ fontSize: 11, color: '#999', margin: '8px 0', wordBreak: 'break-all' }}>密钥: <code>{mfaSecret}</code></p>
-            <div style={{ display: 'flex', gap: 8 }}>
-              <Input placeholder="6 位验证码" value={confirmCode} onChange={e => setConfirmCode(e.target.value)} maxLength={6} size="large" inputMode="numeric" style={{ flex: 1 }} />
-              <Button type="primary" onClick={confirmMFA} size="large">确认</Button>
-            </div>
-          </div>
-        ) : (
-          <div>
-            <p style={{ marginBottom: 12, color: '#666' }}>启用后登录需要密码 + 手机动态码</p>
-            <Button type="primary" icon={<SafetyOutlined />} onClick={setupMFA} loading={loading} block>启用 MFA</Button>
-          </div>
-        )}
-      </Card>
-
-      {/* Change password */}
-      <Card size="small" title="修改密码" style={{ marginBottom: 12 }}>
-        <Form layout="vertical" onFinish={async (values: any) => {
-          if (values.newPassword !== values.confirmPassword) { message.error('两次密码不一致'); return; }
-          const res = await api.changePassword(values.currentPassword, values.newPassword);
-          if (res.success) message.success('密码已修改'); else message.error(res.error);
-        }}>
-          <Form.Item name="currentPassword" label="当前密码" rules={[{ required: true }]}>
-            <Input.Password prefix={<LockOutlined />} />
-          </Form.Item>
-          <Form.Item name="newPassword" label="新密码" rules={[{ required: true }, { min: 6, message: '至少 6 位' }]}>
-            <Input.Password prefix={<LockOutlined />} />
-          </Form.Item>
-          <Form.Item name="confirmPassword" label="确认新密码" rules={[{ required: true }]}>
-            <Input.Password prefix={<LockOutlined />} />
-          </Form.Item>
-          <Button type="primary" htmlType="submit" block>修改密码</Button>
-        </Form>
-      </Card>
-
-      {onLogout && (
-        <Card size="small"><Button danger icon={<LogoutOutlined />} onClick={onLogout} block size="large">退出登录</Button></Card>
-      )}
+      <Tabs items={[
+        { key: 'connection', label: '连接', children: (
+          <Card size="small" title="连接状态">
+            {connection.length === 0 && checking && <span style={{ color: '#999' }}>检查中...</span>}
+            {connection.map((c, i) => (
+              <Alert key={i} type={c.ok ? 'success' : 'error'} showIcon
+                message={`${c.name}: ${c.ok ? '✅ ' + c.account : '❌ ' + c.error}`} style={{ marginBottom: 4 }} />
+            ))}
+          </Card>
+        )},
+        { key: 'security', label: '安全', children: (
+          <>
+            <Card size="small" title="MFA 双因素认证" style={{ marginBottom: 12 }}>
+              {mfaEnabled ? (
+                <Alert type="success" showIcon icon={<CheckCircleOutlined />} message="MFA 已启用 ✅" description="每次登录需要动态验证码" />
+              ) : qrCode ? (
+                <div>
+                  <p style={{ marginBottom: 8 }}>用 Authenticator 扫码：</p>
+                  <div style={{ textAlign: 'center' }}><Image src={qrCode} width={180} /></div>
+                  <p style={{ fontSize: 11, color: '#999', margin: '8px 0', wordBreak: 'break-all' }}>密钥: <code>{mfaSecret}</code></p>
+                  <div style={{ display: 'flex', gap: 8 }}>
+                    <Input placeholder="6 位验证码" value={confirmCode} onChange={e => setConfirmCode(e.target.value)} maxLength={6} size="large" inputMode="numeric" style={{ flex: 1 }} />
+                    <Button type="primary" onClick={confirmMFA} size="large">确认</Button>
+                  </div>
+                </div>
+              ) : (
+                <div>
+                  <p style={{ marginBottom: 12, color: '#666' }}>启用后登录需要密码 + 手机动态码</p>
+                  <Button type="primary" icon={<SafetyOutlined />} onClick={setupMFA} loading={loading} block>启用 MFA</Button>
+                </div>
+              )}
+            </Card>
+            <Card size="small" title="修改密码">
+              <Form layout="vertical" onFinish={async (values: any) => {
+                if (values.newPassword !== values.confirmPassword) { message.error('两次密码不一致'); return; }
+                const res = await api.changePassword(values.currentPassword, values.newPassword);
+                if (res.success) message.success('密码已修改'); else message.error(res.error);
+              }}>
+                <Form.Item name="currentPassword" label="当前密码" rules={[{ required: true }]}><Input.Password prefix={<LockOutlined />} /></Form.Item>
+                <Form.Item name="newPassword" label="新密码" rules={[{ required: true }, { min: 6, message: '至少 6 位' }]}><Input.Password prefix={<LockOutlined />} /></Form.Item>
+                <Form.Item name="confirmPassword" label="确认新密码" rules={[{ required: true }]}><Input.Password prefix={<LockOutlined />} /></Form.Item>
+                <Button type="primary" htmlType="submit" block>修改密码</Button>
+              </Form>
+            </Card>
+          </>
+        )},
+        { key: 'users', label: '用户', children: (
+          <Card size="small" title="用户管理"
+            extra={<Button size="small" icon={<UserAddOutlined />} onClick={() => setAddUserOpen(true)}>添加</Button>}>
+            <Table size="small" dataSource={users} rowKey="id" pagination={false}
+              columns={[
+                { title: '用户名', dataIndex: 'username', render: (u: string) => <strong>{u}</strong> },
+                { title: '角色', dataIndex: 'role', width: 80, render: (r: string) => <Tag color={r === 'admin' ? 'red' : 'blue'}>{r}</Tag> },
+                { title: 'MFA', dataIndex: 'mfa_enabled', width: 50, render: (m: boolean) => m ? '✅' : '❌' },
+                { title: '操作', width: 130, render: (_: any, record: any) => (
+                  <Space size="small">
+                    <Button size="small" onClick={() => { setResetPwdOpen(record); resetForm.resetFields(); }}>重置</Button>
+                    <Popconfirm title="确定删除？" onConfirm={() => handleDeleteUser(record.id)} okText="删除" cancelText="取消">
+                      <Button size="small" danger icon={<DeleteOutlined />} />
+                    </Popconfirm>
+                  </Space>
+                )},
+              ]} />
+          </Card>
+        )},
+        { key: 'account', label: '账号', children: (
+          <Card size="small">
+            <Button danger icon={<LogoutOutlined />} onClick={onLogout} block size="large">退出登录</Button>
+          </Card>
+        )},
+      ]} />
 
       {/* Add user modal */}
       <Modal title="添加用户" open={addUserOpen} onOk={handleAddUser} onCancel={() => setAddUserOpen(false)} okText="创建">

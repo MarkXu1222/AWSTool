@@ -117,50 +117,28 @@ const Dashboard: React.FC = () => {
 
   return (
     <div style={{ padding: '0 4px' }}>
-      <Row gutter={[12, 12]} style={{ marginBottom: 16 }}>
-        <Col xs={12} sm={12} md={6}>
-          <Card size="small">
-            <Statistic
-              title="账户总数"
-              value={accounts.length}
-              prefix={<TeamOutlined />}
-              valueStyle={{ color: '#1890ff' }}
-            />
-          </Card>
-        </Col>
-        <Col xs={12} sm={12} md={6}>
-          <Card size="small">
+      {/* 费用大卡片 */}
+      <Card size="small" style={{ marginBottom: 12 }}>
+        <Row gutter={12} align="middle">
+          <Col xs={24} md={12}>
             <Statistic
               title="本月总费用"
               value={totalCost}
               precision={2}
               prefix={<DollarOutlined />}
               suffix="USD"
-              valueStyle={{ color: '#ff9500' }}
+              valueStyle={{ color: '#ff9500', fontSize: 28 }}
             />
-          </Card>
-        </Col>
-        <Col xs={12} sm={12} md={6}>
-          <Card size="small">
-            <Statistic
-              title="待处理配额"
-              value={pendingRequests}
-              prefix={<ClockCircleOutlined />}
-              valueStyle={{ color: pendingRequests > 0 ? '#faad14' : '#52c41a' }}
-            />
-          </Card>
-        </Col>
-        <Col xs={12} sm={12} md={6}>
-          <Card size="small">
-            <Statistic
-              title="连接状态"
-              value={connected ? '已连接' : '未连接'}
-              prefix={<LinkOutlined />}
-              valueStyle={{ color: connected ? '#52c41a' : '#ff4d4f', fontSize: 20 }}
-            />
-          </Card>
-        </Col>
-      </Row>
+          </Col>
+          <Col xs={24} md={12}>
+            <Row gutter={8}>
+              <Col span={8}><Statistic title="账户" value={accounts.length} valueStyle={{ fontSize: 18 }} /></Col>
+              <Col span={8}><Statistic title="待处理" value={pendingRequests} valueStyle={{ fontSize: 18, color: pendingRequests > 0 ? '#faad14' : '#52c41a' }} /></Col>
+              <Col span={8}><Statistic title="连接" value={connected ? '正常' : '断开'} valueStyle={{ fontSize: 16, color: connected ? '#52c41a' : '#ff4d4f' }} /></Col>
+            </Row>
+          </Col>
+        </Row>
+      </Card>
 
       <Card size="small" title="本月费用 Top 10">
         <Table
@@ -169,7 +147,7 @@ const Dashboard: React.FC = () => {
           columns={topColumns}
           pagination={false}
           rowKey="key"
-          locale={{ emptyText: '暂无数据' }}
+          locale={{ emptyText: '暂无本月费用数据' }}
         />
       </Card>
     </div>
