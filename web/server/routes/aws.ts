@@ -160,6 +160,55 @@ awsRouter.post('/quotas/sync-account/:accountId', async (req: Request, res: Resp
   } catch (e: any) { res.status(500).json({ error: e.message }); }
 });
 
+// Root credentials status (via Credential Report)
+awsRouter.get('/root-credentials/:accountId', async (req: Request, res: Response) => {
+  try {
+    const accountId = req.params.accountId;
+    const { IAMClient, GenerateCredentialReportCommand, GetCredentialReportCommand } = require('@aws-sdk/client-iam');
+    const creds = await (aws as any).assumeToAccount(accountId);
+    const iam = new IAMClient({ region: 'us-east-1', credentials: creds });
+
+    await iam.send(new GenerateCredentialReportCommand({}));
+    // Wait for report to be ready
+    await new Promise(r => setTimeout(r, 2000));
+
+    let report;
+    try { report = await iam.send(new GetCredentialReportCommand({})); }
+    catch {
+      await new Promise(r => setTimeout(r, 3000));
+      report = await iam.send(new GetCredentialReportCommand({}));
+    }
+
+    const csv = Buffer.from(report.Content).toString('utf-8');
+    const lines = csv.split('\n');
+    const headers = lines[0].split(',');
+    const rootData = lines[1]?.split(',') || [];
+
+    const getField = (name: string) => {
+      const idx = headers.indexOf(name);
+      return idx >= 0 ? rootData[idx] : null;
+    };
+
+    const result = {
+      accountId,
+      passwordEnabled: getField('password_enabled') === 'true',
+      passwordLastUsed: getField('password_last_used'),
+      mfaActive: getField('mfa_active') === 'true',
+      accessKey1Active: getField('access_key_1_active') === 'true',
+      accessKey1LastUsed: getField('access_key_1_last_used_date'),
+      accessKey2Active: getField('access_key_2_active') === 'true',
+      accessKey2LastUsed: getField('access_key_2_last_used_date'),
+    };
+
+    res.json({ success: true, data: result });
+  } catch (e: any) { res.status(500).json({ error: e.message }); }
+});
+
+// Delete root access key (requires root login — cannot be done via role)
+awsRouter.post('/root-credentials/:accountId/delete-key', requireAdmin, async (req: Request, res: Response) => {
+  res.status(400).json({ error: '删除根用户 Access Key 需要使用根用户登录 AWS Console 操作，无法通过 IAM Role 完成。请登录对应账户的 AWS Console 手动删除。' });
+});
+
 // Scan resources
 awsRouter.get('/resources/:accountId/:region', async (req: Request, res: Response) => {
   try {

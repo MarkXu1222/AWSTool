@@ -30,8 +30,14 @@ const AccountsPage: React.FC = () => {
     setDetail(null);
     setDetailLoading(true);
     try {
-      const res = await api.getAccountDetail(account.Id);
-      if (res.success) setDetail(res.data);
+      const [detailRes, rootRes] = await Promise.allSettled([
+        api.getAccountDetail(account.Id),
+        api.getRootCredentials(account.Id),
+      ]);
+      const d: any = {};
+      if (detailRes.status === 'fulfilled' && detailRes.value.success) Object.assign(d, detailRes.value.data);
+      if (rootRes.status === 'fulfilled' && rootRes.value.success) d.rootCredentials = rootRes.value.data;
+      setDetail(d);
     } catch {}
     finally { setDetailLoading(false); }
   };
@@ -80,6 +86,15 @@ const AccountsPage: React.FC = () => {
               ))}
             </>
           ) : <span style={{ color: '#999' }}>无数据</span> },
+          { key: 'root', label: '根用户', children: detailLoading ? <div style={{ textAlign: 'center', padding: 30 }}><Spin /></div> : detail?.rootCredentials ? (
+            <Descriptions size="small" column={1} bordered>
+              <Descriptions.Item label="密码"><Tag color={detail.rootCredentials.passwordEnabled ? 'green' : 'default'}>{detail.rootCredentials.passwordEnabled ? '已启用' : '未启用'}</Tag></Descriptions.Item>
+              <Descriptions.Item label="Root MFA"><Tag color={detail.rootCredentials.mfaActive ? 'green' : 'red'}>{detail.rootCredentials.mfaActive ? '已启用' : '未启用 ⚠️'}</Tag></Descriptions.Item>
+              <Descriptions.Item label="Access Key 1"><Tag color={detail.rootCredentials.accessKey1Active ? 'red' : 'green'}>{detail.rootCredentials.accessKey1Active ? '存在 ⚠️' : '无'}</Tag></Descriptions.Item>
+              <Descriptions.Item label="Access Key 2"><Tag color={detail.rootCredentials.accessKey2Active ? 'red' : 'green'}>{detail.rootCredentials.accessKey2Active ? '存在 ⚠️' : '无'}</Tag></Descriptions.Item>
+              <Descriptions.Item label="密码最后使用">{detail.rootCredentials.passwordLastUsed || '-'}</Descriptions.Item>
+            </Descriptions>
+          ) : <span style={{ color: '#999' }}>加载中...</span> },
         ]} />
       </div>
     );
@@ -158,6 +173,14 @@ const AccountsPage: React.FC = () => {
                           columns={[{ title: '用户', dataIndex: 'user' }, { title: 'MFA', dataIndex: 'hasMFA', width: 50, render: (h: boolean) => h ? '✓' : '✗' }]} />
                       </>
                     ) : '无数据' },
+                    { key: 'root', label: '根用户', children: detailLoading ? <Spin /> : detail?.rootCredentials ? (
+                      <Descriptions size="small" column={1} bordered>
+                        <Descriptions.Item label="密码"><Tag color={detail.rootCredentials.passwordEnabled ? 'green' : 'default'}>{detail.rootCredentials.passwordEnabled ? '已启用' : '未启用'}</Tag></Descriptions.Item>
+                        <Descriptions.Item label="Root MFA"><Tag color={detail.rootCredentials.mfaActive ? 'green' : 'red'}>{detail.rootCredentials.mfaActive ? '已启用' : '未启用 ⚠️'}</Tag></Descriptions.Item>
+                        <Descriptions.Item label="AK1"><Tag color={detail.rootCredentials.accessKey1Active ? 'red' : 'green'}>{detail.rootCredentials.accessKey1Active ? '存在⚠️' : '无'}</Tag></Descriptions.Item>
+                        <Descriptions.Item label="AK2"><Tag color={detail.rootCredentials.accessKey2Active ? 'red' : 'green'}>{detail.rootCredentials.accessKey2Active ? '存在⚠️' : '无'}</Tag></Descriptions.Item>
+                      </Descriptions>
+                    ) : '加载中...' },
                   ]} />
                 </Card>
               </div>
