@@ -102,11 +102,11 @@ const AccountsPage: React.FC = () => {
 
   // Desktop columns
   const columns = [
-    { title: 'ID', dataIndex: 'Id', key: 'Id', width: 110, render: (id: string) => <code style={{ fontSize: 11 }}>{id}</code> },
-    { title: '名称', dataIndex: 'Name', key: 'Name', width: 120, render: (n: string) => <strong>{n}</strong> },
-    { title: '邮箱', dataIndex: 'Email', key: 'Email', ellipsis: true },
-    { title: '组织', dataIndex: '_payer', key: '_payer', width: 90, render: (p: string) => <Tag>{p}</Tag>, responsive: ['md'] as any },
-    { title: '状态', dataIndex: 'Status', key: 'Status', width: 70, render: (s: string) => <Tag color={s === 'ACTIVE' ? 'green' : 'red'}>{s}</Tag> },
+    { title: 'ID', dataIndex: 'Id', key: 'Id', width: 130, render: (id: string) => <code style={{ fontSize: 11, color: '#64748B' }}>{id}</code> },
+    { title: '名称', dataIndex: 'Name', key: 'Name', width: 140, render: (n: string) => <span style={{ fontWeight: 500 }}>{n}</span> },
+    { title: '邮箱', dataIndex: 'Email', key: 'Email', ellipsis: { showTitle: true } },
+    { title: '组织', dataIndex: '_payer', key: '_payer', width: 110, render: (p: string) => <Tag style={{ margin: 0, borderRadius: 4 }}>{p}</Tag>, responsive: ['md'] as any },
+    { title: '状态', dataIndex: 'Status', key: 'Status', width: 90, align: 'center' as const, render: (s: string) => <Tag color={s === 'ACTIVE' ? 'success' : 'error'} style={{ margin: 0, borderRadius: 12, fontSize: 11 }}>{s}</Tag> },
   ];
 
   return (
@@ -123,12 +123,12 @@ const AccountsPage: React.FC = () => {
         </Space>
       </div>
 
-      {/* Stats Bar */}
+      {/* Stats Chips */}
       {!isMobile && accounts.length > 0 && (
-        <div style={{ display: 'flex', gap: 24, marginBottom: 16, fontSize: 13, color: '#6B7280' }}>
-          <span>总数 <strong style={{ color: '#111827' }}>{accounts.length}</strong></span>
-          <span>Active <strong style={{ color: '#059669' }}>{accounts.filter(a => a.Status === 'ACTIVE').length}</strong></span>
-          <span>组织 <strong style={{ color: '#111827' }}>{[...new Set(accounts.map(a => a._payer))].length}</strong></span>
+        <div className="stat-chips">
+          <span className="stat-chip">总账户 <strong>{accounts.length}</strong></span>
+          <span className="stat-chip success">Active <strong>{accounts.filter(a => a.Status === 'ACTIVE').length}</strong></span>
+          <span className="stat-chip">组织 <strong>{[...new Set(accounts.map(a => a._payer))].length}</strong></span>
         </div>
       )}
 
@@ -137,8 +137,8 @@ const AccountsPage: React.FC = () => {
         {/* Table Toolbar */}
         <div className="table-toolbar">
           <Input placeholder="搜索 ID、名称、邮箱或组织..." prefix={<SearchOutlined />} value={searchText}
-            onChange={e => setSearchText(e.target.value)} allowClear size="small" style={{ width: 320 }} />
-          <span style={{ fontSize: 12, color: '#9CA3AF' }}>{filtered.length} 条</span>
+            onChange={e => setSearchText(e.target.value)} allowClear size="small" />
+          <span className="stat-chip">共 <strong>{filtered.length}</strong> 条</span>
         </div>
 
         {/* Mobile: card list */}

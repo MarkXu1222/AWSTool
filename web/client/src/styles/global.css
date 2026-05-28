@@ -58,19 +58,20 @@ body {
   font-size: 13px !important;
 }
 .ant-table-thead > tr > th {
-  background: #F9FAFB !important;
-  border-bottom: 1px solid #E5E7EB !important;
-  color: #6B7280 !important;
+  background: #F8FAFC !important;
+  border-bottom: 1.5px solid #E2E8F0 !important;
+  color: #64748B !important;
   font-size: 12px !important;
   font-weight: 500 !important;
   padding: 10px 12px !important;
   white-space: nowrap;
 }
 .ant-table-tbody > tr > td {
-  padding: 8px 12px !important;
-  border-bottom: 1px solid #F3F4F6 !important;
+  padding: 9px 12px !important;
+  border-bottom: 1px solid #F1F5F9 !important;
   color: #1F2937 !important;
   line-height: 1.4;
+  vertical-align: middle !important;
 }
 .ant-table-tbody > tr:hover > td {
   background: #F8FAFC !important;
@@ -81,12 +82,12 @@ body {
 
 /* === Card 加阴影和圆角 === */
 .ant-card {
-  border-radius: 12px !important;
-  box-shadow: 0 1px 4px rgba(0,0,0,0.06) !important;
-  border: 1px solid #eee !important;
+  border-radius: 8px !important;
+  box-shadow: none !important;
+  border: 1px solid #E2E8F0 !important;
 }
 .ant-card-head {
-  border-bottom: 1px solid #f0f0f0 !important;
+  border-bottom: 1px solid #F1F5F9 !important;
   font-weight: 600 !important;
 }
 
@@ -288,8 +289,38 @@ body {
   align-items: center;
   justify-content: space-between;
   margin-bottom: 12px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid #F1F5F9;
 }
 .table-toolbar .ant-input-affix-wrapper {
-  width: 320px !important;
+  width: 360px !important;
   max-width: 100%;
+}
+
+/* === Stat Chips === */
+.stat-chips {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 16px;
+  flex-wrap: wrap;
+}
+.stat-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 26px;
+  padding: 0 10px;
+  border-radius: 6px;
+  background: #F1F5F9;
+  border: 1px solid #E2E8F0;
+  font-size: 12px;
+  color: #64748B;
+  white-space: nowrap;
+}
+.stat-chip strong {
+  color: #1E293B;
+  font-weight: 600;
+}
+.stat-chip.success strong {
+  color: #059669;
 }
