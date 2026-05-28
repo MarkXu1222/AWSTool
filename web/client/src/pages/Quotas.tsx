@@ -5,12 +5,56 @@ import { api } from '../api';
 import { exportToCSV } from '../utils/export';
 
 const SERVICES = [
-  { label: 'EC2', value: 'ec2' }, { label: 'VPC', value: 'vpc' }, { label: 'EBS', value: 'ebs' },
-  { label: 'S3', value: 's3' }, { label: 'Lambda', value: 'lambda' }, { label: 'RDS', value: 'rds' },
-  { label: 'IAM', value: 'iam' }, { label: 'CloudFormation', value: 'cloudformation' },
-  { label: 'ELB', value: 'elasticloadbalancing' }, { label: 'Auto Scaling', value: 'autoscaling' },
-  { label: 'SageMaker', value: 'sagemaker' }, { label: 'DynamoDB', value: 'dynamodb' },
-  { label: 'CloudWatch', value: 'monitoring' }, { label: 'SNS', value: 'sns' }, { label: 'SQS', value: 'sqs' },
+  // Compute
+  { label: 'EC2', value: 'ec2' },
+  { label: 'Lambda', value: 'lambda' },
+  { label: 'ECS', value: 'ecs' },
+  { label: 'EKS', value: 'eks' },
+  { label: 'Lightsail', value: 'lightsail' },
+  { label: 'Auto Scaling', value: 'autoscaling' },
+  // Storage
+  { label: 'S3', value: 's3' },
+  { label: 'EBS', value: 'ebs' },
+  { label: 'EFS', value: 'elasticfilesystem' },
+  // Database
+  { label: 'RDS', value: 'rds' },
+  { label: 'DynamoDB', value: 'dynamodb' },
+  { label: 'ElastiCache', value: 'elasticache' },
+  { label: 'Redshift', value: 'redshift' },
+  // Networking
+  { label: 'VPC', value: 'vpc' },
+  { label: 'ELB', value: 'elasticloadbalancing' },
+  { label: 'CloudFront (us-east-1)', value: 'cloudfront' },
+  { label: 'Route 53 (us-east-1)', value: 'route53' },
+  { label: 'API Gateway', value: 'apigateway' },
+  // Security & Identity
+  { label: 'IAM (us-east-1)', value: 'iam' },
+  { label: 'KMS', value: 'kms' },
+  { label: 'ACM', value: 'acm' },
+  // Management
+  { label: 'CloudFormation', value: 'cloudformation' },
+  { label: 'CloudWatch', value: 'monitoring' },
+  { label: 'CloudTrail', value: 'cloudtrail' },
+  { label: 'Config', value: 'config' },
+  // Application
+  { label: 'SNS', value: 'sns' },
+  { label: 'SQS', value: 'sqs' },
+  { label: 'SES', value: 'ses' },
+  { label: 'EventBridge', value: 'events' },
+  // AI/ML
+  { label: 'SageMaker', value: 'sagemaker' },
+  { label: 'Bedrock', value: 'bedrock' },
+  // Analytics
+  { label: 'Kinesis', value: 'kinesis' },
+  { label: 'Athena', value: 'athena' },
+  { label: 'OpenSearch', value: 'es' },
+  // Others
+  { label: 'WorkSpaces', value: 'workspaces' },
+  { label: 'AppStream', value: 'appstream2' },
+  { label: 'Glue', value: 'glue' },
+  { label: 'Step Functions', value: 'states' },
+  { label: 'CodeBuild', value: 'codebuild' },
+  { label: 'ECR', value: 'ecr' },
 ];
 const REGIONS = ['us-east-1','us-east-2','us-west-1','us-west-2','eu-west-1','eu-west-2','eu-central-1','ap-southeast-1','ap-southeast-2','ap-northeast-1','ap-south-1'];
 
@@ -136,7 +180,7 @@ const QuotasPage: React.FC = () => {
             accounts.forEach(a => { const p = a._payer || 'other'; if (!grouped[p]) grouped[p] = []; grouped[p].push(a); });
             return Object.entries(grouped).map(([payer, accts]) => ({ label: payer, options: accts.map(a => ({ label: `${a.Name} (${a.Id})`, value: a.Id })) }));
           })()} />
-        <Select style={{ width: 120 }} value={selectedService} onChange={setSelectedService} showSearch optionFilterProp="label" options={SERVICES} size="small" />
+        <Select style={{ width: 180 }} value={selectedService} onChange={setSelectedService} showSearch optionFilterProp="label" options={SERVICES} size="small" />
         <Select style={{ width: 160 }} value={selectedRegion} onChange={setSelectedRegion} options={REGIONS.map(r => ({ label: r, value: r }))} size="small" />
         <Button type="primary" onClick={fetchQuotas} loading={loading} icon={<ReloadOutlined />} size="small">查询</Button>
         <Button size="small" onClick={() => { setSelectedAccount(''); setQuotas([]); }}>重置</Button>
