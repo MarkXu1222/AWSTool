@@ -1,0 +1,57 @@
+import express from 'express';
+import cors from 'cors';
+import helmet from 'helmet';
+import path from 'path';
+import { rateLimit } from 'express-rate-limit';
+import { authRouter, authMiddleware } from './auth';
+import { awsRouter } from './routes/aws';
+
+const app = express();
+const configPath = path.join(__dirname, '../../config.json');
+let appConfig: any = {};
+try { appConfig = JSON.parse(require('fs').readFileSync(configPath, 'utf-8')); } catch {}
+const PORT = appConfig.web?.port || process.env.PORT || 3000;
+
+// Security
+app.use(helmet({ contentSecurityPolicy: false }));
+app.use(cors({ origin: process.env.CORS_ORIGIN || true, credentials: true }));
+app.use(express.json());
+
+// Rate limiting
+app.use('/api/', rateLimit({
+  windowMs: 1 * 60 * 1000, // 1 minute
+  max: 100,
+  message: { error: 'Too many requests, try again later' },
+}));
+
+// Login rate limit (stricter)
+app.use('/api/auth/login', rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 5,
+  message: { error: '登录尝试过多，请 15 分钟后重试' },
+}));
+
+// Auth routes (no auth needed)
+app.use('/api/auth', authRouter);
+
+// Protected API routes
+app.use('/api/aws', authMiddleware, awsRouter);
+
+// Serve static frontend
+import fs from 'fs';
+const possiblePaths = [
+  path.join(__dirname, '../dist/client'),    // tsx dev mode (running from server/)
+  path.join(__dirname, '../client'),          // compiled mode (running from dist/server/)
+];
+const clientDist = possiblePaths.find(p => fs.existsSync(path.join(p, 'index.html'))) || possiblePaths[0];
+app.use(express.static(clientDist));
+app.get('*', (_req, res) => {
+  const indexPath = path.join(clientDist, 'index.html');
+  if (fs.existsSync(indexPath)) res.sendFile(indexPath);
+  else res.status(404).send('Frontend not built. Run: npx vite build --config client/vite.config.ts');
+});
+
+app.listen(PORT, () => {
+  console.log(`🚀 AWS Toolbox Web running on http://localhost:${PORT}`);
+  console.log(`   Environment: ${process.env.NODE_ENV || 'development'}`);
+});

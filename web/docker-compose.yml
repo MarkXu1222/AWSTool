@@ -1,0 +1,25 @@
+version: '3.8'
+
+services:
+  app:
+    build: .
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=production
+      - PORT=3000
+      # === 必须配置 ===
+      - AWS_ACCESS_KEY_ID=AKIAR6OJRZOOYQFIZSTC
+      - AWS_SECRET_ACCESS_KEY=changeme  # 替换为真实 SK
+      - AWS_DEFAULT_REGION=us-east-1
+      # Payer 列表格式: name|arn,name|arn
+      - PAYERS=yanhuang11|arn:aws:iam::133354366329:role/tool,yanhuang14|arn:aws:iam::976592800319:role/tool
+      - CHILD_ROLE_NAME=OrganizationAccountAccessRole
+      # === 安全配置 ===
+      - JWT_SECRET=your-random-secret-at-least-32-chars
+      - ADMIN_PASSWORD=YourStrongPassword123!
+      # === 可选 ===
+      - DB_PATH=/app/data/toolbox.db
+    volumes:
+      - ./data:/app/data  # 持久化数据库
+    restart: unless-stopped
