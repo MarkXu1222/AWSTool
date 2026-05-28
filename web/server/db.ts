@@ -3,8 +3,38 @@
  */
 import fs from 'fs';
 import path from 'path';
+import { createCipheriv, createDecipheriv, randomBytes, createHash } from 'crypto';
 
 const DB_PATH = process.env.DB_PATH || path.join(__dirname, '../../data/db.json');
+
+// Encryption key for sensitive fields (MFA secrets)
+// Derive from config jwtSecret or env var
+let ENC_KEY: Buffer;
+try {
+  const configPath = path.join(__dirname, '../../config.json');
+  const config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+  const source = config.web?.jwtSecret || process.env.JWT_SECRET || 'default-fallback-key-32chars-xxx';
+  ENC_KEY = createHash('sha256').update(source).digest(); // Always 32 bytes
+} catch {
+  ENC_KEY = createHash('sha256').update('default-fallback-key-32chars-xxx').digest();
+}
+
+export function encryptField(text: string): string {
+  const iv = randomBytes(16);
+  const cipher = createCipheriv('aes-256-cbc', ENC_KEY, iv);
+  return iv.toString('hex') + ':' + cipher.update(text, 'utf8', 'hex') + cipher.final('hex');
+}
+
+export function decryptField(data: string): string {
+  try {
+    const [ivHex, encrypted] = data.split(':');
+    if (!ivHex || !encrypted) return data; // Not encrypted, return as-is (migration)
+    const decipher = createDecipheriv('aes-256-cbc', ENC_KEY, Buffer.from(ivHex, 'hex'));
+    return decipher.update(encrypted, 'hex', 'utf8') + decipher.final('utf8');
+  } catch {
+    return data; // Return raw if decryption fails (not yet encrypted)
+  }
+}
 
 interface DBSchema {
   users: any[];
