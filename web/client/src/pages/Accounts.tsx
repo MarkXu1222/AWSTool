@@ -103,10 +103,16 @@ const AccountsPage: React.FC = () => {
   // Desktop columns
   const columns = [
     { title: 'ID', dataIndex: 'Id', key: 'Id', width: 130, render: (id: string) => <code style={{ fontSize: 11, color: '#64748B' }}>{id}</code> },
-    { title: '名称', dataIndex: 'Name', key: 'Name', width: 140, render: (n: string) => <span style={{ fontWeight: 500 }}>{n}</span> },
+    { title: '名称', dataIndex: 'Name', key: 'Name', width: 140, sorter: (a: any, b: any) => (a.Name || '').localeCompare(b.Name || ''), render: (n: string) => <span style={{ fontWeight: 500 }}>{n}</span> },
     { title: '邮箱', dataIndex: 'Email', key: 'Email', ellipsis: { showTitle: true } },
-    { title: '组织', dataIndex: '_payer', key: '_payer', width: 110, render: (p: string) => <Tag style={{ margin: 0, borderRadius: 4 }}>{p}</Tag>, responsive: ['md'] as any },
-    { title: '状态', dataIndex: 'Status', key: 'Status', width: 90, align: 'center' as const, render: (s: string) => <Tag color={s === 'ACTIVE' ? 'success' : 'error'} style={{ margin: 0, borderRadius: 12, fontSize: 11 }}>{s}</Tag> },
+    { title: '组织', dataIndex: '_payer', key: '_payer', width: 110,
+      filters: [...new Set(accounts.map(a => a._payer))].filter(Boolean).map(p => ({ text: p, value: p })),
+      onFilter: (value: any, record: any) => record._payer === value,
+      render: (p: string) => <Tag style={{ margin: 0, borderRadius: 4 }}>{p}</Tag>, responsive: ['md'] as any },
+    { title: '状态', dataIndex: 'Status', key: 'Status', width: 90, align: 'center' as const,
+      filters: [{ text: 'ACTIVE', value: 'ACTIVE' }, { text: 'SUSPENDED', value: 'SUSPENDED' }],
+      onFilter: (value: any, record: any) => record.Status === value,
+      render: (s: string) => <Tag color={s === 'ACTIVE' ? 'success' : 'error'} style={{ margin: 0, borderRadius: 12, fontSize: 11 }}>{s}</Tag> },
   ];
 
   return (
