@@ -117,6 +117,7 @@ awsRouter.post('/quotas/sync', async (req: Request, res: Response) => {
               quota_code: r.QuotaCode,
               quota_name: r.QuotaName,
               desired_value: r.DesiredValue,
+              current_value: r._currentValue,
               status: r.Status,
               case_id: r.CaseId || null,
               region: r.QuotaArn ? r.QuotaArn.split(':')[3] : (r._region || 'us-east-1'),
@@ -129,6 +130,30 @@ awsRouter.post('/quotas/sync', async (req: Request, res: Response) => {
     }
 
     res.json({ success: true, data: db.getQuotaRequests() });
+  } catch (e: any) { res.status(500).json({ error: e.message }); }
+});
+
+// Sync single account (quick refresh)
+awsRouter.post('/quotas/sync-account/:accountId', async (req: Request, res: Response) => {
+  try {
+    const { accountId } = req.params;
+    const requests = await aws.listQuotaRequests(accountId);
+    for (const r of requests) {
+      db.upsertQuotaRequest({
+        id: r.Id,
+        account_id: accountId,
+        service_code: r.ServiceCode,
+        quota_code: r.QuotaCode,
+        quota_name: r.QuotaName,
+        desired_value: r.DesiredValue,
+        current_value: r._currentValue,
+        status: r.Status,
+        case_id: r.CaseId || null,
+        region: r.QuotaArn ? r.QuotaArn.split(':')[3] : (r._region || 'us-east-1'),
+        created_at: r.Created ? new Date(r.Created).toISOString() : undefined,
+      });
+    }
+    res.json({ success: true, data: db.getQuotaRequests(), synced: requests.length });
   } catch (e: any) { res.status(500).json({ error: e.message }); }
 });
 

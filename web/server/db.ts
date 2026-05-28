@@ -72,13 +72,9 @@ export const db = {
     if (idx >= 0) { Object.assign(data.users[idx], updates); writeDB(data); }
   },
 
-  // Quota requests
+  // Quota requests — sorted by created_at descending (newest first)
   getQuotaRequests() {
-    const statusOrder: Record<string, number> = { CASE_OPENED: 0, PENDING: 1, APPROVED: 2, DENIED: 3, CASE_CLOSED: 4 };
     return readDB().quota_requests.sort((a, b) => {
-      const sa = statusOrder[a.status] ?? 5;
-      const sb = statusOrder[b.status] ?? 5;
-      if (sa !== sb) return sa - sb;
       return new Date(b.created_at || 0).getTime() - new Date(a.created_at || 0).getTime();
     });
   },

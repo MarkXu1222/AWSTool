@@ -64,6 +64,8 @@ export const api = {
   listQuotaRequests: () => request('/aws/quotas/requests'),
   syncQuotaRequests: (accountIds: string[]) =>
     request('/aws/quotas/sync', { method: 'POST', body: JSON.stringify({ accountIds }) }),
+  syncSingleAccount: (accountId: string) =>
+    request(`/aws/quotas/sync-account/${accountId}`, { method: 'POST' }),
   scanResources: (accountId: string, region: string) => request(`/aws/resources/${accountId}/${region}`),
   getAuditLog: () => request('/aws/audit'),
   changePassword: (currentPassword: string, newPassword: string) =>

@@ -187,7 +187,19 @@ export async function listQuotaRequests(accountId: string) {
   const results = await Promise.allSettled(regions.map(async (region) => {
     const client = new ServiceQuotasClient({ region, credentials: creds });
     const resp = await client.send(new ListRequestedServiceQuotaChangeHistoryCommand({}));
-    return (resp.RequestedQuotas || []).map(r => ({ ...r, _accountId: accountId, _region: region }));
+    const requests = resp.RequestedQuotas || [];
+    
+    // Enrich with current value
+    const enriched = [];
+    for (const r of requests) {
+      let currentValue = null;
+      try {
+        const quotaResp = await client.send(new GetServiceQuotaCommand({ ServiceCode: r.ServiceCode!, QuotaCode: r.QuotaCode! }));
+        currentValue = quotaResp.Quota?.Value ?? null;
+      } catch {}
+      enriched.push({ ...r, _accountId: accountId, _region: region, _currentValue: currentValue });
+    }
+    return enriched;
   }));
 
   for (const result of results) {
