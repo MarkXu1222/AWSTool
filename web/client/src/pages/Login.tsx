@@ -39,9 +39,9 @@ const LoginPage: React.FC<LoginPageProps> = ({ onSuccess }) => {
     <div style={{
       minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center',
       background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
-      padding: 20,
+      padding: 16,
     }}>
-      <Card style={{ width: 380, borderRadius: 16, boxShadow: '0 20px 60px rgba(0,0,0,0.3)' }}>
+      <Card style={{ width: '100%', maxWidth: 380, borderRadius: 16, boxShadow: '0 20px 60px rgba(0,0,0,0.3)' }}>
         <div style={{ textAlign: 'center', marginBottom: 24 }}>
           <h1 style={{ fontSize: 24, margin: 0 }}>☁️ AWS Toolbox</h1>
           <p style={{ color: '#666', margin: '4px 0 0' }}>Multi-Account Manager</p>

@@ -1,5 +1,140 @@
 * { margin: 0; padding: 0; box-sizing: border-box; }
+
 body {
-  font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', sans-serif;
+  font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Helvetica Neue', sans-serif;
   -webkit-font-smoothing: antialiased;
+  background: #f5f5f7;
+  overflow-x: hidden;
+}
+
+/* 禁用 iOS 双击缩放 */
+* { touch-action: manipulation; }
+
+/* 移动端安全区域 */
+.app-container {
+  padding-bottom: env(safe-area-inset-bottom, 0);
+}
+
+/* 响应式表格 */
+@media (max-width: 768px) {
+  .ant-table-thead > tr > th,
+  .ant-table-tbody > tr > td {
+    padding: 8px 6px !important;
+    font-size: 12px !important;
+  }
+  .ant-card-head-title { font-size: 14px !important; }
+  .ant-card-body { padding: 12px !important; }
+  .ant-card-head { padding: 0 12px !important; }
+  .ant-select { font-size: 13px !important; }
+  .ant-tabs-tab { padding: 8px 12px !important; font-size: 13px !important; }
+  .hide-mobile { display: none !important; }
+}
+
+/* 底部导航栏样式 */
+.bottom-nav {
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  background: #fff;
+  border-top: 1px solid #e8e8e8;
+  display: flex;
+  justify-content: space-around;
+  padding: 6px 0;
+  padding-bottom: calc(6px + env(safe-area-inset-bottom, 0));
+  z-index: 1000;
+  box-shadow: 0 -2px 8px rgba(0,0,0,0.06);
+}
+
+.bottom-nav-item {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  padding: 4px 8px;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  color: #8c8c8c;
+  font-size: 10px;
+  min-width: 56px;
+}
+.bottom-nav-item.active {
+  color: #0071e3;
+}
+.bottom-nav-item .nav-icon {
+  font-size: 20px;
+}
+.bottom-nav-item .nav-label {
+  font-size: 10px;
+  font-weight: 500;
+}
+
+/* 移动端内容区域 */
+.mobile-content {
+  padding: 12px;
+  padding-bottom: 72px; /* 给底部导航留空间 */
+  min-height: 100vh;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+/* 桌面端侧边栏 */
+@media (min-width: 769px) {
+  .bottom-nav { display: none; }
+  .mobile-content { padding: 20px; padding-bottom: 20px; }
+}
+@media (max-width: 768px) {
+  .desktop-sider { display: none !important; }
+}
+
+/* 移动端详情页全屏 */
+.mobile-detail-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: #fff;
+  z-index: 999;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  animation: slideUp 0.2s ease;
+}
+@keyframes slideUp {
+  from { transform: translateY(100%); }
+  to { transform: translateY(0); }
+}
+
+/* 移动端卡片列表 */
+.account-card {
+  background: #fff;
+  border-radius: 12px;
+  padding: 12px 16px;
+  margin-bottom: 8px;
+  border: 1px solid #f0f0f0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  cursor: pointer;
+  transition: background 0.1s ease;
+}
+.account-card:active {
+  background: #f5f5f7;
+}
+.account-card-info h4 {
+  font-size: 14px;
+  font-weight: 600;
+  margin: 0;
+}
+.account-card-info p {
+  font-size: 11px;
+  color: #999;
+  margin: 2px 0 0;
+}
+
+/* 统计卡片移动端 */
+@media (max-width: 768px) {
+  .ant-statistic-title { font-size: 11px !important; }
+  .ant-statistic-content-value { font-size: 18px !important; }
 }
