@@ -292,4 +292,4 @@ export async function scanResources(accountId: string, region: string) {
   return resources;
 }
 
-export { PAYERS, DEFAULT_REGION };
+export { PAYERS, DEFAULT_REGION, assumeToAccount };

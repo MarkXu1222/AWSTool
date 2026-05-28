@@ -1,11 +1,12 @@
 import React, { useState, useEffect } from 'react';
 import { Layout, Menu, Button } from 'antd';
-import { HomeOutlined, TeamOutlined, DashboardOutlined, DollarOutlined, SettingOutlined, LogoutOutlined, DeleteOutlined, FileSearchOutlined } from '@ant-design/icons';
+import { HomeOutlined, TeamOutlined, DashboardOutlined, DollarOutlined, SettingOutlined, LogoutOutlined, DeleteOutlined, FileSearchOutlined, GlobalOutlined } from '@ant-design/icons';
 import DashboardPage from '../pages/Dashboard';
 import AccountsPage from '../pages/Accounts';
 import QuotasPage from '../pages/Quotas';
 import BillingPage from '../pages/Billing';
 import CleanupPage from '../pages/Cleanup';
+import RegionsPage from '../pages/Regions';
 import AuditLogPage from '../pages/AuditLog';
 import SettingsPage from '../pages/Settings';
 import { api } from '../api';
@@ -20,6 +21,7 @@ const navItems = [
   { key: 'dashboard', icon: <HomeOutlined />, label: '概览' },
   { key: 'accounts', icon: <TeamOutlined />, label: '账户' },
   { key: 'quotas', icon: <DashboardOutlined />, label: '配额' },
+  { key: 'regions', icon: <GlobalOutlined />, label: '区域' },
   { key: 'billing', icon: <DollarOutlined />, label: '账单' },
   { key: 'cleanup', icon: <DeleteOutlined />, label: '清理' },
   { key: 'audit', icon: <FileSearchOutlined />, label: '审计' },
@@ -47,6 +49,7 @@ const MainLayout: React.FC<MainLayoutProps> = ({ onLogout }) => {
       case 'dashboard': return <DashboardPage />;
       case 'accounts': return <AccountsPage />;
       case 'quotas': return <QuotasPage />;
+      case 'regions': return <RegionsPage />;
       case 'billing': return <BillingPage />;
       case 'cleanup': return <CleanupPage />;
       case 'audit': return <AuditLogPage />;
@@ -65,7 +68,7 @@ const MainLayout: React.FC<MainLayoutProps> = ({ onLogout }) => {
             <h3 style={{ margin: 0, fontSize: 14 }}>☁️ AWS Toolbox</h3>
           </div>
           <Menu mode="inline" selectedKeys={[currentPage]}
-            items={navItems.map(i => ({ ...i, label: i.label === '概览' ? '概览' : i.label === '账户' ? '账户管理' : i.label === '配额' ? '配额管理' : i.label === '账单' ? '账单分析' : i.label === '清理' ? '资源清理' : i.label === '审计' ? '审计日志' : '设置' }))}
+            items={navItems.map(i => ({ ...i, label: i.label === '概览' ? '概览' : i.label === '账户' ? '账户管理' : i.label === '配额' ? '配额管理' : i.label === '区域' ? '区域管理' : i.label === '账单' ? '账单分析' : i.label === '清理' ? '资源清理' : i.label === '审计' ? '审计日志' : '设置' }))}
             onClick={({ key }) => setCurrentPage(key)} style={{ border: 'none' }} />
           <div style={{ position: 'absolute', bottom: 16, left: 12 }}>
             <p style={{ fontSize: 11, color: '#999', marginBottom: 4 }}>{username}</p>

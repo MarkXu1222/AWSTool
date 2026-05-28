@@ -10,6 +10,7 @@ interface DBSchema {
   users: any[];
   quota_requests: any[];
   audit_log: any[];
+  region_data: any[];
 }
 
 // In-memory cache to avoid reading file on every request
@@ -27,7 +28,7 @@ function readDB(): DBSchema {
 
   ensureDir();
   if (!fs.existsSync(DB_PATH)) {
-    cache = { users: [], quota_requests: [], audit_log: [] };
+    cache = { users: [], quota_requests: [], audit_log: [], region_data: [] };
     cacheTime = Date.now();
     return cache;
   }
@@ -36,7 +37,7 @@ function readDB(): DBSchema {
     cacheTime = Date.now();
     return cache!;
   } catch {
-    cache = { users: [], quota_requests: [], audit_log: [] };
+    cache = { users: [], quota_requests: [], audit_log: [], region_data: [] };
     cacheTime = Date.now();
     return cache;
   }
@@ -124,6 +125,30 @@ export const db = {
   deleteUser(id: number) {
     const data = readDB();
     data.users = data.users.filter(u => u.id !== id);
+    writeDB(data);
+  },
+
+  // Region data
+  getRegionData() {
+    const data = readDB();
+    return data.region_data || [];
+  },
+
+  upsertRegionData(accountId: string, regions: { region: string; status: string }[]) {
+    const data = readDB();
+    if (!data.region_data) data.region_data = [];
+    const idx = data.region_data.findIndex((r: any) => r.account_id === accountId);
+    if (idx >= 0) {
+      const existing = data.region_data[idx];
+      for (const r of regions) {
+        const ri = (existing.regions || []).findIndex((er: any) => er.region === r.region);
+        if (ri >= 0) existing.regions[ri] = r;
+        else existing.regions.push(r);
+      }
+      existing.updated_at = new Date().toISOString();
+    } else {
+      data.region_data.push({ account_id: accountId, regions, updated_at: new Date().toISOString() });
+    }
     writeDB(data);
   },
 };

@@ -6,6 +6,7 @@ import path from 'path';
 import { rateLimit } from 'express-rate-limit';
 import { authRouter, authMiddleware } from './auth';
 import { awsRouter } from './routes/aws';
+import { regionsRouter } from './routes/regions';
 
 const app = express();
 app.set('trust proxy', 1);
@@ -53,6 +54,7 @@ app.use('/api/auth', authRouter);
 
 // Protected API routes
 app.use('/api/aws', authMiddleware, awsRouter);
+app.use('/api/regions', authMiddleware, regionsRouter);
 
 // Serve static frontend
 import fs from 'fs';

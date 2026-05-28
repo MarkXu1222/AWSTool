@@ -68,6 +68,12 @@ export const api = {
     request(`/aws/quotas/sync-account/${accountId}`, { method: 'POST' }),
   scanResources: (accountId: string, region: string) => request(`/aws/resources/${accountId}/${region}`),
   getAuditLog: () => request('/aws/audit'),
+  // Regions
+  getRegionStatus: () => request('/regions/status'),
+  scanRegions: (accountIds?: string[]) => request('/regions/scan', { method: 'POST', body: JSON.stringify({ accountIds }) }),
+  scanAccountRegions: (accountId: string) => request(`/regions/scan/${accountId}`, { method: 'POST' }),
+  enableRegion: (accountId: string, region: string) => request('/regions/enable', { method: 'POST', body: JSON.stringify({ accountId, region }) }),
+  enableRegionBatch: (accountIds: string[], region: string) => request('/regions/enable-batch', { method: 'POST', body: JSON.stringify({ accountIds, region }) }),
   changePassword: (currentPassword: string, newPassword: string) =>
     request('/auth/change-password', { method: 'POST', body: JSON.stringify({ currentPassword, newPassword }) }),
   // User management
