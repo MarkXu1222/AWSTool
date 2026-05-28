@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { ConfigProvider, theme } from 'antd';
 import LoginPage from './pages/Login';
 import MainLayout from './components/MainLayout';
+import ErrorBoundary from './components/ErrorBoundary';
 import { api } from './api';
 
 const App: React.FC = () => {
@@ -27,13 +28,15 @@ const App: React.FC = () => {
   if (checking) return null;
 
   return (
-    <ConfigProvider theme={{ algorithm: theme.defaultAlgorithm, token: { colorPrimary: '#0071e3', borderRadius: 8, fontSize: 13 } }}>
-      {authenticated ? (
-        <MainLayout onLogout={() => { localStorage.removeItem('token'); setAuthenticated(false); }} />
-      ) : (
-        <LoginPage onSuccess={() => setAuthenticated(true)} />
-      )}
-    </ConfigProvider>
+    <ErrorBoundary>
+      <ConfigProvider theme={{ algorithm: theme.defaultAlgorithm, token: { colorPrimary: '#0071e3', borderRadius: 8, fontSize: 13 } }}>
+        {authenticated ? (
+          <MainLayout onLogout={() => { localStorage.removeItem('token'); setAuthenticated(false); }} />
+        ) : (
+          <LoginPage onSuccess={() => setAuthenticated(true)} />
+        )}
+      </ConfigProvider>
+    </ErrorBoundary>
   );
 };
 

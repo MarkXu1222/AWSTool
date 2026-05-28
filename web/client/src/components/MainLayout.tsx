@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { Layout, Menu, Button } from 'antd';
-import { TeamOutlined, DashboardOutlined, DollarOutlined, SettingOutlined, LogoutOutlined, DeleteOutlined } from '@ant-design/icons';
+import { HomeOutlined, TeamOutlined, DashboardOutlined, DollarOutlined, SettingOutlined, LogoutOutlined, DeleteOutlined } from '@ant-design/icons';
+import DashboardPage from '../pages/Dashboard';
 import AccountsPage from '../pages/Accounts';
 import QuotasPage from '../pages/Quotas';
 import BillingPage from '../pages/Billing';
@@ -14,6 +15,7 @@ interface MainLayoutProps {
 }
 
 const navItems = [
+  { key: 'dashboard', icon: <HomeOutlined />, label: '概览' },
   { key: 'accounts', icon: <TeamOutlined />, label: '账户' },
   { key: 'quotas', icon: <DashboardOutlined />, label: '配额' },
   { key: 'billing', icon: <DollarOutlined />, label: '账单' },
@@ -22,16 +24,17 @@ const navItems = [
 ];
 
 const MainLayout: React.FC<MainLayoutProps> = ({ onLogout }) => {
-  const [currentPage, setCurrentPage] = useState('accounts');
+  const [currentPage, setCurrentPage] = useState('dashboard');
 
   const renderPage = () => {
     switch (currentPage) {
+      case 'dashboard': return <DashboardPage />;
       case 'accounts': return <AccountsPage />;
       case 'quotas': return <QuotasPage />;
       case 'billing': return <BillingPage />;
       case 'cleanup': return <CleanupPage />;
       case 'settings': return <SettingsPage onLogout={onLogout} />;
-      default: return <AccountsPage />;
+      default: return <DashboardPage />;
     }
   };
 
@@ -45,7 +48,7 @@ const MainLayout: React.FC<MainLayoutProps> = ({ onLogout }) => {
             <h3 style={{ margin: 0, fontSize: 14 }}>☁️ AWS Toolbox</h3>
           </div>
           <Menu mode="inline" selectedKeys={[currentPage]}
-            items={navItems.map(i => ({ ...i, label: i.label === '账户' ? '账户管理' : i.label === '配额' ? '配额管理' : i.label === '账单' ? '账单分析' : i.label === '清理' ? '资源清理' : '设置' }))}
+            items={navItems.map(i => ({ ...i, label: i.label === '概览' ? '概览' : i.label === '账户' ? '账户管理' : i.label === '配额' ? '配额管理' : i.label === '账单' ? '账单分析' : i.label === '清理' ? '资源清理' : '设置' }))}
             onClick={({ key }) => setCurrentPage(key)} style={{ border: 'none' }} />
           <div style={{ position: 'absolute', bottom: 16, left: 12 }}>
             <Button size="small" icon={<LogoutOutlined />} onClick={onLogout} danger>登出</Button>
