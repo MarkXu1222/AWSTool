@@ -50,7 +50,7 @@ authRouter.post('/login', (req: Request, res: Response) => {
   }
 
   const token = jwt.sign({ userId: user.id, username: user.username, role: user.role }, JWT_SECRET, { expiresIn: TOKEN_EXPIRY });
-  db.addAuditLog(user.id, 'LOGIN', `IP: ${req.ip}`);
+  db.addAuditLog(user.id, 'LOGIN', `IP: ${req.ip}`, user.username);
   res.json({ token, username: user.username, role: user.role, mfaEnabled: !!user.mfa_enabled });
 });
 
@@ -110,8 +110,70 @@ authRouter.post('/change-password', (req: Request, res: Response) => {
     }
     const hash = bcrypt.hashSync(newPassword, 12);
     db.updateUser(user.id, { password_hash: hash });
-    db.addAuditLog(user.id, 'PASSWORD_CHANGE', `User ${decoded.username} changed password`);
+    db.addAuditLog(user.id, 'PASSWORD_CHANGE', `修改了自己的密码`, decoded.username);
     res.json({ success: true, message: '密码已修改' });
+  } catch { res.status(401).json({ error: 'Invalid token' }); }
+});
+
+// === User Management (admin only) ===
+
+// List all users
+authRouter.get('/users', (req: Request, res: Response) => {
+  const authHeader = req.headers.authorization;
+  if (!authHeader) return res.status(401).json({ error: 'Unauthorized' });
+  try {
+    const decoded = jwt.verify(authHeader.replace('Bearer ', ''), JWT_SECRET) as any;
+    if (decoded.role !== 'admin') return res.status(403).json({ error: '无权限' });
+    res.json({ success: true, data: db.getAllUsers() });
+  } catch { res.status(401).json({ error: 'Invalid token' }); }
+});
+
+// Create user
+authRouter.post('/users', (req: Request, res: Response) => {
+  const authHeader = req.headers.authorization;
+  if (!authHeader) return res.status(401).json({ error: 'Unauthorized' });
+  try {
+    const decoded = jwt.verify(authHeader.replace('Bearer ', ''), JWT_SECRET) as any;
+    if (decoded.role !== 'admin') return res.status(403).json({ error: '无权限' });
+    const { username, password, role } = req.body;
+    if (!username || !password) return res.status(400).json({ error: '用户名和密码必填' });
+    if (db.getUser(username)) return res.status(400).json({ error: '用户已存在' });
+    const hash = bcrypt.hashSync(password, 12);
+    db.createUser({ username, password_hash: hash, role: role || 'viewer', mfa_enabled: false, mfa_secret: null });
+    db.addAuditLog(decoded.userId, 'USER_CREATE', `创建用户 ${username} (${role || 'viewer'})`, decoded.username);
+    res.json({ success: true, message: `用户 ${username} 已创建` });
+  } catch { res.status(401).json({ error: 'Invalid token' }); }
+});
+
+// Delete user
+authRouter.delete('/users/:id', (req: Request, res: Response) => {
+  const authHeader = req.headers.authorization;
+  if (!authHeader) return res.status(401).json({ error: 'Unauthorized' });
+  try {
+    const decoded = jwt.verify(authHeader.replace('Bearer ', ''), JWT_SECRET) as any;
+    if (decoded.role !== 'admin') return res.status(403).json({ error: '无权限' });
+    const userId = parseInt(req.params.id);
+    if (userId === decoded.userId) return res.status(400).json({ error: '不能删除自己' });
+    db.deleteUser(userId);
+    db.addAuditLog(decoded.userId, 'USER_DELETE', `删除用户 ID: ${userId}`, decoded.username);
+    res.json({ success: true });
+  } catch { res.status(401).json({ error: 'Invalid token' }); }
+});
+
+// Reset user password (admin)
+authRouter.post('/users/:id/reset-password', (req: Request, res: Response) => {
+  const authHeader = req.headers.authorization;
+  if (!authHeader) return res.status(401).json({ error: 'Unauthorized' });
+  try {
+    const decoded = jwt.verify(authHeader.replace('Bearer ', ''), JWT_SECRET) as any;
+    if (decoded.role !== 'admin') return res.status(403).json({ error: '无权限' });
+    const { newPassword } = req.body;
+    if (!newPassword || newPassword.length < 6) return res.status(400).json({ error: '密码至少 6 位' });
+    const userId = parseInt(req.params.id);
+    const hash = bcrypt.hashSync(newPassword, 12);
+    db.updateUser(userId, { password_hash: hash });
+    db.addAuditLog(decoded.userId, 'PASSWORD_RESET', `重置用户 ID: ${userId} 的密码`, decoded.username);
+    res.json({ success: true, message: '密码已重置' });
   } catch { res.status(401).json({ error: 'Invalid token' }); }
 });
 

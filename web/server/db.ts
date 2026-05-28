@@ -91,16 +91,34 @@ export const db = {
   },
 
   // Audit log
-  addAuditLog(userId: number | null, action: string, detail: string) {
+  addAuditLog(userId: number | null, action: string, detail: string, username?: string) {
     const data = readDB();
-    data.audit_log.push({ id: Date.now(), user_id: userId, action, detail, created_at: new Date().toISOString() });
-    // Keep last 500 entries
+    data.audit_log.push({ id: Date.now(), user_id: userId, username: username || null, action, detail, created_at: new Date().toISOString() });
     if (data.audit_log.length > 500) data.audit_log = data.audit_log.slice(-500);
     writeDB(data);
   },
 
   getAuditLog(limit = 100) {
     const data = readDB();
-    return data.audit_log.slice(-limit).reverse();
+    const logs = data.audit_log.slice(-limit).reverse();
+    // Resolve usernames
+    return logs.map(log => {
+      if (!log.username && log.user_id) {
+        const user = data.users.find(u => u.id === log.user_id);
+        log.username = user?.username || 'unknown';
+      }
+      return log;
+    });
+  },
+
+  // User management
+  getAllUsers() {
+    return readDB().users.map(u => ({ id: u.id, username: u.username, role: u.role, mfa_enabled: u.mfa_enabled, created_at: u.created_at }));
+  },
+
+  deleteUser(id: number) {
+    const data = readDB();
+    data.users = data.users.filter(u => u.id !== id);
+    writeDB(data);
   },
 };

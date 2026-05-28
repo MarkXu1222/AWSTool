@@ -60,4 +60,11 @@ export const api = {
   getAuditLog: () => request('/aws/audit'),
   changePassword: (currentPassword: string, newPassword: string) =>
     request('/auth/change-password', { method: 'POST', body: JSON.stringify({ currentPassword, newPassword }) }),
+  // User management
+  listUsers: () => request('/auth/users'),
+  createUser: (username: string, password: string, role: string) =>
+    request('/auth/users', { method: 'POST', body: JSON.stringify({ username, password, role }) }),
+  deleteUser: (id: number) => request(`/auth/users/${id}`, { method: 'DELETE' }),
+  resetUserPassword: (id: number, newPassword: string) =>
+    request(`/auth/users/${id}/reset-password`, { method: 'POST', body: JSON.stringify({ newPassword }) }),
 };
