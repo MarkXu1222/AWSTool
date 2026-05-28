@@ -97,7 +97,7 @@ const AccountsPage: React.FC = () => {
   return (
     <div>
       <Card size="small"
-        title={<span>📋 账户 <Tag color="blue">{filtered.length}</Tag></span>}
+        title={<span>账户管理 <Tag color="blue">{filtered.length}</Tag></span>}
         extra={<Space>
           <Button size="small" className="hide-mobile" onClick={() => exportToCSV(filtered.map(a => ({ ID: a.Id, 名称: a.Name, 邮箱: a.Email, 组织: a._payer, 状态: a.Status })), 'accounts')}>导出</Button>
           <Button size="small" icon={<ReloadOutlined />} onClick={fetchAccounts} loading={loading} />

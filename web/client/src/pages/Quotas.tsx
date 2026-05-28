@@ -146,7 +146,7 @@ const QuotasPage: React.FC = () => {
   ];
 
   return (
-    <Card size="small" title="📊 配额管理" extra={<Button size="small" icon={<DownloadOutlined />} onClick={handleExport}>导出</Button>}>
+    <Card size="small" title="配额管理" extra={<Button size="small" icon={<DownloadOutlined />} onClick={handleExport}>导出</Button>}>
       <Space wrap style={{ marginBottom: 12 }}>
         <Select placeholder="选择账户" style={{ width: 180 }} value={selectedAccount || undefined} onChange={setSelectedAccount}
           showSearch optionFilterProp="label" options={accounts.map(a => ({ label: `${a.Name} (${a.Id})`, value: a.Id }))} size="small" />
@@ -163,6 +163,7 @@ const QuotasPage: React.FC = () => {
               <Input placeholder="搜索配额名称..." prefix={<SearchOutlined />} value={searchText}
                 onChange={e => setSearchText(e.target.value)} allowClear size="small" style={{ marginBottom: 8, maxWidth: 280 }} />
               <Table size="small" dataSource={filtered} rowKey="QuotaCode" loading={loading} pagination={{ pageSize: 15, showTotal: t => `共 ${t} 条` }}
+                locale={{ emptyText: '选择账户和服务后点击「查询」' }}
                 columns={[
                   { title: '配额名称', dataIndex: 'QuotaName', ellipsis: true },
                   { title: '当前值', dataIndex: 'Value', width: 120, sorter: (a: any, b: any) => a.Value - b.Value, render: (v: number, r: any) => <strong>{v === Infinity ? '无限制' : v}{r.Unit && r.Unit !== 'None' ? ` ${r.Unit}` : ''}</strong> },

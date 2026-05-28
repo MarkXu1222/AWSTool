@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { Layout, Menu, Button } from 'antd';
 import { HomeOutlined, TeamOutlined, DashboardOutlined, DollarOutlined, SettingOutlined, LogoutOutlined, DeleteOutlined, FileSearchOutlined } from '@ant-design/icons';
 import DashboardPage from '../pages/Dashboard';
@@ -8,6 +8,7 @@ import BillingPage from '../pages/Billing';
 import CleanupPage from '../pages/Cleanup';
 import AuditLogPage from '../pages/AuditLog';
 import SettingsPage from '../pages/Settings';
+import { api } from '../api';
 
 const { Sider, Content } = Layout;
 
@@ -25,8 +26,21 @@ const navItems = [
   { key: 'settings', icon: <SettingOutlined />, label: '设置' },
 ];
 
+const mobileNavItems = [
+  { key: 'dashboard', icon: <HomeOutlined />, label: '概览' },
+  { key: 'accounts', icon: <TeamOutlined />, label: '账户' },
+  { key: 'quotas', icon: <DashboardOutlined />, label: '配额' },
+  { key: 'billing', icon: <DollarOutlined />, label: '账单' },
+  { key: 'settings', icon: <SettingOutlined />, label: '设置' },
+];
+
 const MainLayout: React.FC<MainLayoutProps> = ({ onLogout }) => {
   const [currentPage, setCurrentPage] = useState('dashboard');
+  const [username, setUsername] = useState('');
+
+  useEffect(() => {
+    api.me().then(r => setUsername(r.username || '')).catch(() => {});
+  }, []);
 
   const renderPage = () => {
     switch (currentPage) {
@@ -54,6 +68,7 @@ const MainLayout: React.FC<MainLayoutProps> = ({ onLogout }) => {
             items={navItems.map(i => ({ ...i, label: i.label === '概览' ? '概览' : i.label === '账户' ? '账户管理' : i.label === '配额' ? '配额管理' : i.label === '账单' ? '账单分析' : i.label === '清理' ? '资源清理' : i.label === '审计' ? '审计日志' : '设置' }))}
             onClick={({ key }) => setCurrentPage(key)} style={{ border: 'none' }} />
           <div style={{ position: 'absolute', bottom: 16, left: 12 }}>
+            <p style={{ fontSize: 11, color: '#999', marginBottom: 4 }}>{username}</p>
             <Button size="small" icon={<LogoutOutlined />} onClick={onLogout} danger>登出</Button>
           </div>
         </Sider>
@@ -68,7 +83,7 @@ const MainLayout: React.FC<MainLayoutProps> = ({ onLogout }) => {
 
       {/* Mobile bottom navigation */}
       <nav className="bottom-nav">
-        {navItems.map(item => (
+        {mobileNavItems.map(item => (
           <div key={item.key} className={`bottom-nav-item ${currentPage === item.key ? 'active' : ''}`}
             onClick={() => setCurrentPage(item.key)}>
             <span className="nav-icon">{item.icon}</span>

@@ -58,7 +58,7 @@ const CleanupPage: React.FC = () => {
   const filtered = resources.filter(r => !searchText || r.name?.toLowerCase().includes(searchText.toLowerCase()) || r.id?.includes(searchText));
 
   return (
-    <Card size="small" title="🧹 资源清理">
+    <Card size="small" title="资源清理">
       <Steps current={step} size="small" style={{ marginBottom: 16 }} items={[{ title: '选账户' }, { title: '查账单' }, { title: '扫描清理' }]} />
 
       <Space wrap style={{ marginBottom: 12 }}>
@@ -68,7 +68,7 @@ const CleanupPage: React.FC = () => {
       </Space>
 
       {step >= 1 && costByService.length > 0 && (
-        <Card size="small" style={{ marginBottom: 12 }} title={`📊 费用分布 (${costByService.length} 个服务)`}>
+        <Card size="small" style={{ marginBottom: 12 }} title={`费用分布 (${costByService.length} 个服务)`}>
           <Table size="small" pagination={false} dataSource={costByService.slice(0, 8)} rowKey="name"
             columns={[{ title: '服务', dataIndex: 'name' }, { title: '费用', dataIndex: 'cost', render: (c: number) => `$${c.toFixed(2)}` }]} />
           <Space style={{ marginTop: 8 }}>

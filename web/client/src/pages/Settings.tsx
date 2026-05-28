@@ -86,7 +86,7 @@ const SettingsPage: React.FC<SettingsPageProps> = ({ onLogout }) => {
 
   return (
     <div style={{ maxWidth: 600 }}>
-      <Card size="small" title="🔗 连接状态" style={{ marginBottom: 12 }}>
+      <Card size="small" title="连接状态" style={{ marginBottom: 12 }}>
         {connection.length === 0 && checking && <span style={{ color: '#999' }}>检查中...</span>}
         {connection.map((c, i) => (
           <Alert key={i} type={c.ok ? 'success' : 'error'} showIcon
@@ -95,7 +95,7 @@ const SettingsPage: React.FC<SettingsPageProps> = ({ onLogout }) => {
       </Card>
 
       {/* User Management */}
-      <Card size="small" title="👥 用户管理" style={{ marginBottom: 12 }}
+      <Card size="small" title="用户管理" style={{ marginBottom: 12 }}
         extra={<Button size="small" icon={<UserAddOutlined />} onClick={() => setAddUserOpen(true)}>添加用户</Button>}>
         <Table size="small" dataSource={users} rowKey="id" pagination={false}
           columns={[
@@ -139,7 +139,7 @@ const SettingsPage: React.FC<SettingsPageProps> = ({ onLogout }) => {
       </Card>
 
       {/* Change password */}
-      <Card size="small" title="🔑 修改密码" style={{ marginBottom: 12 }}>
+      <Card size="small" title="修改密码" style={{ marginBottom: 12 }}>
         <Form layout="vertical" onFinish={async (values: any) => {
           if (values.newPassword !== values.confirmPassword) { message.error('两次密码不一致'); return; }
           const res = await api.changePassword(values.currentPassword, values.newPassword);

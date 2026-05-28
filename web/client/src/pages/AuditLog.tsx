@@ -58,9 +58,10 @@ const AuditLogPage: React.FC = () => {
 
   return (
     <div style={{ maxWidth: 800 }}>
-      <Card size="small" title="📋 审计日志" extra={<Button size="small" icon={<ReloadOutlined />} onClick={fetchLogs} loading={loading}>刷新</Button>}>
+      <Card size="small" title="审计日志" extra={<Button size="small" icon={<ReloadOutlined />} onClick={fetchLogs} loading={loading}>刷新</Button>}>
         <Table dataSource={logs} columns={columns} rowKey={(r, i) => `${r.created_at}-${i}`}
-          size="small" loading={loading} pagination={{ pageSize: 20 }} scroll={{ x: 500 }} />
+          size="small" loading={loading} pagination={{ pageSize: 20 }} scroll={{ x: 500 }}
+          locale={{ emptyText: '暂无操作记录' }} />
       </Card>
     </div>
   );

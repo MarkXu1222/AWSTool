@@ -45,7 +45,7 @@ const BillingPage: React.FC = () => {
         <Col xs={12} md={8}><Card size="small"><Statistic title="总费用" value={totalCost} precision={2} prefix={<DollarOutlined />} suffix="USD" valueStyle={{ color: '#ff9500' }} /></Card></Col>
         <Col xs={12} md={8}><Card size="small"><Statistic title="账户数" value={new Set(tableData.map(d => d.accountId)).size} /></Card></Col>
       </Row>
-      <Card size="small" title="💰 账单" extra={<Button size="small" onClick={() => exportToCSV(filtered.map(d => ({ 账期: d.period, 账户: d.accountId, '费用(USD)': d.cost.toFixed(4) })), 'billing')}>导出</Button>}>
+      <Card size="small" title="账单分析" extra={<Button size="small" onClick={() => exportToCSV(filtered.map(d => ({ 账期: d.period, 账户: d.accountId, '费用(USD)': d.cost.toFixed(4) })), 'billing')}>导出</Button>}>
         <Space wrap style={{ marginBottom: 8 }}>
           <RangePicker value={dateRange} onChange={(d) => { if (d?.[0] && d?.[1]) setDateRange([d[0], d[1]]); }} picker="month" size="small" />
           <Button icon={<ReloadOutlined />} onClick={fetchCosts} loading={loading} type="primary" size="small">查询</Button>

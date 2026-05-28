@@ -162,7 +162,7 @@ const Dashboard: React.FC = () => {
         </Col>
       </Row>
 
-      <Card size="small" title="🏆 本月费用 Top 10 账户">
+      <Card size="small" title="本月费用 Top 10">
         <Table
           size="small"
           dataSource={topAccounts}
