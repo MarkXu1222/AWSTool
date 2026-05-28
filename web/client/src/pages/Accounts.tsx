@@ -111,15 +111,35 @@ const AccountsPage: React.FC = () => {
 
   return (
     <div>
-      <Card size="small"
-        title={<span>账户管理 <Tag color="blue">{filtered.length}</Tag></span>}
-        extra={<Space>
+      {/* Page Header */}
+      <div className="page-header">
+        <div>
+          <h2 className="page-header-title">账户管理</h2>
+          <p className="page-header-subtitle">管理 AWS 账户、组织归属与状态</p>
+        </div>
+        <Space>
           <Button size="small" className="hide-mobile" onClick={() => exportToCSV(filtered.map(a => ({ ID: a.Id, 名称: a.Name, 邮箱: a.Email, 组织: a._payer, 状态: a.Status })), 'accounts')}>导出</Button>
           <Button size="small" icon={<ReloadOutlined />} onClick={fetchAccounts} loading={loading} />
-        </Space>}>
+        </Space>
+      </div>
 
-        <Input placeholder="搜索 ID / 名称 / 邮箱..." prefix={<SearchOutlined />} value={searchText}
-          onChange={e => setSearchText(e.target.value)} allowClear size="small" style={{ marginBottom: 8 }} />
+      {/* Stats Bar */}
+      {!isMobile && accounts.length > 0 && (
+        <div style={{ display: 'flex', gap: 24, marginBottom: 16, fontSize: 13, color: '#6B7280' }}>
+          <span>总数 <strong style={{ color: '#111827' }}>{accounts.length}</strong></span>
+          <span>Active <strong style={{ color: '#059669' }}>{accounts.filter(a => a.Status === 'ACTIVE').length}</strong></span>
+          <span>组织 <strong style={{ color: '#111827' }}>{[...new Set(accounts.map(a => a._payer))].length}</strong></span>
+        </div>
+      )}
+
+      {/* Content Card */}
+      <Card size="small" bodyStyle={{ padding: '12px 16px' }}>
+        {/* Table Toolbar */}
+        <div className="table-toolbar">
+          <Input placeholder="搜索 ID、名称、邮箱或组织..." prefix={<SearchOutlined />} value={searchText}
+            onChange={e => setSearchText(e.target.value)} allowClear size="small" style={{ width: 320 }} />
+          <span style={{ fontSize: 12, color: '#9CA3AF' }}>{filtered.length} 条</span>
+        </div>
 
         {/* Mobile: card list */}
         {isMobile ? (
@@ -141,7 +161,9 @@ const AccountsPage: React.FC = () => {
           <div style={{ display: 'flex', gap: 16 }}>
             <div style={{ flex: 1 }}>
               <Table columns={columns} dataSource={filtered} rowKey="Id" loading={loading} size="small"
-                pagination={{ pageSize: 15, size: 'small' }} onRow={r => ({ onClick: () => openDetail(r), style: { cursor: 'pointer' } })} />
+                pagination={{ pageSize: 15, size: 'small', showTotal: t => `共 ${t} 条`, showSizeChanger: true }}
+                locale={{ emptyText: '暂无匹配账户，请调整搜索关键词' }}
+                onRow={r => ({ onClick: () => openDetail(r), style: { cursor: 'pointer' } })} />
             </div>
             {selectedAccount && (
               <div style={{ width: 360, minWidth: 360 }}>

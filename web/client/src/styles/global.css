@@ -18,20 +18,35 @@ body {
 /* === 侧边栏 === */
 @media (min-width: 769px) {
   .desktop-sider {
-    background: #f7f8fa !important;
-    border-right: 1px solid #e8e8e8 !important;
+    background: #fff !important;
+    border-right: 1px solid #E5E7EB !important;
   }
   .desktop-sider .ant-layout-sider-children {
-    background: #f7f8fa !important;
+    background: #fff !important;
   }
   .desktop-sider .ant-menu {
-    background: #f7f8fa !important;
+    background: #fff !important;
+    padding: 4px 8px !important;
+  }
+  .desktop-sider .ant-menu-item {
+    height: 38px !important;
+    line-height: 38px !important;
+    margin: 2px 0 !important;
+    border-radius: 6px !important;
+    padding-left: 12px !important;
+    font-size: 13px !important;
+    color: #374151 !important;
+  }
+  .desktop-sider .ant-menu-item:hover {
+    background: #F3F4F6 !important;
   }
   .desktop-sider .ant-menu-item-selected {
-    background: #e6f4ff !important;
+    background: #EFF6FF !important;
     color: #1677ff !important;
-    font-weight: 600 !important;
-    border-radius: 6px;
+    font-weight: 500 !important;
+    border-left: 3px solid #1677ff !important;
+    border-radius: 0 6px 6px 0 !important;
+    padding-left: 9px !important;
   }
 }
 
