@@ -158,6 +158,9 @@ const QuotasPage: React.FC = () => {
     { title: '状态', dataIndex: 'status', width: 95, filters: [{ text: 'PENDING', value: 'PENDING' }, { text: 'APPROVED', value: 'APPROVED' }, { text: 'DENIED', value: 'DENIED' }, { text: 'CASE_OPENED', value: 'CASE_OPENED' }], onFilter: (value: any, record: any) => record.status === value, render: (s: string) => { const c: Record<string, string> = { PENDING: 'orange', CASE_OPENED: 'blue', APPROVED: 'green', DENIED: 'red', CASE_CLOSED: 'default' }; return <Tag color={c[s] || 'default'}>{s}</Tag>; } },
     { title: 'Case ID', dataIndex: 'case_id', width: 95, render: (id: string) => id ? <code style={{ fontSize: 10 }}>{id}</code> : '-' },
     { title: '创建时间', dataIndex: 'created_at', width: 100, sorter: (a: any, b: any) => new Date(a.created_at || 0).getTime() - new Date(b.created_at || 0).getTime(), defaultSortOrder: 'descend' as const, render: (d: string, record: any) => { if (!d) return '-'; const date = new Date(d); const daysAgo = Math.floor((Date.now() - date.getTime()) / (1000*60*60*24)); const isPending = record.status === 'PENDING'; const isOverdue = isPending && daysAgo > 7; return <span style={{ fontSize: 11, color: isOverdue ? '#ff3b30' : undefined }}>{date.toLocaleDateString('zh-CN')}{isOverdue ? ' ⚠️' : ''}</span>; } },
+    { title: '', key: 'refresh', width: 40, render: (_: any, record: any) => (
+      <Button type="link" size="small" icon={<ReloadOutlined />} onClick={async (e) => { e.stopPropagation(); try { const res = await api.syncSingleAccount(record.account_id); if (res.success) { setDbRecords(res.data || []); message.success('已刷新'); } } catch {} }} />
+    )},
   ];
 
   return (
