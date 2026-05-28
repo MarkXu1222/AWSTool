@@ -2,6 +2,8 @@
  * HTTP API client — replaces Electron IPC calls
  */
 
+import { cacheGet, cacheSet } from './utils/cache';
+
 const BASE = '/api';
 
 function getToken(): string | null {
@@ -45,7 +47,13 @@ export const api = {
 
   // AWS
   testConnection: () => request('/aws/connection'),
-  listAccounts: () => request('/aws/accounts'),
+  listAccounts: async () => {
+    const cached = cacheGet('accounts');
+    if (cached) return cached;
+    const res = await request('/aws/accounts');
+    if (res.success) cacheSet('accounts', res, 5 * 60 * 1000); // 5 min cache
+    return res;
+  },
   getAccountDetail: (id: string) => request(`/aws/accounts/${id}/detail`),
   getCostByAccount: (start: string, end: string) => request(`/aws/billing/by-account?start=${start}&end=${end}`),
   getCostByService: (accountId: string, start: string, end: string) => request(`/aws/billing/by-service/${accountId}?start=${start}&end=${end}`),

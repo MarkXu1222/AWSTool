@@ -7,6 +7,7 @@ import { authRouter, authMiddleware } from './auth';
 import { awsRouter } from './routes/aws';
 
 const app = express();
+app.set('trust proxy', 1);
 const configPath = path.join(__dirname, '../../config.json');
 let appConfig: any = {};
 try { appConfig = JSON.parse(require('fs').readFileSync(configPath, 'utf-8')); } catch {}
