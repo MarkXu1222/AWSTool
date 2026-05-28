@@ -1,4 +1,5 @@
 import express from 'express';
+import compression from 'compression';
 import cors from 'cors';
 import helmet from 'helmet';
 import path from 'path';
@@ -8,6 +9,9 @@ import { awsRouter } from './routes/aws';
 
 const app = express();
 app.set('trust proxy', 1);
+
+// Gzip compression — reduces JS bundle from 1.28MB to ~400KB
+app.use(compression());
 const configPath = path.join(__dirname, '../../config.json');
 let appConfig: any = {};
 try { appConfig = JSON.parse(require('fs').readFileSync(configPath, 'utf-8')); } catch {}
