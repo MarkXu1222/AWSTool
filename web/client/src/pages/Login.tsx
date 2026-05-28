@@ -25,8 +25,10 @@ const LoginPage: React.FC<LoginPageProps> = ({ onSuccess }) => {
         localStorage.setItem('token', result.token);
         message.success('登录成功');
         onSuccess();
+      } else if (result.error) {
+        message.error(result.error);
       } else {
-        message.error(result.error || '登录失败');
+        message.error('登录失败');
       }
     } catch (e: any) {
       message.error(e.message || '登录失败');

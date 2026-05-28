@@ -19,9 +19,10 @@ async function request(path: string, options: RequestInit = {}) {
     },
   });
 
-  if (res.status === 401) {
+  // Only redirect on 401 for non-auth routes
+  if (res.status === 401 && !path.startsWith('/auth/')) {
     localStorage.removeItem('token');
-    window.location.href = '/login';
+    window.location.href = '/';
     throw new Error('Session expired');
   }
 
