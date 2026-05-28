@@ -3,7 +3,7 @@
 body {
   font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Helvetica Neue', sans-serif;
   -webkit-font-smoothing: antialiased;
-  background: #f5f5f7;
+  background: #f0f2f5;
   overflow-x: hidden;
 }
 
@@ -15,7 +15,100 @@ body {
   padding-bottom: env(safe-area-inset-bottom, 0);
 }
 
-/* 响应式表格 */
+/* === 侧边栏深色 === */
+@media (min-width: 769px) {
+  .desktop-sider {
+    background: #001529 !important;
+  }
+  .desktop-sider .ant-layout-sider-children {
+    background: #001529 !important;
+  }
+  .desktop-sider h3 {
+    color: #fff !important;
+  }
+  .desktop-sider .ant-menu {
+    background: #001529 !important;
+    color: rgba(255,255,255,0.75) !important;
+  }
+  .desktop-sider .ant-menu-item {
+    color: rgba(255,255,255,0.75) !important;
+  }
+  .desktop-sider .ant-menu-item:hover {
+    color: #fff !important;
+    background: rgba(255,255,255,0.08) !important;
+  }
+  .desktop-sider .ant-menu-item-selected {
+    background: #1677ff !important;
+    color: #fff !important;
+    border-radius: 6px;
+  }
+  .desktop-sider p {
+    color: rgba(255,255,255,0.45) !important;
+  }
+  .desktop-sider .ant-btn-dangerous {
+    border-color: rgba(255,255,255,0.3) !important;
+    color: rgba(255,255,255,0.8) !important;
+  }
+}
+
+/* === 表格优化 === */
+.ant-table {
+  background: #fff !important;
+  border-radius: 8px !important;
+  overflow: hidden;
+}
+.ant-table-thead > tr > th {
+  background: #fafafa !important;
+  border-bottom: 2px solid #f0f0f0 !important;
+  color: #333 !important;
+  font-size: 12px !important;
+  font-weight: 600 !important;
+  padding: 10px 12px !important;
+}
+.ant-table-tbody > tr > td {
+  padding: 10px 12px !important;
+  border-bottom: 1px solid #f5f5f5 !important;
+}
+.ant-table-tbody > tr:nth-child(even) > td {
+  background: #fafbfc !important;
+}
+.ant-table-tbody > tr:hover > td {
+  background: #e6f4ff !important;
+}
+
+/* === Card 加阴影和圆角 === */
+.ant-card {
+  border-radius: 12px !important;
+  box-shadow: 0 1px 4px rgba(0,0,0,0.06) !important;
+  border: 1px solid #eee !important;
+}
+.ant-card-head {
+  border-bottom: 1px solid #f0f0f0 !important;
+  font-weight: 600 !important;
+}
+
+/* === 统计卡片 === */
+.stat-card-primary {
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%) !important;
+  border: none !important;
+}
+.stat-card-primary .ant-statistic-title,
+.stat-card-primary .ant-statistic-content {
+  color: #fff !important;
+}
+.stat-card-primary .ant-statistic-content-prefix,
+.stat-card-primary .ant-statistic-content-suffix {
+  color: rgba(255,255,255,0.8) !important;
+}
+
+/* === 按钮 === */
+.ant-btn-primary {
+  border-radius: 6px !important;
+  font-weight: 500 !important;
+  box-shadow: 0 2px 4px rgba(22,119,255,0.2) !important;
+}
+
+/* === 响应式表格 === */
 @media (max-width: 768px) {
   .ant-table-thead > tr > th,
   .ant-table-tbody > tr > td {
@@ -30,7 +123,7 @@ body {
   .hide-mobile { display: none !important; }
 }
 
-/* 底部导航栏样式 */
+/* === 底部导航栏 === */
 .bottom-nav {
   position: fixed;
   bottom: 0;
@@ -45,7 +138,6 @@ body {
   z-index: 1000;
   box-shadow: 0 -2px 8px rgba(0,0,0,0.06);
 }
-
 .bottom-nav-item {
   display: flex;
   flex-direction: column;
@@ -60,7 +152,7 @@ body {
   min-width: 56px;
 }
 .bottom-nav-item.active {
-  color: #0071e3;
+  color: #1677ff;
 }
 .bottom-nav-item .nav-icon {
   font-size: 20px;
@@ -70,10 +162,10 @@ body {
   font-weight: 500;
 }
 
-/* 移动端内容区域 */
+/* === 移动端内容区域 === */
 .mobile-content {
-  padding: 12px;
-  padding-bottom: 72px; /* 给底部导航留空间 */
+  padding: 16px;
+  padding-bottom: 72px;
   min-height: 100vh;
   overflow-y: auto;
   -webkit-overflow-scrolling: touch;
@@ -82,7 +174,7 @@ body {
 /* 桌面端侧边栏 */
 @media (min-width: 769px) {
   .bottom-nav { display: none; }
-  .mobile-content { padding: 20px; padding-bottom: 20px; }
+  .mobile-content { padding: 24px; padding-bottom: 24px; }
 }
 @media (max-width: 768px) {
   .desktop-sider { display: none !important; }
@@ -91,10 +183,7 @@ body {
 /* 移动端详情页全屏 */
 .mobile-detail-overlay {
   position: fixed;
-  top: 0;
-  left: 0;
-  right: 0;
-  bottom: 0;
+  top: 0; left: 0; right: 0; bottom: 0;
   background: #fff;
   z-index: 999;
   overflow-y: auto;
@@ -109,18 +198,20 @@ body {
 /* 移动端卡片列表 */
 .account-card {
   background: #fff;
-  border-radius: 12px;
+  border-radius: 10px;
   padding: 12px 16px;
   margin-bottom: 8px;
-  border: 1px solid #f0f0f0;
+  border: 1px solid #eee;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.04);
   display: flex;
   align-items: center;
   justify-content: space-between;
   cursor: pointer;
-  transition: background 0.1s ease;
+  transition: all 0.15s ease;
 }
 .account-card:active {
-  background: #f5f5f7;
+  background: #f5f7fa;
+  transform: scale(0.99);
 }
 .account-card-info h4 {
   font-size: 14px;
@@ -137,4 +228,12 @@ body {
 @media (max-width: 768px) {
   .ant-statistic-title { font-size: 11px !important; }
   .ant-statistic-content-value { font-size: 18px !important; }
+}
+
+/* === Tabs 优化 === */
+.ant-tabs-tab {
+  font-weight: 500 !important;
+}
+.ant-tabs-tab-active .ant-tabs-tab-btn {
+  font-weight: 600 !important;
 }
