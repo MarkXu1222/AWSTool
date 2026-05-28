@@ -116,7 +116,7 @@ const Dashboard: React.FC = () => {
   }
 
   return (
-    <div style={{ padding: '0 4px' }}>
+    <div>
       <div className="page-header">
         <div>
           <h2 className="page-header-title">概览</h2>

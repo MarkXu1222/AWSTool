@@ -19,13 +19,13 @@ interface MainLayoutProps {
 
 const navItems = [
   { key: 'dashboard', icon: <HomeOutlined />, label: '概览' },
-  { key: 'accounts', icon: <TeamOutlined />, label: '账户' },
-  { key: 'quotas', icon: <DashboardOutlined />, label: '配额' },
-  { key: 'regions', icon: <GlobalOutlined />, label: '区域' },
-  { key: 'billing', icon: <DollarOutlined />, label: '账单' },
-  { key: 'cleanup', icon: <DeleteOutlined />, label: '清理' },
-  { key: 'audit', icon: <FileSearchOutlined />, label: '审计' },
-  { key: 'settings', icon: <SettingOutlined />, label: '设置' },
+  { key: 'accounts', icon: <TeamOutlined />, label: '账户管理' },
+  { key: 'quotas', icon: <DashboardOutlined />, label: '配额管理' },
+  { key: 'regions', icon: <GlobalOutlined />, label: '区域管理' },
+  { key: 'billing', icon: <DollarOutlined />, label: '账单分析' },
+  { key: 'cleanup', icon: <DeleteOutlined />, label: '资源清理' },
+  { key: 'audit', icon: <FileSearchOutlined />, label: '审计日志' },
+  { key: 'settings', icon: <SettingOutlined />, label: '系统设置' },
 ];
 
 const mobileNavItems = [
@@ -61,25 +61,40 @@ const MainLayout: React.FC<MainLayoutProps> = ({ onLogout }) => {
   return (
     <div className="app-container">
       <Layout style={{ minHeight: '100vh' }}>
-        {/* Desktop sidebar */}
-        <Sider width={180} className="desktop-sider"
-          style={{ background: '#001529', borderRight: 'none', position: 'fixed', height: '100vh', left: 0, top: 0, zIndex: 100 }}>
-          <div style={{ padding: '16px 12px', borderBottom: '1px solid rgba(255,255,255,0.1)' }}>
-            <h3 style={{ margin: 0, fontSize: 14, color: '#fff' }}>☁️ AWS Toolbox</h3>
+        {/* Desktop Sidebar — Ant Design Pro style */}
+        <Sider width={208} className="desktop-sider">
+          <div className="sider-logo">
+            <h1>☁️ AWS Toolbox</h1>
           </div>
-          <Menu mode="inline" selectedKeys={[currentPage]}
-            items={navItems.map(i => ({ ...i, label: i.label === '概览' ? '概览' : i.label === '账户' ? '账户管理' : i.label === '配额' ? '配额管理' : i.label === '区域' ? '区域管理' : i.label === '账单' ? '账单分析' : i.label === '清理' ? '资源清理' : i.label === '审计' ? '审计日志' : '设置' }))}
-            onClick={({ key }) => setCurrentPage(key)} style={{ border: 'none' }} />
-          <div style={{ position: 'absolute', bottom: 12, left: 12, right: 12 }}>
-            <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.55)', marginBottom: 4, paddingLeft: 4 }}>{username}</div>
-            <div style={{ fontSize: 10, color: 'rgba(255,255,255,0.35)', marginBottom: 8, paddingLeft: 4 }}>v0.1.0</div>
-            <Button size="small" icon={<LogoutOutlined />} onClick={onLogout} style={{ width: '100%', color: 'rgba(255,255,255,0.65)', borderColor: 'rgba(255,255,255,0.2)', background: 'transparent' }}>登出</Button>
+          <Menu
+            mode="inline"
+            theme="dark"
+            selectedKeys={[currentPage]}
+            items={navItems}
+            onClick={({ key }) => setCurrentPage(key)}
+          />
+          <div className="sider-footer">
+            <div className="sider-footer-user">{username}</div>
+            <div className="sider-footer-version">v0.1.0</div>
+            <Button
+              size="small"
+              icon={<LogoutOutlined />}
+              onClick={onLogout}
+              style={{
+                width: '100%',
+                color: 'rgba(255,255,255,0.65)',
+                borderColor: 'rgba(255,255,255,0.2)',
+                background: 'transparent',
+              }}
+            >
+              退出登录
+            </Button>
           </div>
         </Sider>
 
         {/* Content area */}
-        <Layout style={{ marginLeft: 'var(--sider-width, 0)' }}>
-          <Content className="mobile-content" style={{ background: '#f5f5f7' }}>
+        <Layout>
+          <Content className="main-content">
             {renderPage()}
           </Content>
         </Layout>
@@ -88,20 +103,16 @@ const MainLayout: React.FC<MainLayoutProps> = ({ onLogout }) => {
       {/* Mobile bottom navigation */}
       <nav className="bottom-nav">
         {mobileNavItems.map(item => (
-          <div key={item.key} className={`bottom-nav-item ${currentPage === item.key ? 'active' : ''}`}
-            onClick={() => setCurrentPage(item.key)}>
+          <div
+            key={item.key}
+            className={`bottom-nav-item ${currentPage === item.key ? 'active' : ''}`}
+            onClick={() => setCurrentPage(item.key)}
+          >
             <span className="nav-icon">{item.icon}</span>
             <span className="nav-label">{item.label}</span>
           </div>
         ))}
       </nav>
-
-      <style>{`
-        @media (min-width: 769px) {
-          :root { --sider-width: 180px; }
-          .mobile-content { margin-left: 180px; }
-        }
-      `}</style>
     </div>
   );
 };
