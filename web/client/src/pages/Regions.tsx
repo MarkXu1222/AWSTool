@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
-import { Card, Table, Tag, Button, Space, message, Checkbox, Popconfirm, Progress, Collapse } from 'antd';
-import { GlobalOutlined, ReloadOutlined } from '@ant-design/icons';
+import { Card, Table, Tag, Button, Space, message, Checkbox, Popconfirm, Progress, Input, Alert, Tabs } from 'antd';
+import { GlobalOutlined, ReloadOutlined, SearchOutlined } from '@ant-design/icons';
 import { api } from '../api';
 
 const OPT_IN_REGIONS = [
@@ -17,6 +17,9 @@ const RegionsPage: React.FC = () => {
   const [selectedAccounts, setSelectedAccounts] = useState<string[]>([]);
   const [enabling, setEnabling] = useState(false);
   const [expandedRegion, setExpandedRegion] = useState<string | null>(null);
+  const [searchText, setSearchText] = useState('');
+  const [viewMode, setViewMode] = useState<'regions' | 'account'>('regions');
+  const [selectedAccountRegions, setSelectedAccountRegions] = useState<string[]>([]);
 
   useEffect(() => { loadData(); }, []);
 
@@ -86,17 +89,45 @@ const RegionsPage: React.FC = () => {
       });
   };
 
+  // Get disabled regions for a specific account
+  const getAccountRegionStatus = (accountId: string) => {
+    const rd = regionData.find(r => r.account_id === accountId);
+    if (!rd) return [];
+    return (rd.regions || []).map((r: any) => ({ ...r, accountId }));
+  };
+
+  // Search filtered accounts
+  const searchedAccounts = accounts.filter(a =>
+    searchText && (a.Id?.includes(searchText) || a.Name?.toLowerCase().includes(searchText.toLowerCase()))
+  );
+
+  // Handle batch enable regions for single account
+  const handleEnableRegionsForAccount = async (accountId: string, regions: string[]) => {
+    setEnabling(true);
+    try {
+      for (const region of regions) {
+        await api.enableRegion(accountId, region);
+      }
+      message.success(`${regions.length} 个区域已提交启用`);
+      setSelectedAccountRegions([]);
+      loadData();
+    } catch (e: any) { message.error(e.message); }
+    finally { setEnabling(false); }
+  };
+
   return (
     <div>
       <div className="page-header">
         <div>
           <h2 className="page-header-title">区域管理</h2>
-          <p className="page-header-subtitle">查看所有 opt-in 区域的开通状态，支持单独或批量启用</p>
+          <p className="page-header-subtitle">管理 opt-in 区域开通状态（默认区域 us-east-1/us-west-2/eu-west-1/ap-southeast-1 等已自动开通）</p>
         </div>
         <Button icon={<ReloadOutlined />} onClick={handleScan} loading={scanning} size="small">
           {scanning ? '扫描中...' : '扫描所有账户'}
         </Button>
       </div>
+
+      <Alert message="默认区域（如 us-east-1, us-west-2, eu-west-1, ap-southeast-1 等）始终开启无需管理。下方只显示需要手动开通的 opt-in 区域。" type="info" showIcon style={{ marginBottom: 12 }} />
 
       {regionData.length === 0 ? (
         <Card size="small">
@@ -106,7 +137,10 @@ const RegionsPage: React.FC = () => {
           </div>
         </Card>
       ) : (
-        <>
+        <Tabs items={[
+          {
+            key: 'regions', label: '按区域查看',
+            children: (<>
           {/* 区域总览表 */}
           <Card size="small" bodyStyle={{ padding: 0 }}>
             <Table size="small" dataSource={regionSummary} rowKey="region" pagination={false}
@@ -158,7 +192,67 @@ const RegionsPage: React.FC = () => {
               />
             </Card>
           )}
-        </>
+        </>),
+          },
+          {
+            key: 'account', label: '按账户查看',
+            children: (
+              <>
+                <Input placeholder="搜索账户 ID 或名称..." prefix={<SearchOutlined />} value={searchText}
+                  onChange={e => setSearchText(e.target.value)} allowClear size="small" style={{ marginBottom: 12, width: 320 }} />
+
+                {searchText && searchedAccounts.length > 0 && searchedAccounts.slice(0, 5).map(acct => {
+                  const acctRegions = getAccountRegionStatus(acct.Id);
+                  const disabled = acctRegions.filter((r: any) => r.status === 'DISABLED');
+                  const enabled = acctRegions.filter((r: any) => r.status === 'ENABLED' || r.status === 'ENABLING');
+
+                  return (
+                    <Card key={acct.Id} size="small" style={{ marginBottom: 8 }}
+                      title={<span><code>{acct.Id}</code> — <strong>{acct.Name}</strong> <Tag>{acct._payer}</Tag></span>}
+                      extra={
+                        selectedAccountRegions.length > 0 ? (
+                          <Popconfirm title={`启用 ${selectedAccountRegions.length} 个区域？`}
+                            onConfirm={() => handleEnableRegionsForAccount(acct.Id, selectedAccountRegions)}>
+                            <Button size="small" type="primary" loading={enabling}>批量启用 ({selectedAccountRegions.length})</Button>
+                          </Popconfirm>
+                        ) : null
+                      }>
+                      <p style={{ marginBottom: 8, color: '#6B7280', fontSize: 12 }}>
+                        已开通: <Tag color="green">{enabled.length}</Tag> 未开通: <Tag color="red">{disabled.length}</Tag>
+                      </p>
+                      {disabled.length > 0 && (
+                        <>
+                          <Space style={{ marginBottom: 6 }}>
+                            <Button size="small" onClick={() => setSelectedAccountRegions(disabled.map((r: any) => r.region))}>全选未开通</Button>
+                            <Button size="small" onClick={() => setSelectedAccountRegions([])}>取消</Button>
+                          </Space>
+                          <Table size="small" dataSource={disabled} rowKey="region" pagination={false}
+                            columns={[
+                              { title: '', width: 30, render: (_: any, r: any) => (
+                                <Checkbox checked={selectedAccountRegions.includes(r.region)}
+                                  onChange={e => { if (e.target.checked) setSelectedAccountRegions([...selectedAccountRegions, r.region]); else setSelectedAccountRegions(selectedAccountRegions.filter(id => id !== r.region)); }} />
+                              )},
+                              { title: '区域', dataIndex: 'region', render: (r: string) => <code>{r}</code> },
+                              { title: '状态', dataIndex: 'status', width: 80, render: (s: string) => <Tag color="red">{s}</Tag> },
+                              { title: '', width: 60, render: (_: any, r: any) => (
+                                <Popconfirm title={`启用 ${r.region}?`} onConfirm={() => handleSingleEnable(acct.Id, r.region)}>
+                                  <Button size="small" type="link">启用</Button>
+                                </Popconfirm>
+                              )},
+                            ]} />
+                        </>
+                      )}
+                      {disabled.length === 0 && <p style={{ color: '#52c41a' }}>所有 opt-in 区域已开通 ✓</p>}
+                    </Card>
+                  );
+                })}
+
+                {searchText && searchedAccounts.length === 0 && <p style={{ color: '#9CA3AF', padding: 20, textAlign: 'center' }}>未找到匹配的账户</p>}
+                {!searchText && <p style={{ color: '#9CA3AF', padding: 20, textAlign: 'center' }}>输入账户 ID 或名称搜索</p>}
+              </>
+            ),
+          },
+        ]} />
       )}
     </div>
   );
