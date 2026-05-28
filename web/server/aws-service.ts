@@ -170,9 +170,9 @@ export async function listServiceQuotas(accountId: string, serviceCode: string, 
   return quotas;
 }
 
-export async function requestQuotaIncrease(accountId: string, serviceCode: string, quotaCode: string, desiredValue: number) {
+export async function requestQuotaIncrease(accountId: string, serviceCode: string, quotaCode: string, desiredValue: number, region?: string) {
   const creds = await assumeToAccount(accountId);
-  const client = new ServiceQuotasClient({ region: DEFAULT_REGION, credentials: creds });
+  const client = new ServiceQuotasClient({ region: region || DEFAULT_REGION, credentials: creds });
   const resp = await client.send(new RequestServiceQuotaIncreaseCommand({ ServiceCode: serviceCode, QuotaCode: quotaCode, DesiredValue: desiredValue }));
   return resp.RequestedQuota;
 }

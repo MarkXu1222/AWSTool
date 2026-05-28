@@ -59,8 +59,8 @@ export const api = {
   getCostByService: (accountId: string, start: string, end: string) => request(`/aws/billing/by-service/${accountId}?start=${start}&end=${end}`),
   listServiceQuotas: (accountId: string, serviceCode: string, region?: string) =>
     request(`/aws/quotas/${accountId}/${serviceCode}?region=${region || ''}`),
-  requestQuotaIncrease: (accountId: string, serviceCode: string, quotaCode: string, desiredValue: number, quotaName?: string) =>
-    request('/aws/quotas/increase', { method: 'POST', body: JSON.stringify({ accountId, serviceCode, quotaCode, desiredValue, quotaName }) }),
+  requestQuotaIncrease: (accountId: string, serviceCode: string, quotaCode: string, desiredValue: number, quotaName?: string, region?: string) =>
+    request('/aws/quotas/increase', { method: 'POST', body: JSON.stringify({ accountId, serviceCode, quotaCode, desiredValue, quotaName, region }) }),
   listQuotaRequests: () => request('/aws/quotas/requests'),
   syncQuotaRequests: (accountIds: string[]) =>
     request('/aws/quotas/sync', { method: 'POST', body: JSON.stringify({ accountIds }) }),

@@ -66,17 +66,20 @@ awsRouter.get('/quotas/:accountId/:serviceCode', async (req: Request, res: Respo
 // Request quota increase
 awsRouter.post('/quotas/increase', requireAdmin, async (req: Request, res: Response) => {
   try {
-    const { accountId, serviceCode, quotaCode, desiredValue, quotaName } = req.body;
-    const result = await aws.requestQuotaIncrease(accountId, serviceCode, quotaCode, desiredValue);
+    const { accountId, serviceCode, quotaCode, desiredValue, quotaName, region } = req.body;
+    const targetRegion = region || aws.DEFAULT_REGION;
+    const result = await aws.requestQuotaIncrease(accountId, serviceCode, quotaCode, desiredValue, targetRegion);
     const user = (req as any).user;
 
     db.upsertQuotaRequest({
       id: result?.Id || `${accountId}-${Date.now()}`,
       account_id: accountId, service_code: serviceCode, quota_code: quotaCode,
       quota_name: quotaName || '', desired_value: desiredValue,
-      status: result?.Status || 'PENDING', region: aws.DEFAULT_REGION, submitted_by: user?.username,
+      status: result?.Status || 'PENDING', region: targetRegion, submitted_by: user?.username,
+      case_id: (result as any)?.CaseId || null,
+      created_at: new Date().toISOString(),
     });
-    db.addAuditLog(user?.userId, 'QUOTA_INCREASE', `${accountId} ${serviceCode} ${quotaCode} → ${desiredValue}`);
+    db.addAuditLog(user?.userId, 'QUOTA_INCREASE', `${accountId} ${serviceCode} ${quotaCode} ${targetRegion} → ${desiredValue}`, user?.username);
 
     res.json({ success: true, data: result });
   } catch (e: any) { res.status(500).json({ error: e.message }); }

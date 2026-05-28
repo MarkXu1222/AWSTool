@@ -85,7 +85,7 @@ const QuotasPage: React.FC = () => {
     if (!selectedQuota) return;
     const values = await form.validateFields();
     try {
-      const res = await api.requestQuotaIncrease(selectedAccount, selectedQuota.ServiceCode, selectedQuota.QuotaCode, values.desiredValue, selectedQuota.QuotaName);
+      const res = await api.requestQuotaIncrease(selectedAccount, selectedQuota.ServiceCode, selectedQuota.QuotaCode, values.desiredValue, selectedQuota.QuotaName, selectedRegion);
       if (res.success) { message.success('配额提升请求已提交！'); setModalOpen(false); loadDbRecords(); }
       else message.error(res.error);
     } catch (e: any) { message.error(e.message); }
