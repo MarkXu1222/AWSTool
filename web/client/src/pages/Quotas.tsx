@@ -127,7 +127,7 @@ const QuotasPage: React.FC = () => {
             return Object.entries(grouped).map(([payer, accts]) => ({ label: payer, options: accts.map(a => ({ label: `${a.Name} (${a.Id})`, value: a.Id })) }));
           })()} />
         <Select style={{ width: 110 }} value={selectedService} onChange={setSelectedService} showSearch optionFilterProp="label" options={SERVICES} size="small" />
-        <Select style={{ width: 120 }} value={selectedRegion} onChange={setSelectedRegion} options={REGIONS.map(r => ({ label: r, value: r }))} size="small" />
+        <Select style={{ width: 155 }} value={selectedRegion} onChange={setSelectedRegion} options={REGIONS.map(r => ({ label: r, value: r }))} size="small" />
         <Button type="primary" onClick={fetchQuotas} loading={loading} icon={<ReloadOutlined />} size="small">查询</Button>
       </Space>
 
@@ -139,12 +139,13 @@ const QuotasPage: React.FC = () => {
               <Input placeholder="搜索配额名称..." prefix={<SearchOutlined />} value={searchText}
                 onChange={e => setSearchText(e.target.value)} allowClear size="small" style={{ marginBottom: 8, maxWidth: 280 }} />
               <Table size="small" dataSource={filtered} rowKey="QuotaCode" loading={loading} pagination={{ pageSize: 15, showTotal: t => `共 ${t} 条` }}
+                scroll={{ x: 500 }}
                 locale={{ emptyText: '选择账户和服务后点击「查询」' }}
                 columns={[
                   { title: '配额名称', dataIndex: 'QuotaName', ellipsis: true },
-                  { title: '当前值', dataIndex: 'Value', width: 120, sorter: (a: any, b: any) => a.Value - b.Value, render: (v: number, r: any) => <strong>{v === Infinity ? '无限制' : v}{r.Unit && r.Unit !== 'None' ? ` ${r.Unit}` : ''}</strong> },
-                  { title: '可调整', dataIndex: 'Adjustable', width: 60, filters: [{ text: '是', value: true }, { text: '否', value: false }], onFilter: (value: any, r: any) => r.Adjustable === value, render: (a: boolean) => a ? <Tag color="green">是</Tag> : <span style={{ color: '#ccc' }}>否</span> },
-                  { title: '', key: 'act', width: 70, render: (_: any, r: any) => r.Adjustable ? <Button size="small" icon={<ArrowUpOutlined />} onClick={() => { setSelectedQuota(r); form.setFieldsValue({ desiredValue: r.Value * 2 }); setModalOpen(true); }}>提升</Button> : null },
+                  { title: '当前值', dataIndex: 'Value', width: 80, sorter: (a: any, b: any) => a.Value - b.Value, render: (v: number, r: any) => <strong>{v === Infinity ? '∞' : v}{r.Unit && r.Unit !== 'None' ? ` ${r.Unit}` : ''}</strong> },
+                  { title: '可调', dataIndex: 'Adjustable', width: 50, filters: [{ text: '是', value: true }, { text: '否', value: false }], onFilter: (value: any, r: any) => r.Adjustable === value, render: (a: boolean) => a ? <Tag color="green">是</Tag> : <span style={{ color: '#ccc' }}>否</span> },
+                  { title: '', key: 'act', width: 60, render: (_: any, r: any) => r.Adjustable ? <Button size="small" icon={<ArrowUpOutlined />} onClick={() => { setSelectedQuota(r); form.setFieldsValue({ desiredValue: r.Value * 2 }); setModalOpen(true); }}>提升</Button> : null },
                 ]} />
             </>
           ),
