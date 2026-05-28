@@ -63,17 +63,17 @@ const MainLayout: React.FC<MainLayoutProps> = ({ onLogout }) => {
       <Layout style={{ minHeight: '100vh' }}>
         {/* Desktop sidebar */}
         <Sider width={180} className="desktop-sider"
-          style={{ background: '#f7f8fa', borderRight: '1px solid #e8e8e8', position: 'fixed', height: '100vh', left: 0, top: 0, zIndex: 100 }}>
-          <div style={{ padding: '16px 12px', borderBottom: '1px solid #e8e8e8' }}>
-            <h3 style={{ margin: 0, fontSize: 14 }}>☁️ AWS Toolbox</h3>
+          style={{ background: '#001529', borderRight: 'none', position: 'fixed', height: '100vh', left: 0, top: 0, zIndex: 100 }}>
+          <div style={{ padding: '16px 12px', borderBottom: '1px solid rgba(255,255,255,0.1)' }}>
+            <h3 style={{ margin: 0, fontSize: 14, color: '#fff' }}>☁️ AWS Toolbox</h3>
           </div>
           <Menu mode="inline" selectedKeys={[currentPage]}
             items={navItems.map(i => ({ ...i, label: i.label === '概览' ? '概览' : i.label === '账户' ? '账户管理' : i.label === '配额' ? '配额管理' : i.label === '区域' ? '区域管理' : i.label === '账单' ? '账单分析' : i.label === '清理' ? '资源清理' : i.label === '审计' ? '审计日志' : '设置' }))}
             onClick={({ key }) => setCurrentPage(key)} style={{ border: 'none' }} />
           <div style={{ position: 'absolute', bottom: 12, left: 12, right: 12 }}>
-            <div style={{ fontSize: 12, color: '#9CA3AF', marginBottom: 4, paddingLeft: 4 }}>{username}</div>
-            <div style={{ fontSize: 10, color: '#D1D5DB', marginBottom: 8, paddingLeft: 4 }}>v0.1.0</div>
-            <Button size="small" icon={<LogoutOutlined />} onClick={onLogout} style={{ width: '100%', color: '#9CA3AF', borderColor: '#E5E7EB' }}>登出</Button>
+            <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.55)', marginBottom: 4, paddingLeft: 4 }}>{username}</div>
+            <div style={{ fontSize: 10, color: 'rgba(255,255,255,0.35)', marginBottom: 8, paddingLeft: 4 }}>v0.1.0</div>
+            <Button size="small" icon={<LogoutOutlined />} onClick={onLogout} style={{ width: '100%', color: 'rgba(255,255,255,0.65)', borderColor: 'rgba(255,255,255,0.2)', background: 'transparent' }}>登出</Button>
           </div>
         </Sider>
 

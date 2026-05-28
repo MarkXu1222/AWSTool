@@ -73,25 +73,36 @@ code { font-family: 'SF Mono', 'Fira Code', monospace; font-size: 12px; }
 /* === Sidebar === */
 @media (min-width: 769px) {
   .desktop-sider {
-    background: var(--color-bg-sidebar) !important;
-    border-right: 1px solid var(--color-border) !important;
+    background: #001529 !important;
+    border-right: none !important;
   }
-  .desktop-sider .ant-layout-sider-children { background: var(--color-bg-sidebar) !important; }
-  .desktop-sider .ant-menu { background: var(--color-bg-sidebar) !important; padding: 4px 8px !important; }
+  .desktop-sider .ant-layout-sider-children { background: #001529 !important; }
+  .desktop-sider .ant-menu {
+    background: #001529 !important;
+    padding: 4px 8px !important;
+    border-right: none !important;
+  }
   .desktop-sider .ant-menu-item {
-    height: 36px !important; line-height: 36px !important;
+    height: 40px !important; line-height: 40px !important;
     margin: 2px 0 !important; border-radius: var(--radius-sm) !important;
-    padding-left: 12px !important; font-size: 13px !important;
-    color: var(--color-text-secondary) !important;
+    padding-left: 16px !important; font-size: 13px !important;
+    color: rgba(255,255,255,0.65) !important;
+    border-left: none !important;
   }
-  .desktop-sider .ant-menu-item:hover { background: var(--color-bg-hover) !important; color: var(--color-text-primary) !important; }
+  .desktop-sider .ant-menu-item:hover {
+    background: rgba(255,255,255,0.08) !important;
+    color: #fff !important;
+  }
   .desktop-sider .ant-menu-item-selected {
-    background: var(--color-primary-light) !important;
-    color: var(--color-primary) !important;
+    background: var(--color-primary) !important;
+    color: #fff !important;
     font-weight: 500 !important;
-    border-left: 3px solid var(--color-primary) !important;
-    border-radius: 0 var(--radius-sm) var(--radius-sm) 0 !important;
-    padding-left: 9px !important;
+    border-left: none !important;
+    border-radius: var(--radius-sm) !important;
+    padding-left: 16px !important;
+  }
+  .desktop-sider .ant-menu-item-selected .anticon {
+    color: #fff !important;
   }
 }
 
