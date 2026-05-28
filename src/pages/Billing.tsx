@@ -71,7 +71,7 @@ const BillingPage: React.FC = () => {
     { title: '账期', dataIndex: 'period', key: 'period' },
     {
       title: '账户 ID', dataIndex: 'accountId', key: 'accountId',
-      render: (id: string) => <code style={{ color: '#FF9900' }}>{id}</code>,
+      render: (id: string) => <code style={{ color: 'var(--status-warning, #ff9500)' }}>{id}</code>,
     },
     {
       title: '费用', dataIndex: 'cost', key: 'cost',
@@ -95,18 +95,18 @@ const BillingPage: React.FC = () => {
     <div className="page-container">
       <Row gutter={16} style={{ marginBottom: 16 }}>
         <Col span={8}>
-          <Card style={{ background: '#1a1a2e', border: '1px solid #2a2a4a' }}>
+          <Card >
             <Statistic title="总费用" value={totalCost} precision={2} prefix={<DollarOutlined />} suffix="USD"
-              valueStyle={{ color: '#FF9900', fontSize: 28 }} />
+              valueStyle={{ color: 'var(--status-warning, #ff9500)', fontSize: 28 }} />
           </Card>
         </Col>
         <Col span={8}>
-          <Card style={{ background: '#1a1a2e', border: '1px solid #2a2a4a' }}>
+          <Card >
             <Statistic title="账户数" value={new Set(tableData.map((d) => d.accountId)).size} valueStyle={{ color: '#1890ff' }} />
           </Card>
         </Col>
         <Col span={8}>
-          <Card style={{ background: '#1a1a2e', border: '1px solid #2a2a4a' }}>
+          <Card >
             <Statistic title="日均费用" value={totalCost / Math.max(dateRange[1].diff(dateRange[0], 'day'), 1)}
               precision={2} prefix={<DollarOutlined />} suffix="USD" valueStyle={{ color: '#52c41a' }} />
           </Card>
@@ -125,7 +125,7 @@ const BillingPage: React.FC = () => {
             <Button icon={<DownloadOutlined />}>导出</Button>
           </Dropdown>
         }
-        style={{ background: '#1a1a2e', border: '1px solid #2a2a4a' }}
+        
       >
         <Space style={{ marginBottom: 16 }}>
           <RangePicker value={dateRange}
@@ -143,7 +143,7 @@ const BillingPage: React.FC = () => {
             <Table.Summary.Row>
               <Table.Summary.Cell index={0} colSpan={2}><strong>总计</strong></Table.Summary.Cell>
               <Table.Summary.Cell index={2}>
-                <strong style={{ color: '#FF9900', fontSize: 16 }}>${totalCost.toFixed(2)} USD</strong>
+                <strong style={{ color: 'var(--status-warning, #ff9500)', fontSize: 16 }}>${totalCost.toFixed(2)} USD</strong>
               </Table.Summary.Cell>
               <Table.Summary.Cell index={3}><Tag color="green">100%</Tag></Table.Summary.Cell>
             </Table.Summary.Row>

@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { Card, Table, Tag, Button, Space, message, Statistic, Row, Col, DatePicker, Input } from 'antd';
 import { DollarOutlined, ReloadOutlined, SearchOutlined } from '@ant-design/icons';
 import dayjs from 'dayjs';
@@ -13,6 +13,8 @@ const BillingPage: React.FC = () => {
   const [dateRange, setDateRange] = useState<[dayjs.Dayjs, dayjs.Dayjs]>([dayjs().subtract(1, 'month').startOf('month'), dayjs()]);
   const [totalCost, setTotalCost] = useState(0);
   const [searchText, setSearchText] = useState('');
+
+  useEffect(() => { fetchCosts(); }, []);
 
   const fetchCosts = async () => {
     setLoading(true);

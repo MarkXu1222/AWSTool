@@ -267,7 +267,7 @@ const QuotasPage: React.FC = () => {
             <Button icon={<DownloadOutlined />}>导出</Button>
           </Dropdown>
         }
-        style={{ background: '#1a1a2e', border: '1px solid #2a2a4a' }}
+        
       >
         <Space wrap style={{ marginBottom: 16 }}>
           <Select placeholder="选择账户" style={{ width: 240 }} value={selectedAccount || undefined}

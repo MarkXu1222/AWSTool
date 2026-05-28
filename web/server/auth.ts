@@ -12,7 +12,13 @@ const CONFIG_PATH = path.join(__dirname, '../../config.json');
 let config: any = {};
 try { config = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf-8')); } catch {}
 
-const JWT_SECRET = config.web?.jwtSecret || process.env.JWT_SECRET || 'change-me-in-production-please';
+const JWT_SECRET = config.web?.jwtSecret || process.env.JWT_SECRET || (() => {
+  // Auto-generate a secure JWT secret if not configured
+  const crypto = require('crypto');
+  const generated = crypto.randomBytes(32).toString('hex');
+  console.warn('⚠️  No JWT_SECRET configured. Using auto-generated secret (sessions will reset on restart).');
+  return generated;
+})();
 const TOKEN_EXPIRY = '2h';
 const ADMIN_PASSWORD = config.web?.adminPassword || process.env.ADMIN_PASSWORD || 'admin123';
 

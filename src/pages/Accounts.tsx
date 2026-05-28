@@ -65,7 +65,7 @@ const AccountsPage: React.FC = () => {
   };
 
   const columns = [
-    { title: '账户 ID', dataIndex: 'Id', key: 'Id', render: (id: string) => <code style={{ color: '#FF9900' }}>{id}</code> },
+    { title: '账户 ID', dataIndex: 'Id', key: 'Id', render: (id: string) => <code style={{ color: 'var(--text-accent, #0071e3)' }}>{id}</code> },
     { title: '名称', dataIndex: 'Name', key: 'Name', sorter: (a: AwsAccount, b: AwsAccount) => (a.Name || '').localeCompare(b.Name || ''), render: (name: string) => <strong>{name}</strong> },
     { title: '邮箱', dataIndex: 'Email', key: 'Email', ellipsis: true },
     {
@@ -91,7 +91,7 @@ const AccountsPage: React.FC = () => {
         title={<Space><strong>{selectedAccount.Name}</strong><Tag color="blue">{selectedAccount.Id}</Tag></Space>}
         extra={<Button type="text" size="small" icon={<CloseOutlined />} onClick={closeDetail} />}
         size="small"
-        style={{ background: '#1a1a2e', border: '1px solid #2a2a4a' }}
+        
       >
         <Tabs
           size="small"
@@ -121,7 +121,7 @@ const AccountsPage: React.FC = () => {
                 <div>
                   <Row gutter={16} style={{ marginBottom: 16 }}>
                     <Col span={12}>
-                      <Statistic title="30天费用" value={accountDetail.cost.total} precision={2} prefix="$" valueStyle={{ color: '#FF9900' }} />
+                      <Statistic title="30天费用" value={accountDetail.cost.total} precision={2} prefix="$" valueStyle={{ color: 'var(--text-accent, #0071e3)' }} />
                     </Col>
                     <Col span={12}>
                       <Statistic title="服务数" value={accountDetail.services.length} valueStyle={{ color: '#1890ff' }} />
@@ -192,7 +192,7 @@ const AccountsPage: React.FC = () => {
             </Space>
           }
           size="small"
-          style={{ background: '#1a1a2e', border: '1px solid #2a2a4a' }}
+          
         >
           <Input
             placeholder="搜索账户 ID / 名称 / 邮箱..."

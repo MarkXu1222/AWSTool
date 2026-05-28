@@ -1,0 +1,17 @@
+{
+  "credentials": {
+    "accessKeyId": "YOUR_ACCESS_KEY_ID",
+    "secretAccessKey": "YOUR_SECRET_ACCESS_KEY"
+  },
+  "region": "us-east-1",
+  "payers": [
+    { "name": "org-name-1", "roleArn": "arn:aws:iam::ACCOUNT_ID:role/tool" },
+    { "name": "org-name-2", "roleArn": "arn:aws:iam::ACCOUNT_ID:role/tool" }
+  ],
+  "childRoleName": "OrganizationAccountAccessRole",
+  "web": {
+    "port": 3000,
+    "adminPassword": "CHANGE_ME_STRONG_PASSWORD",
+    "jwtSecret": ""
+  }
+}

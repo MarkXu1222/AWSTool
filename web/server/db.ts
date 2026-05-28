@@ -12,21 +12,40 @@ interface DBSchema {
   audit_log: any[];
 }
 
+// In-memory cache to avoid reading file on every request
+let cache: DBSchema | null = null;
+let cacheTime = 0;
+
 function ensureDir() {
   const dir = path.dirname(DB_PATH);
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 }
 
 function readDB(): DBSchema {
+  // Return cache if written within last 5 seconds (same process)
+  if (cache && Date.now() - cacheTime < 5000) return cache;
+
   ensureDir();
   if (!fs.existsSync(DB_PATH)) {
-    return { users: [], quota_requests: [], audit_log: [] };
+    cache = { users: [], quota_requests: [], audit_log: [] };
+    cacheTime = Date.now();
+    return cache;
   }
-  return JSON.parse(fs.readFileSync(DB_PATH, 'utf-8'));
+  try {
+    cache = JSON.parse(fs.readFileSync(DB_PATH, 'utf-8'));
+    cacheTime = Date.now();
+    return cache!;
+  } catch {
+    cache = { users: [], quota_requests: [], audit_log: [] };
+    cacheTime = Date.now();
+    return cache;
+  }
 }
 
 function writeDB(data: DBSchema) {
   ensureDir();
+  cache = data;
+  cacheTime = Date.now();
   fs.writeFileSync(DB_PATH, JSON.stringify(data, null, 2), 'utf-8');
 }
 

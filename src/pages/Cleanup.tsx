@@ -217,7 +217,7 @@ const CleanupPage: React.FC = () => {
             </Dropdown>
           ) : null
         }
-        style={{ background: '#1a1a2e', border: '1px solid #2a2a4a' }}
+        
       >
         {/* Flow Steps */}
         <Steps current={currentStep} size="small" style={{ marginBottom: 24 }}
@@ -242,8 +242,8 @@ const CleanupPage: React.FC = () => {
 
         {/* Step 1: 账单分析结果 */}
         {currentStep >= 1 && costByService.length > 0 && (
-          <Card size="small" style={{ background: '#1f1f3a', marginBottom: 16, border: '1px solid #2a2a4a' }}
-            title={<span>📊 近30天账单分析（总费用: <span style={{ color: '#FF9900' }}>${totalCost.toFixed(2)}</span>）</span>}>
+          <Card size="small" style={{ marginBottom: 16 }}
+            title={<span>📊 近30天账单分析（总费用: <span style={{ color: 'var(--status-warning, #ff9500)' }}>${totalCost.toFixed(2)}</span>）</span>}>
             <Row gutter={16}>
               <Col span={16}>
                 <Table size="small" pagination={false} dataSource={costByService.slice(0, 10)} rowKey="service"
