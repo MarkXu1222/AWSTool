@@ -92,7 +92,7 @@ const Dashboard: React.FC = () => {
       dataIndex: 'cost',
       key: 'cost',
       render: (cost: number) => (
-        <span style={{ fontWeight: 600, color: cost > 100 ? '#ff3b30' : cost > 10 ? '#ff9500' : '#34c759' }}>
+        <span style={{ fontWeight: 600, fontVariantNumeric: 'tabular-nums' }}>
           ${cost.toFixed(2)}
         </span>
       ),
@@ -117,6 +117,12 @@ const Dashboard: React.FC = () => {
 
   return (
     <div style={{ padding: '0 4px' }}>
+      <div className="page-header">
+        <div>
+          <h2 className="page-header-title">概览</h2>
+          <p className="page-header-subtitle">AWS 多账户管理总览</p>
+        </div>
+      </div>
       {/* 费用大卡片 */}
       <Card size="small" style={{ marginBottom: 12 }}>
         <Row gutter={12} align="middle">

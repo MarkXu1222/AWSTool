@@ -127,7 +127,7 @@ const RegionsPage: React.FC = () => {
         </Button>
       </div>
 
-      <Alert message="默认区域（如 us-east-1, us-west-2, eu-west-1, ap-southeast-1 等）始终开启无需管理。下方只显示需要手动开通的 opt-in 区域。" type="info" showIcon style={{ marginBottom: 12 }} />
+      <Alert message="仅显示需手动开通的 opt-in 区域，默认区域（us-east-1, ap-southeast-1 等）已自动启用" type="info" style={{ marginBottom: 12 }} />
 
       {regionData.length === 0 ? (
         <Card size="small">

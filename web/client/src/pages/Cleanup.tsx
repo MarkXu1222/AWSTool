@@ -76,6 +76,13 @@ const CleanupPage: React.FC = () => {
         {step === 0 && selectedAccount && <Button type="primary" icon={<DollarOutlined />} onClick={analyzeCost} loading={loading}>分析账单</Button>}
       </Space>
 
+      {step === 0 && !selectedAccount && (
+        <div style={{ padding: '40px 0', textAlign: 'center', color: '#9CA3AF' }}>
+          <p style={{ fontSize: 14 }}>选择一个账户开始分析资源</p>
+          <p style={{ fontSize: 12, marginTop: 4 }}>系统将分析费用分布并扫描可清理资源，不会自动删除</p>
+        </div>
+      )}
+
       {step >= 1 && costByService.length > 0 && (
         <Card size="small" style={{ marginBottom: 12 }} title={`费用分布 (${costByService.length} 个服务)`}>
           <Table size="small" pagination={false} dataSource={costByService.slice(0, 8)} rowKey="name"

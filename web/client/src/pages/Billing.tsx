@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Card, Table, Tag, Button, Space, message, Statistic, Row, Col, DatePicker, Input } from 'antd';
+import { Card, Table, Tag, Button, message, Statistic, Row, Col, DatePicker, Input } from 'antd';
 import { DollarOutlined, ReloadOutlined, SearchOutlined } from '@ant-design/icons';
 import dayjs from 'dayjs';
 import { api } from '../api';
@@ -53,10 +53,10 @@ const BillingPage: React.FC = () => {
         <Col xs={12} md={8}><Card size="small"><Statistic title="账户数" value={new Set(tableData.map(d => d.accountId)).size} /></Card></Col>
       </Row>
       <Card size="small" title="账单分析">
-        <Space wrap style={{ marginBottom: 8 }}>
+        <div className="filter-bar">
           <RangePicker value={dateRange} onChange={(d) => { if (d?.[0] && d?.[1]) setDateRange([d[0], d[1]]); }} picker="month" size="small" />
           <Button icon={<ReloadOutlined />} onClick={fetchCosts} loading={loading} type="primary" size="small">查询</Button>
-        </Space>
+        </div>
         <Input placeholder="搜索账户ID..." prefix={<SearchOutlined />} value={searchText} onChange={e => setSearchText(e.target.value)} allowClear size="small" style={{ marginBottom: 8, maxWidth: 250 }} />
         <Table size="small" dataSource={filtered} loading={loading} pagination={{ pageSize: 20 }} rowKey="key"
           columns={[
