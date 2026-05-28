@@ -63,7 +63,6 @@ code { font-family: 'SF Mono', 'Fira Code', monospace; font-size: 12px; }
 }
 
 @media (min-width: 769px) {
-  .bottom-nav { display: none; }
   .mobile-content { padding: var(--space-page); padding-bottom: var(--space-page); max-width: var(--max-content-width); }
 }
 @media (max-width: 768px) {
@@ -200,6 +199,11 @@ code { font-family: 'SF Mono', 'Fira Code', monospace; font-size: 12px; }
 .bottom-nav-item.active { color: var(--color-primary); }
 .bottom-nav-item .nav-icon { font-size: 20px; }
 .bottom-nav-item .nav-label { font-size: 10px; font-weight: 500; }
+
+/* Hide bottom nav on desktop */
+@media (min-width: 769px) {
+  .bottom-nav { display: none !important; }
+}
 
 /* === Mobile Detail Overlay === */
 .mobile-detail-overlay {
