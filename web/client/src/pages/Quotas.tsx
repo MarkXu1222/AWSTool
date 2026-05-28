@@ -105,44 +105,15 @@ const QuotasPage: React.FC = () => {
 
   // 通用请求记录列定义
   const requestColumns = [
-    {
-      title: '账户', dataIndex: 'account_id', width: 100,
-      render: (id: string) => { const a = accounts.find(x => x.Id === id); return a ? <strong style={{ fontSize: 12 }}>{a.Name}</strong> : <code style={{ fontSize: 11 }}>{id}</code>; },
-    },
-    { title: '配额', dataIndex: 'quota_name', ellipsis: true },
-    { title: '服务', dataIndex: 'service_code', width: 65 },
+    { title: '账户', dataIndex: 'account_id', width: 90, render: (id: string) => { const a = accounts.find(x => x.Id === id); return a ? <strong style={{ fontSize: 12 }}>{a.Name}</strong> : <code style={{ fontSize: 11 }}>{id}</code>; } },
+    { title: '配额', dataIndex: 'quota_name', ellipsis: true, width: 180 },
+    { title: '服务', dataIndex: 'service_code', width: 60 },
+    { title: '区域', dataIndex: 'region', width: 95, render: (r: string) => r || 'us-east-1' },
     { title: '当前', dataIndex: 'current_value', width: 50, render: (v: any) => v != null ? v : '-' },
-    {
-      title: '期望', dataIndex: 'desired_value', width: 50,
-      render: (v: number, record: any) => {
-        const done = record.current_value != null && record.current_value >= v;
-        return <strong style={{ color: done ? '#34c759' : undefined }}>{v}{done ? '✓' : ''}</strong>;
-      },
-    },
-    {
-      title: '状态', dataIndex: 'status', width: 85,
-      filters: [{ text: 'PENDING', value: 'PENDING' }, { text: 'APPROVED', value: 'APPROVED' }, { text: 'DENIED', value: 'DENIED' }],
-      onFilter: (value: any, record: any) => record.status === value,
-      render: (s: string) => { const c: Record<string, string> = { PENDING: 'orange', CASE_OPENED: 'blue', APPROVED: 'green', DENIED: 'red' }; return <Tag color={c[s] || 'default'}>{s}</Tag>; },
-    },
-    {
-      title: '时间', dataIndex: 'created_at', width: 100,
-      sorter: (a: any, b: any) => new Date(a.created_at || 0).getTime() - new Date(b.created_at || 0).getTime(),
-      defaultSortOrder: 'descend' as const,
-      render: (d: string, record: any) => {
-        if (!d) return '-';
-        const date = new Date(d);
-        const daysAgo = Math.floor((Date.now() - date.getTime()) / (1000*60*60*24));
-        const isPending = record.status === 'PENDING' || record.Status === 'PENDING';
-        const isOverdue = isPending && daysAgo > 7;
-        return (
-          <span style={{ fontSize: 11, color: isOverdue ? '#ff3b30' : undefined }}>
-            {date.toLocaleDateString('zh-CN')}
-            {isOverdue && ` ⚠️ ${daysAgo}天`}
-          </span>
-        );
-      },
-    },
+    { title: '期望', dataIndex: 'desired_value', width: 50, render: (v: number, record: any) => { const done = record.current_value != null && record.current_value >= v; return <strong style={{ color: done ? '#34c759' : undefined }}>{v}{done ? '✓' : ''}</strong>; } },
+    { title: '状态', dataIndex: 'status', width: 95, filters: [{ text: 'PENDING', value: 'PENDING' }, { text: 'APPROVED', value: 'APPROVED' }, { text: 'DENIED', value: 'DENIED' }, { text: 'CASE_OPENED', value: 'CASE_OPENED' }], onFilter: (value: any, record: any) => record.status === value, render: (s: string) => { const c: Record<string, string> = { PENDING: 'orange', CASE_OPENED: 'blue', APPROVED: 'green', DENIED: 'red', CASE_CLOSED: 'default' }; return <Tag color={c[s] || 'default'}>{s}</Tag>; } },
+    { title: 'Case ID', dataIndex: 'id', width: 95, render: (id: string) => id ? <code style={{ fontSize: 10 }}>{String(id).slice(0, 12)}</code> : '-' },
+    { title: '创建时间', dataIndex: 'created_at', width: 100, sorter: (a: any, b: any) => new Date(a.created_at || 0).getTime() - new Date(b.created_at || 0).getTime(), defaultSortOrder: 'descend' as const, render: (d: string, record: any) => { if (!d) return '-'; const date = new Date(d); const daysAgo = Math.floor((Date.now() - date.getTime()) / (1000*60*60*24)); const isPending = record.status === 'PENDING'; const isOverdue = isPending && daysAgo > 7; return <span style={{ fontSize: 11, color: isOverdue ? '#ff3b30' : undefined }}>{date.toLocaleDateString('zh-CN')}{isOverdue ? ' ⚠️' : ''}</span>; } },
   ];
 
   return (
