@@ -99,9 +99,16 @@ awsRouter.post('/quotas/sync', async (req: Request, res: Response) => {
         const requests = await aws.listQuotaRequests(accountId);
         for (const r of requests) {
           db.upsertQuotaRequest({
-            id: r.Id, account_id: accountId, service_code: r.ServiceCode,
-            quota_code: r.QuotaCode, quota_name: r.QuotaName, desired_value: r.DesiredValue,
+            id: r.Id,
+            account_id: accountId,
+            service_code: r.ServiceCode,
+            quota_code: r.QuotaCode,
+            quota_name: r.QuotaName,
+            desired_value: r.DesiredValue,
             status: r.Status,
+            case_id: (r as any).CaseId || null,
+            region: (r as any).QuotaArn?.split(':')[3] || 'us-east-1',
+            created_at: r.Created ? new Date(r.Created).toISOString() : undefined,
           });
         }
       } catch { /* skip */ }

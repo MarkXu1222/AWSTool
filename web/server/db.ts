@@ -74,7 +74,13 @@ export const db = {
 
   // Quota requests
   getQuotaRequests() {
-    return readDB().quota_requests.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+    const statusOrder: Record<string, number> = { CASE_OPENED: 0, PENDING: 1, APPROVED: 2, DENIED: 3, CASE_CLOSED: 4 };
+    return readDB().quota_requests.sort((a, b) => {
+      const sa = statusOrder[a.status] ?? 5;
+      const sb = statusOrder[b.status] ?? 5;
+      if (sa !== sb) return sa - sb;
+      return new Date(b.created_at || 0).getTime() - new Date(a.created_at || 0).getTime();
+    });
   },
 
   upsertQuotaRequest(record: any) {

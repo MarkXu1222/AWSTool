@@ -87,11 +87,11 @@ const AccountsPage: React.FC = () => {
 
   // Desktop columns
   const columns = [
-    { title: 'ID', dataIndex: 'Id', key: 'Id', width: 120, render: (id: string) => <code style={{ fontSize: 11 }}>{id}</code> },
-    { title: '名称', dataIndex: 'Name', key: 'Name', render: (n: string) => <strong>{n}</strong> },
-    { title: '邮箱', dataIndex: 'Email', key: 'Email', ellipsis: true, responsive: ['md'] as any },
-    { title: '组织', dataIndex: '_payer', key: '_payer', width: 100, render: (p: string) => <Tag>{p}</Tag>, responsive: ['lg'] as any },
-    { title: '状态', dataIndex: 'Status', key: 'Status', width: 80, render: (s: string) => <Tag color={s === 'ACTIVE' ? 'green' : 'red'}>{s}</Tag> },
+    { title: 'ID', dataIndex: 'Id', key: 'Id', width: 110, render: (id: string) => <code style={{ fontSize: 11 }}>{id}</code> },
+    { title: '名称', dataIndex: 'Name', key: 'Name', width: 120, render: (n: string) => <strong>{n}</strong> },
+    { title: '邮箱', dataIndex: 'Email', key: 'Email', ellipsis: true },
+    { title: '组织', dataIndex: '_payer', key: '_payer', width: 90, render: (p: string) => <Tag>{p}</Tag>, responsive: ['md'] as any },
+    { title: '状态', dataIndex: 'Status', key: 'Status', width: 70, render: (s: string) => <Tag color={s === 'ACTIVE' ? 'green' : 'red'}>{s}</Tag> },
   ];
 
   return (
