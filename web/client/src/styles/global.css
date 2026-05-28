@@ -15,39 +15,23 @@ body {
   padding-bottom: env(safe-area-inset-bottom, 0);
 }
 
-/* === 侧边栏深色 === */
+/* === 侧边栏 === */
 @media (min-width: 769px) {
   .desktop-sider {
-    background: #001529 !important;
+    background: #f7f8fa !important;
+    border-right: 1px solid #e8e8e8 !important;
   }
   .desktop-sider .ant-layout-sider-children {
-    background: #001529 !important;
-  }
-  .desktop-sider h3 {
-    color: #fff !important;
+    background: #f7f8fa !important;
   }
   .desktop-sider .ant-menu {
-    background: #001529 !important;
-    color: rgba(255,255,255,0.75) !important;
-  }
-  .desktop-sider .ant-menu-item {
-    color: rgba(255,255,255,0.75) !important;
-  }
-  .desktop-sider .ant-menu-item:hover {
-    color: #fff !important;
-    background: rgba(255,255,255,0.08) !important;
+    background: #f7f8fa !important;
   }
   .desktop-sider .ant-menu-item-selected {
-    background: #1677ff !important;
-    color: #fff !important;
+    background: #e6f4ff !important;
+    color: #1677ff !important;
+    font-weight: 600 !important;
     border-radius: 6px;
-  }
-  .desktop-sider p {
-    color: rgba(255,255,255,0.45) !important;
-  }
-  .desktop-sider .ant-btn-dangerous {
-    border-color: rgba(255,255,255,0.3) !important;
-    color: rgba(255,255,255,0.8) !important;
   }
 }
 
@@ -89,7 +73,7 @@ body {
 
 /* === 统计卡片 === */
 .stat-card-primary {
-  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%) !important;
+  background: linear-gradient(135deg, #1677ff 0%, #4096ff 100%) !important;
   border: none !important;
 }
 .stat-card-primary .ant-statistic-title,

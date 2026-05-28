@@ -60,9 +60,9 @@ const MainLayout: React.FC<MainLayoutProps> = ({ onLogout }) => {
       <Layout style={{ minHeight: '100vh' }}>
         {/* Desktop sidebar */}
         <Sider width={180} className="desktop-sider"
-          style={{ background: '#001529', borderRight: 'none', position: 'fixed', height: '100vh', left: 0, top: 0, zIndex: 100 }}>
-          <div style={{ padding: '16px 12px', borderBottom: '1px solid rgba(255,255,255,0.1)' }}>
-            <h3 style={{ margin: 0, fontSize: 14, color: '#fff' }}>☁️ AWS Toolbox</h3>
+          style={{ background: '#f7f8fa', borderRight: '1px solid #e8e8e8', position: 'fixed', height: '100vh', left: 0, top: 0, zIndex: 100 }}>
+          <div style={{ padding: '16px 12px', borderBottom: '1px solid #e8e8e8' }}>
+            <h3 style={{ margin: 0, fontSize: 14 }}>☁️ AWS Toolbox</h3>
           </div>
           <Menu mode="inline" selectedKeys={[currentPage]}
             items={navItems.map(i => ({ ...i, label: i.label === '概览' ? '概览' : i.label === '账户' ? '账户管理' : i.label === '配额' ? '配额管理' : i.label === '账单' ? '账单分析' : i.label === '清理' ? '资源清理' : i.label === '审计' ? '审计日志' : '设置' }))}
