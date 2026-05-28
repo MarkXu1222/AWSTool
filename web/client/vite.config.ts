@@ -8,14 +8,6 @@ export default defineConfig({
   build: {
     outDir: path.resolve(__dirname, '../dist/client'),
     emptyOutDir: true,
-    rollupOptions: {
-      output: {
-        manualChunks: {
-          'antd': ['antd', '@ant-design/icons'],
-          'aws': ['dayjs'],
-        },
-      },
-    },
   },
   server: {
     port: 5174,
