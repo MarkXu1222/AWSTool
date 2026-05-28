@@ -22,18 +22,8 @@ const PORT = appConfig.web?.port || process.env.PORT || 3000;
 // Migrate plaintext MFA secrets on startup
 migrateEncryptMFASecrets();
 
-// Security
-app.use(helmet({
-  contentSecurityPolicy: {
-    directives: {
-      defaultSrc: ["'self'"],
-      scriptSrc: ["'self'", "'unsafe-inline'", "'unsafe-eval'"],
-      styleSrc: ["'self'", "'unsafe-inline'"],
-      imgSrc: ["'self'", "data:", "blob:"],
-      connectSrc: ["'self'"],
-    },
-  },
-}));
+// Security — CSP relaxed for SPA (inline scripts from Vite build)
+app.use(helmet({ contentSecurityPolicy: false }));
 app.use(cors({
   origin: process.env.CORS_ORIGIN || true, // Same-origin requests don't need CORS; keep open for now
   credentials: true,
