@@ -1,326 +1,227 @@
-* { margin: 0; padding: 0; box-sizing: border-box; }
+/* ================================================================
+   AWS Toolbox — Design System
+   B-端后台管理系统统一规范
+   ================================================================ */
 
+/* === Design Tokens === */
+:root {
+  --color-bg-app: #F5F7FA;
+  --color-bg-card: #FFFFFF;
+  --color-bg-sidebar: #FFFFFF;
+  --color-bg-table-header: #F8FAFC;
+  --color-bg-hover: #F8FAFC;
+  --color-bg-selected: #EFF6FF;
+  --color-text-primary: #111827;
+  --color-text-secondary: #6B7280;
+  --color-text-muted: #9CA3AF;
+  --color-border: #E5E7EB;
+  --color-border-light: #F1F5F9;
+  --color-primary: #2563EB;
+  --color-primary-light: #EFF6FF;
+  --color-success: #059669;
+  --color-success-bg: #ECFDF5;
+  --color-warning: #D97706;
+  --color-warning-bg: #FFFBEB;
+  --color-error: #DC2626;
+  --color-error-bg: #FEF2F2;
+  --color-info: #2563EB;
+  --color-info-bg: #EFF6FF;
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --space-page: 24px;
+  --space-section: 16px;
+  --space-xs: 4px;
+  --space-sm: 8px;
+  --space-md: 12px;
+  --max-content-width: 1440px;
+}
+
+/* === Reset === */
+* { margin: 0; padding: 0; box-sizing: border-box; }
 body {
-  font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Helvetica Neue', sans-serif;
+  font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Inter', 'Helvetica Neue', sans-serif;
   -webkit-font-smoothing: antialiased;
-  background: #f0f2f5;
+  background: var(--color-bg-app);
+  color: var(--color-text-primary);
+  font-size: 13px;
+  line-height: 1.5;
   overflow-x: hidden;
 }
-
-/* 禁用 iOS 双击缩放 */
 * { touch-action: manipulation; }
+code { font-family: 'SF Mono', 'Fira Code', monospace; font-size: 12px; }
 
-/* 移动端安全区域 */
-.app-container {
-  padding-bottom: env(safe-area-inset-bottom, 0);
-}
+/* === Layout === */
+.app-container { padding-bottom: env(safe-area-inset-bottom, 0); }
 
-/* === 侧边栏 === */
-@media (min-width: 769px) {
-  .desktop-sider {
-    background: #fff !important;
-    border-right: 1px solid #E5E7EB !important;
-  }
-  .desktop-sider .ant-layout-sider-children {
-    background: #fff !important;
-  }
-  .desktop-sider .ant-menu {
-    background: #fff !important;
-    padding: 4px 8px !important;
-  }
-  .desktop-sider .ant-menu-item {
-    height: 38px !important;
-    line-height: 38px !important;
-    margin: 2px 0 !important;
-    border-radius: 6px !important;
-    padding-left: 12px !important;
-    font-size: 13px !important;
-    color: #374151 !important;
-  }
-  .desktop-sider .ant-menu-item:hover {
-    background: #F3F4F6 !important;
-  }
-  .desktop-sider .ant-menu-item-selected {
-    background: #EFF6FF !important;
-    color: #1677ff !important;
-    font-weight: 500 !important;
-    border-left: 3px solid #1677ff !important;
-    border-radius: 0 6px 6px 0 !important;
-    padding-left: 9px !important;
-  }
-}
-
-/* === 表格优化 === */
-.ant-table {
-  background: #fff !important;
-  border-radius: 8px !important;
-  overflow: hidden;
-  font-size: 13px !important;
-}
-.ant-table-thead > tr > th {
-  background: #F8FAFC !important;
-  border-bottom: 1.5px solid #E2E8F0 !important;
-  color: #64748B !important;
-  font-size: 12px !important;
-  font-weight: 500 !important;
-  padding: 10px 12px !important;
-  white-space: nowrap;
-}
-.ant-table-tbody > tr > td {
-  padding: 9px 12px !important;
-  border-bottom: 1px solid #F1F5F9 !important;
-  color: #1F2937 !important;
-  line-height: 1.4;
-  vertical-align: middle !important;
-}
-.ant-table-tbody > tr:hover > td {
-  background: #F8FAFC !important;
-}
-.ant-table-tbody > tr.ant-table-row-selected > td {
-  background: #EFF6FF !important;
-}
-
-/* === Card 加阴影和圆角 === */
-.ant-card {
-  border-radius: 8px !important;
-  box-shadow: none !important;
-  border: 1px solid #E2E8F0 !important;
-}
-.ant-card-head {
-  border-bottom: 1px solid #F1F5F9 !important;
-  font-weight: 600 !important;
-}
-
-/* === 统计卡片 === */
-.stat-card-primary {
-  background: linear-gradient(135deg, #1677ff 0%, #4096ff 100%) !important;
-  border: none !important;
-}
-.stat-card-primary .ant-statistic-title,
-.stat-card-primary .ant-statistic-content {
-  color: #fff !important;
-}
-.stat-card-primary .ant-statistic-content-prefix,
-.stat-card-primary .ant-statistic-content-suffix {
-  color: rgba(255,255,255,0.8) !important;
-}
-
-/* === 按钮 === */
-.ant-btn-primary {
-  border-radius: 6px !important;
-  font-weight: 500 !important;
-  box-shadow: 0 2px 4px rgba(22,119,255,0.2) !important;
-}
-
-/* === 响应式表格 === */
-@media (max-width: 768px) {
-  .ant-table-thead > tr > th,
-  .ant-table-tbody > tr > td {
-    padding: 8px 6px !important;
-    font-size: 12px !important;
-  }
-  .ant-card-head-title { font-size: 14px !important; }
-  .ant-card-body { padding: 12px !important; }
-  .ant-card-head { padding: 0 12px !important; }
-  .ant-select { font-size: 13px !important; }
-  .ant-tabs-tab { padding: 8px 12px !important; font-size: 13px !important; }
-  .hide-mobile { display: none !important; }
-}
-
-/* === 底部导航栏 === */
-.bottom-nav {
-  position: fixed;
-  bottom: 0;
-  left: 0;
-  right: 0;
-  background: #fff;
-  border-top: 1px solid #e8e8e8;
-  display: flex;
-  justify-content: space-around;
-  padding: 6px 0;
-  padding-bottom: calc(6px + env(safe-area-inset-bottom, 0));
-  z-index: 1000;
-  box-shadow: 0 -2px 8px rgba(0,0,0,0.06);
-}
-.bottom-nav-item {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 2px;
-  padding: 4px 8px;
-  border-radius: 8px;
-  cursor: pointer;
-  transition: all 0.15s ease;
-  color: #8c8c8c;
-  font-size: 10px;
-  min-width: 56px;
-}
-.bottom-nav-item.active {
-  color: #1677ff;
-}
-.bottom-nav-item .nav-icon {
-  font-size: 20px;
-}
-.bottom-nav-item .nav-label {
-  font-size: 10px;
-  font-weight: 500;
-}
-
-/* === 移动端内容区域 === */
 .mobile-content {
-  padding: 16px;
+  padding: var(--space-page);
   padding-bottom: 72px;
   min-height: 100vh;
   overflow-y: auto;
   -webkit-overflow-scrolling: touch;
+  max-width: var(--max-content-width);
 }
 
-/* 桌面端侧边栏 */
 @media (min-width: 769px) {
   .bottom-nav { display: none; }
-  .mobile-content { padding: 24px; padding-bottom: 24px; }
+  .mobile-content { padding: var(--space-page); padding-bottom: var(--space-page); max-width: var(--max-content-width); }
 }
 @media (max-width: 768px) {
   .desktop-sider { display: none !important; }
+  .mobile-content { padding: 12px; padding-bottom: 72px; }
 }
 
-/* 移动端详情页全屏 */
+/* === Sidebar === */
+@media (min-width: 769px) {
+  .desktop-sider {
+    background: var(--color-bg-sidebar) !important;
+    border-right: 1px solid var(--color-border) !important;
+  }
+  .desktop-sider .ant-layout-sider-children { background: var(--color-bg-sidebar) !important; }
+  .desktop-sider .ant-menu { background: var(--color-bg-sidebar) !important; padding: 4px 8px !important; }
+  .desktop-sider .ant-menu-item {
+    height: 36px !important; line-height: 36px !important;
+    margin: 2px 0 !important; border-radius: var(--radius-sm) !important;
+    padding-left: 12px !important; font-size: 13px !important;
+    color: var(--color-text-secondary) !important;
+  }
+  .desktop-sider .ant-menu-item:hover { background: var(--color-bg-hover) !important; color: var(--color-text-primary) !important; }
+  .desktop-sider .ant-menu-item-selected {
+    background: var(--color-primary-light) !important;
+    color: var(--color-primary) !important;
+    font-weight: 500 !important;
+    border-left: 3px solid var(--color-primary) !important;
+    border-radius: 0 var(--radius-sm) var(--radius-sm) 0 !important;
+    padding-left: 9px !important;
+  }
+}
+
+/* === Page Header === */
+.page-header {
+  display: flex; align-items: flex-start; justify-content: space-between;
+  margin-bottom: var(--space-section);
+}
+.page-header-title { font-size: 18px; font-weight: 600; color: var(--color-text-primary); margin: 0; line-height: 1.3; }
+.page-header-subtitle { font-size: 13px; color: var(--color-text-muted); margin-top: 2px; }
+
+/* === Stat Chips === */
+.stat-chips { display: flex; gap: 8px; margin-bottom: var(--space-section); flex-wrap: wrap; }
+.stat-chip {
+  display: inline-flex; align-items: center; gap: 4px;
+  height: 26px; padding: 0 10px; border-radius: var(--radius-sm);
+  background: var(--color-bg-table-header); border: 1px solid var(--color-border);
+  font-size: 12px; color: var(--color-text-secondary); white-space: nowrap;
+}
+.stat-chip strong { color: var(--color-text-primary); font-weight: 600; }
+.stat-chip.success strong { color: var(--color-success); }
+
+/* === Filter Bar === */
+.filter-bar {
+  background: var(--color-bg-card); border: 1px solid var(--color-border);
+  border-radius: var(--radius-md); padding: 12px 16px;
+  margin-bottom: var(--space-section);
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+}
+
+/* === Table Toolbar === */
+.table-toolbar {
+  display: flex; align-items: center; justify-content: space-between;
+  margin-bottom: var(--space-md); padding-bottom: var(--space-md);
+  border-bottom: 1px solid var(--color-border-light);
+}
+.table-toolbar .ant-input-affix-wrapper { width: 360px !important; max-width: 100%; }
+
+/* === Tables === */
+.ant-table { background: var(--color-bg-card) !important; border-radius: var(--radius-md) !important; font-size: 13px !important; }
+.ant-table-thead > tr > th {
+  background: var(--color-bg-table-header) !important;
+  border-bottom: 1.5px solid var(--color-border) !important;
+  color: var(--color-text-secondary) !important;
+  font-size: 12px !important; font-weight: 600 !important;
+  padding: 10px 12px !important; white-space: nowrap;
+}
+.ant-table-tbody > tr > td {
+  padding: 9px 12px !important;
+  border-bottom: 1px solid var(--color-border-light) !important;
+  color: var(--color-text-primary) !important;
+  vertical-align: middle !important;
+}
+.ant-table-tbody > tr:hover > td { background: var(--color-bg-hover) !important; }
+.ant-table-tbody > tr.ant-table-row-selected > td { background: var(--color-bg-selected) !important; }
+
+/* === Cards === */
+.ant-card { border-radius: var(--radius-md) !important; box-shadow: none !important; border: 1px solid var(--color-border) !important; }
+.ant-card-head { border-bottom: 1px solid var(--color-border-light) !important; font-weight: 600 !important; min-height: auto !important; }
+
+/* === Buttons === */
+.ant-btn { border-radius: var(--radius-sm) !important; font-weight: 500 !important; }
+.ant-btn-primary { box-shadow: none !important; }
+
+/* === Inputs === */
+.ant-input, .ant-select-selector, .ant-picker, .ant-input-affix-wrapper {
+  border-radius: var(--radius-sm) !important;
+}
+
+/* === Tabs === */
+.ant-tabs-tab { font-weight: 500 !important; color: var(--color-text-secondary) !important; padding: 10px 4px !important; }
+.ant-tabs-tab-active .ant-tabs-tab-btn { font-weight: 600 !important; color: var(--color-text-primary) !important; }
+.ant-tabs-ink-bar { height: 2px !important; }
+
+/* === Tags / Badges — unified status system === */
+.ant-tag { border-radius: var(--radius-sm) !important; font-size: 11px !important; line-height: 20px !important; height: 20px !important; }
+
+/* === Mobile === */
+@media (max-width: 768px) {
+  .ant-table-thead > tr > th, .ant-table-tbody > tr > td { padding: 8px 6px !important; font-size: 12px !important; }
+  .ant-card-head-title { font-size: 14px !important; }
+  .ant-card-body { padding: 12px !important; }
+  .ant-card-head { padding: 0 12px !important; }
+  .ant-tabs-tab { padding: 8px 8px !important; font-size: 13px !important; }
+  .hide-mobile { display: none !important; }
+  .stat-chips { gap: 6px; }
+  .stat-chip { height: 24px; padding: 0 8px; font-size: 11px; }
+  .page-header-title { font-size: 16px; }
+  .table-toolbar .ant-input-affix-wrapper { width: 100% !important; }
+}
+
+/* === Bottom Nav === */
+.bottom-nav {
+  position: fixed; bottom: 0; left: 0; right: 0;
+  background: #fff; border-top: 1px solid var(--color-border);
+  display: flex; justify-content: space-around;
+  padding: 6px 0; padding-bottom: calc(6px + env(safe-area-inset-bottom, 0));
+  z-index: 1000;
+}
+.bottom-nav-item {
+  display: flex; flex-direction: column; align-items: center; gap: 2px;
+  padding: 4px 8px; border-radius: var(--radius-sm);
+  cursor: pointer; color: var(--color-text-muted); font-size: 10px; min-width: 56px;
+}
+.bottom-nav-item.active { color: var(--color-primary); }
+.bottom-nav-item .nav-icon { font-size: 20px; }
+.bottom-nav-item .nav-label { font-size: 10px; font-weight: 500; }
+
+/* === Mobile Detail Overlay === */
 .mobile-detail-overlay {
-  position: fixed;
-  top: 0; left: 0; right: 0; bottom: 0;
-  background: #fff;
-  z-index: 999;
-  overflow-y: auto;
-  -webkit-overflow-scrolling: touch;
-  animation: slideUp 0.2s ease;
+  position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+  background: #fff; z-index: 999; overflow-y: auto;
+  -webkit-overflow-scrolling: touch; animation: slideUp 0.2s ease;
 }
-@keyframes slideUp {
-  from { transform: translateY(100%); }
-  to { transform: translateY(0); }
-}
+@keyframes slideUp { from { transform: translateY(100%); } to { transform: translateY(0); } }
 
-/* 移动端卡片列表 */
+/* === Account Cards (mobile) === */
 .account-card {
-  background: #fff;
-  border-radius: 10px;
-  padding: 12px 16px;
-  margin-bottom: 8px;
-  border: 1px solid #eee;
-  box-shadow: 0 1px 3px rgba(0,0,0,0.04);
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  cursor: pointer;
-  transition: all 0.15s ease;
+  background: var(--color-bg-card); border-radius: var(--radius-md);
+  padding: 12px 16px; margin-bottom: 8px;
+  border: 1px solid var(--color-border); display: flex;
+  align-items: center; justify-content: space-between; cursor: pointer;
 }
-.account-card:active {
-  background: #f5f7fa;
-  transform: scale(0.99);
-}
-.account-card-info h4 {
-  font-size: 14px;
-  font-weight: 600;
-  margin: 0;
-}
-.account-card-info p {
-  font-size: 11px;
-  color: #999;
-  margin: 2px 0 0;
-}
+.account-card:active { background: var(--color-bg-hover); }
+.account-card-info h4 { font-size: 14px; font-weight: 600; margin: 0; }
+.account-card-info p { font-size: 11px; color: var(--color-text-muted); margin: 2px 0 0; }
 
-/* 统计卡片移动端 */
+/* === Statistic mobile === */
 @media (max-width: 768px) {
   .ant-statistic-title { font-size: 11px !important; }
   .ant-statistic-content-value { font-size: 18px !important; }
-}
-
-/* === Tabs 优化 === */
-.ant-tabs-tab {
-  font-weight: 500 !important;
-  color: #6B7280 !important;
-  padding: 10px 4px !important;
-}
-.ant-tabs-tab-active .ant-tabs-tab-btn {
-  font-weight: 600 !important;
-  color: #1F2937 !important;
-}
-.ant-tabs-ink-bar {
-  height: 2px !important;
-}
-
-/* === 筛选卡片 === */
-.filter-bar {
-  background: #fff;
-  border: 1px solid #E5E7EB;
-  border-radius: 8px;
-  padding: 12px 16px;
-  margin-bottom: 16px;
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  flex-wrap: wrap;
-}
-.filter-bar .ant-select, .filter-bar .ant-btn {
-  height: 32px !important;
-}
-
-/* === 页面标题区 === */
-.page-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  margin-bottom: 16px;
-}
-.page-header-title {
-  font-size: 18px;
-  font-weight: 600;
-  color: #1F2937;
-  margin: 0;
-}
-.page-header-subtitle {
-  font-size: 12px;
-  color: #9CA3AF;
-  margin-top: 2px;
-}
-
-/* === 表格工具栏 === */
-.table-toolbar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  margin-bottom: 12px;
-  padding-bottom: 12px;
-  border-bottom: 1px solid #F1F5F9;
-}
-.table-toolbar .ant-input-affix-wrapper {
-  width: 360px !important;
-  max-width: 100%;
-}
-
-/* === Stat Chips === */
-.stat-chips {
-  display: flex;
-  gap: 8px;
-  margin-bottom: 16px;
-  flex-wrap: wrap;
-}
-.stat-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  height: 26px;
-  padding: 0 10px;
-  border-radius: 6px;
-  background: #F1F5F9;
-  border: 1px solid #E2E8F0;
-  font-size: 12px;
-  color: #64748B;
-  white-space: nowrap;
-}
-.stat-chip strong {
-  color: #1E293B;
-  font-weight: 600;
-}
-.stat-chip.success strong {
-  color: #059669;
 }

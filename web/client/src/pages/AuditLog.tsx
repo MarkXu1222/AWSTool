@@ -27,7 +27,15 @@ const AuditLogPage: React.FC = () => {
   };
 
   return (
-    <Card size="small" title="审计日志" extra={<Button size="small" icon={<ReloadOutlined />} onClick={fetchLogs} loading={loading}>刷新</Button>}>
+    <div>
+      <div className="page-header">
+        <div>
+          <h2 className="page-header-title">审计日志</h2>
+          <p className="page-header-subtitle">查看系统操作记录和登录行为</p>
+        </div>
+        <Button size="small" icon={<ReloadOutlined />} onClick={fetchLogs} loading={loading}>刷新</Button>
+      </div>
+      <Card size="small" bodyStyle={{ padding: 0 }}>
       <Table dataSource={logs} rowKey={(r, i) => `${r.created_at}-${i}`}
         size="small" loading={loading} pagination={{ pageSize: 20 }} scroll={{ x: 500 }}
         columns={[
@@ -37,7 +45,8 @@ const AuditLogPage: React.FC = () => {
           { title: '详情', dataIndex: 'detail', ellipsis: true },
         ]}
       />
-    </Card>
+      </Card>
+    </div>
   );
 };
 

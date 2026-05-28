@@ -70,10 +70,10 @@ const MainLayout: React.FC<MainLayoutProps> = ({ onLogout }) => {
           <Menu mode="inline" selectedKeys={[currentPage]}
             items={navItems.map(i => ({ ...i, label: i.label === '概览' ? '概览' : i.label === '账户' ? '账户管理' : i.label === '配额' ? '配额管理' : i.label === '区域' ? '区域管理' : i.label === '账单' ? '账单分析' : i.label === '清理' ? '资源清理' : i.label === '审计' ? '审计日志' : '设置' }))}
             onClick={({ key }) => setCurrentPage(key)} style={{ border: 'none' }} />
-          <div style={{ position: 'absolute', bottom: 16, left: 12 }}>
-            <p style={{ fontSize: 11, color: '#999', marginBottom: 4 }}>{username}</p>
-            <p style={{ fontSize: 10, color: '#ccc', marginBottom: 6 }}>v0.1.0</p>
-            <Button size="small" icon={<LogoutOutlined />} onClick={onLogout} danger>登出</Button>
+          <div style={{ position: 'absolute', bottom: 12, left: 12, right: 12 }}>
+            <div style={{ fontSize: 12, color: '#9CA3AF', marginBottom: 4, paddingLeft: 4 }}>{username}</div>
+            <div style={{ fontSize: 10, color: '#D1D5DB', marginBottom: 8, paddingLeft: 4 }}>v0.1.0</div>
+            <Button size="small" icon={<LogoutOutlined />} onClick={onLogout} style={{ width: '100%', color: '#9CA3AF', borderColor: '#E5E7EB' }}>登出</Button>
           </div>
         </Sider>
 

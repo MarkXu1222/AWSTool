@@ -118,7 +118,7 @@ const Dashboard: React.FC = () => {
   return (
     <div style={{ padding: '0 4px' }}>
       {/* 费用大卡片 */}
-      <Card size="small" className="stat-card-primary" style={{ marginBottom: 12 }}>
+      <Card size="small" style={{ marginBottom: 12 }}>
         <Row gutter={12} align="middle">
           <Col xs={24} md={12}>
             <Statistic
@@ -127,14 +127,14 @@ const Dashboard: React.FC = () => {
               precision={2}
               prefix={<DollarOutlined />}
               suffix="USD"
-              valueStyle={{ color: '#fff', fontSize: 28 }}
+              valueStyle={{ color: 'var(--color-text-primary)', fontSize: 28, fontWeight: 700 }}
             />
           </Col>
           <Col xs={24} md={12}>
             <Row gutter={8}>
-              <Col span={8}><Statistic title="账户" value={accounts.length} valueStyle={{ fontSize: 18, color: '#fff' }} /></Col>
-              <Col span={8}><Statistic title="待处理" value={pendingRequests} valueStyle={{ fontSize: 18, color: pendingRequests > 0 ? '#ffd666' : '#95de64' }} /></Col>
-              <Col span={8}><Statistic title="连接" value={connected ? '正常' : '断开'} valueStyle={{ fontSize: 16, color: connected ? '#95de64' : '#ff7875' }} /></Col>
+              <Col span={8}><Statistic title="账户" value={accounts.length} valueStyle={{ fontSize: 18 }} /></Col>
+              <Col span={8}><Statistic title="待处理" value={pendingRequests} valueStyle={{ fontSize: 18, color: pendingRequests > 0 ? 'var(--color-warning)' : 'var(--color-success)' }} /></Col>
+              <Col span={8}><Statistic title="连接" value={connected ? '正常' : '断开'} valueStyle={{ fontSize: 16, color: connected ? 'var(--color-success)' : 'var(--color-error)' }} /></Col>
             </Row>
           </Col>
         </Row>
