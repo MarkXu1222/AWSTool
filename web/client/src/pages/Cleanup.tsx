@@ -58,8 +58,17 @@ const CleanupPage: React.FC = () => {
   const filtered = resources.filter(r => !searchText || r.name?.toLowerCase().includes(searchText.toLowerCase()) || r.id?.includes(searchText));
 
   return (
-    <Card size="small" title="资源清理">
-      <Steps current={step} size="small" style={{ marginBottom: 16 }} items={[{ title: '选账户' }, { title: '查账单' }, { title: '扫描清理' }]} />
+    <div>
+      <div className="page-header">
+        <div>
+          <h2 className="page-header-title">资源清理</h2>
+          <p className="page-header-subtitle">分析账户费用分布，扫描并清理闲置资源</p>
+        </div>
+      </div>
+
+      <div style={{ maxWidth: 960 }}>
+        <Card size="small">
+          <Steps current={step} size="small" style={{ marginBottom: 16, maxWidth: 400 }} items={[{ title: '选账户' }, { title: '查账单' }, { title: '扫描清理' }]} />
 
       <Space wrap style={{ marginBottom: 12 }}>
         <Select placeholder="选择账户" style={{ width: 220 }} value={selectedAccount || undefined} onChange={v => { setSelectedAccount(v); setStep(0); }}
@@ -95,6 +104,8 @@ const CleanupPage: React.FC = () => {
       <DangerConfirm open={confirmOpen} title="确认删除" description={<p>将删除 {selectedIds.length} 个资源</p>}
         confirmText="确认删除" onConfirm={handleDelete} onCancel={() => setConfirmOpen(false)} />
     </Card>
+    </div>
+    </div>
   );
 };
 

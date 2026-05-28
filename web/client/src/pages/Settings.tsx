@@ -85,7 +85,14 @@ const SettingsPage: React.FC<SettingsPageProps> = ({ onLogout }) => {
   };
 
   return (
-    <div style={{ maxWidth: 600 }}>
+    <div>
+      <div className="page-header">
+        <div>
+          <h2 className="page-header-title">设置</h2>
+          <p className="page-header-subtitle">管理连接、安全策略和用户</p>
+        </div>
+      </div>
+      <div style={{ maxWidth: 640 }}>
       <Tabs items={[
         { key: 'connection', label: '连接', children: (
           <Card size="small" title="连接状态">
@@ -177,6 +184,7 @@ const SettingsPage: React.FC<SettingsPageProps> = ({ onLogout }) => {
           </Form.Item>
         </Form>
       </Modal>
+    </div>
     </div>
   );
 };
