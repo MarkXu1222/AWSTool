@@ -35,7 +35,7 @@ app.use(helmet({
   },
 }));
 app.use(cors({
-  origin: process.env.CORS_ORIGIN || `http://localhost:${PORT}`,
+  origin: process.env.CORS_ORIGIN || true, // Same-origin requests don't need CORS; keep open for now
   credentials: true,
 }));
 app.use(express.json());
