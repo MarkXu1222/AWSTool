@@ -79,10 +79,13 @@ const Dashboard: React.FC = () => {
 
   const topColumns = [
     {
-      title: '账户 ID',
+      title: '账户',
       dataIndex: 'accountId',
-      key: 'accountId',
-      render: (id: string) => <code>{id}</code>,
+      key: 'account',
+      render: (id: string) => {
+        const acct = accounts.find((a: any) => a.Id === id);
+        return acct ? <span><strong>{acct.Name}</strong><br/><code style={{ fontSize: 10, color: '#999' }}>{id}</code></span> : <code>{id}</code>;
+      },
     },
     {
       title: '本月费用',

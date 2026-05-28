@@ -129,7 +129,19 @@ const QuotasPage: React.FC = () => {
       title: '时间', dataIndex: 'created_at', width: 100,
       sorter: (a: any, b: any) => new Date(a.created_at || 0).getTime() - new Date(b.created_at || 0).getTime(),
       defaultSortOrder: 'descend' as const,
-      render: (d: string) => d ? <span style={{ fontSize: 11 }}>{new Date(d).toLocaleDateString('zh-CN')}</span> : '-',
+      render: (d: string, record: any) => {
+        if (!d) return '-';
+        const date = new Date(d);
+        const daysAgo = Math.floor((Date.now() - date.getTime()) / (1000*60*60*24));
+        const isPending = record.status === 'PENDING' || record.Status === 'PENDING';
+        const isOverdue = isPending && daysAgo > 7;
+        return (
+          <span style={{ fontSize: 11, color: isOverdue ? '#ff3b30' : undefined }}>
+            {date.toLocaleDateString('zh-CN')}
+            {isOverdue && ` ⚠️ ${daysAgo}天`}
+          </span>
+        );
+      },
     },
   ];
 

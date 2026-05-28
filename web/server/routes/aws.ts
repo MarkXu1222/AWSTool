@@ -4,6 +4,14 @@ import { db } from '../db';
 
 export const awsRouter = Router();
 
+// RBAC: reject write operations for viewer role
+const requireAdmin = (req: Request, res: Response, next: any) => {
+  if ((req as any).user?.role === 'viewer') {
+    return res.status(403).json({ error: '查看者角色无此权限' });
+  }
+  next();
+};
+
 // Test connection
 awsRouter.get('/connection', async (_req: Request, res: Response) => {
   try {
@@ -56,7 +64,7 @@ awsRouter.get('/quotas/:accountId/:serviceCode', async (req: Request, res: Respo
 });
 
 // Request quota increase
-awsRouter.post('/quotas/increase', async (req: Request, res: Response) => {
+awsRouter.post('/quotas/increase', requireAdmin, async (req: Request, res: Response) => {
   try {
     const { accountId, serviceCode, quotaCode, desiredValue, quotaName } = req.body;
     const result = await aws.requestQuotaIncrease(accountId, serviceCode, quotaCode, desiredValue);
