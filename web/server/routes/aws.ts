@@ -90,29 +90,44 @@ awsRouter.get('/quotas/requests', async (_req: Request, res: Response) => {
   } catch (e: any) { res.status(500).json({ error: e.message }); }
 });
 
-// Sync quota requests from AWS
+// Sync quota requests from AWS — queries all accounts across all regions
 awsRouter.post('/quotas/sync', async (req: Request, res: Response) => {
   try {
-    const { accountIds } = req.body;
-    for (const accountId of (accountIds || []).slice(0, 20)) {
-      try {
-        const requests = await aws.listQuotaRequests(accountId);
-        for (const r of requests) {
-          db.upsertQuotaRequest({
-            id: r.Id,
-            account_id: accountId,
-            service_code: r.ServiceCode,
-            quota_code: r.QuotaCode,
-            quota_name: r.QuotaName,
-            desired_value: r.DesiredValue,
-            status: r.Status,
-            case_id: r.CaseId || null,
-            region: r.QuotaArn ? r.QuotaArn.split(':')[3] : (r._region || 'us-east-1'),
-            created_at: r.Created ? new Date(r.Created).toISOString() : undefined,
-          });
-        }
-      } catch { /* skip */ }
+    // Get all accounts from the payer mapping (already loaded)
+    let { accountIds } = req.body;
+    
+    // If no accountIds provided or too few, get all from listAccounts
+    if (!accountIds || accountIds.length < 50) {
+      const allAccounts = await aws.listAccounts();
+      accountIds = allAccounts.map((a: any) => a.Id);
     }
+
+    // Process in batches of 10 (parallel within batch)
+    const batchSize = 10;
+    for (let i = 0; i < accountIds.length; i += batchSize) {
+      const batch = accountIds.slice(i, i + batchSize);
+      const results = await Promise.allSettled(batch.map(async (accountId: string) => {
+        try {
+          const requests = await aws.listQuotaRequests(accountId);
+          for (const r of requests) {
+            db.upsertQuotaRequest({
+              id: r.Id,
+              account_id: accountId,
+              service_code: r.ServiceCode,
+              quota_code: r.QuotaCode,
+              quota_name: r.QuotaName,
+              desired_value: r.DesiredValue,
+              status: r.Status,
+              case_id: r.CaseId || null,
+              region: r.QuotaArn ? r.QuotaArn.split(':')[3] : (r._region || 'us-east-1'),
+              created_at: r.Created ? new Date(r.Created).toISOString() : undefined,
+            });
+          }
+          return requests.length;
+        } catch { return 0; }
+      }));
+    }
+
     res.json({ success: true, data: db.getQuotaRequests() });
   } catch (e: any) { res.status(500).json({ error: e.message }); }
 });
