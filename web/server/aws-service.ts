@@ -194,25 +194,46 @@ export async function listQuotaRequests(accountId: string) {
     'il-central-1', 'ap-southeast-6', 'ap-southeast-7', 'mx-central-1',
   ];
   
+  // Step 1: Query all regions for history (fast, no enrichment yet)
   const results = await Promise.allSettled(regions.map(async (region) => {
     const client = new ServiceQuotasClient({ region, credentials: creds });
     const resp = await client.send(new ListRequestedServiceQuotaChangeHistoryCommand({}));
-    const requests = resp.RequestedQuotas || [];
-    
-    // Enrich with current value
-    const enriched = [];
-    for (const r of requests) {
-      let currentValue = null;
-      try {
-        const quotaResp = await client.send(new GetServiceQuotaCommand({ ServiceCode: r.ServiceCode!, QuotaCode: r.QuotaCode! }));
-        currentValue = quotaResp.Quota?.Value ?? null;
-      } catch {}
-      enriched.push({ ...r, _accountId: accountId, _region: region, _currentValue: currentValue });
-    }
-    return enriched;
+    return (resp.RequestedQuotas || []).map(r => ({ ...r, _accountId: accountId, _region: region }));
   }));
 
+  // Collect all requests from successful regions
+  const rawRequests: any[] = [];
   for (const result of results) {
+    if (result.status === 'fulfilled') rawRequests.push(...result.value);
+  }
+
+  // Step 2: Enrich with current values — batch per region for efficiency
+  const byRegion: Record<string, any[]> = {};
+  for (const r of rawRequests) {
+    if (!byRegion[r._region]) byRegion[r._region] = [];
+    byRegion[r._region].push(r);
+  }
+
+  const enrichResults = await Promise.allSettled(
+    Object.entries(byRegion).map(async ([region, reqs]) => {
+      const client = new ServiceQuotasClient({ region, credentials: creds });
+      // Deduplicate by ServiceCode+QuotaCode to minimize API calls
+      const seen = new Set<string>();
+      const valueMap: Record<string, number | null> = {};
+      for (const r of reqs) {
+        const key = `${r.ServiceCode}|${r.QuotaCode}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        try {
+          const resp = await client.send(new GetServiceQuotaCommand({ ServiceCode: r.ServiceCode!, QuotaCode: r.QuotaCode! }));
+          valueMap[key] = resp.Quota?.Value ?? null;
+        } catch { valueMap[key] = null; }
+      }
+      return reqs.map(r => ({ ...r, _currentValue: valueMap[`${r.ServiceCode}|${r.QuotaCode}`] ?? null }));
+    })
+  );
+
+  for (const result of enrichResults) {
     if (result.status === 'fulfilled') allRequests.push(...result.value);
   }
 
