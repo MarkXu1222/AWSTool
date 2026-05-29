@@ -8,7 +8,7 @@
  */
 import * as aws from './aws-service';
 import { db } from './db';
-import { notifyQuotaAchieved } from './notify';
+import { notifyQuotaChanged } from './notify';
 import { refreshDashboardCache } from './routes/aws';
 
 let quotaSyncRunning = false;
@@ -74,6 +74,7 @@ async function syncQuotaRequests() {
 
     // Process in batches of 8, with 2s delay between batches to avoid throttling
     const batchSize = 8;
+    const changedRecords: any[] = []; // Track quotas whose current_value changed
     for (let i = 0; i < accountIds.length; i += batchSize) {
       const batch = accountIds.slice(i, i + batchSize);
       
@@ -83,7 +84,22 @@ async function syncQuotaRequests() {
           if (requests.length > 0) {
             requests = await aws.enrichCurrentValues(accountId, requests);
           }
+          // Snapshot existing records to detect current_value changes
+          const existing = db.getQuotaRequests();
           for (const r of requests) {
+            const prev = existing.find((x: any) => x.id === r.Id);
+            const newCurrent = r._currentValue;
+            // Detect change: had a previous value, new value differs
+            if (prev && prev.current_value != null && newCurrent != null && prev.current_value !== newCurrent) {
+              changedRecords.push({
+                accountId,
+                quotaName: r.QuotaName,
+                region: r.QuotaArn ? r.QuotaArn.split(':')[3] : (r._region || 'us-east-1'),
+                oldValue: prev.current_value,
+                newValue: newCurrent,
+                desiredValue: r.DesiredValue,
+              });
+            }
             db.upsertQuotaRequest({
               id: r.Id,
               account_id: accountId,
@@ -120,33 +136,23 @@ async function syncQuotaRequests() {
     lastQuotaSync = new Date().toISOString();
     console.log(`[Scheduler] Quota sync complete: ${total} accounts, ${totalRecords} records`);
 
-    // Check for newly achieved quotas and notify
+    // Notify for any quota whose current value changed
     try {
-      const allRecords = db.getQuotaRequests();
-      const { accounts: accts } = db.getAccountsCache();
-      const achieved = allRecords.filter(r =>
-        r.current_value != null && r.desired_value != null &&
-        r.current_value >= r.desired_value &&
-        !r.notified // Not yet notified
-      );
-      if (achieved.length > 0) {
-        const toNotify = achieved.map(r => {
-          const acct = accts.find((a: any) => a.Id === r.account_id);
+      if (changedRecords.length > 0) {
+        const { accounts: accts } = db.getAccountsCache();
+        const toNotify = changedRecords.map(r => {
+          const acct = accts.find((a: any) => a.Id === r.accountId);
           return {
-            accountId: r.account_id,
-            accountName: acct?.Name || r.account_id,
-            quotaName: r.quota_name || '',
-            region: r.region || 'us-east-1',
-            currentValue: r.current_value,
-            desiredValue: r.desired_value,
+            accountId: r.accountId,
+            accountName: acct?.Name || r.accountId,
+            quotaName: r.quotaName,
+            region: r.region,
+            oldValue: r.oldValue,
+            newValue: r.newValue,
+            desiredValue: r.desiredValue,
           };
         });
-        await notifyQuotaAchieved(toNotify);
-        // Mark as notified
-        const data = db.getQuotaRequests();
-        for (const r of achieved) {
-          db.upsertQuotaRequest({ ...r, notified: true });
-        }
+        await notifyQuotaChanged(toNotify);
       }
     } catch (e: any) {
       console.error('[Scheduler] Notification check failed:', e.message);
