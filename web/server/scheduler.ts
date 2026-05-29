@@ -8,6 +8,7 @@
  */
 import * as aws from './aws-service';
 import { db } from './db';
+import { notifyQuotaAchieved } from './notify';
 
 let quotaSyncRunning = false;
 let regionSyncRunning = false;
@@ -106,6 +107,38 @@ async function syncQuotaRequests() {
 
     lastQuotaSync = new Date().toISOString();
     console.log(`[Scheduler] Quota sync complete: ${total} accounts, ${totalRecords} records`);
+
+    // Check for newly achieved quotas and notify
+    try {
+      const allRecords = db.getQuotaRequests();
+      const { accounts: accts } = db.getAccountsCache();
+      const achieved = allRecords.filter(r =>
+        r.current_value != null && r.desired_value != null &&
+        r.current_value >= r.desired_value &&
+        !r.notified // Not yet notified
+      );
+      if (achieved.length > 0) {
+        const toNotify = achieved.map(r => {
+          const acct = accts.find((a: any) => a.Id === r.account_id);
+          return {
+            accountId: r.account_id,
+            accountName: acct?.Name || r.account_id,
+            quotaName: r.quota_name || '',
+            region: r.region || 'us-east-1',
+            currentValue: r.current_value,
+            desiredValue: r.desired_value,
+          };
+        });
+        await notifyQuotaAchieved(toNotify);
+        // Mark as notified
+        const data = db.getQuotaRequests();
+        for (const r of achieved) {
+          db.upsertQuotaRequest({ ...r, notified: true });
+        }
+      }
+    } catch (e: any) {
+      console.error('[Scheduler] Notification check failed:', e.message);
+    }
   } catch (e: any) {
     console.error('[Scheduler] Quota sync failed:', e.message);
   } finally {

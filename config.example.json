@@ -13,6 +13,7 @@
     "port": 3000,
     "adminPassword": "CHANGE_ME_STRONG_PASSWORD",
     "jwtSecret": "",
-    "encryptionKey": ""
+    "encryptionKey": "",
+    "feishuWebhook": ""
   }
 }
