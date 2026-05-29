@@ -117,21 +117,32 @@ const QuotasPage: React.FC = () => {
   const [form] = Form.useForm();
 
   useEffect(() => { loadAccounts(); loadDbRecords(); }, []);
+  useEffect(() => { if (selectedAccount && activeTab === 'requests') fetchAccountRequests(); }, [selectedAccount]);
 
   const loadAccounts = async () => { const res = await api.listAccounts(); if (res.success) setAccounts(res.data); };
   const loadDbRecords = async () => { const res = await api.listQuotaRequests(); if (res.success) setDbRecords(res.data); };
 
   const fetchQuotas = async () => {
     if (!selectedAccount) { message.warning('请选择账户'); return; }
-    if (!selectedService) { message.warning('查询当前配额需要选择具体服务'); return; }
-    if (!selectedRegion) { message.warning('查询当前配额需要选择具体区域'); return; }
-    setLoading(true);
-    try {
-      const res = await api.listServiceQuotas(selectedAccount, selectedService, selectedRegion);
-      if (res.success) { setQuotas(res.data); setActiveTab('quotas'); message.success(`${res.data.length} 个配额`); }
-      else message.error(res.error);
-    } catch (e: any) { message.error(e.message); }
-    finally { setLoading(false); }
+    // 当前配额 tab 需要具体服务和区域
+    if (activeTab === 'quotas') {
+      if (!selectedService) { message.warning('查询当前配额需要选择具体服务'); return; }
+      if (!selectedRegion) { message.warning('查询当前配额需要选择具体区域'); return; }
+      setLoading(true);
+      try {
+        const res = await api.listServiceQuotas(selectedAccount, selectedService, selectedRegion);
+        if (res.success) { setQuotas(res.data); message.success(`${res.data.length} 个配额`); }
+        else message.error(res.error);
+      } catch (e: any) { message.error(e.message); }
+      finally { setLoading(false); }
+    } else if (activeTab === 'requests') {
+      // 当前账户请求 — 不需要服务/区域
+      fetchAccountRequests();
+    } else if (activeTab === 'all-requests') {
+      fetchAllRequests();
+    } else if (activeTab === 'db-records') {
+      handleSync();
+    }
   };
 
   // 当前账户请求 — 查询选中账户的所有提升记录
