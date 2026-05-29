@@ -64,7 +64,8 @@ const MainLayout: React.FC<MainLayoutProps> = ({ onLogout }) => {
         {/* Desktop Sidebar — Ant Design Pro style */}
         <Sider width={208} className="desktop-sider">
           <div className="sider-logo">
-            <h1>☁️ AWS Toolbox</h1>
+            <img src="/image.png" alt="logo" style={{ height: 32, width: 32, objectFit: 'contain', borderRadius: 6 }} />
+            <h1 style={{ marginLeft: 8 }}>AWS Toolbox</h1>
           </div>
           <Menu
             mode="inline"

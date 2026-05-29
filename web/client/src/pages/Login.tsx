@@ -45,7 +45,8 @@ const LoginPage: React.FC<LoginPageProps> = ({ onSuccess }) => {
     }}>
       <Card style={{ width: '100%', maxWidth: 380 }}>
         <div style={{ textAlign: 'center', marginBottom: 24 }}>
-          <h1 style={{ fontSize: 24, margin: 0 }}>☁️ AWS Toolbox</h1>
+          <img src="/image.png" alt="AWS Toolbox" style={{ width: 72, height: 72, objectFit: 'contain', marginBottom: 8 }} />
+          <h1 style={{ fontSize: 24, margin: 0 }}>AWS Toolbox</h1>
           <p style={{ color: '#666', margin: '4px 0 0' }}>Multi-Account Manager</p>
         </div>
 
