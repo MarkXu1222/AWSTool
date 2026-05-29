@@ -65,7 +65,8 @@ export const api = {
   listQuotaRequests: () => request('/aws/quotas/requests'),
   getQuotaStats: () => request('/aws/quotas/stats'),
   getDashboardSummary: () => request('/aws/dashboard/summary'),
-  getConsoleUrl: (accountId: string, caseId: string) => request(`/aws/console-url/${accountId}?caseId=${caseId}`),
+  getConsoleUrl: (accountId: string, caseId?: string) =>
+    request(`/aws/console-url/${accountId}${caseId ? `?caseId=${caseId}` : ''}`),
   syncQuotaRequests: (accountIds: string[]) =>
     request('/aws/quotas/sync', { method: 'POST', body: JSON.stringify({ accountIds }) }),
   syncSingleAccount: (accountId: string) =>

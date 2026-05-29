@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { Card, Table, Tag, Button, Space, message, Input, Spin, Descriptions, Tabs, Statistic, Row, Col } from 'antd';
-import { ReloadOutlined, SearchOutlined, DollarOutlined, SafetyOutlined, CheckCircleOutlined, CloseCircleOutlined, LeftOutlined } from '@ant-design/icons';
+import { ReloadOutlined, SearchOutlined, DollarOutlined, SafetyOutlined, CheckCircleOutlined, CloseCircleOutlined, LeftOutlined, LoginOutlined } from '@ant-design/icons';
 import { api } from '../api';
 import { exportToCSV } from '../utils/export';
 
@@ -11,6 +11,7 @@ const AccountsPage: React.FC = () => {
   const [selectedAccount, setSelectedAccount] = useState<any>(null);
   const [detail, setDetail] = useState<any>(null);
   const [detailLoading, setDetailLoading] = useState(false);
+  const [consoleLoading, setConsoleLoading] = useState(false);
   const [isMobile] = useState(() => window.innerWidth < 769);
 
   const fetchAccounts = async () => {
@@ -24,6 +25,22 @@ const AccountsPage: React.FC = () => {
   };
 
   useEffect(() => { fetchAccounts(); }, []);
+
+  // 免登录进入该账户的 AWS 控制台
+  const openConsole = async (accountId: string) => {
+    setConsoleLoading(true);
+    const hide = message.loading('正在生成免登录链接...', 0);
+    try {
+      const res = await api.getConsoleUrl(accountId);
+      hide();
+      if (res.success && res.url) {
+        window.open(res.url, '_blank');
+      } else {
+        message.error(res.error || '生成链接失败');
+      }
+    } catch (e: any) { hide(); message.error(e.message); }
+    finally { setConsoleLoading(false); }
+  };
 
   const openDetail = async (account: any) => {
     setSelectedAccount(account);
@@ -53,6 +70,7 @@ const AccountsPage: React.FC = () => {
           <Button type="text" icon={<LeftOutlined />} onClick={() => setSelectedAccount(null)}>返回</Button>
           <span style={{ fontWeight: 600, marginLeft: 8 }}>{selectedAccount.Name}</span>
           <Tag style={{ marginLeft: 8 }}>{selectedAccount._payer}</Tag>
+          <Button type="primary" size="small" icon={<LoginOutlined />} loading={consoleLoading} onClick={() => openConsole(selectedAccount.Id)} style={{ marginLeft: 'auto' }}>控制台</Button>
         </div>
         <Tabs size="small" items={[
           { key: 'info', label: '基本', children: (
@@ -174,7 +192,12 @@ const AccountsPage: React.FC = () => {
             {selectedAccount && (
               <div style={{ width: 360, minWidth: 360 }}>
                 <Card size="small" title={<span>{selectedAccount.Name}</span>}
-                  extra={<Button type="text" size="small" onClick={() => setSelectedAccount(null)}>✕</Button>}>
+                  extra={
+                    <Space size={4}>
+                      <Button type="primary" size="small" icon={<LoginOutlined />} loading={consoleLoading} onClick={() => openConsole(selectedAccount.Id)}>控制台</Button>
+                      <Button type="text" size="small" onClick={() => setSelectedAccount(null)}>✕</Button>
+                    </Space>
+                  }>
                   <Tabs size="small" items={[
                     { key: 'info', label: '基本', children: (
                       <Descriptions size="small" column={1} bordered>
