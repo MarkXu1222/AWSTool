@@ -1,6 +1,7 @@
 import { Router, Request, Response } from 'express';
 import * as aws from '../aws-service';
 import { db } from '../db';
+import { generateQuotaDoc, getCompanyForAccount } from '../doc-generator';
 
 export const awsRouter = Router();
 
@@ -129,6 +130,36 @@ awsRouter.get('/console-url/:accountId', async (req: Request, res: Response) => 
     }
     const url = await aws.getConsoleSigninUrl(accountId, dest);
     res.json({ success: true, url });
+  } catch (e: any) { res.status(500).json({ error: e.message }); }
+});
+
+// Generate quota increase document (PDF)
+awsRouter.post('/quotas/generate-doc', async (req: Request, res: Response) => {
+  try {
+    const { accountId, accountName, companyKey, serviceCode, quotaName, region, requestedValue, currentValue } = req.body;
+    if (!accountId || !quotaName || !region || !requestedValue) {
+      return res.status(400).json({ error: '缺少必要参数' });
+    }
+    const pdf = await generateQuotaDoc({
+      accountId, accountName, companyKey, serviceCode,
+      quotaName, region, requestedValue: Number(requestedValue),
+      currentValue: currentValue != null ? Number(currentValue) : undefined,
+    });
+    const company = companyKey || (getCompanyForAccount(accountId)?.key) || 'doc';
+    const filename = `${company}-${(quotaName || 'quota').replace(/[^a-zA-Z0-9]/g, '_').slice(0, 30)}-${requestedValue}-${region}.pdf`;
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.send(pdf);
+  } catch (e: any) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Get company profile for an account (for doc generation UI)
+awsRouter.get('/quotas/company/:accountId', async (req: Request, res: Response) => {
+  try {
+    const company = getCompanyForAccount(req.params.accountId);
+    res.json({ success: true, data: company });
   } catch (e: any) { res.status(500).json({ error: e.message }); }
 });
 

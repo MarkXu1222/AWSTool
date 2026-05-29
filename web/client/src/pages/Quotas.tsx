@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { Card, Table, Tag, Button, Space, message, Input, Select, Tabs, Modal, Form, InputNumber } from 'antd';
-import { ReloadOutlined, SearchOutlined, DownloadOutlined } from '@ant-design/icons';
+import { ReloadOutlined, SearchOutlined, DownloadOutlined, FileTextOutlined } from '@ant-design/icons';
 import { api } from '../api';
 import { exportToCSV, exportQuotaPivotTable, exportQuotaRecords } from '../utils/export';
 
@@ -333,17 +333,38 @@ const QuotasPage: React.FC = () => {
         },
       },
       {
-        title: '', key: 'refresh', width: 36,
+        title: '操作', key: 'actions', width: 90, fixed: 'right' as const,
         render: (_: any, record: any) => (
-        <Button type="link" size="small" icon={<ReloadOutlined />} onClick={async (e) => {
-          e.stopPropagation();
-          try { const res = await api.syncSingleAccount(record.account_id); if (res.success) { setDbRecords(res.data || []); message.success('已刷新'); } } catch {}
-        }} />
-      ),
-    },
+          <Space size={2}>
+            <Button type="link" size="small" icon={<FileTextOutlined />} title="生成提额文档" onClick={async (e) => {
+              e.stopPropagation();
+              const hide = message.loading('正在生成文档...', 0);
+              try {
+                await api.generateQuotaDoc({
+                  accountId: record.account_id,
+                  accountName: accounts.find(a => a.Id === record.account_id)?.Name,
+                  serviceCode: record.service_code,
+                  quotaName: record.quota_name,
+                  region: record.region || 'us-east-1',
+                  requestedValue: record.desired_value,
+                  currentValue: record.current_value,
+                });
+                hide();
+                message.success('文档已生成');
+              } catch (err: any) { hide(); message.error(err.message || '生成失败'); }
+            }} />
+            <Button type="link" size="small" icon={<ReloadOutlined />} title="刷新" onClick={async (e) => {
+              e.stopPropagation();
+              try { const res = await api.syncSingleAccount(record.account_id); if (res.success) { setDbRecords(res.data || []); message.success('已刷新'); } } catch {}
+            }} />
+          </Space>
+        ),
+      },
   ];
   return allColumns;
-  };  return (
+  };
+
+  return (
     <div>
       {/* 页面标题区 */}
       <div className="page-header">

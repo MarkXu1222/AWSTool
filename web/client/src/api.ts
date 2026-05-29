@@ -67,6 +67,29 @@ export const api = {
   getDashboardSummary: () => request('/aws/dashboard/summary'),
   getConsoleUrl: (accountId: string, caseId?: string) =>
     request(`/aws/console-url/${accountId}${caseId ? `?caseId=${caseId}` : ''}`),
+  // Generate quota increase PDF document — downloads the file
+  generateQuotaDoc: async (params: { accountId: string; accountName?: string; serviceCode: string; quotaName: string; region: string; requestedValue: number; currentValue?: number }) => {
+    const token = getToken();
+    const res = await fetch(`${BASE}/aws/quotas/generate-doc`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+      body: JSON.stringify(params),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ error: '生成失败' }));
+      throw new Error(err.error || '生成失败');
+    }
+    const blob = await res.blob();
+    const disposition = res.headers.get('Content-Disposition') || '';
+    const match = disposition.match(/filename="(.+)"/);
+    const filename = match ? match[1] : 'quota-doc.pdf';
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    a.click();
+    URL.revokeObjectURL(url);
+  },
   syncQuotaRequests: (accountIds: string[]) =>
     request('/aws/quotas/sync', { method: 'POST', body: JSON.stringify({ accountIds }) }),
   syncSingleAccount: (accountId: string) =>
