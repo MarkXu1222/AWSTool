@@ -117,7 +117,6 @@ const QuotasPage: React.FC = () => {
   const [form] = Form.useForm();
 
   useEffect(() => { loadAccounts(); loadDbRecords(); }, []);
-  useEffect(() => { if (selectedAccount && activeTab === 'requests') fetchAccountRequests(); }, [selectedAccount]);
 
   const loadAccounts = async () => { const res = await api.listAccounts(); if (res.success) setAccounts(res.data); };
   const loadDbRecords = async () => { const res = await api.listQuotaRequests(); if (res.success) setDbRecords(res.data); };
@@ -139,14 +138,13 @@ const QuotasPage: React.FC = () => {
     finally { setLoading(false); }
   };
 
-  // 当前账户请求 — 查询选中账户的所有提升记录
+  // 当前账户请求 — 查询选中账户的所有提升记录（手动触发）
   const fetchAccountRequests = async () => {
-    if (!selectedAccount) return;
+    if (!selectedAccount) { message.warning('请选择账户'); return; }
     setLoading(true);
     try {
       const res = await api.syncSingleAccount(selectedAccount);
       if (res.success) {
-        // Filter to only this account's records
         const all = res.data || [];
         setRequests(all.filter((r: any) => r.account_id === selectedAccount));
         setDbRecords(all);
@@ -216,9 +214,7 @@ const QuotasPage: React.FC = () => {
     if (activeTab === 'quotas') {
       exportToCSV(filtered.map(q => ({ 服务: q.ServiceCode, 配额: q.QuotaName, 当前值: q.Value, 单位: q.Unit, 可调整: q.Adjustable ? '是' : '否', 区域: selectedRegion })), `quotas_${selectedService}`);
     } else if (activeTab === 'requests') {
-      // Single account — pivot table
-      const acct = accounts.find(a => a.Id === selectedAccount);
-      exportQuotaPivotTable(requests, acct?.Name || selectedAccount, `quota_${selectedAccount}`);
+      exportQuotaRecords(requests, accounts, `quota_${selectedAccount}`);
     } else if (activeTab === 'all-requests') {
       exportQuotaRecords(allRequests.length > 0 ? allRequests : dbRecords, accounts, 'quota_all_requests');
     } else {
@@ -328,7 +324,7 @@ const QuotasPage: React.FC = () => {
 
       {/* Tab + 内容区 */}
       <Card size="small" bodyStyle={{ padding: '0 16px 16px' }}>
-        <Tabs activeKey={activeTab} onChange={(key) => { setActiveTab(key); if (key === 'requests') fetchAccountRequests(); }} items={[
+        <Tabs activeKey={activeTab} onChange={(key) => { setActiveTab(key); }} items={[
         {
           key: 'quotas', label: `当前配额 (${filtered.length})`,
           children: (
@@ -355,16 +351,20 @@ const QuotasPage: React.FC = () => {
           key: 'requests', label: `当前账户请求 (${requests.length})`,
           children: selectedAccount ? (
             <>
-              <div style={{ marginBottom: 12, fontSize: 13, color: 'rgba(0,0,0,0.45)' }}>
-                查询账户 <strong style={{ color: 'rgba(0,0,0,0.85)' }}>{accounts.find(a => a.Id === selectedAccount)?.Name || selectedAccount}</strong> 在所有区域的配额提升记录
-                <Button type="link" size="small" icon={<ReloadOutlined />} onClick={fetchAccountRequests} style={{ marginLeft: 8 }}>刷新</Button>
-              </div>
+              <Space style={{ marginBottom: 12 }}>
+                <Button type="primary" icon={<ReloadOutlined />} onClick={fetchAccountRequests} loading={loading} size="small">
+                  查询
+                </Button>
+                <span style={{ fontSize: 13, color: 'rgba(0,0,0,0.45)' }}>
+                  查询账户 <strong style={{ color: 'rgba(0,0,0,0.85)' }}>{accounts.find(a => a.Id === selectedAccount)?.Name || selectedAccount}</strong> 在所有区域的配额提升记录
+                </span>
+              </Space>
               <Table size="small" dataSource={requests} rowKey="id" columns={getRequestColumns(requests)} scroll={{ x: 900 }} loading={loading}
                 pagination={{ pageSize: 15, size: 'small', showTotal: t => `共 ${t} 条` }}
-                locale={{ emptyText: '该账户暂无配额提升记录' }} />
+                locale={{ emptyText: '点击「查询」获取该账户的配额提升记录' }} />
             </>
           ) : (
-            <div style={{ padding: '40px 0', textAlign: 'center', color: 'rgba(0,0,0,0.45)' }}>请先在上方选择一个账户，然后点击「查询」（服务和区域可选"全部"）</div>
+            <div style={{ padding: '40px 0', textAlign: 'center', color: 'rgba(0,0,0,0.45)' }}>请先在上方选择一个账户，然后点击「查询」</div>
           ),
         },
         {
