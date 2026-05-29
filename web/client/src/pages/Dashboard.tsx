@@ -1,45 +1,52 @@
 import React, { useState, useEffect } from 'react';
 import { Card, Statistic, Row, Col, Table, Tag, Spin, message } from 'antd';
-import { DollarOutlined, TeamOutlined, ClockCircleOutlined, LinkOutlined } from '@ant-design/icons';
+import { DollarOutlined, TeamOutlined, AlertOutlined, LinkOutlined } from '@ant-design/icons';
 import dayjs from 'dayjs';
 import { api } from '../api';
 
 const Dashboard: React.FC = () => {
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(false);
   const [accounts, setAccounts] = useState<any[]>([]);
   const [totalCost, setTotalCost] = useState(0);
   const [topAccounts, setTopAccounts] = useState<any[]>([]);
-  const [pendingRequests, setPendingRequests] = useState(0);
+  const [caseOpened7d, setCaseOpened7d] = useState(0);
   const [connected, setConnected] = useState(false);
+  const [costLoading, setCostLoading] = useState(true);
 
   useEffect(() => {
     loadDashboard();
   }, []);
 
   const loadDashboard = async () => {
-    setLoading(true);
+    // Phase 1: Load from cache/DB (instant)
     try {
-      const [accountsRes, costRes, quotaRes, connRes] = await Promise.allSettled([
+      const [accountsRes, quotaStatsRes] = await Promise.allSettled([
         api.listAccounts(),
+        api.getQuotaStats(),
+      ]);
+      if (accountsRes.status === 'fulfilled' && accountsRes.value.success) {
+        setAccounts(accountsRes.value.data || []);
+      }
+      if (quotaStatsRes.status === 'fulfilled' && quotaStatsRes.value.success) {
+        setCaseOpened7d(quotaStatsRes.value.data.caseOpened7d || 0);
+      }
+    } catch {}
+
+    // Phase 2: Load cost data + connection (slower, async)
+    setCostLoading(true);
+    try {
+      const [costRes, connRes] = await Promise.allSettled([
         api.getCostByAccount(
           dayjs().startOf('month').format('YYYY-MM-DD'),
           dayjs().format('YYYY-MM-DD')
         ),
-        api.listQuotaRequests(),
         api.testConnection(),
       ]);
 
-      // Accounts
-      if (accountsRes.status === 'fulfilled' && accountsRes.value.success) {
-        setAccounts(accountsRes.value.data || []);
-      }
-
-      // Cost data — compute total and top 10
       if (costRes.status === 'fulfilled' && costRes.value.success) {
         const data = costRes.value.data || [];
         let total = 0;
         const accountCostMap: Record<string, number> = {};
-
         data.forEach((period: any) => {
           (period.Groups || []).forEach((g: any) => {
             const amount = parseFloat(g.Metrics?.UnblendedCost?.Amount || '0');
@@ -48,7 +55,6 @@ const Dashboard: React.FC = () => {
             accountCostMap[acctId] = (accountCostMap[acctId] || 0) + amount;
           });
         });
-
         setTotalCost(total);
         const sorted = Object.entries(accountCostMap)
           .map(([accountId, cost]) => ({ key: accountId, accountId, cost }))
@@ -57,24 +63,11 @@ const Dashboard: React.FC = () => {
         setTopAccounts(sorted);
       }
 
-      // Quota requests — count PENDING
-      if (quotaRes.status === 'fulfilled' && quotaRes.value.success) {
-        const requests = quotaRes.value.data || [];
-        const pending = requests.filter((r: any) =>
-          r.status === 'PENDING' || r.Status?.Value === 'PENDING'
-        ).length;
-        setPendingRequests(pending);
-      }
-
-      // Connection status
       if (connRes.status === 'fulfilled') {
         setConnected(connRes.value.success === true);
       }
-    } catch (err: any) {
-      message.error('加载概览数据失败');
-    } finally {
-      setLoading(false);
-    }
+    } catch {}
+    finally { setCostLoading(false); }
   };
 
   const topColumns = [
@@ -84,7 +77,7 @@ const Dashboard: React.FC = () => {
       key: 'account',
       render: (id: string) => {
         const acct = accounts.find((a: any) => a.Id === id);
-        return acct ? <span><strong>{acct.Name}</strong><br/><code style={{ fontSize: 10, color: '#999' }}>{id}</code></span> : <code>{id}</code>;
+        return acct ? <span><strong>{acct.Name}</strong><br/><code style={{ fontSize: 11, color: 'rgba(0,0,0,0.45)' }}>{id}</code></span> : <code>{id}</code>;
       },
     },
     {
@@ -107,14 +100,6 @@ const Dashboard: React.FC = () => {
     },
   ];
 
-  if (loading) {
-    return (
-      <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', minHeight: 300 }}>
-        <Spin size="large" tip="加载中..." />
-      </div>
-    );
-  }
-
   return (
     <div>
       <div className="page-header">
@@ -123,30 +108,36 @@ const Dashboard: React.FC = () => {
           <p className="page-header-subtitle">AWS 多账户管理总览</p>
         </div>
       </div>
-      {/* 费用大卡片 */}
-      <Card size="small" style={{ marginBottom: 12 }}>
-        <Row gutter={12} align="middle">
-          <Col xs={24} md={12}>
-            <Statistic
-              title="本月总费用"
-              value={totalCost}
-              precision={2}
-              prefix={<DollarOutlined />}
-              suffix="USD"
-              valueStyle={{ color: 'var(--color-text-primary)', fontSize: 28, fontWeight: 700 }}
-            />
-          </Col>
-          <Col xs={24} md={12}>
-            <Row gutter={8}>
-              <Col span={8}><Statistic title="账户" value={accounts.length} valueStyle={{ fontSize: 18 }} /></Col>
-              <Col span={8}><Statistic title="待处理" value={pendingRequests} valueStyle={{ fontSize: 18, color: pendingRequests > 0 ? 'var(--color-warning)' : 'var(--color-success)' }} /></Col>
-              <Col span={8}><Statistic title="连接" value={connected ? '正常' : '断开'} valueStyle={{ fontSize: 16, color: connected ? 'var(--color-success)' : 'var(--color-error)' }} /></Col>
-            </Row>
-          </Col>
-        </Row>
-      </Card>
 
-      <Card size="small" title="本月费用 Top 10">
+      {/* Stats row — instant from cache */}
+      <Row gutter={16} style={{ marginBottom: 16 }}>
+        <Col xs={12} md={6}>
+          <Card size="small">
+            <Statistic title="账户总数" value={accounts.length} prefix={<TeamOutlined />} valueStyle={{ fontSize: 24 }} />
+          </Card>
+        </Col>
+        <Col xs={12} md={6}>
+          <Card size="small">
+            <Statistic title="本月费用" value={totalCost} precision={2} prefix={<DollarOutlined />} suffix="USD"
+              loading={costLoading} valueStyle={{ fontSize: 24 }} />
+          </Card>
+        </Col>
+        <Col xs={12} md={6}>
+          <Card size="small">
+            <Statistic title="进行中 Case (7天)" value={caseOpened7d} prefix={<AlertOutlined />}
+              valueStyle={{ fontSize: 24, color: caseOpened7d > 0 ? '#faad14' : '#52c41a' }} />
+          </Card>
+        </Col>
+        <Col xs={12} md={6}>
+          <Card size="small">
+            <Statistic title="连接状态" value={connected ? '正常' : costLoading ? '检查中' : '断开'} prefix={<LinkOutlined />}
+              valueStyle={{ fontSize: 18, color: connected ? '#52c41a' : costLoading ? 'rgba(0,0,0,0.45)' : '#ff4d4f' }} />
+          </Card>
+        </Col>
+      </Row>
+
+      {/* Top 10 costs */}
+      <Card size="small" title="本月费用 Top 10" loading={costLoading}>
         <Table
           size="small"
           dataSource={topAccounts}

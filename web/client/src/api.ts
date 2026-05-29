@@ -51,9 +51,10 @@ export const api = {
     const cached = cacheGet('accounts');
     if (cached) return cached;
     const res = await request('/aws/accounts');
-    if (res.success) cacheSet('accounts', res, 5 * 60 * 1000); // 5 min cache
+    if (res.success) cacheSet('accounts', res, 60 * 1000); // 1 min client cache
     return res;
   },
+  refreshAccounts: () => request('/aws/accounts/refresh', { method: 'POST' }),
   getAccountDetail: (id: string) => request(`/aws/accounts/${id}/detail`),
   getCostByAccount: (start: string, end: string) => request(`/aws/billing/by-account?start=${start}&end=${end}`),
   getCostByService: (accountId: string, start: string, end: string) => request(`/aws/billing/by-service/${accountId}?start=${start}&end=${end}`),
@@ -62,6 +63,7 @@ export const api = {
   requestQuotaIncrease: (accountId: string, serviceCode: string, quotaCode: string, desiredValue: number, quotaName?: string, region?: string) =>
     request('/aws/quotas/increase', { method: 'POST', body: JSON.stringify({ accountId, serviceCode, quotaCode, desiredValue, quotaName, region }) }),
   listQuotaRequests: () => request('/aws/quotas/requests'),
+  getQuotaStats: () => request('/aws/quotas/stats'),
   syncQuotaRequests: (accountIds: string[]) =>
     request('/aws/quotas/sync', { method: 'POST', body: JSON.stringify({ accountIds }) }),
   syncSingleAccount: (accountId: string) =>

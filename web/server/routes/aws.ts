@@ -20,10 +20,34 @@ awsRouter.get('/connection', async (_req: Request, res: Response) => {
   } catch (e: any) { res.status(500).json({ error: e.message }); }
 });
 
-// List accounts
+// List accounts — returns cached data instantly, refreshes in background
 awsRouter.get('/accounts', async (_req: Request, res: Response) => {
   try {
+    const { accounts: cached, cachedAt } = db.getAccountsCache();
+    
+    // If cache exists and is less than 10 minutes old, return it instantly
+    if (cached.length > 0) {
+      res.json({ success: true, data: cached, cachedAt });
+      // Refresh in background if cache is older than 5 minutes
+      const age = Date.now() - new Date(cachedAt).getTime();
+      if (age > 5 * 60 * 1000) {
+        aws.listAccounts().then(accounts => db.setAccountsCache(accounts)).catch(() => {});
+      }
+      return;
+    }
+    
+    // No cache — must fetch (first time)
     const accounts = await aws.listAccounts();
+    db.setAccountsCache(accounts);
+    res.json({ success: true, data: accounts });
+  } catch (e: any) { res.status(500).json({ error: e.message }); }
+});
+
+// Force refresh accounts from AWS
+awsRouter.post('/accounts/refresh', async (_req: Request, res: Response) => {
+  try {
+    const accounts = await aws.listAccounts();
+    db.setAccountsCache(accounts);
     res.json({ success: true, data: accounts });
   } catch (e: any) { res.status(500).json({ error: e.message }); }
 });
@@ -82,6 +106,19 @@ awsRouter.post('/quotas/increase', requireAdmin, async (req: Request, res: Respo
     db.addAuditLog(user?.userId, 'QUOTA_INCREASE', `${accountId} ${serviceCode} ${quotaCode} ${targetRegion} → ${desiredValue}`, user?.username);
 
     res.json({ success: true, data: result });
+  } catch (e: any) { res.status(500).json({ error: e.message }); }
+});
+
+// Quota stats from DB (no AWS call — instant)
+awsRouter.get('/quotas/stats', async (_req: Request, res: Response) => {
+  try {
+    const records = db.getQuotaRequests();
+    const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+    const caseOpened7d = records.filter(r =>
+      (r.status === 'CASE_OPENED' || r.status === 'PENDING') &&
+      r.created_at && r.created_at >= sevenDaysAgo
+    );
+    res.json({ success: true, data: { total: records.length, caseOpened7d: caseOpened7d.length, records: caseOpened7d } });
   } catch (e: any) { res.status(500).json({ error: e.message }); }
 });
 
@@ -210,11 +247,13 @@ awsRouter.post('/quotas/sync', async (req: Request, res: Response) => {
   } catch (e: any) { res.status(500).json({ error: e.message }); }
 });
 
-// Sync single account (quick refresh)
+// Sync single account (quick refresh — with current value enrichment)
 awsRouter.post('/quotas/sync-account/:accountId', async (req: Request, res: Response) => {
   try {
     const { accountId } = req.params;
-    const requests = await aws.listQuotaRequests(accountId);
+    let requests = await aws.listQuotaRequests(accountId);
+    // Enrich with current values (acceptable for single account)
+    requests = await aws.enrichCurrentValues(accountId, requests);
     for (const r of requests) {
       db.upsertQuotaRequest({
         id: r.Id,

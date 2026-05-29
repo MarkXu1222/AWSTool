@@ -43,6 +43,8 @@ interface DBSchema {
   quota_requests: any[];
   audit_log: any[];
   region_data: any[];
+  accounts_cache: any[];
+  accounts_cache_time: string;
 }
 
 // In-memory cache to avoid reading file on every request
@@ -60,16 +62,18 @@ function readDB(): DBSchema {
 
   ensureDir();
   if (!fs.existsSync(DB_PATH)) {
-    cache = { users: [], quota_requests: [], audit_log: [], region_data: [] };
+    cache = { users: [], quota_requests: [], audit_log: [], region_data: [], accounts_cache: [], accounts_cache_time: '' };
     cacheTime = Date.now();
     return cache;
   }
   try {
     cache = JSON.parse(fs.readFileSync(DB_PATH, 'utf-8'));
+    if (!cache!.accounts_cache) cache!.accounts_cache = [];
+    if (!cache!.accounts_cache_time) cache!.accounts_cache_time = '';
     cacheTime = Date.now();
     return cache!;
   } catch {
-    cache = { users: [], quota_requests: [], audit_log: [], region_data: [] };
+    cache = { users: [], quota_requests: [], audit_log: [], region_data: [], accounts_cache: [], accounts_cache_time: '' };
     cacheTime = Date.now();
     return cache;
   }
@@ -157,6 +161,19 @@ export const db = {
   deleteUser(id: number) {
     const data = readDB();
     data.users = data.users.filter(u => u.id !== id);
+    writeDB(data);
+  },
+
+  // Accounts cache — for instant loading
+  getAccountsCache() {
+    const data = readDB();
+    return { accounts: data.accounts_cache || [], cachedAt: data.accounts_cache_time || '' };
+  },
+
+  setAccountsCache(accounts: any[]) {
+    const data = readDB();
+    data.accounts_cache = accounts;
+    data.accounts_cache_time = new Date().toISOString();
     writeDB(data);
   },
 

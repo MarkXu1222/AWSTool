@@ -224,6 +224,43 @@ export async function listQuotaRequestsFast(accountId: string) {
   return listQuotaRequests(accountId);
 }
 
+// Enrich requests with current values — used for single-account view
+export async function enrichCurrentValues(accountId: string, requests: any[]) {
+  if (requests.length === 0) return requests;
+  const creds = await assumeToAccount(accountId);
+  
+  const byRegion: Record<string, any[]> = {};
+  for (const r of requests) {
+    const region = r._region || r.region || 'us-east-1';
+    if (!byRegion[region]) byRegion[region] = [];
+    byRegion[region].push(r);
+  }
+
+  await Promise.allSettled(Object.entries(byRegion).map(async ([region, reqs]) => {
+    const client = new ServiceQuotasClient({ region, credentials: creds });
+    const seen = new Set<string>();
+    const valueMap: Record<string, number | null> = {};
+    for (const r of reqs) {
+      const sc = r.ServiceCode || r.service_code;
+      const qc = r.QuotaCode || r.quota_code;
+      if (!sc || !qc) continue;
+      const key = `${sc}|${qc}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      try {
+        const resp = await client.send(new GetServiceQuotaCommand({ ServiceCode: sc, QuotaCode: qc }));
+        valueMap[key] = resp.Quota?.Value ?? null;
+      } catch { valueMap[key] = null; }
+    }
+    for (const r of reqs) {
+      const key = `${r.ServiceCode || r.service_code}|${r.QuotaCode || r.quota_code}`;
+      r._currentValue = valueMap[key] ?? r._currentValue ?? null;
+    }
+  }));
+
+  return requests;
+}
+
 export async function getAccountDetail(accountId: string) {
   let iamCreds: any;
   try { iamCreds = await assumeToAccount(accountId); } catch { iamCreds = await getAdminCredsForPayer(PAYERS[0]?.roleArn); }
