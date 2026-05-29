@@ -66,6 +66,23 @@ export const api = {
     request('/aws/quotas/sync', { method: 'POST', body: JSON.stringify({ accountIds }) }),
   syncSingleAccount: (accountId: string) =>
     request(`/aws/quotas/sync-account/${accountId}`, { method: 'POST' }),
+  getSyncStatus: () => request('/aws/quotas/sync-status'),
+  // Streaming sync — returns EventSource for real-time progress
+  startStreamSync: (onProgress: (data: any) => void, onDone: (data: any) => void, onError?: (err: any) => void) => {
+    const token = getToken();
+    const es = new EventSource(`${BASE}/aws/quotas/sync-stream?token=${token}`);
+    es.onmessage = (event) => {
+      try {
+        const data = JSON.parse(event.data);
+        if (data.type === 'progress') onProgress(data);
+        else if (data.type === 'done') { onDone(data); es.close(); }
+        else if (data.type === 'error') { if (onError) onError(data); es.close(); }
+        else if (data.type === 'start') onProgress(data);
+      } catch {}
+    };
+    es.onerror = () => { if (onError) onError({ message: 'Connection lost' }); es.close(); };
+    return es;
+  },
   scanResources: (accountId: string, region: string) => request(`/aws/resources/${accountId}/${region}`),
   getAuditLog: () => request('/aws/audit'),
   // Regions

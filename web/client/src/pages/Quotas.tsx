@@ -109,6 +109,7 @@ const QuotasPage: React.FC = () => {
   const [allRequestsLoading, setAllRequestsLoading] = useState(false);
   const [dbRecords, setDbRecords] = useState<any[]>([]);
   const [syncLoading, setSyncLoading] = useState(false);
+  const [syncProgress, setSyncProgress] = useState<{ done: number; total: number } | null>(null);
   const [searchText, setSearchText] = useState('');
   const [modalOpen, setModalOpen] = useState(false);
   const [selectedQuota, setSelectedQuota] = useState<any>(null);
@@ -165,16 +166,39 @@ const QuotasPage: React.FC = () => {
     finally { setAllRequestsLoading(false); }
   };
 
-  // 同步 — 更新数据库记录状态
+  // 同步 — 流式同步，实时显示进度
   const handleSync = async () => {
     setSyncLoading(true);
+    setSyncProgress({ done: 0, total: 0 });
     try {
-      const ids = accounts.map(a => a.Id);
-      const res = await api.syncQuotaRequests(ids);
-      if (res.success) { setDbRecords(res.data); message.success(`已同步 ${res.data.length} 条记录`); }
-      else message.error(res.error);
-    } catch (e: any) { message.error(e.message); }
-    finally { setSyncLoading(false); }
+      api.startStreamSync(
+        // onProgress
+        (data) => {
+          setSyncProgress({ done: data.done || 0, total: data.total || 0 });
+          // Refresh DB records periodically as data comes in
+          if (data.done && data.done % 10 === 0) {
+            api.listQuotaRequests().then(res => { if (res.success) setDbRecords(res.data); });
+          }
+        },
+        // onDone
+        (data) => {
+          setSyncLoading(false);
+          setSyncProgress(null);
+          api.listQuotaRequests().then(res => { if (res.success) setDbRecords(res.data); });
+          message.success(`同步完成，共 ${data.total} 条记录`);
+        },
+        // onError
+        (err) => {
+          setSyncLoading(false);
+          setSyncProgress(null);
+          message.error(err.message || '同步失败');
+        }
+      );
+    } catch (e: any) {
+      setSyncLoading(false);
+      setSyncProgress(null);
+      message.error(e.message);
+    }
   };
 
   const handleIncrease = async () => {
@@ -334,10 +358,14 @@ const QuotasPage: React.FC = () => {
           children: (
             <>
               <Space style={{ marginBottom: 12 }}>
-                <Button onClick={fetchAllRequests} loading={allRequestsLoading} type="primary" icon={<ReloadOutlined />}>查询所有账户的提升请求</Button>
-                <span style={{ fontSize: 12, color: 'rgba(0,0,0,0.45)' }}>将查询 {accounts.length} 个账户的历史记录</span>
+                <Button onClick={handleSync} loading={allRequestsLoading || syncLoading} type="primary" icon={<ReloadOutlined />}>
+                  {syncLoading && syncProgress ? `查询中 ${syncProgress.done}/${syncProgress.total}` : '查询所有账户的提升请求'}
+                </Button>
+                <span style={{ fontSize: 12, color: 'rgba(0,0,0,0.45)' }}>
+                  {syncLoading ? `正在查询...` : `将查询 ${accounts.length} 个账户的历史记录`}
+                </span>
               </Space>
-              <Table size="small" dataSource={allRequests} rowKey="id" columns={getRequestColumns(allRequests)} scroll={{ x: 900 }} loading={allRequestsLoading}
+              <Table size="small" dataSource={dbRecords} rowKey="id" columns={getRequestColumns(dbRecords)} scroll={{ x: 900 }} loading={allRequestsLoading && dbRecords.length === 0}
                 pagination={{ pageSize: 15, showTotal: t => `共 ${t} 条` }} />
             </>
           ),
@@ -347,10 +375,16 @@ const QuotasPage: React.FC = () => {
           children: (
             <>
               <Space style={{ marginBottom: 12 }}>
-                <Button onClick={handleSync} loading={syncLoading} icon={<ReloadOutlined />}>同步最新状态</Button>
-                <span style={{ fontSize: 12, color: 'rgba(0,0,0,0.45)' }}>从 AWS 拉取最新状态并更新记录</span>
+                <Button onClick={handleSync} loading={syncLoading} icon={<ReloadOutlined />}>
+                  {syncLoading && syncProgress ? `同步中 ${syncProgress.done}/${syncProgress.total}` : '同步最新状态'}
+                </Button>
+                <span style={{ fontSize: 12, color: 'rgba(0,0,0,0.45)' }}>
+                  {syncLoading && syncProgress
+                    ? `正在查询第 ${syncProgress.done}/${syncProgress.total} 个账户...`
+                    : '从 AWS 拉取最新状态并更新记录'}
+                </span>
               </Space>
-              <Table size="small" dataSource={dbRecords} rowKey="id" columns={getRequestColumns(dbRecords)} scroll={{ x: 900 }} loading={syncLoading}
+              <Table size="small" dataSource={dbRecords} rowKey="id" columns={getRequestColumns(dbRecords)} scroll={{ x: 900 }} loading={syncLoading && dbRecords.length === 0}
                 pagination={{ pageSize: 15, showTotal: t => `共 ${t} 条记录`, showSizeChanger: true }} />
             </>
           ),

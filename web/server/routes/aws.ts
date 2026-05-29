@@ -93,20 +93,31 @@ awsRouter.get('/quotas/requests', async (_req: Request, res: Response) => {
   } catch (e: any) { res.status(500).json({ error: e.message }); }
 });
 
-// Sync quota requests from AWS — queries all accounts across all regions
-awsRouter.post('/quotas/sync', async (req: Request, res: Response) => {
-  try {
-    // Get all accounts from the payer mapping (already loaded)
-    let { accountIds } = req.body;
-    
-    // If no accountIds provided or too few, get all from listAccounts
-    if (!accountIds || accountIds.length < 50) {
-      const allAccounts = await aws.listAccounts();
-      accountIds = allAccounts.map((a: any) => a.Id);
-    }
+// Sync status — check if a background sync is running
+let syncState = { running: false, total: 0, done: 0, startedAt: '' };
 
-    // Process in batches of 10 (parallel within batch)
-    const batchSize = 10;
+awsRouter.get('/quotas/sync-status', async (_req: Request, res: Response) => {
+  res.json({ success: true, data: syncState });
+});
+
+// Sync quota requests — SSE streaming (data arrives as each account completes)
+awsRouter.get('/quotas/sync-stream', async (req: Request, res: Response) => {
+  // SSE headers
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.flushHeaders();
+
+  try {
+    const allAccounts = await aws.listAccounts();
+    const accountIds = allAccounts.map((a: any) => a.Id);
+    const total = accountIds.length;
+
+    syncState = { running: true, total, done: 0, startedAt: new Date().toISOString() };
+    res.write(`data: ${JSON.stringify({ type: 'start', total })}\n\n`);
+
+    // Process in batches of 5 to avoid throttling
+    const batchSize = 5;
     for (let i = 0; i < accountIds.length; i += batchSize) {
       const batch = accountIds.slice(i, i + batchSize);
       const results = await Promise.allSettled(batch.map(async (accountId: string) => {
@@ -127,8 +138,65 @@ awsRouter.post('/quotas/sync', async (req: Request, res: Response) => {
               created_at: r.Created ? new Date(r.Created).toISOString() : undefined,
             });
           }
-          return requests.length;
-        } catch { return 0; }
+          return { accountId, count: requests.length };
+        } catch { return { accountId, count: 0 }; }
+      }));
+
+      // Send progress update
+      syncState.done = Math.min(i + batchSize, total);
+      const batchResults = results.map(r => r.status === 'fulfilled' ? r.value : { accountId: '', count: 0 });
+      res.write(`data: ${JSON.stringify({ type: 'progress', done: syncState.done, total, batch: batchResults })}\n\n`);
+    }
+
+    syncState = { running: false, total, done: total, startedAt: syncState.startedAt };
+    const allRecords = db.getQuotaRequests();
+    res.write(`data: ${JSON.stringify({ type: 'done', total: allRecords.length })}\n\n`);
+    res.end();
+  } catch (e: any) {
+    syncState.running = false;
+    res.write(`data: ${JSON.stringify({ type: 'error', message: e.message })}\n\n`);
+    res.end();
+  }
+});
+
+// Legacy sync endpoint (for backward compat / small account lists)
+awsRouter.post('/quotas/sync', async (req: Request, res: Response) => {
+  try {
+    let { accountIds } = req.body;
+    
+    if (!accountIds || accountIds.length === 0) {
+      const allAccounts = await aws.listAccounts();
+      accountIds = allAccounts.map((a: any) => a.Id);
+    }
+
+    // If large set, return DB data immediately and suggest streaming
+    if (accountIds.length > 20) {
+      return res.json({ success: true, data: db.getQuotaRequests(), message: 'Use /quotas/sync-stream for large sync' });
+    }
+
+    // Small set — sync directly
+    const batchSize = 5;
+    for (let i = 0; i < accountIds.length; i += batchSize) {
+      const batch = accountIds.slice(i, i + batchSize);
+      await Promise.allSettled(batch.map(async (accountId: string) => {
+        try {
+          const requests = await aws.listQuotaRequests(accountId);
+          for (const r of requests) {
+            db.upsertQuotaRequest({
+              id: r.Id,
+              account_id: accountId,
+              service_code: r.ServiceCode,
+              quota_code: r.QuotaCode,
+              quota_name: r.QuotaName,
+              desired_value: r.DesiredValue,
+              current_value: r._currentValue,
+              status: r.Status,
+              case_id: r.CaseId || null,
+              region: r.QuotaArn ? r.QuotaArn.split(':')[3] : (r._region || 'us-east-1'),
+              created_at: r.Created ? new Date(r.Created).toISOString() : undefined,
+            });
+          }
+        } catch {}
       }));
     }
 

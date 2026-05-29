@@ -185,9 +185,11 @@ authRouter.post('/users/:id/reset-password', (req: Request, res: Response) => {
 // Auth middleware
 export function authMiddleware(req: Request, res: Response, next: NextFunction) {
   const authHeader = req.headers.authorization;
-  if (!authHeader?.startsWith('Bearer ')) return res.status(401).json({ error: 'Unauthorized' });
+  // Support token via query param (for SSE/EventSource which can't set headers)
+  const token = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : (req.query.token as string);
+  if (!token) return res.status(401).json({ error: 'Unauthorized' });
   try {
-    const decoded = jwt.verify(authHeader.slice(7), JWT_SECRET) as any;
+    const decoded = jwt.verify(token, JWT_SECRET) as any;
     (req as any).user = decoded;
     next();
   } catch { return res.status(401).json({ error: 'Token expired' }); }
