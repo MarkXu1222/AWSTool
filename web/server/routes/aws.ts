@@ -121,8 +121,8 @@ awsRouter.get('/quotas/sync-stream', async (req: Request, res: Response) => {
     res.write(`data: ${JSON.stringify({ type: 'start', total })}\n\n`);
     if (typeof (res as any).flush === 'function') (res as any).flush();
 
-    // Process in batches of 5 to avoid throttling
-    const batchSize = 5;
+    // Process in batches of 15 (parallel within batch, no enrichment = fast)
+    const batchSize = 15;
     for (let i = 0; i < accountIds.length; i += batchSize) {
       const batch = accountIds.slice(i, i + batchSize);
       const results = await Promise.allSettled(batch.map(async (accountId: string) => {

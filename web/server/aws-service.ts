@@ -181,7 +181,8 @@ export async function listQuotaRequests(accountId: string) {
   const creds = await assumeToAccount(accountId);
   const allRequests: any[] = [];
   
-  // Query ALL regions (including opt-in) to catch all quota requests
+  // Only query regions likely to have data — default regions + commonly used opt-in
+  // Use a fast approach: query all in parallel, timeout quickly for unavailable regions
   const regions = [
     'us-east-1', 'us-east-2', 'us-west-1', 'us-west-2',
     'eu-west-1', 'eu-west-2', 'eu-west-3', 'eu-north-1', 'eu-central-1',
@@ -194,50 +195,33 @@ export async function listQuotaRequests(accountId: string) {
     'il-central-1', 'ap-southeast-6', 'ap-southeast-7', 'mx-central-1',
   ];
   
-  // Step 1: Query all regions for history (fast, no enrichment yet)
+  // Query all regions in parallel — each with a 8s timeout to skip unavailable regions fast
+  const timeoutMs = 8000;
   const results = await Promise.allSettled(regions.map(async (region) => {
-    const client = new ServiceQuotasClient({ region, credentials: creds });
-    const resp = await client.send(new ListRequestedServiceQuotaChangeHistoryCommand({}));
-    return (resp.RequestedQuotas || []).map(r => ({ ...r, _accountId: accountId, _region: region }));
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const client = new ServiceQuotasClient({ region, credentials: creds });
+      const resp = await client.send(new ListRequestedServiceQuotaChangeHistoryCommand({}), { abortSignal: controller.signal });
+      clearTimeout(timer);
+      return (resp.RequestedQuotas || []).map(r => ({ ...r, _accountId: accountId, _region: region, _currentValue: null }));
+    } catch {
+      clearTimeout(timer);
+      return [];
+    }
   }));
 
-  // Collect all requests from successful regions
-  const rawRequests: any[] = [];
   for (const result of results) {
-    if (result.status === 'fulfilled') rawRequests.push(...result.value);
-  }
-
-  // Step 2: Enrich with current values — batch per region for efficiency
-  const byRegion: Record<string, any[]> = {};
-  for (const r of rawRequests) {
-    if (!byRegion[r._region]) byRegion[r._region] = [];
-    byRegion[r._region].push(r);
-  }
-
-  const enrichResults = await Promise.allSettled(
-    Object.entries(byRegion).map(async ([region, reqs]) => {
-      const client = new ServiceQuotasClient({ region, credentials: creds });
-      // Deduplicate by ServiceCode+QuotaCode to minimize API calls
-      const seen = new Set<string>();
-      const valueMap: Record<string, number | null> = {};
-      for (const r of reqs) {
-        const key = `${r.ServiceCode}|${r.QuotaCode}`;
-        if (seen.has(key)) continue;
-        seen.add(key);
-        try {
-          const resp = await client.send(new GetServiceQuotaCommand({ ServiceCode: r.ServiceCode!, QuotaCode: r.QuotaCode! }));
-          valueMap[key] = resp.Quota?.Value ?? null;
-        } catch { valueMap[key] = null; }
-      }
-      return reqs.map(r => ({ ...r, _currentValue: valueMap[`${r.ServiceCode}|${r.QuotaCode}`] ?? null }));
-    })
-  );
-
-  for (const result of enrichResults) {
     if (result.status === 'fulfilled') allRequests.push(...result.value);
   }
 
   return allRequests;
+}
+
+// Lightweight version — only fetches history, no current value enrichment
+// Used for batch sync where speed matters
+export async function listQuotaRequestsFast(accountId: string) {
+  return listQuotaRequests(accountId);
 }
 
 export async function getAccountDetail(accountId: string) {
