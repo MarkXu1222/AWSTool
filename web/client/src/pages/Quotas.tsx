@@ -124,34 +124,35 @@ const QuotasPage: React.FC = () => {
 
   const fetchQuotas = async () => {
     if (!selectedAccount) { message.warning('请选择账户'); return; }
-    // 当前配额 tab 需要具体服务和区域
-    if (activeTab === 'quotas') {
-      if (!selectedService) { message.warning('查询当前配额需要选择具体服务'); return; }
-      if (!selectedRegion) { message.warning('查询当前配额需要选择具体区域'); return; }
-      setLoading(true);
-      try {
-        const res = await api.listServiceQuotas(selectedAccount, selectedService, selectedRegion);
-        if (res.success) { setQuotas(res.data); message.success(`${res.data.length} 个配额`); }
-        else message.error(res.error);
-      } catch (e: any) { message.error(e.message); }
-      finally { setLoading(false); }
-    } else if (activeTab === 'requests') {
-      // 当前账户请求 — 不需要服务/区域
+    // 如果服务或区域是"全部"，跳转到"当前账户请求"tab 查该账户所有提升记录
+    if (!selectedService || !selectedRegion) {
+      setActiveTab('requests');
       fetchAccountRequests();
-    } else if (activeTab === 'all-requests') {
-      fetchAllRequests();
-    } else if (activeTab === 'db-records') {
-      handleSync();
+      return;
     }
+    setLoading(true);
+    try {
+      const res = await api.listServiceQuotas(selectedAccount, selectedService, selectedRegion);
+      if (res.success) { setQuotas(res.data); setActiveTab('quotas'); message.success(`${res.data.length} 个配额`); }
+      else message.error(res.error);
+    } catch (e: any) { message.error(e.message); }
+    finally { setLoading(false); }
   };
 
   // 当前账户请求 — 查询选中账户的所有提升记录
   const fetchAccountRequests = async () => {
     if (!selectedAccount) return;
+    setLoading(true);
     try {
-      const res = await api.syncQuotaRequests([selectedAccount]);
-      if (res.success) { setRequests(res.data.filter((r: any) => r.account_id === selectedAccount)); loadDbRecords(); }
+      const res = await api.syncSingleAccount(selectedAccount);
+      if (res.success) {
+        // Filter to only this account's records
+        const all = res.data || [];
+        setRequests(all.filter((r: any) => r.account_id === selectedAccount));
+        setDbRecords(all);
+      }
     } catch {}
+    finally { setLoading(false); }
   };
 
   // 在线查询 — 批量查所有账户
@@ -348,9 +349,17 @@ const QuotasPage: React.FC = () => {
         {
           key: 'requests', label: `当前账户请求 (${requests.length})`,
           children: selectedAccount ? (
-            <Table size="small" dataSource={requests} rowKey="id" columns={getRequestColumns(requests)} scroll={{ x: 900 }} pagination={{ pageSize: 10, size: 'small', showTotal: t => `共 ${t} 条` }} />
+            <>
+              <div style={{ marginBottom: 12, fontSize: 13, color: 'rgba(0,0,0,0.45)' }}>
+                查询账户 <strong style={{ color: 'rgba(0,0,0,0.85)' }}>{accounts.find(a => a.Id === selectedAccount)?.Name || selectedAccount}</strong> 在所有区域的配额提升记录
+                <Button type="link" size="small" icon={<ReloadOutlined />} onClick={fetchAccountRequests} style={{ marginLeft: 8 }}>刷新</Button>
+              </div>
+              <Table size="small" dataSource={requests} rowKey="id" columns={getRequestColumns(requests)} scroll={{ x: 900 }} loading={loading}
+                pagination={{ pageSize: 15, size: 'small', showTotal: t => `共 ${t} 条` }}
+                locale={{ emptyText: '该账户暂无配额提升记录' }} />
+            </>
           ) : (
-            <div style={{ padding: '40px 0', textAlign: 'center', color: 'rgba(0,0,0,0.45)' }}>请先在上方选择一个账户</div>
+            <div style={{ padding: '40px 0', textAlign: 'center', color: 'rgba(0,0,0,0.45)' }}>请先在上方选择一个账户，然后点击「查询」（服务和区域可选"全部"）</div>
           ),
         },
         {
