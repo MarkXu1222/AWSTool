@@ -91,7 +91,7 @@ regionsRouter.post('/enable', async (req: Request, res: Response) => {
     const { accountId, region } = req.body;
     await enableRegion(accountId, region);
     const user = (req as any).user;
-    db.addAuditLog(user?.userId, 'REGION_ENABLE', `${accountId} 启用区域 ${region}`, user?.username);
+    db.addAuditLog(user?.userId, 'REGION_ENABLE', `${accountId} 启用区域 ${region}`, user?.username, req.ip);
     // Update cached status
     db.upsertRegionData(accountId, [{ region, status: 'ENABLING' }]);
     res.json({ success: true, message: `${region} 启用中` });
@@ -115,7 +115,7 @@ regionsRouter.post('/enable-batch', async (req: Request, res: Response) => {
       }
     }
 
-    db.addAuditLog(user?.userId, 'REGION_BATCH_ENABLE', `批量启用 ${region} (${accountIds.length} 账户)`, user?.username);
+    db.addAuditLog(user?.userId, 'REGION_BATCH_ENABLE', `批量启用 ${region} (${accountIds.length} 账户)`, user?.username, req.ip);
     res.json({ success: true, data: results });
   } catch (e: any) { res.status(500).json({ error: e.message }); }
 });

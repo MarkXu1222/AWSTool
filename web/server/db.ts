@@ -136,9 +136,10 @@ export const db = {
   },
 
   // Audit log
-  addAuditLog(userId: number | null, action: string, detail: string, username?: string) {
+  addAuditLog(userId: number | null, action: string, detail: string, username?: string, ip?: string) {
     const data = readDB();
-    data.audit_log.push({ id: Date.now(), user_id: userId, username: username || null, action, detail, created_at: new Date().toISOString() });
+    const cleanIp = ip ? ip.replace('::ffff:', '') : null;
+    data.audit_log.push({ id: Date.now(), user_id: userId, username: username || null, action, detail, ip: cleanIp, created_at: new Date().toISOString() });
     if (data.audit_log.length > 500) data.audit_log = data.audit_log.slice(-500);
     writeDB(data);
   },

@@ -11,6 +11,7 @@ const actionColors: Record<string, string> = {
   USER_CREATE: 'purple',
   USER_DELETE: 'red',
   REGION_ENABLE: 'cyan',
+  REGION_BATCH_ENABLE: 'cyan',
   REGION_DISABLE: 'default',
   MFA_SETUP: 'green',
   LOGOUT: 'default',
@@ -23,6 +24,7 @@ const actionLabels: Record<string, string> = {
   USER_CREATE: '创建用户',
   USER_DELETE: '删除用户',
   REGION_ENABLE: '启用区域',
+  REGION_BATCH_ENABLE: '批量启用区域',
   REGION_DISABLE: '禁用区域',
   MFA_SETUP: '启用MFA',
   LOGOUT: '登出',
@@ -73,6 +75,11 @@ const AuditLogPage: React.FC = () => {
             onFilter: (value: any, record: any) => record.action === value,
             render: (a: string) => <Tag color={actionColors[a] || 'default'}>{actionLabels[a] || a}</Tag> },
           { title: '详情', dataIndex: 'detail', ellipsis: { showTitle: true }, render: (d: string) => <span style={{ fontSize: 12 }}>{cleanIP(d)}</span> },
+          { title: 'IP', dataIndex: 'ip', width: 130, render: (ip: string, record: any) => {
+            // Fallback: extract from detail if ip field missing
+            const val = ip || (record.detail?.match(/IP:\s*(.+)/)?.[1] || '').replace('::ffff:', '');
+            return val ? <code style={{ fontSize: 11 }}>{val}</code> : '-';
+          }},
         ]}
       />
       </Card>
