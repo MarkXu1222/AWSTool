@@ -103,7 +103,7 @@ awsRouter.post('/quotas/increase', requireAdmin, async (req: Request, res: Respo
       case_id: (result as any)?.CaseId || null,
       created_at: new Date().toISOString(),
     });
-    db.addAuditLog(user?.userId, 'QUOTA_INCREASE', `${accountId} ${serviceCode} ${quotaCode} ${targetRegion} → ${desiredValue}`, user?.username, req.ip);
+    db.addAuditLog(user?.userId, 'QUOTA_INCREASE', `账户 ${accountId} | ${quotaName || quotaCode} | ${serviceCode} | ${targetRegion} | 提升至 ${desiredValue}`, user?.username, req.ip);
 
     res.json({ success: true, data: result });
   } catch (e: any) { res.status(500).json({ error: e.message }); }
