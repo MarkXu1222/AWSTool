@@ -5,3 +5,4 @@ dist/
 .env
 config.json
 提额文档/
+data/db.json
