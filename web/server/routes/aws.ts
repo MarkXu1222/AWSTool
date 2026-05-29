@@ -158,13 +158,17 @@ awsRouter.get('/quotas/sync-stream', async (req: Request, res: Response) => {
     res.write(`data: ${JSON.stringify({ type: 'start', total })}\n\n`);
     if (typeof (res as any).flush === 'function') (res as any).flush();
 
-    // Process in batches of 15 (parallel within batch, no enrichment = fast)
-    const batchSize = 15;
+    // Process in batches of 15 (parallel within batch, with enrichment)
+    const batchSize = 10;
     for (let i = 0; i < accountIds.length; i += batchSize) {
       const batch = accountIds.slice(i, i + batchSize);
       const results = await Promise.allSettled(batch.map(async (accountId: string) => {
         try {
-          const requests = await aws.listQuotaRequests(accountId);
+          let requests = await aws.listQuotaRequests(accountId);
+          // Enrich with current values
+          if (requests.length > 0) {
+            requests = await aws.enrichCurrentValues(accountId, requests);
+          }
           for (const r of requests) {
             db.upsertQuotaRequest({
               id: r.Id,
@@ -217,13 +221,16 @@ awsRouter.post('/quotas/sync', async (req: Request, res: Response) => {
       return res.json({ success: true, data: db.getQuotaRequests(), message: 'Use /quotas/sync-stream for large sync' });
     }
 
-    // Small set — sync directly
+    // Small set — sync directly with enrichment
     const batchSize = 5;
     for (let i = 0; i < accountIds.length; i += batchSize) {
       const batch = accountIds.slice(i, i + batchSize);
       await Promise.allSettled(batch.map(async (accountId: string) => {
         try {
-          const requests = await aws.listQuotaRequests(accountId);
+          let requests = await aws.listQuotaRequests(accountId);
+          if (requests.length > 0) {
+            requests = await aws.enrichCurrentValues(accountId, requests);
+          }
           for (const r of requests) {
             db.upsertQuotaRequest({
               id: r.Id,
