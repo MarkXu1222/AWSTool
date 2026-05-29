@@ -60,7 +60,7 @@ const SERVICES = [
 
 const REGIONS = [
   { label: '全部区域', value: '' },
-  // 默认区域 (始终可用)
+  // 默认区域
   { label: 'us-east-1 (弗吉尼亚)', value: 'us-east-1' },
   { label: 'us-east-2 (俄亥俄)', value: 'us-east-2' },
   { label: 'us-west-1 (加州)', value: 'us-west-1' },
@@ -78,16 +78,15 @@ const REGIONS = [
   { label: 'ap-south-1 (孟买)', value: 'ap-south-1' },
   { label: 'sa-east-1 (圣保罗)', value: 'sa-east-1' },
   { label: 'ca-central-1 (加拿大)', value: 'ca-central-1' },
-  // Opt-in 区域 (需手动开通)
+  // Opt-in 区域
   { label: 'af-south-1 (开普敦)', value: 'af-south-1' },
   { label: 'ap-east-1 (香港)', value: 'ap-east-1' },
-  { label: 'ap-east-2 (马来西亚)', value: 'ap-east-2' },
   { label: 'ap-south-2 (海得拉巴)', value: 'ap-south-2' },
   { label: 'ap-southeast-3 (雅加达)', value: 'ap-southeast-3' },
   { label: 'ap-southeast-4 (墨尔本)', value: 'ap-southeast-4' },
-  { label: 'ap-southeast-5 (奥克兰)', value: 'ap-southeast-5' },
-  { label: 'ap-southeast-6 (曼谷)', value: 'ap-southeast-6' },
-  { label: 'ap-southeast-7 (马尼拉)', value: 'ap-southeast-7' },
+  { label: 'ap-southeast-5 (马来西亚)', value: 'ap-southeast-5' },
+  { label: 'ap-southeast-6 (新西兰)', value: 'ap-southeast-6' },
+  { label: 'ap-southeast-7 (泰国)', value: 'ap-southeast-7' },
   { label: 'ca-west-1 (卡尔加里)', value: 'ca-west-1' },
   { label: 'eu-central-2 (苏黎世)', value: 'eu-central-2' },
   { label: 'eu-south-1 (米兰)', value: 'eu-south-1' },
@@ -292,7 +291,7 @@ const QuotasPage: React.FC = () => {
             return Object.entries(grouped).map(([payer, accts]) => ({ label: payer, options: accts.map(a => ({ label: `${a.Name} (${a.Id})`, value: a.Id })) }));
           })()} />
         <Select style={{ width: 180 }} value={selectedService} onChange={setSelectedService} showSearch optionFilterProp="label" options={SERVICES} size="small" />
-        <Select style={{ width: 160 }} value={selectedRegion} onChange={setSelectedRegion} options={REGIONS} size="small" />
+        <Select style={{ width: 220 }} value={selectedRegion} onChange={setSelectedRegion} options={REGIONS} size="small" showSearch optionFilterProp="label" />
         <Button type="primary" onClick={fetchQuotas} loading={loading} icon={<ReloadOutlined />} size="small">查询</Button>
         <Button size="small" onClick={() => { setSelectedAccount(''); setSelectedService('ec2'); setSelectedRegion('us-east-1'); setQuotas([]); }}>重置</Button>
       </div>
