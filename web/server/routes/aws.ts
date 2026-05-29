@@ -114,6 +114,24 @@ export async function refreshDashboardCache() {
 }
 
 
+// Federated console sign-in URL — open a child account's console (e.g. Support case) without login
+awsRouter.get('/console-url/:accountId', async (req: Request, res: Response) => {
+  try {
+    const { accountId } = req.params;
+    const { caseId, destination } = req.query;
+    // Default destination: Support case page (or custom)
+    let dest = destination as string;
+    if (!dest && caseId) {
+      dest = `https://support.console.aws.amazon.com/support/home#/case/?displayId=${caseId}`;
+    }
+    if (!dest) {
+      dest = 'https://console.aws.amazon.com/';
+    }
+    const url = await aws.getConsoleSigninUrl(accountId, dest);
+    res.json({ success: true, url });
+  } catch (e: any) { res.status(500).json({ error: e.message }); }
+});
+
 // Billing by service
 awsRouter.get('/billing/by-service/:accountId', async (req: Request, res: Response) => {
   try {

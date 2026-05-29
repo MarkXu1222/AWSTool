@@ -232,62 +232,105 @@ const QuotasPage: React.FC = () => {
   };
 
   // 通用请求记录列定义 — 全部可筛选
-  const getRequestColumns = (data: any[]) => [
-    {
-      title: '账户', dataIndex: 'account_id', width: 120,
-      filters: getUniqueFilters(data, 'account_id'),
-      onFilter: (value: any, record: any) => record.account_id === value,
-      filterSearch: true,
-      render: (id: string) => { const a = accounts.find(x => x.Id === id); return <span style={{ fontSize: 12 }}><code>{id}</code>{a ? <><br/><strong>{a.Name}</strong></> : ''}</span>; },
-    },
-    {
-      title: '配额', dataIndex: 'quota_name', ellipsis: true, width: 200,
-      filterSearch: true,
-      filters: getUniqueFilters(data, 'quota_name'),
-      onFilter: (value: any, record: any) => record.quota_name === value,
-    },
-    {
-      title: '服务', dataIndex: 'service_code', width: 70,
-      filters: getUniqueFilters(data, 'service_code'),
-      onFilter: (value: any, record: any) => record.service_code === value,
-    },
-    {
-      title: '区域', dataIndex: 'region', width: 110,
-      filters: getUniqueFilters(data, 'region'),
-      onFilter: (value: any, record: any) => (record.region || 'us-east-1') === value,
-      render: (r: string) => r || 'us-east-1',
-    },
-    { title: '当前', dataIndex: 'current_value', width: 55, render: (v: any) => v != null ? v : '-' },
-    { title: '期望', dataIndex: 'desired_value', width: 55, render: (v: number, record: any) => { const done = record.current_value != null && record.current_value >= v; return <strong style={{ color: done ? '#52c41a' : undefined }}>{v}{done ? ' ✓' : ''}</strong>; } },
-    {
-      title: '状态', dataIndex: 'status', width: 100,
-      filters: [
-        { text: 'PENDING', value: 'PENDING' },
-        { text: 'APPROVED', value: 'APPROVED' },
-        { text: 'DENIED', value: 'DENIED' },
-        { text: 'CASE_OPENED', value: 'CASE_OPENED' },
-        { text: 'CASE_CLOSED', value: 'CASE_CLOSED' },
-      ],
-      onFilter: (value: any, record: any) => record.status === value,
-      render: (s: string) => { const c: Record<string, string> = { PENDING: 'orange', CASE_OPENED: 'blue', APPROVED: 'green', DENIED: 'red', CASE_CLOSED: 'default' }; return <Tag color={c[s] || 'default'}>{s}</Tag>; },
-    },
-    { title: 'Case ID', dataIndex: 'case_id', width: 100, render: (id: string) => id ? <code style={{ fontSize: 11 }}>{id}</code> : '-' },
-    {
-      title: '创建时间', dataIndex: 'created_at', width: 105,
-      sorter: (a: any, b: any) => new Date(a.created_at || 0).getTime() - new Date(b.created_at || 0).getTime(),
-      defaultSortOrder: 'descend' as const,
-      render: (d: string, record: any) => {
-        if (!d) return '-';
-        const date = new Date(d);
-        const daysAgo = Math.floor((Date.now() - date.getTime()) / (1000*60*60*24));
-        const isPending = record.status === 'PENDING' || record.status === 'CASE_OPENED';
-        const isOverdue = isPending && daysAgo > 7;
-        return <span style={{ fontSize: 11, color: isOverdue ? '#ff4d4f' : undefined }}>{date.toLocaleDateString('zh-CN')}{isOverdue ? ' ⚠️' : ''}</span>;
+  const getRequestColumns = (data: any[]) => {
+    const allColumns: any[] = [
+      {
+        title: '账户', dataIndex: 'account_id', width: 100,
+        filters: getUniqueFilters(data, 'account_id'),
+        onFilter: (value: any, record: any) => record.account_id === value,
+        filterSearch: true,
+        render: (id: string) => { const a = accounts.find(x => x.Id === id); return <span style={{ fontSize: 11 }}>{a ? <><strong>{a.Name}</strong><br/></> : ''}<code style={{ fontSize: 10, color: 'rgba(0,0,0,0.45)' }}>{id}</code></span>; },
       },
-    },
-    {
-      title: '', key: 'refresh', width: 40,
-      render: (_: any, record: any) => (
+      {
+        title: '配额', dataIndex: 'quota_name', width: 160,
+        filterSearch: true,
+        filters: getUniqueFilters(data, 'quota_name'),
+        onFilter: (value: any, record: any) => record.quota_name === value,
+        ellipsis: { showTitle: true },
+        render: (name: string) => window.innerWidth < 769
+          ? <span style={{ fontSize: 11, cursor: 'pointer' }} onClick={() => Modal.info({ title: '配额名称', content: name })}>{name}</span>
+          : <span style={{ fontSize: 12 }}>{name}</span>,
+      },
+      {
+        title: '服务', dataIndex: 'service_code', width: 55,
+        filters: getUniqueFilters(data, 'service_code'),
+        onFilter: (value: any, record: any) => record.service_code === value,
+        render: (s: string) => <span style={{ fontSize: 11 }}>{s}</span>,
+      },
+      {
+        title: '区域', dataIndex: 'region', width: 100,
+        filters: getUniqueFilters(data, 'region'),
+        onFilter: (value: any, record: any) => (record.region || 'us-east-1') === value,
+        render: (r: string) => <span style={{ fontSize: 11 }}>{r || 'us-east-1'}</span>,
+      },
+      {
+        title: '期望', dataIndex: 'desired_value', width: 50,
+        render: (v: number, record: any) => {
+          const done = record.current_value != null && record.current_value >= v;
+          return <strong style={{ color: done ? '#52c41a' : undefined, fontSize: 12 }}>{v}{done ? ' ✓' : ''}</strong>;
+        },
+      },
+      {
+        title: '状态', dataIndex: 'status', width: 95,
+        filters: [
+          { text: 'CASE_OPENED', value: 'CASE_OPENED' },
+          { text: 'APPROVED', value: 'APPROVED' },
+          { text: 'CASE_CLOSED', value: 'CASE_CLOSED' },
+          { text: 'PENDING', value: 'PENDING' },
+          { text: 'DENIED', value: 'DENIED' },
+        ],
+        onFilter: (value: any, record: any) => record.status === value,
+        render: (s: string) => { const c: Record<string, string> = { PENDING: 'orange', CASE_OPENED: 'blue', APPROVED: 'green', DENIED: 'red', CASE_CLOSED: 'default' }; return <Tag color={c[s] || 'default'} style={{ fontSize: 10, margin: 0 }}>{s}</Tag>; },
+      },
+      {
+        title: 'Case', dataIndex: 'case_id', width: 90,
+        render: (id: string, record: any) => {
+          if (!id) return '-';
+          const openConsole = async () => {
+            const hide = message.loading('正在生成免登录链接...', 0);
+            try {
+              const res = await api.getConsoleUrl(record.account_id, id);
+              hide();
+              if (res.success && res.url) {
+                window.open(res.url, '_blank');
+              } else {
+                message.error(res.error || '生成链接失败');
+              }
+            } catch (e: any) { hide(); message.error(e.message); }
+          };
+          if (window.innerWidth < 769) {
+            return <code style={{ fontSize: 9, cursor: 'pointer', color: '#1890ff' }} onClick={() => Modal.info({
+              title: 'Case ID',
+              content: (
+                <div>
+                  <code style={{ fontSize: 13, wordBreak: 'break-all' }}>{id}</code>
+                  <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
+                    <Button size="small" type="primary" onClick={openConsole}>免登录打开 Case</Button>
+                    <Button size="small" onClick={() => { navigator.clipboard.writeText(id); message.success('已复制'); }}>复制</Button>
+                  </div>
+                </div>
+              ),
+            })}>{id.slice(-6)}</code>;
+          }
+          return <a onClick={openConsole} style={{ fontSize: 11, fontFamily: 'monospace', cursor: 'pointer' }} title="点击免登录打开该账户的 Support Case">{id}</a>;
+        },
+      },
+      {
+        title: '时间', dataIndex: 'created_at', width: 80,
+        sorter: (a: any, b: any) => new Date(a.created_at || 0).getTime() - new Date(b.created_at || 0).getTime(),
+        defaultSortOrder: 'descend' as const,
+        render: (d: string, record: any) => {
+          if (!d) return '-';
+          const date = new Date(d);
+          const daysAgo = Math.floor((Date.now() - date.getTime()) / (1000*60*60*24));
+          const isPending = record.status === 'PENDING' || record.status === 'CASE_OPENED';
+          const isOverdue = isPending && daysAgo > 7;
+          return <span style={{ fontSize: 10, color: isOverdue ? '#ff4d4f' : undefined }}>{date.toLocaleDateString('zh-CN')}{isOverdue ? ' ⚠️' : ''}</span>;
+        },
+      },
+      {
+        title: '', key: 'refresh', width: 36,
+        render: (_: any, record: any) => (
         <Button type="link" size="small" icon={<ReloadOutlined />} onClick={async (e) => {
           e.stopPropagation();
           try { const res = await api.syncSingleAccount(record.account_id); if (res.success) { setDbRecords(res.data || []); message.success('已刷新'); } } catch {}
@@ -295,8 +338,8 @@ const QuotasPage: React.FC = () => {
       ),
     },
   ];
-
-  return (
+  return allColumns;
+  };  return (
     <div>
       {/* 页面标题区 */}
       <div className="page-header">

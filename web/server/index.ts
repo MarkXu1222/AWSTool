@@ -31,7 +31,17 @@ migrateEncryptMFASecrets();
 // Security — CSP relaxed for SPA (inline scripts from Vite build)
 app.use(helmet({ contentSecurityPolicy: false }));
 app.use(cors({
-  origin: 'https://markxu.co',
+  origin: (origin, callback) => {
+    const allowed = [
+      'https://markxu.co',
+      'http://localhost:8000',
+      'http://localhost:8001',
+      'http://127.0.0.1:8000',
+    ];
+    // Allow requests with no origin (e.g. curl, mobile apps)
+    if (!origin || allowed.includes(origin)) return callback(null, true);
+    callback(new Error('Not allowed by CORS'));
+  },
   credentials: true,
 }));
 app.use(express.json());

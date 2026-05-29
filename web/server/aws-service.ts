@@ -344,4 +344,36 @@ export async function scanResources(accountId: string, region: string) {
   return resources;
 }
 
+/**
+ * Generate a federated AWS Console sign-in URL for a child account.
+ * Lets the user open the account's console (e.g. a Support case) without manual login.
+ * Uses STS federation — free, no Business plan required.
+ */
+export async function getConsoleSigninUrl(accountId: string, destinationUrl: string) {
+  // Get temporary credentials for the target account
+  const creds = await assumeToAccount(accountId);
+
+  // Step 1: Get a sign-in token from AWS federation endpoint
+  const sessionJson = JSON.stringify({
+    sessionId: creds.accessKeyId,
+    sessionKey: creds.secretAccessKey,
+    sessionToken: creds.sessionToken,
+  });
+
+  const getTokenUrl = `https://signin.aws.amazon.com/federation?Action=getSigninToken&Session=${encodeURIComponent(sessionJson)}`;
+  const tokenResp = await fetch(getTokenUrl);
+  if (!tokenResp.ok) {
+    throw new Error(`获取登录令牌失败: ${tokenResp.status}`);
+  }
+  const { SigninToken } = await tokenResp.json() as { SigninToken: string };
+
+  // Step 2: Build the login URL with the token + destination
+  const loginUrl = `https://signin.aws.amazon.com/federation?Action=login` +
+    `&Issuer=${encodeURIComponent('AWS-Toolbox')}` +
+    `&Destination=${encodeURIComponent(destinationUrl)}` +
+    `&SigninToken=${SigninToken}`;
+
+  return loginUrl;
+}
+
 export { PAYERS, DEFAULT_REGION, assumeToAccount };
