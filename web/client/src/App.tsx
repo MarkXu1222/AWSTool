@@ -2,11 +2,13 @@ import React, { useState, useEffect } from 'react';
 import { ConfigProvider, theme } from 'antd';
 import LoginPage from './pages/Login';
 import MainLayout from './components/MainLayout';
+import SetupMFA from './pages/SetupMFA';
 import ErrorBoundary from './components/ErrorBoundary';
 import { api } from './api';
 
 const App: React.FC = () => {
   const [authenticated, setAuthenticated] = useState(false);
+  const [mfaBound, setMfaBound] = useState(true); // 是否已绑定 MFA
   const [checking, setChecking] = useState(true);
 
   useEffect(() => {
@@ -37,24 +39,47 @@ const App: React.FC = () => {
     const token = localStorage.getItem('token');
     if (!token) { setChecking(false); return; }
     try {
-      await api.me();
+      const me = await api.me();
       setAuthenticated(true);
+      setMfaBound(!!me.mfaEnabled);
     } catch {
       localStorage.removeItem('token');
     }
     setChecking(false);
   };
 
+  // 登录成功回调：检查是否已绑定 MFA
+  const handleLoginSuccess = async () => {
+    setAuthenticated(true);
+    try {
+      const me = await api.me();
+      setMfaBound(!!me.mfaEnabled);
+    } catch { setMfaBound(true); }
+  };
+
+  const handleLogout = () => {
+    localStorage.removeItem('token');
+    setAuthenticated(false);
+    setMfaBound(true);
+  };
+
   if (checking) return null;
+
+  const renderContent = () => {
+    if (!authenticated) {
+      return <LoginPage onSuccess={handleLoginSuccess} />;
+    }
+    if (!mfaBound) {
+      // 已登录但未绑定 MFA — 强制绑定
+      return <SetupMFA onComplete={() => setMfaBound(true)} onLogout={handleLogout} />;
+    }
+    return <MainLayout onLogout={handleLogout} />;
+  };
 
   return (
     <ErrorBoundary>
-      <ConfigProvider theme={{ algorithm: theme.defaultAlgorithm, token: { colorPrimary: '#0071e3', borderRadius: 8, fontSize: 13 } }}>
-        {authenticated ? (
-          <MainLayout onLogout={() => { localStorage.removeItem('token'); setAuthenticated(false); }} />
-        ) : (
-          <LoginPage onSuccess={() => setAuthenticated(true)} />
-        )}
+      <ConfigProvider theme={{ algorithm: theme.defaultAlgorithm, token: { colorPrimary: '#1890ff', borderRadius: 4, fontSize: 13 } }}>
+        {renderContent()}
       </ConfigProvider>
     </ErrorBoundary>
   );

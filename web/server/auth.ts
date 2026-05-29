@@ -191,6 +191,11 @@ export function authMiddleware(req: Request, res: Response, next: NextFunction) 
   try {
     const decoded = jwt.verify(token, JWT_SECRET) as any;
     (req as any).user = decoded;
+    // 强制 MFA：未绑定 MFA 的用户不能访问受保护的业务接口
+    const user = db.getUser(decoded.username);
+    if (!user?.mfa_enabled) {
+      return res.status(403).json({ error: 'MFA_REQUIRED', message: '请先绑定 MFA 后再使用系统' });
+    }
     next();
   } catch { return res.status(401).json({ error: 'Token expired' }); }
 }
