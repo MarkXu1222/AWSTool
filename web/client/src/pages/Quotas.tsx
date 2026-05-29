@@ -216,13 +216,13 @@ const QuotasPage: React.FC = () => {
     if (activeTab === 'quotas') {
       exportToCSV(filtered.map(q => ({ 服务: q.ServiceCode, 配额: q.QuotaName, 当前值: q.Value, 单位: q.Unit, 可调整: q.Adjustable ? '是' : '否', 区域: selectedRegion })), `quotas_${selectedService}`);
     } else if (activeTab === 'requests') {
-      // Single account — pivot table format
+      // Single account — pivot table
       const acct = accounts.find(a => a.Id === selectedAccount);
       exportQuotaPivotTable(requests, acct?.Name || selectedAccount, `quota_${selectedAccount}`);
+    } else if (activeTab === 'all-requests') {
+      exportQuotaRecords(allRequests.length > 0 ? allRequests : dbRecords, accounts, 'quota_all_requests');
     } else {
-      // All records — detailed list
-      const data = activeTab === 'all-requests' ? allRequests : dbRecords;
-      exportQuotaRecords(data, accounts, 'quota_requests');
+      exportQuotaRecords(dbRecords, accounts, 'quota_requests');
     }
     message.success('已导出');
   };
