@@ -191,22 +191,125 @@ export const COMPANY_PROFILES: Record<string, CompanyProfile> = {
       { name: 'Partner Integration Layer', useType: 'Integration', purpose: 'External partner and internal system integration.', weight: 0.12 },
     ],
   },
+
+  malatrading: {
+    key: 'malatrading',
+    displayName: 'Malatrading',
+    industry: 'Cross-border E-commerce',
+    summary: `Malatrading is a Malaysia-registered e-commerce company focused on the development, operation, and product sales of cross-border e-commerce platforms. Dedicated to building a global e-commerce ecosystem, Malatrading emphasizes technological innovation and user experience as its core driving forces. Its online shopping platform offers a wide range of products, from electronics to home goods, meeting the needs of consumers in Southeast Asia and around the world.`,
+    migrationBackground: `Malatrading's e-commerce platform currently operates on Alibaba Cloud, with key services containerized via ACK (Alibaba Cloud Kubernetes). These services support high-traffic modules including order processing, payment gateways, membership systems, product recommendation engines, and data analytics. In the migration plan, all core applications and supporting services will be transitioned to AWS, with the target architecture comprising Amazon EKS, RDS (Aurora), Amazon OpenSearch, and Amazon S3. During the transition, a dual-run period is required to ensure business continuity.`,
+    coreBusiness: `Order processing, payment gateways, membership systems, product recommendation engines, and large-scale data analytics for cross-border shopping operations.`,
+    technicalArchitecture: `The target architecture comprises Amazon EKS for container orchestration, RDS (Aurora) and Amazon OpenSearch for data, Amazon S3 for static content, and a GitLab + Jenkins CI/CD pipeline, deployed across multiple availability zones with centralized logging and IAM governance.`,
+    sourceCloud: 'Alibaba Cloud',
+    archImage: 'malatrading.png',
+    resourceComponents: [
+      { name: 'E-commerce Services (EKS)', useType: 'Core services', purpose: 'Containerized order, payment, and membership services.', weight: 0.28 },
+      { name: 'Product Recommendation Engine', useType: 'Core platform', purpose: 'Recommendation and personalization workloads.', weight: 0.18 },
+      { name: 'Data Analytics Platform', useType: 'BI/ETL workloads', purpose: 'Big data analytics, Glue and Athena pipelines.', weight: 0.18 },
+      { name: 'Payment & Membership', useType: 'Financial ops', purpose: 'Payment gateway and membership systems.', weight: 0.14 },
+      { name: 'Middleware & Caching', useType: 'Middleware', purpose: 'Redis, Kafka, and MongoDB equivalents.', weight: 0.12 },
+      { name: 'Development & Staging', useType: 'QA/test', purpose: 'Parallel validation during migration.', weight: 0.10 },
+    ],
+  },
+
+  osstable: {
+    key: 'osstable',
+    displayName: 'Osstable',
+    industry: 'Online Gaming / MMORPG',
+    summary: `Osstable is a technology company headquartered in Malaysia, focusing on global online entertainment and digital interactive experiences. The company's regional operations center is located in Malaysia, which is the core hub of its Southeast Asian strategy. Osstable is committed to creating immersive virtual worlds and real-time interactive experiences, mainly for mobile and PC platform users, with target markets covering Southeast Asian countries such as Indonesia, Thailand, the Philippines, and Singapore, with plans to expand to global players. The company is accelerating its overseas cloud infrastructure transformation to support high availability, low latency, and global coverage deployment of next-generation massively multiplayer online role-playing game (MMORPG) services.`,
+    migrationBackground: `Osstable is migrating the backend of its flagship online role-playing game from Alibaba Cloud (Malaysia Region) to AWS for enhanced scalability, observability, and regional compliance. The migration covers core services such as authentication, matchmaking, payment processing, player profile management, inventory and item systems, leaderboards, and real-time analytics. The company is moving from a single-AZ deployment to a multi-availability zone architecture, requiring a dual-run period to ensure service continuity.`,
+    coreBusiness: `Login/authentication systems, battle matchmaking, recharge payment, character management, inventory and item systems, leaderboards, and real-time data analysis for MMORPG services.`,
+    technicalArchitecture: `The future architecture includes Amazon EKS for microservices, Aurora and DynamoDB for databases, Amazon EMR + S3 and OpenSearch Service for analytics, CloudFront CDN for global game delivery, and CloudWatch Logs for observability, deployed across multiple availability zones for fault tolerance and PDPA/GDPR compliance.`,
+    sourceCloud: 'Alibaba Cloud',
+    archImage: 'osstable.png',
+    resourceComponents: [
+      { name: 'Game Server Cluster (EKS)', useType: 'Core services', purpose: 'Authentication, matchmaking, and game session services.', weight: 0.28 },
+      { name: 'Real-time Battle & Matching', useType: 'Core platform', purpose: 'Battle matching and real-time interaction.', weight: 0.20 },
+      { name: 'Player Data & Inventory', useType: 'Database ops', purpose: 'Character management, inventory, and leaderboards.', weight: 0.16 },
+      { name: 'Real-time Analytics (EMR)', useType: 'BI/ETL workloads', purpose: 'Behavior tracking and user retention models.', weight: 0.14 },
+      { name: 'Payment & Recharge', useType: 'Financial ops', purpose: 'Recharge payment processing.', weight: 0.12 },
+      { name: 'Development & Staging', useType: 'QA/test', purpose: 'Parallel validation during migration.', weight: 0.10 },
+    ],
+  },
+
+  taxismap: {
+    key: 'taxismap',
+    displayName: 'TaxisMap Technologies Limited',
+    industry: 'Connected Vehicle / IoV',
+    summary: `TaxisMap Technologies Limited was established in Malaysia in 2020, providing core software architecture from vehicle to cloud for automotive companies, and quickly customizing software products and cloud business systems for specific parts according to vehicle models. The company's connected vehicle (Internet of Vehicles) system platform uploads data collected from vehicles to the cloud via MQTT over the Internet. TaxisMap, Yanhuang, and AWS reached a comprehensive strategic cooperation in 2025 Q1 to enhance its overall connected vehicle service competitiveness internationally and promote the establishment of a customer globalization system.`,
+    migrationBackground: `TaxisMap's connected vehicle system platform is currently deployed in Alibaba Cloud Malaysia Region, using ACK to deploy containerized connected vehicle applications. The migration target is the entire vehicle networking platform, with data processing during the transition phase relying on a dedicated line between AWS and Alibaba Cloud. The company is migrating to AWS to leverage global infrastructure capacity and overseas advantages.`,
+    coreBusiness: `Vehicle data ingestion via MQTT, connected vehicle application processing, user profile and behavior generation, in-depth vehicle data analysis, and global connected vehicle solutions.`,
+    technicalArchitecture: `The target architecture uses Amazon EKS for containerized connected vehicle applications, RDS and KV store databases for business data, Amazon S3 for vehicle-uploaded static files, and analytics platforms for vehicle data analysis, deployed across multiple availability zones.`,
+    sourceCloud: 'Alibaba Cloud',
+    archImage: 'taxismap.jpeg',
+    resourceComponents: [
+      { name: 'Connected Vehicle App (EKS)', useType: 'Core services', purpose: 'Containerized vehicle data processing applications.', weight: 0.28 },
+      { name: 'MQTT Data Ingestion', useType: 'Data Ops', purpose: 'Real-time vehicle data ingestion pipelines.', weight: 0.20 },
+      { name: 'Data Analytics Platform', useType: 'BI/ETL workloads', purpose: 'Vehicle data analysis and user profiling.', weight: 0.18 },
+      { name: 'Message Queue (RocketMQ)', useType: 'Middleware', purpose: 'Real-time messaging and event processing.', weight: 0.14 },
+      { name: 'Data & Storage Tier', useType: 'Database ops', purpose: 'RDS, KV store, and S3 storage.', weight: 0.10 },
+      { name: 'Development & Staging', useType: 'QA/test', purpose: 'Parallel validation during migration.', weight: 0.10 },
+    ],
+  },
 };
 
-// 账户ID → 公司key 映射（基于 config.json payer 名称）
+// 账户ID → 公司key 映射（基于 config.json payer 名称，对照文档库确认）
 export const ACCOUNT_TO_COMPANY: Record<string, string> = {
   '133354366329': 'skymora',      // yanhuang11-skymora
   '976592800319': 'dldata',       // yanhuang14-DLDAte
-  '820242927609': 'malasoftware', // yanhuang2-malatrading (malatrading → 用 malasoftware 模板? 需确认)
+  '820242927609': 'malatrading',  // yanhuang2-malatrading
   '577578676580': 'zyronix',      // yanhuang19-zyronix
-  '314146334864': 'taosource',    // yanhuang1-taximap (taximap → ? 需确认)
+  '314146334864': 'taxismap',     // yanhuang1-taximap
   '724772095868': 'taovolt',      // yanhuang3-taoVolt
   '343218184773': 'malasoftware', // yanhuang4-malasoftware
-  '023020468236': 'taosource',    // yanhuang6-ostable (ostable → ? 需确认)
+  '023020468236': 'osstable',     // yanhuang6-ostable
   '424016505663': 'buminiaga',    // yanhuang12-buminiaga
   '770017447024': 'taosource',    // yanhuang10-tao-source
   '326280737814': 'avants',       // yanhuang16-avants
 };
+
+// Payer 组织名 → 公司key 映射（子账户通过 _payer 字段匹配）
+export const PAYER_TO_COMPANY: Record<string, string> = {
+  // 完整名（新）
+  'yanhuang11-skymora': 'skymora',
+  'yanhuang14-DLDAte': 'dldata',
+  'yanhuang2-malatrading': 'malatrading',
+  'yanhuang19-zyronix': 'zyronix',
+  'yanhuang1-taximap': 'taxismap',
+  'yanhuang3-taoVolt': 'taovolt',
+  'yanhuang4-malasoftware': 'malasoftware',
+  'yanhuang6-ostable': 'osstable',
+  'yanhuang12-buminiaga': 'buminiaga',
+  'yanhuang10-tao-source': 'taosource',
+  'yanhuang16-avants': 'avants',
+  // 短名（兼容旧缓存）
+  'yanhuang11': 'skymora',
+  'yanhuang14': 'dldata',
+  'yanhuang2': 'malatrading',
+  'yanhuang19': 'zyronix',
+  'yanhuang1': 'taxismap',
+  'yanhuang3': 'taovolt',
+  'yanhuang4': 'malasoftware',
+  'yanhuang6': 'osstable',
+  'yanhuang12': 'buminiaga',
+  'yanhuang10': 'taosource',
+  'yanhuang16': 'avants',
+};
+
+// 从 payer 名解析公司 key（兼容大小写、短名、后缀变化）
+export function companyFromPayer(payer: string): string | null {
+  if (!payer) return null;
+  if (PAYER_TO_COMPANY[payer]) return PAYER_TO_COMPANY[payer];
+  // 提取 yanhuangXX 前缀部分匹配
+  const prefixMatch = payer.match(/^(yanhuang\d+)/i);
+  if (prefixMatch && PAYER_TO_COMPANY[prefixMatch[1]]) return PAYER_TO_COMPANY[prefixMatch[1]];
+  // 尝试从 "yanhuangXX-公司" 提取公司部分匹配
+  const suffix = payer.split('-').slice(1).join('-').toLowerCase();
+  for (const [k, v] of Object.entries(PAYER_TO_COMPANY)) {
+    if (k.toLowerCase().endsWith(suffix) && suffix) return v;
+  }
+  return null;
+}
 
 // 配额类型映射：service_code + quota 关键词 → AWS 官方 Quota Name + 文档类型
 export interface QuotaTypeInfo {

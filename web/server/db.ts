@@ -86,6 +86,34 @@ function writeDB(data: DBSchema) {
   fs.writeFileSync(DB_PATH, JSON.stringify(data, null, 2), 'utf-8');
 }
 
+// === Auto-backup: keep a daily rotating copy of the DB ===
+let lastBackupDay = '';
+export function backupDB() {
+  try {
+    if (!fs.existsSync(DB_PATH)) return;
+    const dir = path.join(path.dirname(DB_PATH), 'backups');
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    const today = new Date().toISOString().slice(0, 10);
+    const dest = path.join(dir, `db-${today}.json`);
+    fs.copyFileSync(DB_PATH, dest);
+    // Keep only last 7 daily backups
+    const files = fs.readdirSync(dir).filter(f => f.startsWith('db-') && f.endsWith('.json')).sort();
+    while (files.length > 7) {
+      const old = files.shift();
+      if (old) fs.unlinkSync(path.join(dir, old));
+    }
+    lastBackupDay = today;
+  } catch (e: any) {
+    console.error('[DB Backup] failed:', e.message);
+  }
+}
+
+// Run backup at most once per day, triggered on read
+export function maybeBackup() {
+  const today = new Date().toISOString().slice(0, 10);
+  if (today !== lastBackupDay) backupDB();
+}
+
 // === Query helpers (simple) ===
 
 export const db = {

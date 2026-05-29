@@ -145,7 +145,7 @@ awsRouter.post('/quotas/generate-doc', async (req: Request, res: Response) => {
       quotaName, region, requestedValue: Number(requestedValue),
       currentValue: currentValue != null ? Number(currentValue) : undefined,
     });
-    const company = companyKey || (getCompanyForAccount(accountId)?.key) || 'doc';
+    const company = (getCompanyForAccount(accountId)?.key) || companyKey || 'doc';
     const filename = `${company}-${(quotaName || 'quota').replace(/[^a-zA-Z0-9]/g, '_').slice(0, 30)}-${requestedValue}-${region}.pdf`;
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);

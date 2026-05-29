@@ -5,9 +5,27 @@
 import fs from 'fs';
 import path from 'path';
 import puppeteer from 'puppeteer-core';
-import { COMPANY_PROFILES, ACCOUNT_TO_COMPANY, getRegionDisplay, CompanyProfile } from './doc-templates';
+import { COMPANY_PROFILES, ACCOUNT_TO_COMPANY, PAYER_TO_COMPANY, companyFromPayer, getRegionDisplay, CompanyProfile } from './doc-templates';
+import { db } from './db';
 
 const ARCH_DIR = path.join(__dirname, '../../doc-templates/architectures');
+
+// 解析子账户对应的公司：优先用账户缓存里的 _payer，回退到 payer 账户ID映射
+function resolveCompanyKey(accountId: string, override?: string): string | null {
+  if (override && COMPANY_PROFILES[override]) return override;
+  // 1) 子账户：在缓存里找 _payer
+  try {
+    const { accounts } = db.getAccountsCache();
+    const acct = accounts.find((a: any) => a.Id === accountId);
+    if (acct && acct._payer) {
+      const key = companyFromPayer(acct._payer);
+      if (key) return key;
+    }
+  } catch {}
+  // 2) payer 账户ID直接映射
+  if (ACCOUNT_TO_COMPANY[accountId]) return ACCOUNT_TO_COMPANY[accountId];
+  return null;
+}
 
 // Find Chrome executable across environments
 function findChrome(): string {
@@ -198,8 +216,9 @@ function buildHTML(params: DocParams, profile: CompanyProfile): string {
 }
 
 export async function generateQuotaDoc(params: DocParams): Promise<Buffer> {
-  // 确定公司
-  const companyKey = params.companyKey || ACCOUNT_TO_COMPANY[params.accountId] || 'malasoftware';
+  // 确定公司（子账户 → payer → 公司）
+  const companyKey = resolveCompanyKey(params.accountId, params.companyKey);
+  if (!companyKey) throw new Error(`无法识别账户 ${params.accountId} 所属公司，请检查账户缓存`);
   const profile = COMPANY_PROFILES[companyKey];
   if (!profile) throw new Error(`未找到公司模板: ${companyKey}`);
 
@@ -225,6 +244,6 @@ export async function generateQuotaDoc(params: DocParams): Promise<Buffer> {
 }
 
 export function getCompanyForAccount(accountId: string): CompanyProfile | null {
-  const key = ACCOUNT_TO_COMPANY[accountId];
+  const key = resolveCompanyKey(accountId);
   return key ? COMPANY_PROFILES[key] : null;
 }

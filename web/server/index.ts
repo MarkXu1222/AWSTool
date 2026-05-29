@@ -7,7 +7,7 @@ import { rateLimit } from 'express-rate-limit';
 import { authRouter, authMiddleware } from './auth';
 import { awsRouter } from './routes/aws';
 import { regionsRouter } from './routes/regions';
-import { migrateEncryptMFASecrets } from './db';
+import { migrateEncryptMFASecrets, backupDB } from './db';
 import { startScheduler, getSchedulerStatus } from './scheduler';
 
 const app = express();
@@ -27,6 +27,8 @@ const PORT = appConfig.web?.port || process.env.PORT || 3000;
 
 // Migrate plaintext MFA secrets on startup
 migrateEncryptMFASecrets();
+// Backup DB on every startup (before any sync runs)
+backupDB();
 
 // Security — CSP relaxed for SPA (inline scripts from Vite build)
 app.use(helmet({ contentSecurityPolicy: false }));
