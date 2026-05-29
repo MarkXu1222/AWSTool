@@ -64,6 +64,7 @@ export const api = {
     request('/aws/quotas/increase', { method: 'POST', body: JSON.stringify({ accountId, serviceCode, quotaCode, desiredValue, quotaName, region }) }),
   listQuotaRequests: () => request('/aws/quotas/requests'),
   getQuotaStats: () => request('/aws/quotas/stats'),
+  getDashboardSummary: () => request('/aws/dashboard/summary'),
   syncQuotaRequests: (accountIds: string[]) =>
     request('/aws/quotas/sync', { method: 'POST', body: JSON.stringify({ accountIds }) }),
   syncSingleAccount: (accountId: string) =>

@@ -181,6 +181,18 @@ export const db = {
     writeDB(data);
   },
 
+  // Dashboard cache — cost summary for instant loading
+  getDashboardCache() {
+    const data = readDB() as any;
+    return data.dashboard_cache || null;
+  },
+
+  setDashboardCache(summary: any) {
+    const data = readDB() as any;
+    data.dashboard_cache = { ...summary, cachedAt: new Date().toISOString() };
+    writeDB(data);
+  },
+
   // Region data
   getRegionData() {
     const data = readDB();

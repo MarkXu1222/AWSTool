@@ -69,6 +69,51 @@ awsRouter.get('/billing/by-account', async (req: Request, res: Response) => {
   } catch (e: any) { res.status(500).json({ error: e.message }); }
 });
 
+// Dashboard summary — cached, instant
+awsRouter.get('/dashboard/summary', async (_req: Request, res: Response) => {
+  try {
+    const cached = db.getDashboardCache();
+    if (cached) {
+      res.json({ success: true, data: cached });
+      // Refresh in background if older than 1 hour
+      const age = cached.cachedAt ? Date.now() - new Date(cached.cachedAt).getTime() : Infinity;
+      if (age > 60 * 60 * 1000) {
+        refreshDashboardCache().catch(() => {});
+      }
+      return;
+    }
+    // No cache — compute now
+    const summary = await refreshDashboardCache();
+    res.json({ success: true, data: summary });
+  } catch (e: any) { res.status(500).json({ error: e.message }); }
+});
+
+// Helper: compute and cache dashboard summary
+export async function refreshDashboardCache() {
+  const dayjs = require('dayjs');
+  const start = dayjs().startOf('month').format('YYYY-MM-DD');
+  const end = dayjs().format('YYYY-MM-DD');
+  const data = await aws.getCostByAccount(start, end);
+  let totalCost = 0;
+  const accountCostMap: Record<string, number> = {};
+  (data || []).forEach((period: any) => {
+    (period.Groups || []).forEach((g: any) => {
+      const amount = parseFloat(g.Metrics?.UnblendedCost?.Amount || '0');
+      totalCost += amount;
+      const acctId = g.Keys[0];
+      accountCostMap[acctId] = (accountCostMap[acctId] || 0) + amount;
+    });
+  });
+  const topAccounts = Object.entries(accountCostMap)
+    .map(([accountId, cost]) => ({ key: accountId, accountId, cost }))
+    .sort((a, b) => b.cost - a.cost)
+    .slice(0, 10);
+  const summary = { totalCost, topAccounts };
+  db.setDashboardCache(summary);
+  return { ...summary, cachedAt: new Date().toISOString() };
+}
+
+
 // Billing by service
 awsRouter.get('/billing/by-service/:accountId', async (req: Request, res: Response) => {
   try {

@@ -1,7 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { Card, Statistic, Row, Col, Table, Tag, Spin, message } from 'antd';
 import { DollarOutlined, TeamOutlined, AlertOutlined, LinkOutlined } from '@ant-design/icons';
-import dayjs from 'dayjs';
 import { api } from '../api';
 
 const Dashboard: React.FC = () => {
@@ -32,35 +31,18 @@ const Dashboard: React.FC = () => {
       }
     } catch {}
 
-    // Phase 2: Load cost data + connection (slower, async)
+    // Phase 2: Load cached cost summary (instant from DB) + connection
     setCostLoading(true);
     try {
-      const [costRes, connRes] = await Promise.allSettled([
-        api.getCostByAccount(
-          dayjs().startOf('month').format('YYYY-MM-DD'),
-          dayjs().format('YYYY-MM-DD')
-        ),
+      const [summaryRes, connRes] = await Promise.allSettled([
+        api.getDashboardSummary(),
         api.testConnection(),
       ]);
 
-      if (costRes.status === 'fulfilled' && costRes.value.success) {
-        const data = costRes.value.data || [];
-        let total = 0;
-        const accountCostMap: Record<string, number> = {};
-        data.forEach((period: any) => {
-          (period.Groups || []).forEach((g: any) => {
-            const amount = parseFloat(g.Metrics?.UnblendedCost?.Amount || '0');
-            total += amount;
-            const acctId = g.Keys[0];
-            accountCostMap[acctId] = (accountCostMap[acctId] || 0) + amount;
-          });
-        });
-        setTotalCost(total);
-        const sorted = Object.entries(accountCostMap)
-          .map(([accountId, cost]) => ({ key: accountId, accountId, cost }))
-          .sort((a, b) => b.cost - a.cost)
-          .slice(0, 10);
-        setTopAccounts(sorted);
+      if (summaryRes.status === 'fulfilled' && summaryRes.value.success) {
+        const d = summaryRes.value.data || {};
+        setTotalCost(d.totalCost || 0);
+        setTopAccounts(d.topAccounts || []);
       }
 
       if (connRes.status === 'fulfilled') {

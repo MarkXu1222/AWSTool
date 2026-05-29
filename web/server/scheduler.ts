@@ -9,6 +9,7 @@
 import * as aws from './aws-service';
 import { db } from './db';
 import { notifyQuotaAchieved } from './notify';
+import { refreshDashboardCache } from './routes/aws';
 
 let quotaSyncRunning = false;
 let regionSyncRunning = false;
@@ -36,6 +37,17 @@ async function syncAccounts() {
     console.log(`[Scheduler] Accounts synced: ${accounts.length} accounts`);
   } catch (e: any) {
     console.error('[Scheduler] Accounts sync failed:', e.message);
+  }
+}
+
+// === Dashboard cost summary cache (every 2 hours) ===
+async function syncDashboard() {
+  try {
+    console.log('[Scheduler] Refreshing dashboard cost cache...');
+    await refreshDashboardCache();
+    console.log('[Scheduler] Dashboard cache refreshed');
+  } catch (e: any) {
+    console.error('[Scheduler] Dashboard cache failed:', e.message);
   }
 }
 
@@ -208,6 +220,15 @@ export function startScheduler() {
   setTimeout(() => {
     syncAccounts();
   }, 10 * 1000);
+
+  // Dashboard cost cache: first run after 30s, then every 2 hours
+  setTimeout(() => {
+    syncDashboard();
+  }, 30 * 1000);
+
+  setInterval(() => {
+    syncDashboard();
+  }, 2 * 60 * 60 * 1000);
 
   // Accounts: every 30 minutes
   setInterval(() => {
