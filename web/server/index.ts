@@ -31,7 +31,7 @@ migrateEncryptMFASecrets();
 // Security — CSP relaxed for SPA (inline scripts from Vite build)
 app.use(helmet({ contentSecurityPolicy: false }));
 app.use(cors({
-  origin: process.env.CORS_ORIGIN || true, // Same-origin requests don't need CORS; keep open for now
+  origin: 'https://markxu.co',
   credentials: true,
 }));
 app.use(express.json());
@@ -88,8 +88,8 @@ app.get('*', (_req, res) => {
   else res.status(404).send('Frontend not built. Run: npx vite build --config client/vite.config.ts');
 });
 
-app.listen(PORT, () => {
-  console.log(`🚀 AWS Toolbox Web running on http://localhost:${PORT}`);
+app.listen(Number(PORT), '127.0.0.1', () => {
+  console.log(`🚀 AWS Toolbox Web running on http://127.0.0.1:${PORT}`);
   console.log(`   Environment: ${process.env.NODE_ENV || 'development'}`);
   // Start background data sync
   startScheduler();
