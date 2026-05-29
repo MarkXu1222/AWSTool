@@ -8,6 +8,7 @@ import { authRouter, authMiddleware } from './auth';
 import { awsRouter } from './routes/aws';
 import { regionsRouter } from './routes/regions';
 import { migrateEncryptMFASecrets } from './db';
+import { startScheduler, getSchedulerStatus } from './scheduler';
 
 const app = express();
 app.set('trust proxy', 1);
@@ -68,6 +69,11 @@ app.use('/api/auth', authRouter);
 app.use('/api/aws', authMiddleware, awsRouter);
 app.use('/api/regions', authMiddleware, regionsRouter);
 
+// Scheduler status endpoint
+app.get('/api/scheduler/status', authMiddleware, (_req, res) => {
+  res.json({ success: true, data: getSchedulerStatus() });
+});
+
 // Serve static frontend
 import fs from 'fs';
 const possiblePaths = [
@@ -85,4 +91,6 @@ app.get('*', (_req, res) => {
 app.listen(PORT, () => {
   console.log(`🚀 AWS Toolbox Web running on http://localhost:${PORT}`);
   console.log(`   Environment: ${process.env.NODE_ENV || 'development'}`);
+  // Start background data sync
+  startScheduler();
 });
