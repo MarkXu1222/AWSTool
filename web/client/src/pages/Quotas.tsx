@@ -264,6 +264,10 @@ const QuotasPage: React.FC = () => {
         render: (r: string) => <span style={{ fontSize: 11 }}>{r || 'us-east-1'}</span>,
       },
       {
+        title: '当前', dataIndex: 'current_value', width: 55,
+        render: (v: any) => <span style={{ fontSize: 12 }}>{v != null ? v : '-'}</span>,
+      },
+      {
         title: '期望', dataIndex: 'desired_value', width: 50,
         render: (v: number, record: any) => {
           const done = record.current_value != null && record.current_value >= v;
