@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { Card, Table, Tag, Button, Space, message, Input, Select, Tabs, Modal, Form, InputNumber } from 'antd';
 import { ReloadOutlined, SearchOutlined, DownloadOutlined } from '@ant-design/icons';
 import { api } from '../api';
-import { exportToCSV } from '../utils/export';
+import { exportToCSV, exportQuotaPivotTable, exportQuotaRecords } from '../utils/export';
 
 const SERVICES = [
   { label: '全部服务', value: '' },
@@ -215,9 +215,14 @@ const QuotasPage: React.FC = () => {
   const handleExport = () => {
     if (activeTab === 'quotas') {
       exportToCSV(filtered.map(q => ({ 服务: q.ServiceCode, 配额: q.QuotaName, 当前值: q.Value, 单位: q.Unit, 可调整: q.Adjustable ? '是' : '否', 区域: selectedRegion })), `quotas_${selectedService}`);
+    } else if (activeTab === 'requests') {
+      // Single account — pivot table format
+      const acct = accounts.find(a => a.Id === selectedAccount);
+      exportQuotaPivotTable(requests, acct?.Name || selectedAccount, `quota_${selectedAccount}`);
     } else {
-      const data = activeTab === 'requests' ? requests : activeTab === 'all-requests' ? allRequests : dbRecords;
-      exportToCSV(data.map((r: any) => ({ 账户: r.account_id, 配额: r.quota_name, 服务: r.service_code, 当前值: r.current_value ?? '', 期望值: r.desired_value, 状态: r.status, 区域: r.region || '', 时间: r.created_at })), 'quota_requests');
+      // All records — detailed list
+      const data = activeTab === 'all-requests' ? allRequests : dbRecords;
+      exportQuotaRecords(data, accounts, 'quota_requests');
     }
     message.success('已导出');
   };
