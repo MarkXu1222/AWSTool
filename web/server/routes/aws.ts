@@ -102,10 +102,14 @@ awsRouter.get('/quotas/sync-status', async (_req: Request, res: Response) => {
 
 // Sync quota requests — SSE streaming (data arrives as each account completes)
 awsRouter.get('/quotas/sync-stream', async (req: Request, res: Response) => {
-  // SSE headers
+  // SSE headers — disable compression for streaming
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache');
   res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no');
+  (res as any).flush = (res as any).flush || (() => {});
+  // Disable compression for this response
+  (req as any).headers['accept-encoding'] = '';
   res.flushHeaders();
 
   try {
@@ -115,6 +119,7 @@ awsRouter.get('/quotas/sync-stream', async (req: Request, res: Response) => {
 
     syncState = { running: true, total, done: 0, startedAt: new Date().toISOString() };
     res.write(`data: ${JSON.stringify({ type: 'start', total })}\n\n`);
+    if (typeof (res as any).flush === 'function') (res as any).flush();
 
     // Process in batches of 5 to avoid throttling
     const batchSize = 5;
@@ -146,6 +151,7 @@ awsRouter.get('/quotas/sync-stream', async (req: Request, res: Response) => {
       syncState.done = Math.min(i + batchSize, total);
       const batchResults = results.map(r => r.status === 'fulfilled' ? r.value : { accountId: '', count: 0 });
       res.write(`data: ${JSON.stringify({ type: 'progress', done: syncState.done, total, batch: batchResults })}\n\n`);
+      if (typeof (res as any).flush === 'function') (res as any).flush();
     }
 
     syncState = { running: false, total, done: total, startedAt: syncState.startedAt };

@@ -12,8 +12,13 @@ import { migrateEncryptMFASecrets } from './db';
 const app = express();
 app.set('trust proxy', 1);
 
-// Gzip compression
-app.use(compression());
+// Gzip compression (skip SSE streams)
+app.use(compression({
+  filter: (req, res) => {
+    if (req.path.includes('sync-stream')) return false;
+    return compression.filter(req, res);
+  }
+}));
 const configPath = path.join(__dirname, '../../config.json');
 let appConfig: any = {};
 try { appConfig = JSON.parse(require('fs').readFileSync(configPath, 'utf-8')); } catch {}
