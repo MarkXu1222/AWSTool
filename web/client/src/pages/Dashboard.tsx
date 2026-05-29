@@ -110,26 +110,26 @@ const Dashboard: React.FC = () => {
       </div>
 
       {/* Stats row — instant from cache */}
-      <Row gutter={16} style={{ marginBottom: 16 }}>
-        <Col xs={12} md={6}>
-          <Card size="small">
+      <Row gutter={[16, 16]} style={{ marginBottom: 16 }}>
+        <Col xs={12} sm={12} md={6}>
+          <Card size="small" bodyStyle={{ padding: '16px 20px' }}>
             <Statistic title="账户总数" value={accounts.length} prefix={<TeamOutlined />} valueStyle={{ fontSize: 24 }} />
           </Card>
         </Col>
-        <Col xs={12} md={6}>
-          <Card size="small">
+        <Col xs={12} sm={12} md={6}>
+          <Card size="small" bodyStyle={{ padding: '16px 20px' }}>
             <Statistic title="本月费用" value={totalCost} precision={2} prefix={<DollarOutlined />} suffix="USD"
               loading={costLoading} valueStyle={{ fontSize: 24 }} />
           </Card>
         </Col>
-        <Col xs={12} md={6}>
-          <Card size="small">
+        <Col xs={12} sm={12} md={6}>
+          <Card size="small" bodyStyle={{ padding: '16px 20px' }}>
             <Statistic title="进行中 Case (7天)" value={caseOpened7d} prefix={<AlertOutlined />}
               valueStyle={{ fontSize: 24, color: caseOpened7d > 0 ? '#faad14' : '#52c41a' }} />
           </Card>
         </Col>
-        <Col xs={12} md={6}>
-          <Card size="small">
+        <Col xs={12} sm={12} md={6}>
+          <Card size="small" bodyStyle={{ padding: '16px 20px' }}>
             <Statistic title="连接状态" value={connected ? '正常' : costLoading ? '检查中' : '断开'} prefix={<LinkOutlined />}
               valueStyle={{ fontSize: 18, color: connected ? '#52c41a' : costLoading ? 'rgba(0,0,0,0.45)' : '#ff4d4f' }} />
           </Card>
