@@ -207,6 +207,7 @@ awsRouter.post('/quotas/increase', requireAdmin, async (req: Request, res: Respo
       await notifyQuotaChanged([{
         accountId,
         accountName: acct?.Name || accountId,
+        payer: acct?._payer || '',
         quotaName: quotaName || quotaCode,
         region: targetRegion,
         oldValue: '提交',

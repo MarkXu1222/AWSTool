@@ -4,11 +4,31 @@ import { GlobalOutlined, ReloadOutlined, SearchOutlined } from '@ant-design/icon
 import { api } from '../api';
 
 const OPT_IN_REGIONS = [
-  'af-south-1', 'ap-east-1', 'ap-east-2', 'ap-south-2', 'ap-southeast-3',
+  'af-south-1', 'ap-east-1', 'ap-south-2', 'ap-southeast-3',
   'ap-southeast-4', 'ap-southeast-5', 'ap-southeast-6', 'ap-southeast-7',
   'ca-west-1', 'eu-central-2', 'eu-south-1', 'eu-south-2',
   'il-central-1', 'me-central-1', 'me-south-1', 'mx-central-1',
 ];
+
+// 区域中文名
+const REGION_CN: Record<string, string> = {
+  'af-south-1': '开普敦（南非）',
+  'ap-east-1': '香港',
+  'ap-south-2': '海得拉巴（印度）',
+  'ap-southeast-3': '雅加达（印尼）',
+  'ap-southeast-4': '墨尔本（澳大利亚）',
+  'ap-southeast-5': '马来西亚',
+  'ap-southeast-6': '新西兰',
+  'ap-southeast-7': '泰国',
+  'ca-west-1': '卡尔加里（加拿大）',
+  'eu-central-2': '苏黎世（瑞士）',
+  'eu-south-1': '米兰（意大利）',
+  'eu-south-2': '西班牙',
+  'il-central-1': '特拉维夫（以色列）',
+  'me-central-1': '阿联酋',
+  'me-south-1': '巴林',
+  'mx-central-1': '墨西哥',
+};
 
 const RegionsPage: React.FC = () => {
   const [regionData, setRegionData] = useState<any[]>([]);
@@ -145,7 +165,8 @@ const RegionsPage: React.FC = () => {
           <Card size="small" bodyStyle={{ padding: 0 }}>
             <Table size="small" dataSource={regionSummary} rowKey="region" pagination={false}
               columns={[
-                { title: '区域', dataIndex: 'region', width: 160, render: (r: string) => <code style={{ fontSize: 12 }}>{r}</code> },
+                { title: '区域', dataIndex: 'region', width: 150, render: (r: string) => <code style={{ fontSize: 12 }}>{r}</code> },
+                { title: '名称', dataIndex: 'region', key: 'cn', width: 150, render: (r: string) => <span style={{ fontSize: 13 }}>{REGION_CN[r] || '-'}</span> },
                 { title: '已开通', dataIndex: 'enabled', width: 80, align: 'center', render: (n: number) => <Tag color="green">{n}</Tag> },
                 { title: '启用中', dataIndex: 'enabling', width: 80, align: 'center', render: (n: number) => n > 0 ? <Tag color="blue">{n}</Tag> : <span style={{ color: '#D1D5DB' }}>0</span> },
                 { title: '未开通', dataIndex: 'disabled', width: 80, align: 'center', render: (n: number) => n > 0 ? <Tag color="red">{n}</Tag> : <span style={{ color: '#D1D5DB' }}>0</span> },
@@ -232,7 +253,7 @@ const RegionsPage: React.FC = () => {
                                 <Checkbox checked={selectedAccountRegions.includes(r.region)}
                                   onChange={e => { if (e.target.checked) setSelectedAccountRegions([...selectedAccountRegions, r.region]); else setSelectedAccountRegions(selectedAccountRegions.filter(id => id !== r.region)); }} />
                               )},
-                              { title: '区域', dataIndex: 'region', render: (r: string) => <code>{r}</code> },
+                              { title: '区域', dataIndex: 'region', render: (r: string) => <span><code>{r}</code> <span style={{ color: 'rgba(0,0,0,0.45)', fontSize: 12 }}>{REGION_CN[r] || ''}</span></span> },
                               { title: '状态', dataIndex: 'status', width: 80, render: (s: string) => <Tag color="red">{s}</Tag> },
                               { title: '', width: 60, render: (_: any, r: any) => (
                                 <Popconfirm title={`启用 ${r.region}?`} onConfirm={() => handleSingleEnable(acct.Id, r.region)}>

@@ -97,7 +97,7 @@ export async function notifyQuotaAchieved(records: { accountId: string; accountN
  * Send quota change notification — clean Feishu card grouped by account.
  * Uses column_set for table-like alignment + colored values.
  */
-export async function notifyQuotaChanged(records: { accountId: string; accountName: string; quotaName: string; region: string; oldValue: number; newValue: number; desiredValue: number }[]) {
+export async function notifyQuotaChanged(records: { accountId: string; accountName: string; payer?: string; quotaName: string; region: string; oldValue: number; newValue: number; desiredValue: number }[]) {
   if (records.length === 0) return;
 
   // Shorten common verbose quota names
@@ -107,12 +107,14 @@ export async function notifyQuotaChanged(records: { accountId: string; accountNa
     .replace('Running Dedicated ', 'Dedicated ')
     .replace('EC2-VPC Elastic IPs', 'Elastic IPs');
 
-  // Group by account
+  // Group by account (include payer in key)
   const byAccount: Record<string, typeof records> = {};
+  const accountPayer: Record<string, string> = {};
   for (const r of records) {
     const key = `${r.accountName}|${r.accountId}`;
     if (!byAccount[key]) byAccount[key] = [];
     byAccount[key].push(r);
+    if (r.payer) accountPayer[key] = r.payer;
   }
 
   const elements: any[] = [];
@@ -134,11 +136,13 @@ export async function notifyQuotaChanged(records: { accountId: string; accountNa
   for (let idx = 0; idx < accountKeys.length; idx++) {
     const [name, id] = accountKeys[idx].split('|');
     const items = byAccount[accountKeys[idx]];
+    const payer = accountPayer[accountKeys[idx]];
 
-    // Account header
+    // Account header — 显示组织(yanhuang几) + 账户名 + ID
+    const orgLabel = payer ? `<font color='blue'>[${payer}]</font> ` : '';
     elements.push({
       tag: 'div',
-      text: { tag: 'lark_md', content: `🏢 **${name}**　<font color='grey'>${id}</font>` },
+      text: { tag: 'lark_md', content: `🏢 ${orgLabel}**${name}**　<font color='grey'>${id}</font>` },
     });
 
     // Each quota as an aligned 2-column row

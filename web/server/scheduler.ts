@@ -165,6 +165,7 @@ async function syncQuotaRequests() {
           return {
             accountId: r.accountId,
             accountName: acct?.Name || r.accountId,
+            payer: acct?._payer || '',
             quotaName: r.quotaName,
             region: r.region,
             oldValue: r.oldValue,
