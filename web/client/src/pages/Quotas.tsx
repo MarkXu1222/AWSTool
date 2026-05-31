@@ -235,11 +235,23 @@ const QuotasPage: React.FC = () => {
   const getRequestColumns = (data: any[]) => {
     const allColumns: any[] = [
       {
-        title: '账户', dataIndex: 'account_id', width: 100,
-        filters: getUniqueFilters(data, 'account_id'),
-        onFilter: (value: any, record: any) => record.account_id === value,
+        title: '账户', dataIndex: 'account_id', width: 150,
+        filters: [...new Set(accounts.map(a => a._payer))].filter(Boolean).sort().map(p => ({ text: p, value: p })),
+        onFilter: (value: any, record: any) => {
+          const a = accounts.find(x => x.Id === record.account_id);
+          return a?._payer === value;
+        },
         filterSearch: true,
-        render: (id: string) => { const a = accounts.find(x => x.Id === id); return <span style={{ fontSize: 11 }}>{a ? <><strong>{a.Name}</strong><br/></> : ''}<code style={{ fontSize: 10, color: 'rgba(0,0,0,0.45)' }}>{id}</code></span>; },
+        render: (id: string) => {
+          const a = accounts.find(x => x.Id === id);
+          return (
+            <span style={{ fontSize: 11 }}>
+              {a ? <><strong>{a.Name}</strong><br/></> : ''}
+              <code style={{ fontSize: 10, color: 'rgba(0,0,0,0.45)' }}>{id}</code>
+              {a?._payer ? <><br/><Tag color="blue" style={{ fontSize: 9, lineHeight: '14px', padding: '0 4px', margin: 0 }}>{a._payer}</Tag></> : ''}
+            </span>
+          );
+        },
       },
       {
         title: '配额', dataIndex: 'quota_name', width: 160,
