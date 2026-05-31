@@ -98,25 +98,16 @@ async function syncQuotaRequests() {
             const region = r.QuotaArn ? r.QuotaArn.split(':')[3] : (r._region || 'us-east-1');
 
             if (!prev) {
-              // 全新记录（新提交的配额提升请求）— 通知
-              changedRecords.push({
-                accountId, quotaName: r.QuotaName, region,
-                oldValue: '新增', newValue: newCurrent != null ? newCurrent : '-',
-                desiredValue: r.DesiredValue, status: newStatus, isNew: true,
-              });
+              // 全新记录（新提交的提升请求）— 不通知，等额度真正变动再通知
             } else {
-              // 当前值变化 OR 状态变化 — 通知
+              // 仅当"当前值"实际变化时通知（提交、状态变化不通知）
               const curChanged = prev.current_value != null && newCurrent != null && prev.current_value !== newCurrent;
-              const statusChanged = prev.status && newStatus && prev.status !== newStatus;
-              if (curChanged || statusChanged) {
+              if (curChanged) {
                 changedRecords.push({
                   accountId, quotaName: r.QuotaName, region,
-                  oldValue: curChanged ? prev.current_value : (newCurrent ?? '-'),
-                  newValue: newCurrent != null ? newCurrent : '-',
+                  oldValue: prev.current_value,
+                  newValue: newCurrent,
                   desiredValue: r.DesiredValue,
-                  status: newStatus,
-                  oldStatus: prev.status,
-                  statusChanged,
                 });
               }
             }

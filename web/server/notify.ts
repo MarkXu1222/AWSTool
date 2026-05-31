@@ -122,11 +122,15 @@ export async function notifyQuotaChanged(records: { accountId: string; accountNa
   const accountKeys = Object.keys(byAccount).slice(0, MAX_ACCOUNTS);
 
   // Summary line
-  const reachedCount = records.filter(r => r.desiredValue != null && r.newValue >= r.desiredValue).length;
-  const inProgressCount = records.length - reachedCount;
+  // 只有"实际当前值变化"且达标才算达标；"提交"/"新增"算提升中
+  const isNumeric = (v: any) => typeof v === 'number' || (typeof v === 'string' && /^\d+$/.test(v));
+  const reachedCount = records.filter(r => isNumeric(r.oldValue) && r.desiredValue != null && r.newValue >= r.desiredValue).length;
+  const submittedCount = records.filter(r => !isNumeric(r.oldValue)).length;
+  const inProgressCount = records.length - reachedCount - submittedCount;
   const summaryParts: string[] = [];
   if (reachedCount > 0) summaryParts.push(`<font color='green'>✅ ${reachedCount} 项达标</font>`);
-  if (inProgressCount > 0) summaryParts.push(`<font color='orange'>⏳ ${inProgressCount} 项提升中</font>`);
+  if (submittedCount > 0) summaryParts.push(`<font color='blue'>📤 ${submittedCount} 项已提交</font>`);
+  if (inProgressCount > 0) summaryParts.push(`<font color='orange'>⏳ ${inProgressCount} 项进行中</font>`);
   elements.push({
     tag: 'div',
     text: { tag: 'lark_md', content: `共 **${records.length}** 项配额变动　｜　${summaryParts.join('　')}` },
@@ -147,8 +151,10 @@ export async function notifyQuotaChanged(records: { accountId: string; accountNa
 
     // Each quota as an aligned 2-column row
     for (const r of items) {
-      const reached = r.desiredValue != null && r.newValue >= r.desiredValue;
-      const changeColor = reached ? 'green' : 'orange';
+      const submitted = !isNumeric(r.oldValue);
+      const reached = isNumeric(r.oldValue) && r.desiredValue != null && r.newValue >= r.desiredValue;
+      const changeColor = submitted ? 'blue' : reached ? 'green' : 'orange';
+      const badge = submitted ? ' 📤' : reached ? ' ✅' : '';
       elements.push({
         tag: 'column_set',
         flex_mode: 'none',
@@ -159,7 +165,7 @@ export async function notifyQuotaChanged(records: { accountId: string; accountNa
           },
           {
             tag: 'column', width: 'weighted', weight: 3, vertical_align: 'center',
-            elements: [{ tag: 'div', text: { tag: 'lark_md', content: `<font color='grey'>${r.oldValue}</font> → <font color='${changeColor}'>**${r.newValue}**</font>${reached ? ' ✅' : ''}\n<font color='grey'>目标 ${r.desiredValue ?? '-'}</font>` } }],
+            elements: [{ tag: 'div', text: { tag: 'lark_md', content: `<font color='grey'>${r.oldValue}</font> → <font color='${changeColor}'>**${r.newValue}**</font>${badge}\n<font color='grey'>目标 ${r.desiredValue ?? '-'}</font>` } }],
           },
         ],
       });
@@ -174,7 +180,7 @@ export async function notifyQuotaChanged(records: { accountId: string; accountNa
 
   elements.push({ tag: 'note', elements: [{ tag: 'plain_text', content: `AWS Toolbox · ${new Date().toLocaleString('zh-CN')}` }] });
 
-  // Header color: green if all reached, else blue
-  const headerColor = inProgressCount === 0 ? 'green' : 'blue';
+  // Header color: green if all actually reached, else blue
+  const headerColor = (reachedCount === records.length && reachedCount > 0) ? 'green' : 'blue';
   await sendCard(`配额变动 · ${records.length} 项`, headerColor, elements);
 }
