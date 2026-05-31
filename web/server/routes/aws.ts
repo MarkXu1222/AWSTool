@@ -199,6 +199,22 @@ awsRouter.post('/quotas/increase', requireAdmin, async (req: Request, res: Respo
     });
     db.addAuditLog(user?.userId, 'QUOTA_INCREASE', `账户 ${accountId} | ${quotaName || quotaCode} | ${serviceCode} | ${targetRegion} | 提升至 ${desiredValue}`, user?.username, req.ip);
 
+    // 立即推送飞书通知（手动提交的提升请求）
+    try {
+      const { notifyQuotaChanged } = require('../notify');
+      const { accounts } = db.getAccountsCache();
+      const acct = accounts.find((a: any) => a.Id === accountId);
+      await notifyQuotaChanged([{
+        accountId,
+        accountName: acct?.Name || accountId,
+        quotaName: quotaName || quotaCode,
+        region: targetRegion,
+        oldValue: '提交',
+        newValue: desiredValue,
+        desiredValue,
+      }]);
+    } catch (e) { /* 通知失败不影响主流程 */ }
+
     res.json({ success: true, data: result });
   } catch (e: any) { res.status(500).json({ error: e.message }); }
 });

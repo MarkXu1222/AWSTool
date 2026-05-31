@@ -72,6 +72,12 @@ async function syncQuotaRequests() {
     let done = 0;
     let totalRecords = 0;
 
+    // 一次性快照所有现有记录（在任何写入前），用于对比变动
+    const snapshot = new Map<string, any>();
+    for (const r of db.getQuotaRequests()) {
+      snapshot.set(r.id, { current_value: r.current_value, status: r.status });
+    }
+
     // Process in batches of 8, with 2s delay between batches to avoid throttling
     const batchSize = 8;
     const changedRecords: any[] = []; // Track quotas whose current_value changed
@@ -84,21 +90,35 @@ async function syncQuotaRequests() {
           if (requests.length > 0) {
             requests = await aws.enrichCurrentValues(accountId, requests);
           }
-          // Snapshot existing records to detect current_value changes
-          const existing = db.getQuotaRequests();
+          // Snapshot existing records to detect changes (use upfront snapshot, not live DB)
           for (const r of requests) {
-            const prev = existing.find((x: any) => x.id === r.Id);
+            const prev = snapshot.get(r.Id);
             const newCurrent = r._currentValue;
-            // Detect change: had a previous value, new value differs
-            if (prev && prev.current_value != null && newCurrent != null && prev.current_value !== newCurrent) {
+            const newStatus = r.Status?.Value || r.Status;
+            const region = r.QuotaArn ? r.QuotaArn.split(':')[3] : (r._region || 'us-east-1');
+
+            if (!prev) {
+              // 全新记录（新提交的配额提升请求）— 通知
               changedRecords.push({
-                accountId,
-                quotaName: r.QuotaName,
-                region: r.QuotaArn ? r.QuotaArn.split(':')[3] : (r._region || 'us-east-1'),
-                oldValue: prev.current_value,
-                newValue: newCurrent,
-                desiredValue: r.DesiredValue,
+                accountId, quotaName: r.QuotaName, region,
+                oldValue: '新增', newValue: newCurrent != null ? newCurrent : '-',
+                desiredValue: r.DesiredValue, status: newStatus, isNew: true,
               });
+            } else {
+              // 当前值变化 OR 状态变化 — 通知
+              const curChanged = prev.current_value != null && newCurrent != null && prev.current_value !== newCurrent;
+              const statusChanged = prev.status && newStatus && prev.status !== newStatus;
+              if (curChanged || statusChanged) {
+                changedRecords.push({
+                  accountId, quotaName: r.QuotaName, region,
+                  oldValue: curChanged ? prev.current_value : (newCurrent ?? '-'),
+                  newValue: newCurrent != null ? newCurrent : '-',
+                  desiredValue: r.DesiredValue,
+                  status: newStatus,
+                  oldStatus: prev.status,
+                  statusChanged,
+                });
+              }
             }
             db.upsertQuotaRequest({
               id: r.Id,
@@ -110,7 +130,7 @@ async function syncQuotaRequests() {
               current_value: r._currentValue,
               status: r.Status,
               case_id: r.CaseId || null,
-              region: r.QuotaArn ? r.QuotaArn.split(':')[3] : (r._region || 'us-east-1'),
+              region,
               created_at: r.Created ? new Date(r.Created).toISOString() : undefined,
             });
           }
@@ -136,12 +156,12 @@ async function syncQuotaRequests() {
     lastQuotaSync = new Date().toISOString();
     console.log(`[Scheduler] Quota sync complete: ${total} accounts, ${totalRecords} records`);
 
-    // Notify for any quota whose current value changed
+    // Notify for any quota change — but skip if this was the first-ever sync (empty snapshot = avoid flooding)
     try {
-      if (changedRecords.length > 0) {
-        const { accounts: accts } = db.getAccountsCache();
+      if (changedRecords.length > 0 && snapshot.size > 0) {
+        const { accounts: accts2 } = db.getAccountsCache();
         const toNotify = changedRecords.map(r => {
-          const acct = accts.find((a: any) => a.Id === r.accountId);
+          const acct = accts2.find((a: any) => a.Id === r.accountId);
           return {
             accountId: r.accountId,
             accountName: acct?.Name || r.accountId,
@@ -153,6 +173,9 @@ async function syncQuotaRequests() {
           };
         });
         await notifyQuotaChanged(toNotify);
+        console.log(`[Scheduler] Notified ${toNotify.length} quota changes to Feishu`);
+      } else if (changedRecords.length > 0) {
+        console.log(`[Scheduler] Skipped notification (first sync, ${changedRecords.length} records)`);
       }
     } catch (e: any) {
       console.error('[Scheduler] Notification check failed:', e.message);
