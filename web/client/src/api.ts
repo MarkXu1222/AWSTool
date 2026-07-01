@@ -67,8 +67,10 @@ export const api = {
   getDashboardSummary: () => request('/aws/dashboard/summary'),
   getConsoleUrl: (accountId: string, caseId?: string) =>
     request(`/aws/console-url/${accountId}${caseId ? `?caseId=${caseId}` : ''}`),
+  // List company profiles (for manual doc-generation UI)
+  listCompanies: () => request('/aws/quotas/companies'),
   // Generate quota increase PDF document — downloads the file
-  generateQuotaDoc: async (params: { accountId: string; accountName?: string; serviceCode: string; quotaName: string; region: string; requestedValue: number; currentValue?: number }) => {
+  generateQuotaDoc: async (params: { accountId?: string; accountName?: string; companyKey?: string; serviceCode: string; quotaName: string; region: string; requestedValue: number; currentValue?: number }) => {
     const token = getToken();
     const res = await fetch(`${BASE}/aws/quotas/generate-doc`, {
       method: 'POST',

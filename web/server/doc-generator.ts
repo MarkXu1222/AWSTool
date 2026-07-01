@@ -11,8 +11,9 @@ import { db } from './db';
 const ARCH_DIR = path.join(__dirname, '../../doc-templates/architectures');
 
 // 解析子账户对应的公司：优先用账户缓存里的 _payer，回退到 payer 账户ID映射
-function resolveCompanyKey(accountId: string, override?: string): string | null {
+function resolveCompanyKey(accountId?: string, override?: string): string | null {
   if (override && COMPANY_PROFILES[override]) return override;
+  if (!accountId) return null;
   // 1) 子账户：在缓存里找 _payer
   try {
     const { accounts } = db.getAccountsCache();
@@ -42,9 +43,9 @@ function findChrome(): string {
 }
 
 export interface DocParams {
-  accountId: string;
+  accountId?: string;        // 可选：从记录生成时提供，从项目手动生成时可省略
   accountName?: string;
-  companyKey?: string;       // 可覆盖默认映射
+  companyKey?: string;       // 可覆盖默认映射；手动生成模式下必填
   serviceCode: string;       // ec2 / lightsail ...
   quotaName: string;         // 原始 quota 名
   region: string;
@@ -216,9 +217,13 @@ function buildHTML(params: DocParams, profile: CompanyProfile): string {
 }
 
 export async function generateQuotaDoc(params: DocParams): Promise<Buffer> {
-  // 确定公司（子账户 → payer → 公司）
+  // 确定公司（子账户 → payer → 公司；或直接使用 companyKey）
   const companyKey = resolveCompanyKey(params.accountId, params.companyKey);
-  if (!companyKey) throw new Error(`无法识别账户 ${params.accountId} 所属公司，请检查账户缓存`);
+  if (!companyKey) throw new Error(
+    params.accountId
+      ? `无法识别账户 ${params.accountId} 所属公司，请检查账户缓存`
+      : '未指定项目（companyKey），无法生成文档'
+  );
   const profile = COMPANY_PROFILES[companyKey];
   if (!profile) throw new Error(`未找到公司模板: ${companyKey}`);
 

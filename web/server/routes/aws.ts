@@ -2,6 +2,7 @@ import { Router, Request, Response } from 'express';
 import * as aws from '../aws-service';
 import { db } from '../db';
 import { generateQuotaDoc, getCompanyForAccount } from '../doc-generator';
+import { COMPANY_PROFILES } from '../doc-templates';
 
 export const awsRouter = Router();
 
@@ -137,15 +138,19 @@ awsRouter.get('/console-url/:accountId', async (req: Request, res: Response) => 
 awsRouter.post('/quotas/generate-doc', async (req: Request, res: Response) => {
   try {
     const { accountId, accountName, companyKey, serviceCode, quotaName, region, requestedValue, currentValue } = req.body;
-    if (!accountId || !quotaName || !region || !requestedValue) {
-      return res.status(400).json({ error: '缺少必要参数' });
+    // 必需：quotaName + region + requestedValue，且 accountId / companyKey 至少一个
+    if (!quotaName || !region || !requestedValue) {
+      return res.status(400).json({ error: '缺少必要参数（quotaName / region / requestedValue）' });
+    }
+    if (!accountId && !companyKey) {
+      return res.status(400).json({ error: '需要指定 accountId 或 companyKey' });
     }
     const pdf = await generateQuotaDoc({
       accountId, accountName, companyKey, serviceCode,
       quotaName, region, requestedValue: Number(requestedValue),
       currentValue: currentValue != null ? Number(currentValue) : undefined,
     });
-    const company = (getCompanyForAccount(accountId)?.key) || companyKey || 'doc';
+    const company = companyKey || (accountId ? getCompanyForAccount(accountId)?.key : null) || 'doc';
     const filename = `${company}-${(quotaName || 'quota').replace(/[^a-zA-Z0-9]/g, '_').slice(0, 30)}-${requestedValue}-${region}.pdf`;
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
@@ -160,6 +165,20 @@ awsRouter.get('/quotas/company/:accountId', async (req: Request, res: Response) 
   try {
     const company = getCompanyForAccount(req.params.accountId);
     res.json({ success: true, data: company });
+  } catch (e: any) { res.status(500).json({ error: e.message }); }
+});
+
+// List all company profiles (for manual doc generation UI)
+awsRouter.get('/quotas/companies', async (_req: Request, res: Response) => {
+  try {
+    const list = Object.values(COMPANY_PROFILES).map(c => ({
+      key: c.key,
+      displayName: c.displayName,
+      industry: c.industry,
+    }));
+    // 按名字排序，便于下拉查找
+    list.sort((a, b) => a.displayName.localeCompare(b.displayName));
+    res.json({ success: true, data: list });
   } catch (e: any) { res.status(500).json({ error: e.message }); }
 });
 

@@ -1,8 +1,22 @@
 import React, { useState, useEffect } from 'react';
 import { Card, Table, Tag, Button, Space, message, Input, Select, Tabs, Modal, Form, InputNumber } from 'antd';
-import { ReloadOutlined, SearchOutlined, DownloadOutlined, FileTextOutlined } from '@ant-design/icons';
+import { ReloadOutlined, SearchOutlined, DownloadOutlined, FileTextOutlined, FilePdfOutlined } from '@ant-design/icons';
 import { api } from '../api';
 import { exportToCSV, exportQuotaPivotTable, exportQuotaRecords } from '../utils/export';
+
+// 手动生成文档时可选的常用配额类型（组合了 serviceCode + quotaName，classifyQuota 会据此推断类别 + 单位）
+const QUOTA_PRESETS = [
+  { label: 'EC2 Standard vCPU (A/C/D/H/I/M/R/T/Z)', serviceCode: 'ec2', quotaName: 'Running On-Demand Standard (A, C, D, H, I, M, R, T, Z) instances', unit: 'vCPUs' },
+  { label: 'EC2 G/VT vCPU (GPU)', serviceCode: 'ec2', quotaName: 'Running On-Demand G and VT instances', unit: 'vCPUs' },
+  { label: 'EC2 F vCPU (FPGA)', serviceCode: 'ec2', quotaName: 'Running On-Demand F instances', unit: 'vCPUs' },
+  { label: 'EC2 Elastic IPs (EIP)', serviceCode: 'ec2', quotaName: 'EC2-VPC Elastic IPs', unit: 'EIPs' },
+  { label: 'EC2 Mac Dedicated Hosts (mac.m2)', serviceCode: 'ec2', quotaName: 'Running Dedicated mac.m2 Hosts', unit: 'Hosts' },
+  { label: 'EC2 Mac Dedicated Hosts (mac.m4)', serviceCode: 'ec2', quotaName: 'Running Dedicated mac.m4 Hosts', unit: 'Hosts' },
+  { label: 'Lightsail Instances', serviceCode: 'lightsail', quotaName: 'Lightsail Instances', unit: 'Instances' },
+  { label: 'WorkSpaces Bundles', serviceCode: 'workspaces', quotaName: 'WorkSpaces', unit: 'WorkSpaces' },
+  { label: 'Fargate On-Demand Tasks', serviceCode: 'fargate', quotaName: 'Fargate On-Demand resource count', unit: 'Tasks' },
+  { label: 'Route 53 Domains', serviceCode: 'route53', quotaName: 'Domain count limit', unit: 'Domains' },
+];
 
 const SERVICES = [
   { label: '全部服务', value: '' },
@@ -116,10 +130,61 @@ const QuotasPage: React.FC = () => {
   const [activeTab, setActiveTab] = useState('db-records');
   const [form] = Form.useForm();
 
-  useEffect(() => { loadAccounts(); loadDbRecords(); }, []);
+  // 手动生成文档相关状态
+  const [docModalOpen, setDocModalOpen] = useState(false);
+  const [docForm] = Form.useForm();
+  const [companies, setCompanies] = useState<{ key: string; displayName: string; industry: string }[]>([]);
+  const [docGenerating, setDocGenerating] = useState(false);
+
+  useEffect(() => { loadAccounts(); loadDbRecords(); loadCompanies(); }, []);
 
   const loadAccounts = async () => { const res = await api.listAccounts(); if (res.success) setAccounts(res.data); };
   const loadDbRecords = async () => { const res = await api.listQuotaRequests(); if (res.success) setDbRecords(res.data); };
+  const loadCompanies = async () => {
+    try {
+      const res = await api.listCompanies();
+      if (res.success) setCompanies(res.data);
+    } catch {}
+  };
+
+  // 手动生成申请文档 —— 不依赖已有提额记录
+  const openDocModal = () => {
+    docForm.resetFields();
+    docForm.setFieldsValue({
+      presetIndex: 0,
+      region: selectedRegion || 'us-east-1',
+      requestedValue: 256,
+    });
+    setDocModalOpen(true);
+  };
+
+  const handleGenerateManualDoc = async () => {
+    try {
+      const values = await docForm.validateFields();
+      const preset = QUOTA_PRESETS[values.presetIndex ?? 0];
+      setDocGenerating(true);
+      const hide = message.loading('正在生成文档...', 0);
+      try {
+        await api.generateQuotaDoc({
+          companyKey: values.companyKey,
+          serviceCode: preset.serviceCode,
+          quotaName: preset.quotaName,
+          region: values.region,
+          requestedValue: Number(values.requestedValue),
+        });
+        hide();
+        message.success('文档已生成');
+        setDocModalOpen(false);
+      } catch (err: any) {
+        hide();
+        message.error(err.message || '生成失败');
+      } finally {
+        setDocGenerating(false);
+      }
+    } catch {
+      // form 校验失败
+    }
+  };
 
   const fetchQuotas = async () => {
     if (!selectedAccount) { message.warning('请选择账户'); return; }
@@ -384,7 +449,10 @@ const QuotasPage: React.FC = () => {
           <h2 className="page-header-title">配额管理</h2>
           <p className="page-header-subtitle">管理不同账号、服务和区域下的资源配额</p>
         </div>
-        <Button size="small" icon={<DownloadOutlined />} onClick={handleExport}>导出</Button>
+        <Space size="small">
+          <Button size="small" type="primary" icon={<FilePdfOutlined />} onClick={openDocModal}>生成申请文档</Button>
+          <Button size="small" icon={<DownloadOutlined />} onClick={handleExport}>导出</Button>
+        </Space>
       </div>
 
       {/* 筛选卡片区 */}
@@ -495,6 +563,56 @@ const QuotasPage: React.FC = () => {
             </Form.Item>
           </Form>
         )}
+      </Modal>
+
+      {/* 手动生成申请文档 */}
+      <Modal
+        title={<span><FilePdfOutlined style={{ marginRight: 6 }} />生成提额申请文档</span>}
+        open={docModalOpen}
+        onOk={handleGenerateManualDoc}
+        onCancel={() => setDocModalOpen(false)}
+        okText="生成并下载 PDF"
+        cancelText="取消"
+        confirmLoading={docGenerating}
+        width={560}
+      >
+        <p style={{ color: 'rgba(0,0,0,0.55)', fontSize: 12, marginTop: 0 }}>
+          直接根据"项目 + 服务 + 区域 + 数量"生成一份英文 Project Summary PDF，无需已有提额记录。
+        </p>
+        <Form form={docForm} layout="vertical">
+          <Form.Item name="companyKey" label="项目 (公司)" rules={[{ required: true, message: '请选择项目' }]}>
+            <Select
+              placeholder="选择项目"
+              showSearch
+              optionFilterProp="label"
+              options={companies.map(c => ({
+                label: `${c.displayName} — ${c.industry}`,
+                value: c.key,
+              }))}
+            />
+          </Form.Item>
+          <Form.Item name="presetIndex" label="配额类型" rules={[{ required: true, message: '请选择配额类型' }]}>
+            <Select
+              placeholder="选择要申请的配额类型"
+              options={QUOTA_PRESETS.map((p, i) => ({ label: p.label, value: i }))}
+            />
+          </Form.Item>
+          <Form.Item name="region" label="区域" rules={[{ required: true, message: '请选择区域' }]}>
+            <Select
+              showSearch
+              optionFilterProp="label"
+              options={REGIONS.filter(r => r.value).map(r => ({ label: r.label, value: r.value }))}
+            />
+          </Form.Item>
+          <Form.Item
+            name="requestedValue"
+            label="申请数量"
+            rules={[{ required: true, message: '请输入申请数量' }]}
+            extra="将同时用于计算 Projected in 2 Months (约 1.5x)"
+          >
+            <InputNumber style={{ width: '100%' }} min={1} />
+          </Form.Item>
+        </Form>
       </Modal>
     </Card>
     </div>
