@@ -58,6 +58,12 @@ function classifyQuota(serviceCode: string, quotaName: string) {
   const q = (quotaName || '').toLowerCase();
   const s = (serviceCode || '').toLowerCase();
 
+  if (s.includes('globalaccelerator') || q.includes('accelerator')) {
+    // 兼容 Standard / Custom Routing 两种
+    const isCustom = q.includes('custom');
+    const official = isCustom ? 'Custom routing accelerators per AWS account' : 'Standard accelerators per AWS account';
+    return { service: 'AWS Global Accelerator', officialName: official, unit: 'Accelerators', category: 'other' as const };
+  }
   if (s.includes('lightsail') || q.includes('lightsail')) {
     return { service: 'Amazon Lightsail', officialName: 'Instances', unit: 'Instances', category: 'lightsail' as const };
   }

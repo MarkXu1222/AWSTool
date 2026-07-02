@@ -16,6 +16,8 @@ const QUOTA_PRESETS = [
   { label: 'WorkSpaces Bundles', serviceCode: 'workspaces', quotaName: 'WorkSpaces', unit: 'WorkSpaces' },
   { label: 'Fargate On-Demand Tasks', serviceCode: 'fargate', quotaName: 'Fargate On-Demand resource count', unit: 'Tasks' },
   { label: 'Route 53 Domains', serviceCode: 'route53', quotaName: 'Domain count limit', unit: 'Domains' },
+  { label: 'Global Accelerator - Standard Accelerators', serviceCode: 'globalaccelerator', quotaName: 'Standard accelerators per AWS account', unit: 'Accelerators' },
+  { label: 'Global Accelerator - Custom Routing Accelerators', serviceCode: 'globalaccelerator', quotaName: 'Custom routing accelerators per AWS account', unit: 'Accelerators' },
 ];
 
 const SERVICES = [
