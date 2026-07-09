@@ -192,6 +192,18 @@ async function captureOne(browser: Browser, task: ExportTask, outDir: string): P
         }
         return { clicked: false, reason: 'no modal, no print button in tail' };
       }
+      // 找所有 awsui modal，选包含"打印内容"或者按钮里有"打印"的
+      var allModals = Array.prototype.slice.call(document.querySelectorAll('[class*="awsui_modal-content"], [class*="awsui_modal-container"], [class*="awsui_dialog"]'));
+      var titles = allModals.map(function(m){ 
+        var h = m.querySelector('h1,h2,h3'); 
+        return h ? h.textContent.trim() : ''; 
+      });
+      // 优先找标题包含"打印"的 modal
+      for (var k = 0; k < allModals.length; k++) {
+        var t = titles[k] || '';
+        if (/打印|Print/i.test(t)) { modal = allModals[k]; break; }
+      }
+      var modalTitle = (modal.querySelector('h1,h2,h3') || {}).textContent || '(no title)';
       var btns = Array.prototype.slice.call(modal.querySelectorAll('button'));
       var btnDump = btns.map(function(b, i){
         return i + ':[' + (b.textContent || '').trim().slice(0, 30) + ']';
@@ -205,7 +217,7 @@ async function captureOne(browser: Browser, task: ExportTask, outDir: string): P
           return { clicked: true, text: txt2.slice(0, 20), via: 'modal' };
         }
       }
-      return { clicked: false, reason: 'modal found but no print button inside', btnCount: btns.length, btnDump: btnDump };
+      return { clicked: false, reason: 'no print btn', modalTitle: modalTitle, allModalTitles: titles, btnCount: btns.length, btnDump: btnDump };
     })()`);
     log(`click #2: ${JSON.stringify(click2)}`);
 
