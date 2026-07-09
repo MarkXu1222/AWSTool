@@ -144,10 +144,23 @@ async function captureOne(browser: Browser, task: ExportTask, outDir: string): P
     log(`print button click: ${JSON.stringify(clicked)}`);
 
     if (clicked && clicked.clicked) {
-      // 等 AWS 应用打印布局（切换 DOM / 加 class / 触发 print media）
       await new Promise(r => setTimeout(r, 2500));
-      const printed: any = await page.evaluate(`window.__printCalled || false`);
-      log(`window.print called by AWS? ${printed}`);
+      const diag: any = await page.evaluate(`(function(){
+        return {
+          url: location.href,
+          printCalled: window.__printCalled || false,
+          bodyClasses: document.body.className,
+          htmlClasses: document.documentElement.className,
+          bodyChildCount: document.body.children.length,
+          bodyText: (document.body.innerText || '').slice(0, 200)
+        };
+      })()`);
+      log(`after click diag: ${JSON.stringify(diag)}`);
+      const snapDir = path.dirname(outDir);
+      try {
+        await page.screenshot({ path: path.join(snapDir, `after-click-${task.accountId}-${task.year}-${monthStr}.png`), fullPage: false });
+        log('after-click screenshot saved');
+      } catch {}
     }
 
     // 6) 生成 PDF —— 用 print media（跟 window.print 行为一致，让 AWS 的 @media print CSS 生效）
