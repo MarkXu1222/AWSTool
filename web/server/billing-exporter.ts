@@ -86,12 +86,13 @@ async function captureOne(browser: Browser, task: ExportTask, outDir: string): P
     await page.setExtraHTTPHeaders({ 'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8' });
 
     // 提前拦截 window.print()，避免 AWS 打印按钮触发真的调用（headless 下无影响，但保险）
-    await page.evaluateOnNewDocument(() => {
-      (window as any).__printCalled = false;
-      const origPrint = window.print;
-      window.print = function () { (window as any).__printCalled = true; };
-      (window as any).__origPrint = origPrint;
-    });
+    // 注意：用字符串形式的 evaluate，避免 tsx/esbuild 注入 __name helper 污染浏览器上下文
+    await page.evaluateOnNewDocument(`(function(){
+      window.__printCalled = false;
+      var _p = window.print;
+      window.print = function(){ window.__printCalled = true; };
+      window.__origPrint = _p;
+    })();`);
 
     // 3) 导航到 signin URL，会自动重定向到 destination
     log('navigating...');
@@ -102,20 +103,17 @@ async function captureOne(browser: Browser, task: ExportTask, outDir: string): P
     await new Promise(r => setTimeout(r, 5000));
     log(`after 5s wait, URL: ${page.url()}`);
 
-    // 4) 等待 Billing 页面关键元素出现
+    // 4) 等待 Billing 页面关键元素出现 —— 用字符串 waitForFunction 避开 __name 问题
     try {
       await page.waitForFunction(
-        () => {
-          const txt = document.body?.innerText || '';
-          return /账单周期|Billing period|预计总计|Estimated Total|按服务计费|Charges by service/i.test(txt);
-        },
+        `(function(){ var t = (document.body && document.body.innerText) || ''; return /账单周期|Billing period|预计总计|Estimated Total|按服务计费|Charges by service/i.test(t); })()`,
         { timeout: 60_000 }
       );
       log('key text detected');
     } catch (waitErr: any) {
       log(`waitForFunction timeout: ${waitErr.message}`);
-      const bodyText = await page.evaluate(() => document.body?.innerText?.slice(0, 500) || '(empty)').catch(() => '(err)');
-      log(`page body preview: ${bodyText.replace(/\n/g, ' | ').slice(0, 300)}`);
+      const bodyText: any = await page.evaluate(`document.body ? document.body.innerText.slice(0,500) : '(empty)'`).catch(() => '(err)');
+      log(`page body preview: ${String(bodyText).replace(/\n/g, ' | ').slice(0, 300)}`);
       const snapDir = path.dirname(outDir);
       try {
         await page.screenshot({ path: path.join(snapDir, `snapshot-${task.accountId}-${task.year}-${monthStr}.png`), fullPage: true });
@@ -127,26 +125,29 @@ async function captureOne(browser: Browser, task: ExportTask, outDir: string): P
     await new Promise(r => setTimeout(r, 3000));
 
     // 5) 模拟点击 AWS "打印" 按钮 —— 触发 AWS 自己的打印视图切换
-    const clicked = await page.evaluate(() => {
-      const nodes = Array.from(document.querySelectorAll('button, [role="button"], a')) as HTMLElement[];
-      const isPrintBtn = (el: HTMLElement) => {
-        const txt = (el.textContent || '').trim();
-        const label = el.getAttribute('aria-label') || '';
-        return /^打印$|^Print$/i.test(txt) || /打印|print/i.test(label);
-      };
-      const btn = nodes.find(isPrintBtn);
-      if (btn) {
-        btn.click();
-        return { clicked: true, text: (btn.textContent || '').trim().slice(0, 20), label: btn.getAttribute('aria-label') };
+    //    用字符串形式 evaluate，避开 tsx/esbuild __name helper 污染
+    const clicked: any = await page.evaluate(`(function(){
+      var nodes = Array.prototype.slice.call(document.querySelectorAll('button, [role="button"], a'));
+      var found = null;
+      for (var i = 0; i < nodes.length; i++) {
+        var el = nodes[i];
+        var txt = (el.textContent || '').trim();
+        var label = el.getAttribute('aria-label') || '';
+        if (/^打印$|^Print$/i.test(txt) || /打印|print/i.test(label)) { found = el; break; }
+      }
+      if (found) {
+        found.click();
+        return { clicked: true, text: (found.textContent || '').trim().slice(0, 20), label: found.getAttribute('aria-label') };
       }
       return { clicked: false };
-    });
+    })()`);
     log(`print button click: ${JSON.stringify(clicked)}`);
 
-    if (clicked.clicked) {
+    if (clicked && clicked.clicked) {
       // 等 AWS 应用打印布局（切换 DOM / 加 class / 触发 print media）
       await new Promise(r => setTimeout(r, 2500));
-      log(`window.print called by AWS? ${await page.evaluate(() => (window as any).__printCalled)}`);
+      const printed: any = await page.evaluate(`window.__printCalled || false`);
+      log(`window.print called by AWS? ${printed}`);
     }
 
     // 6) 生成 PDF —— 用 print media（跟 window.print 行为一致，让 AWS 的 @media print CSS 生效）
