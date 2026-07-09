@@ -71,34 +71,56 @@ async function captureOne(browser: Browser, task: ExportTask, outDir: string): P
   const filename = `${nameBase}-${task.year}-${monthStr}.pdf`;
   result.filename = filename;
 
+  const log = (msg: string) => console.log(`[${task.accountId}/${task.year}-${monthStr}] ${msg}`);
   let page;
   try {
     // 1) 生成 federation signin URL
+    log('generating signin URL...');
     const destUrl = buildBillsUrl(task.year, task.month);
     const signinUrl = await getConsoleSigninUrl(task.accountId, destUrl);
+    log(`signin URL OK (len=${signinUrl.length})`);
 
     // 2) 打开新 tab
     page = await browser.newPage();
     await page.setViewport({ width: 1440, height: 1800, deviceScaleFactor: 1 });
-    // 中文界面，跟用户样例一致
     await page.setExtraHTTPHeaders({ 'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8' });
 
     // 3) 导航到 signin URL，会自动重定向到 destination
-    await page.goto(signinUrl, { waitUntil: 'networkidle2', timeout: 90_000 });
+    log('navigating...');
+    await page.goto(signinUrl, { waitUntil: 'domcontentloaded', timeout: 60_000 });
+    log(`navigated, current URL: ${page.url()}`);
 
-    // 4) 等待 Billing 页面关键元素出现（多重兜底）
-    //    页面主要文字：账单周期 / Billing period / 预计总计 / Estimated Total
-    await page.waitForFunction(
-      () => {
-        const txt = document.body?.innerText || '';
-        return /账单周期|Billing period|预计总计|Estimated Total|按服务计费|Charges by service/i.test(txt);
-      },
-      { timeout: 60_000 }
-    );
-    // 给动态图表和汇总额外渲染时间
+    // 等一会儿让 SPA JS 加载
+    await new Promise(r => setTimeout(r, 5000));
+    const url1 = page.url();
+    log(`after 5s wait, URL: ${url1}`);
+
+    // 4) 等待 Billing 页面关键元素出现
+    try {
+      await page.waitForFunction(
+        () => {
+          const txt = document.body?.innerText || '';
+          return /账单周期|Billing period|预计总计|Estimated Total|按服务计费|Charges by service/i.test(txt);
+        },
+        { timeout: 60_000 }
+      );
+      log('key text detected');
+    } catch (waitErr: any) {
+      // 超时了：截图 + 保存 HTML 快照方便排查
+      log(`waitForFunction timeout: ${waitErr.message}`);
+      const bodyText = await page.evaluate(() => document.body?.innerText?.slice(0, 500) || '(empty)').catch(() => '(err)');
+      log(`page body preview: ${bodyText.replace(/\n/g, ' | ').slice(0, 300)}`);
+      const snapDir = path.dirname(outDir);
+      try {
+        await page.screenshot({ path: path.join(snapDir, `snapshot-${task.accountId}-${task.year}-${monthStr}.png`), fullPage: true });
+        log('screenshot saved');
+      } catch {}
+      throw waitErr;
+    }
     await new Promise(r => setTimeout(r, 3000));
 
-    // 5) 生成 PDF (A4，含背景色)
+    // 5) 生成 PDF
+    log('generating PDF...');
     await page.emulateMediaType('print');
     const outPath = path.join(outDir, filename);
     await page.pdf({
@@ -107,9 +129,11 @@ async function captureOne(browser: Browser, task: ExportTask, outDir: string): P
       printBackground: true,
       margin: { top: '10mm', bottom: '10mm', left: '8mm', right: '8mm' },
     });
+    log(`PDF saved: ${filename}`);
     result.ok = true;
   } catch (e: any) {
     result.error = e?.message || String(e);
+    log(`FAIL: ${result.error}`);
   } finally {
     try { if (page) await page.close(); } catch {}
   }
