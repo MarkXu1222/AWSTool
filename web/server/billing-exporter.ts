@@ -295,40 +295,49 @@ async function captureOne(browser: Browser, task: ExportTask, outDir: string): P
     try {
       const pages = await browser.pages();
       log(`total pages/tabs: ${pages.length}`);
-      let newPage = null;
+      let newPage: any = null;
       for (const p of pages) {
-        if (p !== page) {
-          newPage = p;
-          break;
-        }
+        if (p !== page) { newPage = p; break; }
       }
       if (newPage) {
         const newUrl = newPage.url();
-        const newTitle = await newPage.title().catch(() => '?');
-        log(`new tab URL: ${newUrl}, title: ${newTitle}`);
-        await newPage.bringToFront().catch(() => {});
-        // AWS 打印视图是 document.write 到 about:blank，不能靠 URL/navigation 判断
-        // Poll: 等 body 有实质内容 (含"账单周期"或类似关键文字)
+        log(`new tab URL: ${newUrl}`);
+        // 在新 tab 上拦截 window.print (可能已经晚了，但值得一试)
+        try {
+          await newPage.evaluate(`(function(){
+            window.__printCalled = false;
+            var _p = window.print;
+            window.print = function(){ window.__printCalled = true; };
+          })();`).catch(() => {});
+        } catch {}
+        // AWS 打印视图是 document.write 到新 tab
         let waited = 0;
         let ready = false;
-        while (waited < 20000) {
+        while (waited < 25000) {
           try {
-            const contentSize: any = await newPage.evaluate(`(function(){
+            const info: any = await newPage.evaluate(`(function(){
               var b = document.body;
               return {
                 htmlLen: (b && b.innerHTML || '').length,
-                hasBills: /账单周期|Billing period|预计总计|Estimated Total|AWS.*预计账单/.test(b && b.innerText || '')
+                textLen: (b && b.innerText || '').length,
+                url: location.href,
+                readyState: document.readyState,
+                hasBills: /账单周期|Billing period|预计总计|Estimated Total|AWS.*预计账单/.test(b && b.innerText || ''),
+                childCount: b ? b.children.length : 0,
+                title: document.title
               };
-            })()`).catch(() => ({htmlLen: 0, hasBills: false}));
-            log(`new tab poll: htmlLen=${contentSize.htmlLen}, hasBills=${contentSize.hasBills}`);
-            if (contentSize.hasBills) { ready = true; break; }
+            })()`).catch(() => ({htmlLen: 0, hasBills: false, url: '?', childCount: 0}));
+            if (waited % 3000 === 0) log(`new tab @${waited}ms: url=${info.url} state=${info.readyState} htmlLen=${info.htmlLen} textLen=${info.textLen} kids=${info.childCount} bills=${info.hasBills}`);
+            if (info.hasBills) { ready = true; break; }
           } catch {}
           await new Promise(r => setTimeout(r, 1000));
           waited += 1000;
         }
         log(`new tab ready: ${ready}, waited ${waited}ms`);
-        await new Promise(r => setTimeout(r, 1500));
-        page = newPage;
+        if (ready) {
+          await new Promise(r => setTimeout(r, 1500));
+          page = newPage;
+        }
       }
     } catch (e: any) { log(`tab check err: ${e.message}`); }
 
@@ -398,6 +407,9 @@ export async function exportBillingInvoices(
       '--disable-setuid-sandbox',
       '--disable-dev-shm-usage',
       '--disable-gpu',
+      '--disable-popup-blocking',
+      '--enable-features=OverscrollHistoryNavigation',
+      '--disable-features=IsolateOrigins',
     ],
   });
 
