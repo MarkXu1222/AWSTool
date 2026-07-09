@@ -124,6 +124,9 @@ async function captureOne(browser: Browser, task: ExportTask, outDir: string): P
     // 页面首次渲染后再等一会儿，让金额/表格数据加载完
     await new Promise(r => setTimeout(r, 3000));
 
+    // 走"注入 CSS 隐藏导航"的路径 (headless 中 AWS 打印按钮触发不了正确流程)
+    const USE_PRINT_BTN = false;
+
     // 4.5) 关闭 Cookie 弹窗（首次访问 AWS Console 会有）
     const cookieResult: any = await page.evaluate(`(function(){
       // AWS Cookie Banner: id="awsccc-cb-c"
@@ -152,6 +155,7 @@ async function captureOne(browser: Browser, task: ExportTask, outDir: string): P
       await new Promise(r => setTimeout(r, 1500));
     }
 
+    if (USE_PRINT_BTN) {
     // 5) 完整流程 = 两次点击 "打印":
     //    (a) 页面右上角"打印" → 弹出"打印内容"对话框(选摘要/付款信息等区域)
     //    (b) 对话框底部"打印" → 调用 window.print()，浏览器原生 print CSS 会隐藏侧栏
@@ -340,6 +344,57 @@ async function captureOne(browser: Browser, task: ExportTask, outDir: string): P
         }
       }
     } catch (e: any) { log(`tab check err: ${e.message}`); }
+    } // end USE_PRINT_BTN
+
+    // 5.a) 通用打印视图: 注入 CSS 强力隐藏导航栏
+    log('injecting print CSS...');
+    await page.addStyleTag({
+      content: `
+        /* AWS Console 顶部导航栏 */
+        #awsc-nav-header, header[role="banner"],
+        [class*="awsui_top-nav"], [id*="awsc-nav-"],
+        [aria-label*="Global"], [aria-label*="全局"],
+        [class*="awsccc-"] { display: none !important; }
+        /* 左侧导航面板 */
+        aside, nav, [class*="awsui_navigation"],
+        [class*="AppLayoutDrawer"], [class*="AppLayout_navigation"],
+        [class*="drawer"], [class*="Drawer"],
+        [data-testid*="navigation"], [data-testid*="sidebar"],
+        [role="navigation"] { display: none !important; }
+        /* 面包屑 */
+        [class*="Breadcrumbs"], [class*="breadcrumb"],
+        [aria-label*="breadcrumb"] { display: none !important; }
+        /* 主内容区拉满，去内边距 */
+        [class*="awsui_layout"], [class*="AppLayout_content"],
+        [class*="app-layout"], main, [role="main"] {
+          padding: 0 !important; margin: 0 !important;
+          max-width: 100% !important; width: 100% !important; grid-template-columns: none !important;
+        }
+        html, body { padding: 0 !important; margin: 0 !important; overflow: visible !important; }
+        /* 隐藏所有 fixed / sticky */
+        *[style*="position: fixed"], *[style*="position:fixed"],
+        *[style*="position: sticky"], *[style*="position:sticky"] {
+          position: static !important;
+        }
+      `
+    });
+
+    // 5.b) 精准移除 fixed/sticky positioned 元素 (用 JS，比 CSS 更彻底)
+    await page.evaluate(`(function(){
+      var all = document.querySelectorAll('*');
+      for (var i = 0; i < all.length; i++) {
+        var el = all[i];
+        var s = window.getComputedStyle(el);
+        if ((s.position === 'fixed' || s.position === 'sticky')) {
+          // 顶部导航栏 / 页面 top bar
+          var rect = el.getBoundingClientRect();
+          if (rect.top < 100 && rect.width > 500) {
+            el.style.display = 'none';
+          }
+        }
+      }
+    })();`).catch(() => {});
+    await new Promise(r => setTimeout(r, 800));
 
     // 6) 生成 PDF —— 用 print media 让 AWS 自带的 @media print CSS 生效
     log('generating PDF...');
