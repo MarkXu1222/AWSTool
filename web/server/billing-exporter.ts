@@ -179,12 +179,32 @@ export async function exportBillingInvoices(
 
   // 用系统 zip 命令打包（不引入 archiver 依赖）
   const zipPath = path.join(workDir, `billing-invoices-${Date.now()}.zip`);
-  // -j: 只保留文件名不保留路径；-q: 静默
-  const zipResult = spawnSync('zip', ['-j', '-q', zipPath, ...fs.readdirSync(pdfDir).map(f => path.join(pdfDir, f))], {
+  const pdfFiles = fs.readdirSync(pdfDir);
+
+  // 写一份 summary.txt 到 zip 里（成功/失败清单）
+  const summaryPath = path.join(pdfDir, '_summary.txt');
+  const lines = [`Batch export summary  (${new Date().toISOString()})`, ''];
+  lines.push(`Total: ${results.length}  OK: ${results.filter(r => r.ok).length}  Fail: ${results.filter(r => !r.ok).length}`);
+  lines.push('');
+  for (const r of results) {
+    lines.push(`[${r.ok ? 'OK' : 'FAIL'}] ${r.filename}${r.ok ? '' : '  -- ' + (r.error || 'unknown')}`);
+  }
+  fs.writeFileSync(summaryPath, lines.join('\n') + '\n');
+
+  const zipInputs = fs.readdirSync(pdfDir).map(f => path.join(pdfDir, f));
+  // -j: 只保留文件名不保留路径
+  const zipResult = spawnSync('zip', ['-j', zipPath, ...zipInputs], {
     cwd: workDir,
+    encoding: 'utf-8',
   });
   if (zipResult.status !== 0) {
-    throw new Error(`zip 打包失败: ${zipResult.stderr?.toString() || 'unknown'}`);
+    throw new Error(`zip 打包失败 (exit=${zipResult.status}): stderr=${zipResult.stderr || ''} stdout=${zipResult.stdout || ''}`);
+  }
+
+  if (pdfFiles.length === 0) {
+    // 所有任务都失败了，仍然返回 zip（含 summary.txt），但同时提示错误概况
+    const firstErr = results.find(r => r.error)?.error || 'unknown';
+    console.warn(`[billing-exporter] 全部任务失败，首个错误: ${firstErr}`);
   }
 
   return { zipPath, results, workDir };

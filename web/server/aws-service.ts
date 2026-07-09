@@ -65,6 +65,16 @@ async function getAdminCredsForPayer(payerRoleArn: string) {
 }
 
 async function assumeToAccount(accountId: string) {
+  // 兜底：如果 accountId 本身就是一个 payer 账号，直接用 payer role 的 admin creds
+  // （payer 账号一般没有 CHILD_ROLE_NAME=OrganizationAccountAccessRole，无法 AssumeRole）
+  const selfPayer = PAYERS.find(p => {
+    const m = /arn:aws:iam::(\d+):role\//.exec(p.roleArn);
+    return m && m[1] === accountId;
+  });
+  if (selfPayer) {
+    return await getAdminCredsForPayer(selfPayer.roleArn);
+  }
+
   const roleArn = `arn:aws:iam::${accountId}:role/${CHILD_ROLE_NAME}`;
 
   // Try known payer first
