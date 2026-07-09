@@ -69,6 +69,29 @@ export const api = {
     request(`/aws/console-url/${accountId}${caseId ? `?caseId=${caseId}` : ''}`),
   // List company profiles (for manual doc-generation UI)
   listCompanies: () => request('/aws/quotas/companies'),
+  // Batch export AWS Console Billing → Bills PDFs, returns a zip
+  exportBillingInvoices: async (params: { accountIds: string[]; months: string[]; concurrency?: number }) => {
+    const token = getToken();
+    const res = await fetch(`${BASE}/aws/billing/export-invoices`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+      body: JSON.stringify(params),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ error: '导出失败' }));
+      throw new Error(err.error || '导出失败');
+    }
+    const summary = res.headers.get('X-Export-Summary') || '';
+    const disposition = res.headers.get('Content-Disposition') || '';
+    const match = disposition.match(/filename="(.+)"/);
+    const filename = match ? match[1] : 'billing-invoices.zip';
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = filename; a.click();
+    URL.revokeObjectURL(url);
+    return summary;
+  },
   // Generate quota increase PDF document — downloads the file
   generateQuotaDoc: async (params: { accountId?: string; accountName?: string; companyKey?: string; serviceCode: string; quotaName: string; region: string; requestedValue: number; currentValue?: number }) => {
     const token = getToken();

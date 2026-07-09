@@ -1,6 +1,6 @@
-import React, { useState, useEffect } from 'react';
-import { Card, Table, Tag, Button, message, Statistic, Row, Col, DatePicker, Input } from 'antd';
-import { DollarOutlined, ReloadOutlined, SearchOutlined } from '@ant-design/icons';
+import React, { useState, useEffect, useMemo } from 'react';
+import { Card, Table, Tag, Button, message, Statistic, Row, Col, DatePicker, Input, Modal, Select, InputNumber, Space, Alert } from 'antd';
+import { DollarOutlined, ReloadOutlined, SearchOutlined, FilePdfOutlined } from '@ant-design/icons';
 import dayjs from 'dayjs';
 import { api } from '../api';
 import { exportToCSV } from '../utils/export';
@@ -14,7 +14,35 @@ const BillingPage: React.FC = () => {
   const [totalCost, setTotalCost] = useState(0);
   const [searchText, setSearchText] = useState('');
 
-  useEffect(() => { fetchCosts(); }, []);
+  // 批量导出账单相关状态
+  const [accounts, setAccounts] = useState<any[]>([]);
+  const [exportModalOpen, setExportModalOpen] = useState(false);
+  const [selectedAccountIds, setSelectedAccountIds] = useState<string[]>([]);
+  const [selectedMonths, setSelectedMonths] = useState<string[]>([]);
+  const [concurrency, setConcurrency] = useState<number>(10);
+  const [exporting, setExporting] = useState(false);
+
+  // 生成近 12 个月的候选月份
+  const monthCandidates = useMemo(() => {
+    const arr: { value: string; label: string }[] = [];
+    const now = dayjs();
+    for (let i = 0; i < 12; i++) {
+      const d = now.subtract(i, 'month');
+      const value = d.format('YYYY-M');    // 后端解析 YYYY-M 或 YYYY-MM 均可
+      const label = d.format('YYYY-MM');
+      arr.push({ value, label });
+    }
+    return arr;
+  }, []);
+
+  useEffect(() => { fetchCosts(); loadAccounts(); }, []);
+
+  const loadAccounts = async () => {
+    try {
+      const res = await api.listAccounts();
+      if (res.success) setAccounts(res.data);
+    } catch {}
+  };
 
   const fetchCosts = async () => {
     setLoading(true);
@@ -39,6 +67,40 @@ const BillingPage: React.FC = () => {
 
   const filtered = tableData.filter(d => !searchText || d.accountId.includes(searchText));
 
+  // 批量导出账单
+  const openExportModal = () => {
+    setSelectedAccountIds([]);
+    setSelectedMonths([dayjs().subtract(1, 'month').format('YYYY-M')]);
+    setConcurrency(10);
+    setExportModalOpen(true);
+  };
+
+  const handleExportInvoices = async () => {
+    if (!selectedAccountIds.length) return message.warning('请选择至少一个账号');
+    if (!selectedMonths.length) return message.warning('请选择至少一个月份');
+    const taskCount = selectedAccountIds.length * selectedMonths.length;
+    if (taskCount > 200) return message.warning(`任务过多 (${taskCount})，请分批`);
+    setExporting(true);
+    const hide = message.loading(`正在导出 ${taskCount} 份账单 PDF（预计 ${Math.ceil(taskCount * 15 / concurrency)} 秒）...`, 0);
+    try {
+      const summary = await api.exportBillingInvoices({
+        accountIds: selectedAccountIds,
+        months: selectedMonths,
+        concurrency,
+      });
+      hide();
+      message.success(`导出完成 (${summary})`);
+      setExportModalOpen(false);
+    } catch (err: any) {
+      hide();
+      message.error(err.message || '导出失败');
+    } finally {
+      setExporting(false);
+    }
+  };
+
+  const taskCount = selectedAccountIds.length * selectedMonths.length;
+
   return (
     <div>
       <div className="page-header">
@@ -46,7 +108,10 @@ const BillingPage: React.FC = () => {
           <h2 className="page-header-title">账单分析</h2>
           <p className="page-header-subtitle">按账户查看 AWS 费用分布</p>
         </div>
-        <Button size="small" onClick={() => exportToCSV(filtered.map(d => ({ 账期: d.period, 账户: d.accountId, '费用(USD)': d.cost.toFixed(4) })), 'billing')}>导出</Button>
+        <Space size="small">
+          <Button size="small" type="primary" icon={<FilePdfOutlined />} onClick={openExportModal}>批量导出账单 PDF</Button>
+          <Button size="small" onClick={() => exportToCSV(filtered.map(d => ({ 账期: d.period, 账户: d.accountId, '费用(USD)': d.cost.toFixed(4) })), 'billing')}>导出 CSV</Button>
+        </Space>
       </div>
       <Row gutter={12} style={{ marginBottom: 12 }}>
         <Col xs={12} md={8}><Card size="small"><Statistic title="总费用" value={totalCost} precision={2} prefix={<DollarOutlined />} suffix="USD" valueStyle={{ color: 'var(--color-text-primary)' }} /></Card></Col>
@@ -66,6 +131,77 @@ const BillingPage: React.FC = () => {
             { title: '占比', key: 'pct', render: (_: any, r: any) => <Tag color="blue">{totalCost > 0 ? ((r.cost / totalCost) * 100).toFixed(1) : 0}%</Tag> },
           ]} />
       </Card>
+
+      {/* 批量导出账单 PDF Modal */}
+      <Modal
+        title={<span><FilePdfOutlined style={{ marginRight: 6 }} />批量导出账单 PDF</span>}
+        open={exportModalOpen}
+        onOk={handleExportInvoices}
+        onCancel={() => setExportModalOpen(false)}
+        okText={`导出 ${taskCount || 0} 份 PDF`}
+        cancelText="取消"
+        confirmLoading={exporting}
+        width={720}
+        okButtonProps={{ disabled: !selectedAccountIds.length || !selectedMonths.length || taskCount > 200 }}
+      >
+        <Alert
+          type="info"
+          showIcon
+          style={{ marginBottom: 12 }}
+          message="从 AWS Console → Billing → Bills 页面抓取官方账单摘要，打包为 zip 下载。"
+          description="账号已加密免登录访问；每份约需 10-20 秒。任务总数 ≤ 200。"
+        />
+        <div style={{ marginBottom: 12 }}>
+          <div style={{ marginBottom: 4, fontWeight: 500 }}>账号 <span style={{ color: '#999', fontWeight: 400 }}>({selectedAccountIds.length}/{accounts.length})</span></div>
+          <Space style={{ marginBottom: 6 }} size={4}>
+            <Button size="small" onClick={() => setSelectedAccountIds(accounts.map(a => a.Id))}>全选</Button>
+            <Button size="small" onClick={() => setSelectedAccountIds([])}>清空</Button>
+          </Space>
+          <Select
+            mode="multiple"
+            style={{ width: '100%' }}
+            placeholder="选择要导出的账号"
+            value={selectedAccountIds}
+            onChange={setSelectedAccountIds}
+            showSearch
+            optionFilterProp="label"
+            maxTagCount={5}
+            options={accounts.map((a: any) => ({
+              label: `${a.Name || a.Id} (${a.Id})`,
+              value: a.Id,
+            }))}
+          />
+        </div>
+        <div style={{ marginBottom: 12 }}>
+          <div style={{ marginBottom: 4, fontWeight: 500 }}>月份 <span style={{ color: '#999', fontWeight: 400 }}>({selectedMonths.length} 个)</span></div>
+          <Space style={{ marginBottom: 6 }} size={4}>
+            <Button size="small" onClick={() => setSelectedMonths(monthCandidates.slice(0, 3).map(m => m.value))}>近 3 个月</Button>
+            <Button size="small" onClick={() => setSelectedMonths(monthCandidates.slice(0, 6).map(m => m.value))}>近 6 个月</Button>
+            <Button size="small" onClick={() => setSelectedMonths(monthCandidates.map(m => m.value))}>近 12 个月</Button>
+            <Button size="small" onClick={() => setSelectedMonths([])}>清空</Button>
+          </Space>
+          <Select
+            mode="multiple"
+            style={{ width: '100%' }}
+            placeholder="选择月份"
+            value={selectedMonths}
+            onChange={setSelectedMonths}
+            options={monthCandidates}
+          />
+        </div>
+        <div>
+          <div style={{ marginBottom: 4, fontWeight: 500 }}>并发数</div>
+          <InputNumber min={1} max={15} value={concurrency} onChange={v => setConcurrency(v || 10)} style={{ width: 120 }} />
+          <span style={{ color: '#999', marginLeft: 12, fontSize: 12 }}>建议 10，最大 15</span>
+        </div>
+        {taskCount > 0 && (
+          <div style={{ marginTop: 14, padding: 10, background: 'var(--color-bg-subtle, #f5f5f5)', borderRadius: 4, fontSize: 12 }}>
+            <div>总任务: <strong>{taskCount}</strong> 份 PDF ({selectedAccountIds.length} 账号 × {selectedMonths.length} 月份)</div>
+            <div>预估耗时: <strong>{Math.ceil(taskCount * 15 / concurrency)}</strong> 秒（并发 {concurrency}，每份约 15s）</div>
+            {taskCount > 200 && <div style={{ color: 'var(--color-danger, #ff4d4f)' }}>⚠️ 超出 200 上限，请减少</div>}
+          </div>
+        )}
+      </Modal>
     </div>
   );
 };

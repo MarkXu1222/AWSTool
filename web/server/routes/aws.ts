@@ -3,6 +3,9 @@ import * as aws from '../aws-service';
 import { db } from '../db';
 import { generateQuotaDoc, getCompanyForAccount } from '../doc-generator';
 import { COMPANY_PROFILES } from '../doc-templates';
+import { exportBillingInvoices, cleanupWorkDir, ExportTask } from '../billing-exporter';
+import fs from 'fs';
+import path from 'path';
 
 export const awsRouter = Router();
 
@@ -166,6 +169,68 @@ awsRouter.get('/quotas/company/:accountId', async (req: Request, res: Response) 
     const company = getCompanyForAccount(req.params.accountId);
     res.json({ success: true, data: company });
   } catch (e: any) { res.status(500).json({ error: e.message }); }
+});
+
+// Batch export AWS Console Billing → Bills PDFs (zip)
+// Body: { accountIds: string[], months: string[] "YYYY-MM", concurrency?: number }
+awsRouter.post('/billing/export-invoices', async (req: Request, res: Response) => {
+  try {
+    const { accountIds, months, concurrency } = req.body as {
+      accountIds: string[]; months: string[]; concurrency?: number;
+    };
+    if (!Array.isArray(accountIds) || accountIds.length === 0) {
+      return res.status(400).json({ error: '请选择至少一个账号' });
+    }
+    if (!Array.isArray(months) || months.length === 0) {
+      return res.status(400).json({ error: '请选择至少一个月份' });
+    }
+    // 拿 accountName 用于文件名
+    const { accounts } = db.getAccountsCache();
+    const nameById: Record<string, string> = {};
+    for (const a of accounts) nameById[a.Id] = a.Name || '';
+
+    // 展开为 (账号 × 月份) 任务
+    const tasks: ExportTask[] = [];
+    for (const aid of accountIds) {
+      for (const m of months) {
+        const match = /^(\d{4})-(\d{1,2})$/.exec(m);
+        if (!match) continue;
+        tasks.push({
+          accountId: aid,
+          accountName: nameById[aid] || undefined,
+          year: parseInt(match[1], 10),
+          month: parseInt(match[2], 10),
+        });
+      }
+    }
+    if (!tasks.length) return res.status(400).json({ error: '月份格式错误' });
+
+    // 上限保护：避免一次跑太多
+    if (tasks.length > 200) {
+      return res.status(400).json({ error: `任务过多 (${tasks.length})，请分批（≤200）` });
+    }
+
+    const { zipPath, results, workDir } = await exportBillingInvoices(
+      tasks,
+      concurrency || 10,
+    );
+
+    // 附加一个 summary.txt 到 zip 里（方便用户对账，看哪些失败）
+    const okCount = results.filter(r => r.ok).length;
+    const failCount = results.length - okCount;
+    const filename = `billing-invoices-${Date.now()}-${okCount}ok-${failCount}fail.zip`;
+
+    res.setHeader('Content-Type', 'application/zip');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.setHeader('X-Export-Summary', `total=${tasks.length};ok=${okCount};fail=${failCount}`);
+
+    const stream = fs.createReadStream(zipPath);
+    stream.pipe(res);
+    stream.on('close', () => cleanupWorkDir(workDir));
+    stream.on('error', () => cleanupWorkDir(workDir));
+  } catch (e: any) {
+    res.status(500).json({ error: e?.message || String(e) });
+  }
 });
 
 // List all company profiles (for manual doc generation UI)
