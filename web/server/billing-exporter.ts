@@ -124,6 +124,34 @@ async function captureOne(browser: Browser, task: ExportTask, outDir: string): P
     // 页面首次渲染后再等一会儿，让金额/表格数据加载完
     await new Promise(r => setTimeout(r, 3000));
 
+    // 4.5) 关闭 Cookie 弹窗（首次访问 AWS Console 会有）
+    const cookieResult: any = await page.evaluate(`(function(){
+      // AWS Cookie Banner: id="awsccc-cb-c"
+      var cookieBanner = document.querySelector('#awsccc-cb-c, [id*="awsccc-cb"]');
+      if (!cookieBanner) return { found: false };
+      // 尝试点击 "Continue" / "接受" / "Accept all" 按钮
+      var btns = Array.prototype.slice.call(cookieBanner.querySelectorAll('button'));
+      for (var i = 0; i < btns.length; i++) {
+        var el = btns[i];
+        var txt = (el.textContent || '').trim();
+        if (/Accept|Continue|接受|继续/i.test(txt)) {
+          el.click();
+          return { found: true, clicked: txt.slice(0, 30) };
+        }
+      }
+      // 兜底: 点第一个 button (通常是主 CTA)
+      if (btns.length) {
+        var t = (btns[0].textContent || '').trim().slice(0, 30);
+        btns[0].click();
+        return { found: true, clicked: t, via: 'first' };
+      }
+      return { found: true, clicked: null };
+    })()`);
+    log(`cookie banner: ${JSON.stringify(cookieResult)}`);
+    if (cookieResult && cookieResult.found) {
+      await new Promise(r => setTimeout(r, 1500));
+    }
+
     // 5) 完整流程 = 两次点击 "打印":
     //    (a) 页面右上角"打印" → 弹出"打印内容"对话框(选摘要/付款信息等区域)
     //    (b) 对话框底部"打印" → 调用 window.print()，浏览器原生 print CSS 会隐藏侧栏
@@ -148,8 +176,8 @@ async function captureOne(browser: Browser, task: ExportTask, outDir: string): P
 
     log('click #2: modal 内的 打印 按钮');
     const click2: any = await page.evaluate(`(function(){
-      // AWS 的 modal 组件类名带 awsui_modal_
-      var modal = document.querySelector('[class*="awsui_modal-content"], [class*="awsui_modal-container"], [role="dialog"]');
+      // 只找 AWS Cloudscape (awsui) 的 modal，跳过 Cookie 弹窗 (awsccc-*)
+      var modal = document.querySelector('[class*="awsui_modal-content"], [class*="awsui_modal-container"], [class*="awsui_dialog"]');
       if (!modal) {
         // 兜底: 找页面上"最新"出现的"打印"按钮 (通常 modal footer)
         var allBtns = Array.prototype.slice.call(document.querySelectorAll('button'));
