@@ -155,33 +155,29 @@ async function captureOne(browser: Browser, task: ExportTask, outDir: string): P
     // 5) 完整流程 = 两次点击 "打印":
     //    (a) 页面右上角"打印" → 弹出"打印内容"对话框(选摘要/付款信息等区域)
     //    (b) 对话框底部"打印" → 调用 window.print()，浏览器原生 print CSS 会隐藏侧栏
-    log('click #1: page header 打印 button');
-    const click1: any = await page.evaluate(`(function(){
-      function fireRealClick(el) {
-        try {
-          var rect = el.getBoundingClientRect();
-          var x = rect.left + rect.width / 2;
-          var y = rect.top + rect.height / 2;
-          var opts = { bubbles: true, cancelable: true, view: window, clientX: x, clientY: y, button: 0 };
-          el.dispatchEvent(new MouseEvent('pointerdown', opts));
-          el.dispatchEvent(new MouseEvent('mousedown', opts));
-          el.dispatchEvent(new MouseEvent('pointerup', opts));
-          el.dispatchEvent(new MouseEvent('mouseup', opts));
-          el.dispatchEvent(new MouseEvent('click', opts));
-        } catch (e) { try { el.click(); } catch (e2) {} }
-      }
+    // click #1: 给 header 的"打印"按钮打标记，用 puppeteer page.click
+    log('click #1 preparation: mark page header 打印 btn');
+    const mark1: any = await page.evaluate(`(function(){
       var nodes = Array.prototype.slice.call(document.querySelectorAll('button, [role="button"]'));
       for (var i = 0; i < nodes.length; i++) {
         var el = nodes[i];
         var txt = (el.textContent || '').trim();
         var label = el.getAttribute('aria-label') || '';
         if (/^打印$|^Print$/i.test(txt) || /打印|print/i.test(label)) {
-          fireRealClick(el);
-          return { clicked: true, text: txt.slice(0, 20) };
+          el.setAttribute('data-test-print-header', '1');
+          return { marked: true, text: txt.slice(0, 20) };
         }
       }
-      return { clicked: false };
+      return { marked: false };
     })()`);
+    log(`mark1: ${JSON.stringify(mark1)}`);
+    let click1: any = { clicked: false };
+    if (mark1 && mark1.marked) {
+      try {
+        await page.click('[data-test-print-header="1"]');
+        click1 = { clicked: true, text: mark1.text };
+      } catch (e: any) { log(`click #1 failed: ${e.message}`); }
+    }
     log(`click #1: ${JSON.stringify(click1)}`);
 
     // 等"打印内容"对话框渲染完
