@@ -85,6 +85,14 @@ async function captureOne(browser: Browser, task: ExportTask, outDir: string): P
     await page.setViewport({ width: 1440, height: 1800, deviceScaleFactor: 1 });
     await page.setExtraHTTPHeaders({ 'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8' });
 
+    // 提前拦截 window.print()，避免 AWS 打印按钮触发真的调用（headless 下无影响，但保险）
+    await page.evaluateOnNewDocument(() => {
+      (window as any).__printCalled = false;
+      const origPrint = window.print;
+      window.print = function () { (window as any).__printCalled = true; };
+      (window as any).__origPrint = origPrint;
+    });
+
     // 3) 导航到 signin URL，会自动重定向到 destination
     log('navigating...');
     await page.goto(signinUrl, { waitUntil: 'domcontentloaded', timeout: 60_000 });
@@ -92,8 +100,7 @@ async function captureOne(browser: Browser, task: ExportTask, outDir: string): P
 
     // 等一会儿让 SPA JS 加载
     await new Promise(r => setTimeout(r, 5000));
-    const url1 = page.url();
-    log(`after 5s wait, URL: ${url1}`);
+    log(`after 5s wait, URL: ${page.url()}`);
 
     // 4) 等待 Billing 页面关键元素出现
     try {
@@ -106,7 +113,6 @@ async function captureOne(browser: Browser, task: ExportTask, outDir: string): P
       );
       log('key text detected');
     } catch (waitErr: any) {
-      // 超时了：截图 + 保存 HTML 快照方便排查
       log(`waitForFunction timeout: ${waitErr.message}`);
       const bodyText = await page.evaluate(() => document.body?.innerText?.slice(0, 500) || '(empty)').catch(() => '(err)');
       log(`page body preview: ${bodyText.replace(/\n/g, ' | ').slice(0, 300)}`);
@@ -117,16 +123,43 @@ async function captureOne(browser: Browser, task: ExportTask, outDir: string): P
       } catch {}
       throw waitErr;
     }
+    // 页面首次渲染后再等一会儿，让金额/表格数据加载完
     await new Promise(r => setTimeout(r, 3000));
 
-    // 5) 生成 PDF
+    // 5) 模拟点击 AWS "打印" 按钮 —— 触发 AWS 自己的打印视图切换
+    const clicked = await page.evaluate(() => {
+      const nodes = Array.from(document.querySelectorAll('button, [role="button"], a')) as HTMLElement[];
+      const isPrintBtn = (el: HTMLElement) => {
+        const txt = (el.textContent || '').trim();
+        const label = el.getAttribute('aria-label') || '';
+        return /^打印$|^Print$/i.test(txt) || /打印|print/i.test(label);
+      };
+      const btn = nodes.find(isPrintBtn);
+      if (btn) {
+        btn.click();
+        return { clicked: true, text: (btn.textContent || '').trim().slice(0, 20), label: btn.getAttribute('aria-label') };
+      }
+      return { clicked: false };
+    });
+    log(`print button click: ${JSON.stringify(clicked)}`);
+
+    if (clicked.clicked) {
+      // 等 AWS 应用打印布局（切换 DOM / 加 class / 触发 print media）
+      await new Promise(r => setTimeout(r, 2500));
+      log(`window.print called by AWS? ${await page.evaluate(() => (window as any).__printCalled)}`);
+    }
+
+    // 6) 生成 PDF —— 用 print media（跟 window.print 行为一致，让 AWS 的 @media print CSS 生效）
     log('generating PDF...');
     await page.emulateMediaType('print');
+    // print media 切换后再给点时间稳定
+    await new Promise(r => setTimeout(r, 800));
     const outPath = path.join(outDir, filename);
     await page.pdf({
       path: outPath,
       format: 'A4',
       printBackground: true,
+      preferCSSPageSize: true,
       margin: { top: '10mm', bottom: '10mm', left: '8mm', right: '8mm' },
     });
     log(`PDF saved: ${filename}`);
