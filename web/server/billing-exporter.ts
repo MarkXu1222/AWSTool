@@ -124,48 +124,66 @@ async function captureOne(browser: Browser, task: ExportTask, outDir: string): P
     // 页面首次渲染后再等一会儿，让金额/表格数据加载完
     await new Promise(r => setTimeout(r, 3000));
 
-    // 5) 注入 CSS 隐藏 Console 的顶部导航栏、左侧导航栏和其它非账单内容
-    //    (AWS Console 用了动态生成的 css module 类名，我们用 class 前缀模糊匹配)
-    log('injecting print CSS...');
-    await page.addStyleTag({
-      content: `
-        /* 顶部全局导航栏 */
-        #awsc-nav-header, header[role="banner"], .globalNav-container,
-        nav[aria-label*="Global"], nav[aria-label*="全局"] {
-          display: none !important;
+    // 5) 完整流程 = 两次点击 "打印":
+    //    (a) 页面右上角"打印" → 弹出"打印内容"对话框(选摘要/付款信息等区域)
+    //    (b) 对话框底部"打印" → 调用 window.print()，浏览器原生 print CSS 会隐藏侧栏
+    log('click #1: page header 打印 button');
+    const click1: any = await page.evaluate(`(function(){
+      var nodes = Array.prototype.slice.call(document.querySelectorAll('button, [role="button"]'));
+      for (var i = 0; i < nodes.length; i++) {
+        var el = nodes[i];
+        var txt = (el.textContent || '').trim();
+        var label = el.getAttribute('aria-label') || '';
+        if (/^打印$|^Print$/i.test(txt) || /打印|print/i.test(label)) {
+          el.click();
+          return { clicked: true, text: txt.slice(0, 20) };
         }
-        /* 左侧导航面板 (Billing 侧边栏) */
-        aside, nav[aria-label*="Service"], nav[aria-label*="服务"],
-        [class*="AppLayoutDrawer"], [class*="app-layout-navigation"],
-        [class*="AppLayout_navigation"], [class*="Sidebar"],
-        [data-testid*="navigation"], [data-testid*="sidebar"] {
-          display: none !important;
-        }
-        /* 面包屑 / 页面顶部快捷按钮组 */
-        [class*="Breadcrumbs"], [class*="breadcrumb"] {
-          display: none !important;
-        }
-        /* 主内容区拉满 */
-        main, [class*="AppLayout_content"], [class*="ContentLayout"] {
-          padding: 0 !important;
-          margin: 0 !important;
-          max-width: 100% !important;
-          width: 100% !important;
-        }
-        body { padding: 0 !important; margin: 0 !important; }
-        /* 隐藏所有 fixed / sticky 元素 (通常是顶部 sticky bar) */
-        *[style*="position: fixed"], *[style*="position:fixed"],
-        *[style*="position: sticky"], *[style*="position:sticky"] {
-          position: static !important;
-        }
-      `
-    });
-    await new Promise(r => setTimeout(r, 500));
+      }
+      return { clicked: false };
+    })()`);
+    log(`click #1: ${JSON.stringify(click1)}`);
 
-    // 6) 生成 PDF —— 用 print media 让 AWS 自带的 @media print 也生效
+    // 等"打印内容"对话框渲染完
+    await new Promise(r => setTimeout(r, 3500));
+
+    log('click #2: modal 内的 打印 按钮');
+    const click2: any = await page.evaluate(`(function(){
+      // AWS 的 modal 组件类名带 awsui_modal_
+      var modal = document.querySelector('[class*="awsui_modal-content"], [class*="awsui_modal-container"], [role="dialog"]');
+      if (!modal) {
+        // 兜底: 找页面上"最新"出现的"打印"按钮 (通常 modal footer)
+        var allBtns = Array.prototype.slice.call(document.querySelectorAll('button'));
+        // 反向遍历: modal footer 通常在 DOM 尾部
+        for (var i = allBtns.length - 1; i >= 0; i--) {
+          var el = allBtns[i];
+          var txt = (el.textContent || '').trim();
+          if (/^打印$|^Print$/i.test(txt)) {
+            el.click();
+            return { clicked: true, text: txt.slice(0, 20), via: 'fallback-last' };
+          }
+        }
+        return { clicked: false, reason: 'no modal, no print button in tail' };
+      }
+      var btns = Array.prototype.slice.call(modal.querySelectorAll('button'));
+      for (var j = 0; j < btns.length; j++) {
+        var el2 = btns[j];
+        var txt2 = (el2.textContent || '').trim();
+        if (/^打印$|^Print$/i.test(txt2)) {
+          el2.click();
+          return { clicked: true, text: txt2.slice(0, 20), via: 'modal' };
+        }
+      }
+      return { clicked: false, reason: 'modal found but no print button inside', modalHTML: modal.outerHTML.slice(0, 400) };
+    })()`);
+    log(`click #2: ${JSON.stringify(click2)}`);
+
+    // 等 window.print 触发 print CSS 生效（虽然被拦截了，但 media print CSS 会应用）
+    await new Promise(r => setTimeout(r, 1500));
+
+    // 6) 生成 PDF —— 用 print media 让 AWS 自带的 @media print CSS 生效
     log('generating PDF...');
     await page.emulateMediaType('print');
-    await new Promise(r => setTimeout(r, 500));
+    await new Promise(r => setTimeout(r, 800));
     const outPath = path.join(outDir, filename);
     await page.pdf({
       path: outPath,
