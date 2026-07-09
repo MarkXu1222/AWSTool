@@ -157,13 +157,26 @@ async function captureOne(browser: Browser, task: ExportTask, outDir: string): P
     //    (b) 对话框底部"打印" → 调用 window.print()，浏览器原生 print CSS 会隐藏侧栏
     log('click #1: page header 打印 button');
     const click1: any = await page.evaluate(`(function(){
+      function fireRealClick(el) {
+        try {
+          var rect = el.getBoundingClientRect();
+          var x = rect.left + rect.width / 2;
+          var y = rect.top + rect.height / 2;
+          var opts = { bubbles: true, cancelable: true, view: window, clientX: x, clientY: y, button: 0 };
+          el.dispatchEvent(new MouseEvent('pointerdown', opts));
+          el.dispatchEvent(new MouseEvent('mousedown', opts));
+          el.dispatchEvent(new MouseEvent('pointerup', opts));
+          el.dispatchEvent(new MouseEvent('mouseup', opts));
+          el.dispatchEvent(new MouseEvent('click', opts));
+        } catch (e) { try { el.click(); } catch (e2) {} }
+      }
       var nodes = Array.prototype.slice.call(document.querySelectorAll('button, [role="button"]'));
       for (var i = 0; i < nodes.length; i++) {
         var el = nodes[i];
         var txt = (el.textContent || '').trim();
         var label = el.getAttribute('aria-label') || '';
         if (/^打印$|^Print$/i.test(txt) || /打印|print/i.test(label)) {
-          el.click();
+          fireRealClick(el);
           return { clicked: true, text: txt.slice(0, 20) };
         }
       }
@@ -208,12 +221,25 @@ async function captureOne(browser: Browser, task: ExportTask, outDir: string): P
       var btnDump = btns.map(function(b, i){
         return i + ':[' + (b.textContent || '').trim().slice(0, 30) + ']';
       }).join(' ');
+      function fireRealClick(el) {
+        try {
+          var rect = el.getBoundingClientRect();
+          var x = rect.left + rect.width / 2;
+          var y = rect.top + rect.height / 2;
+          var opts = { bubbles: true, cancelable: true, view: window, clientX: x, clientY: y, button: 0 };
+          el.dispatchEvent(new MouseEvent('pointerdown', opts));
+          el.dispatchEvent(new MouseEvent('mousedown', opts));
+          el.dispatchEvent(new MouseEvent('pointerup', opts));
+          el.dispatchEvent(new MouseEvent('mouseup', opts));
+          el.dispatchEvent(new MouseEvent('click', opts));
+        } catch (e) { try { el.click(); } catch (e2) {} }
+      }
       for (var j = 0; j < btns.length; j++) {
         var el2 = btns[j];
         var txt2 = (el2.textContent || '').trim();
         // 匹配 "打印" 或 包含"打印" (排除包含"取消"的)
         if ((/^打印$|^Print$/i.test(txt2) || (txt2.indexOf('打印') >= 0 && txt2.indexOf('取消') < 0)) && txt2.length < 10) {
-          el2.click();
+          fireRealClick(el2);
           return { clicked: true, text: txt2.slice(0, 20), via: 'modal' };
         }
       }
