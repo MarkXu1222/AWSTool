@@ -193,15 +193,19 @@ async function captureOne(browser: Browser, task: ExportTask, outDir: string): P
         return { clicked: false, reason: 'no modal, no print button in tail' };
       }
       var btns = Array.prototype.slice.call(modal.querySelectorAll('button'));
+      var btnDump = btns.map(function(b, i){
+        return i + ':[' + (b.textContent || '').trim().slice(0, 30) + ']';
+      }).join(' ');
       for (var j = 0; j < btns.length; j++) {
         var el2 = btns[j];
         var txt2 = (el2.textContent || '').trim();
-        if (/^打印$|^Print$/i.test(txt2)) {
+        // 匹配 "打印" 或 包含"打印" (排除包含"取消"的)
+        if ((/^打印$|^Print$/i.test(txt2) || (txt2.indexOf('打印') >= 0 && txt2.indexOf('取消') < 0)) && txt2.length < 10) {
           el2.click();
           return { clicked: true, text: txt2.slice(0, 20), via: 'modal' };
         }
       }
-      return { clicked: false, reason: 'modal found but no print button inside', modalHTML: modal.outerHTML.slice(0, 400) };
+      return { clicked: false, reason: 'modal found but no print button inside', btnCount: btns.length, btnDump: btnDump };
     })()`);
     log(`click #2: ${JSON.stringify(click2)}`);
 
