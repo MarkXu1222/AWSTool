@@ -144,23 +144,20 @@ async function captureOne(browser: Browser, task: ExportTask, outDir: string): P
     log(`print button click: ${JSON.stringify(clicked)}`);
 
     if (clicked && clicked.clicked) {
-      await new Promise(r => setTimeout(r, 2500));
+      // 等 modal 完全加载
+      await new Promise(r => setTimeout(r, 6000));
       const diag: any = await page.evaluate(`(function(){
+        var modal = document.querySelector('[class*="awsui_modal"], [role="dialog"]');
+        var modalText = modal ? (modal.innerText || '').slice(0, 500) : '(no modal)';
         return {
           url: location.href,
-          printCalled: window.__printCalled || false,
           bodyClasses: document.body.className,
-          htmlClasses: document.documentElement.className,
-          bodyChildCount: document.body.children.length,
-          bodyText: (document.body.innerText || '').slice(0, 200)
+          hasModal: !!modal,
+          modalText: modalText.replace(/\\n/g, ' | '),
+          modalChildCount: modal ? modal.children.length : 0
         };
       })()`);
-      log(`after click diag: ${JSON.stringify(diag)}`);
-      const snapDir = path.dirname(outDir);
-      try {
-        await page.screenshot({ path: path.join(snapDir, `after-click-${task.accountId}-${task.year}-${monthStr}.png`), fullPage: false });
-        log('after-click screenshot saved');
-      } catch {}
+      log(`modal diag: ${JSON.stringify(diag)}`);
     }
 
     // 6) 生成 PDF —— 用 print media（跟 window.print 行为一致，让 AWS 的 @media print CSS 生效）
