@@ -249,15 +249,28 @@ async function captureOne(browser: Browser, task: ExportTask, outDir: string): P
         const newTitle = await newPage.title().catch(() => '?');
         log(`new tab URL: ${newUrl}, title: ${newTitle}`);
         await newPage.bringToFront().catch(() => {});
-        // 等新 tab 加载完，打印视图渲染完
-        await newPage.waitForFunction(
-          `document.body && document.body.innerText.length > 200`,
-          { timeout: 30_000 }
-        ).catch((e: any) => log(`newPage wait timeout: ${e.message}`));
-        await new Promise(r => setTimeout(r, 3000));
-        // 切换到新 tab
+        // AWS 打印视图是 document.write 到 about:blank，不能靠 URL/navigation 判断
+        // Poll: 等 body 有实质内容 (含"账单周期"或类似关键文字)
+        let waited = 0;
+        let ready = false;
+        while (waited < 20000) {
+          try {
+            const contentSize: any = await newPage.evaluate(`(function(){
+              var b = document.body;
+              return {
+                htmlLen: (b && b.innerHTML || '').length,
+                hasBills: /账单周期|Billing period|预计总计|Estimated Total|AWS.*预计账单/.test(b && b.innerText || '')
+              };
+            })()`).catch(() => ({htmlLen: 0, hasBills: false}));
+            log(`new tab poll: htmlLen=${contentSize.htmlLen}, hasBills=${contentSize.hasBills}`);
+            if (contentSize.hasBills) { ready = true; break; }
+          } catch {}
+          await new Promise(r => setTimeout(r, 1000));
+          waited += 1000;
+        }
+        log(`new tab ready: ${ready}, waited ${waited}ms`);
+        await new Promise(r => setTimeout(r, 1500));
         page = newPage;
-        log(`switched to new tab, body preview: ${await page.evaluate(`(document.body.innerText||'').slice(0,200)`).catch(() => '?')}`);
       }
     } catch (e: any) { log(`tab check err: ${e.message}`); }
 
