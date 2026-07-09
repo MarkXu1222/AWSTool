@@ -221,8 +221,40 @@ async function captureOne(browser: Browser, task: ExportTask, outDir: string): P
     })()`);
     log(`click #2: ${JSON.stringify(click2)}`);
 
-    // 等 window.print 触发 print CSS 生效（虽然被拦截了，但 media print CSS 会应用）
-    await new Promise(r => setTimeout(r, 1500));
+    // 等 window.print 触发 print CSS 生效
+    await new Promise(r => setTimeout(r, 3000));
+    const postClick: any = await page.evaluate(`(function(){
+      return {
+        url: location.href,
+        printCalled: window.__printCalled || false,
+        title: document.title,
+        bodyText: (document.body.innerText || '').slice(0, 300).replace(/\\n/g, ' | ')
+      };
+    })()`);
+    log(`post click #2 diag: ${JSON.stringify(postClick)}`);
+
+    // 检查是否有新 tab / popup 打开
+    try {
+      const pages = await browser.pages();
+      log(`total pages/tabs: ${pages.length}`);
+      if (pages.length > 1) {
+        // 切换到最新的 tab (通常是打印视图)
+        const newPage = pages[pages.length - 1];
+        if (newPage !== page) {
+          const newUrl = newPage.url();
+          const newTitle = await newPage.title().catch(() => '?');
+          log(`new tab URL: ${newUrl}, title: ${newTitle}`);
+          await newPage.waitForFunction(
+            `document.body && document.body.innerText.length > 100`,
+            { timeout: 30_000 }
+          ).catch(() => {});
+          await new Promise(r => setTimeout(r, 2000));
+          // 用新 page 生成 PDF
+          page = newPage;
+          log('switched to new tab');
+        }
+      }
+    } catch (e: any) { log(`tab check err: ${e.message}`); }
 
     // 6) 生成 PDF —— 用 print media 让 AWS 自带的 @media print CSS 生效
     log('generating PDF...');
