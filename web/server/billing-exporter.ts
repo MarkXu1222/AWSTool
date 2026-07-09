@@ -233,26 +233,31 @@ async function captureOne(browser: Browser, task: ExportTask, outDir: string): P
     })()`);
     log(`post click #2 diag: ${JSON.stringify(postClick)}`);
 
-    // 检查是否有新 tab / popup 打开
+    // 检查是否有新 tab / popup 打开（AWS 打印会开新窗口显示打印视图）
     try {
       const pages = await browser.pages();
       log(`total pages/tabs: ${pages.length}`);
-      if (pages.length > 1) {
-        // 切换到最新的 tab (通常是打印视图)
-        const newPage = pages[pages.length - 1];
-        if (newPage !== page) {
-          const newUrl = newPage.url();
-          const newTitle = await newPage.title().catch(() => '?');
-          log(`new tab URL: ${newUrl}, title: ${newTitle}`);
-          await newPage.waitForFunction(
-            `document.body && document.body.innerText.length > 100`,
-            { timeout: 30_000 }
-          ).catch(() => {});
-          await new Promise(r => setTimeout(r, 2000));
-          // 用新 page 生成 PDF
-          page = newPage;
-          log('switched to new tab');
+      let newPage = null;
+      for (const p of pages) {
+        if (p !== page) {
+          newPage = p;
+          break;
         }
+      }
+      if (newPage) {
+        const newUrl = newPage.url();
+        const newTitle = await newPage.title().catch(() => '?');
+        log(`new tab URL: ${newUrl}, title: ${newTitle}`);
+        await newPage.bringToFront().catch(() => {});
+        // 等新 tab 加载完，打印视图渲染完
+        await newPage.waitForFunction(
+          `document.body && document.body.innerText.length > 200`,
+          { timeout: 30_000 }
+        ).catch((e: any) => log(`newPage wait timeout: ${e.message}`));
+        await new Promise(r => setTimeout(r, 3000));
+        // 切换到新 tab
+        page = newPage;
+        log(`switched to new tab, body preview: ${await page.evaluate(`(document.body.innerText||'').slice(0,200)`).catch(() => '?')}`);
       }
     } catch (e: any) { log(`tab check err: ${e.message}`); }
 
