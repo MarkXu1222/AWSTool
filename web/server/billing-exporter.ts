@@ -187,8 +187,44 @@ async function captureOne(browser: Browser, task: ExportTask, outDir: string): P
     // 等"打印内容"对话框渲染完
     await new Promise(r => setTimeout(r, 3500));
 
-    log('click #2: modal 内的 打印 按钮');
-    const click2: any = await page.evaluate(`(function(){
+    // click #2 用 puppeteer page.click (CDP 触发真实鼠标事件, React 会正确处理)
+    // 先在 modal 里给"打印"按钮打个标记，再用 selector click
+    log('click #2 preparation: mark modal print btn');
+    const markResult: any = await page.evaluate(`(function(){
+      var mods = Array.prototype.slice.call(document.querySelectorAll('[class*="awsui_modal-content"], [class*="awsui_modal-container"], [class*="awsui_dialog"]'));
+      var modal = null;
+      for (var k = 0; k < mods.length; k++) {
+        var h = mods[k].querySelector('h1,h2,h3');
+        var t = h ? h.textContent.trim() : '';
+        if (/打印|Print/i.test(t)) { modal = mods[k]; break; }
+      }
+      if (!modal && mods.length) modal = mods[mods.length - 1];
+      if (!modal) return { marked: false, reason: 'no modal' };
+      var btns = Array.prototype.slice.call(modal.querySelectorAll('button'));
+      var btnDump = btns.map(function(b, i){ return i + ':[' + (b.textContent || '').trim().slice(0, 20) + ']'; }).join(' ');
+      for (var j = 0; j < btns.length; j++) {
+        var el2 = btns[j];
+        var txt2 = (el2.textContent || '').trim();
+        if ((/^打印$|^Print$/i.test(txt2) || (txt2.indexOf('打印') >= 0 && txt2.indexOf('取消') < 0)) && txt2.length < 10) {
+          el2.setAttribute('data-test-print', '1');
+          return { marked: true, text: txt2 };
+        }
+      }
+      return { marked: false, reason: 'no print btn in modal', btnDump: btnDump };
+    })()`);
+    log(`markResult: ${JSON.stringify(markResult)}`);
+    
+    let click2: any = { clicked: false };
+    if (markResult && markResult.marked) {
+      try {
+        await page.click('[data-test-print="1"]');
+        click2 = { clicked: true, text: markResult.text, via: 'puppeteer-click' };
+      } catch (e: any) {
+        log(`page.click failed: ${e.message}`);
+      }
+    }
+    /* legacy: 在 evaluate 里 dispatchEvent (可能对某些 React 组件无效)
+    const click2_legacy: any = await page.evaluate(`(function(){
       // 只找 AWS Cloudscape (awsui) 的 modal，跳过 Cookie 弹窗 (awsccc-*)
       var modal = document.querySelector('[class*="awsui_modal-content"], [class*="awsui_modal-container"], [class*="awsui_dialog"]');
       if (!modal) {
@@ -244,7 +280,7 @@ async function captureOne(browser: Browser, task: ExportTask, outDir: string): P
         }
       }
       return { clicked: false, reason: 'no print btn', modalTitle: modalTitle, allModalTitles: titles, btnCount: btns.length, btnDump: btnDump };
-    })()`);
+    })()`); */
     log(`click #2: ${JSON.stringify(click2)}`);
 
     // 等 window.print 触发 print CSS 生效
