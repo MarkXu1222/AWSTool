@@ -29,6 +29,8 @@ const BASE_CREDENTIALS = {
 };
 const DEFAULT_REGION = config.region || process.env.AWS_DEFAULT_REGION || 'us-east-1';
 const CHILD_ROLE_NAME = config.childRoleName || process.env.CHILD_ROLE_NAME || 'OrganizationAccountAccessRole';
+// 一级跳专用: 每个账户里都建有并信任主账号的 role (方案 A: 优先用它，失败 fallback 到 payer 二级跳)
+const SUPPORT_ROLE_NAME = config.supportRoleName || process.env.SUPPORT_ROLE_NAME || 'support-quota';
 
 // Payers from config.json or env
 let PAYERS: { name: string; roleArn: string }[] = config.payers || [];
@@ -43,6 +45,32 @@ if (PAYERS.length === 0) {
 // Credential cache
 const adminCredsCache: Map<string, { creds: any; expiry: number }> = new Map();
 const accountPayerMap: Map<string, string> = new Map();
+// 记录哪些账号的 support-quota role AssumeRole 失败过 (避免每次都重试消耗 STS 调用)
+const supportRoleUnavailable: Set<string> = new Set();
+
+// 尝试一级跳: 直接 AssumeRole 到目标账户的 support-quota role
+async function tryAssumeSupportRole(accountId: string) {
+  if (!SUPPORT_ROLE_NAME) return null;
+  if (supportRoleUnavailable.has(accountId)) return null;
+  try {
+    const roleArn = `arn:aws:iam::${accountId}:role/${SUPPORT_ROLE_NAME}`;
+    const sts = new STSClient({ region: DEFAULT_REGION, credentials: BASE_CREDENTIALS });
+    const resp = await sts.send(new AssumeRoleCommand({
+      RoleArn: roleArn,
+      RoleSessionName: `web-${accountId}`,
+      DurationSeconds: 3600,
+    }));
+    return {
+      accessKeyId: resp.Credentials!.AccessKeyId!,
+      secretAccessKey: resp.Credentials!.SecretAccessKey!,
+      sessionToken: resp.Credentials!.SessionToken!,
+    };
+  } catch (e) {
+    // 该账户没有 support-quota role 或者信任关系没建立好，记住，下次不重试
+    supportRoleUnavailable.add(accountId);
+    return null;
+  }
+}
 
 async function getAdminCredsForPayer(payerRoleArn: string) {
   const cached = adminCredsCache.get(payerRoleArn);
@@ -65,6 +93,10 @@ async function getAdminCredsForPayer(payerRoleArn: string) {
 }
 
 async function assumeToAccount(accountId: string) {
+  // ★ 方案 A: 优先尝试一级跳 support-quota role
+  const supportCreds = await tryAssumeSupportRole(accountId);
+  if (supportCreds) return supportCreds;
+
   // 兜底：如果 accountId 本身就是一个 payer 账号，直接用 payer role 的 admin creds
   // （payer 账号一般没有 CHILD_ROLE_NAME=OrganizationAccountAccessRole，无法 AssumeRole）
   const selfPayer = PAYERS.find(p => {
