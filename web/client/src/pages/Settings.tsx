@@ -1,7 +1,8 @@
 import React, { useState, useEffect } from 'react';
-import { Card, Button, message, Alert, Image, Input, Form, Table, Tag, Modal, Select, Space, Popconfirm, Tabs } from 'antd';
-import { SafetyOutlined, CheckCircleOutlined, LogoutOutlined, LockOutlined, UserAddOutlined, DeleteOutlined } from '@ant-design/icons';
+import { Card, Button, message, Alert, Image, Input, Form, Table, Tag, Modal, Select, Space, Popconfirm, Tabs, Checkbox } from 'antd';
+import { SafetyOutlined, CheckCircleOutlined, LogoutOutlined, LockOutlined, UserAddOutlined, DeleteOutlined, EditOutlined } from '@ant-design/icons';
 import { api } from '../api';
+import { PAGE_META } from '../components/MainLayout';
 
 interface SettingsPageProps {
   onLogout?: () => void;
@@ -18,8 +19,11 @@ const SettingsPage: React.FC<SettingsPageProps> = ({ onLogout }) => {
   const [users, setUsers] = useState<any[]>([]);
   const [addUserOpen, setAddUserOpen] = useState(false);
   const [resetPwdOpen, setResetPwdOpen] = useState<any>(null);
+  const [editUserOpen, setEditUserOpen] = useState<any>(null);
   const [addForm] = Form.useForm();
   const [resetForm] = Form.useForm();
+  const [editForm] = Form.useForm();
+  const ALL_PAGE_KEYS = PAGE_META.map(p => p.key);
 
   useEffect(() => { checkStatus(); loadUsers(); }, []);
 
@@ -61,8 +65,27 @@ const SettingsPage: React.FC<SettingsPageProps> = ({ onLogout }) => {
   const handleAddUser = async () => {
     const values = await addForm.validateFields();
     try {
-      const res = await api.createUser(values.username, values.password, values.role);
+      // admin 忽略 allowedPages (后端会视为全部)；viewer 传勾选的
+      const allowedPages = values.role === 'admin' ? undefined : (values.allowedPages || []);
+      const res = await api.createUser(values.username, values.password, values.role, allowedPages);
       if (res.success) { message.success(res.message); setAddUserOpen(false); addForm.resetFields(); loadUsers(); }
+      else message.error(res.error);
+    } catch (e: any) { message.error(e.message); }
+  };
+
+  const openEditUser = (record: any) => {
+    // 未设置 allowed_pages (旧数据/admin) 时默认勾全
+    const initialPages = Array.isArray(record.allowed_pages) ? record.allowed_pages : ALL_PAGE_KEYS;
+    editForm.setFieldsValue({ role: record.role, allowedPages: initialPages });
+    setEditUserOpen(record);
+  };
+
+  const handleEditUser = async () => {
+    const values = await editForm.validateFields();
+    try {
+      const allowedPages = values.role === 'admin' ? undefined : (values.allowedPages || []);
+      const res = await api.updateUser(editUserOpen.id, { role: values.role, allowedPages });
+      if (res.success) { message.success(res.message || '已更新'); setEditUserOpen(null); editForm.resetFields(); loadUsers(); }
       else message.error(res.error);
     } catch (e: any) { message.error(e.message); }
   };
@@ -147,8 +170,23 @@ const SettingsPage: React.FC<SettingsPageProps> = ({ onLogout }) => {
                 { title: '用户名', dataIndex: 'username', render: (u: string) => <strong>{u}</strong> },
                 { title: '角色', dataIndex: 'role', width: 80, render: (r: string) => <Tag color={r === 'admin' ? 'red' : 'blue'}>{r}</Tag> },
                 { title: 'MFA', dataIndex: 'mfa_enabled', width: 50, render: (m: boolean) => m ? '✅' : '❌' },
-                { title: '操作', width: 130, render: (_: any, record: any) => (
+                { title: '页面权限', render: (_: any, record: any) => {
+                  if (record.role === 'admin') return <Tag color="red">全部</Tag>;
+                  const pages: string[] = Array.isArray(record.allowed_pages) ? record.allowed_pages : ALL_PAGE_KEYS;
+                  if (pages.length === ALL_PAGE_KEYS.length) return <Tag color="green">全部</Tag>;
+                  if (pages.length === 0) return <Tag>无</Tag>;
+                  return (
+                    <Space size={4} wrap>
+                      {pages.map(k => {
+                        const meta = PAGE_META.find(p => p.key === k);
+                        return <Tag key={k}>{meta?.label || k}</Tag>;
+                      })}
+                    </Space>
+                  );
+                }},
+                { title: '操作', width: 180, render: (_: any, record: any) => (
                   <Space size="small">
+                    <Button size="small" icon={<EditOutlined />} onClick={() => openEditUser(record)}>编辑</Button>
                     <Button size="small" onClick={() => { setResetPwdOpen(record); resetForm.resetFields(); }}>重置</Button>
                     <Popconfirm title="确定删除？" onConfirm={() => handleDeleteUser(record.id)} okText="删除" cancelText="取消">
                       <Button size="small" danger icon={<DeleteOutlined />} />
@@ -166,12 +204,42 @@ const SettingsPage: React.FC<SettingsPageProps> = ({ onLogout }) => {
       ]} />
 
       {/* Add user modal */}
-      <Modal title="添加用户" open={addUserOpen} onOk={handleAddUser} onCancel={() => setAddUserOpen(false)} okText="创建">
-        <Form form={addForm} layout="vertical">
+      <Modal title="添加用户" open={addUserOpen} onOk={handleAddUser} onCancel={() => setAddUserOpen(false)} okText="创建" destroyOnClose>
+        <Form form={addForm} layout="vertical" initialValues={{ role: 'viewer', allowedPages: ALL_PAGE_KEYS }}>
           <Form.Item name="username" label="用户名" rules={[{ required: true }]}><Input /></Form.Item>
           <Form.Item name="password" label="密码" rules={[{ required: true }, { min: 6, message: '至少 6 位' }]}><Input.Password /></Form.Item>
-          <Form.Item name="role" label="角色" initialValue="viewer">
+          <Form.Item name="role" label="角色">
             <Select options={[{ label: '管理员 (admin)', value: 'admin' }, { label: '查看者 (viewer)', value: 'viewer' }]} />
+          </Form.Item>
+          <Form.Item noStyle shouldUpdate={(prev, cur) => prev.role !== cur.role}>
+            {({ getFieldValue }) => getFieldValue('role') === 'admin' ? (
+              <Alert type="info" showIcon message="管理员默认拥有全部页面权限" style={{ marginBottom: 12 }} />
+            ) : (
+              <Form.Item name="allowedPages" label="页面权限"
+                extra="勾选该用户可见的左侧菜单页面">
+                <Checkbox.Group options={PAGE_META.map(p => ({ label: p.label, value: p.key }))} />
+              </Form.Item>
+            )}
+          </Form.Item>
+        </Form>
+      </Modal>
+
+      {/* Edit user modal */}
+      <Modal title={`编辑用户 — ${editUserOpen?.username}`} open={!!editUserOpen}
+        onOk={handleEditUser} onCancel={() => setEditUserOpen(null)} okText="保存" destroyOnClose>
+        <Form form={editForm} layout="vertical">
+          <Form.Item name="role" label="角色">
+            <Select options={[{ label: '管理员 (admin)', value: 'admin' }, { label: '查看者 (viewer)', value: 'viewer' }]} />
+          </Form.Item>
+          <Form.Item noStyle shouldUpdate={(prev, cur) => prev.role !== cur.role}>
+            {({ getFieldValue }) => getFieldValue('role') === 'admin' ? (
+              <Alert type="info" showIcon message="管理员默认拥有全部页面权限" style={{ marginBottom: 12 }} />
+            ) : (
+              <Form.Item name="allowedPages" label="页面权限"
+                extra="勾选该用户可见的左侧菜单页面">
+                <Checkbox.Group options={PAGE_META.map(p => ({ label: p.label, value: p.key }))} />
+              </Form.Item>
+            )}
           </Form.Item>
         </Form>
       </Modal>

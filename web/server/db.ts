@@ -187,7 +187,14 @@ export const db = {
 
   // User management
   getAllUsers() {
-    return readDB().users.map(u => ({ id: u.id, username: u.username, role: u.role, mfa_enabled: u.mfa_enabled, created_at: u.created_at }));
+    return readDB().users.map(u => ({
+      id: u.id,
+      username: u.username,
+      role: u.role,
+      mfa_enabled: u.mfa_enabled,
+      allowed_pages: (u as any).allowed_pages ?? null,
+      created_at: u.created_at,
+    }));
   },
 
   deleteUser(id: number) {

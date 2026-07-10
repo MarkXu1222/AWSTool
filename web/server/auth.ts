@@ -11,6 +11,32 @@ import fs from 'fs';
 // Allow 2 steps before/after (150 second window) to handle time drift and slow input
 authenticator.options = { window: 2 };
 
+// === 页面访问权限：所有可分配的页面 key（需与前端 MainLayout.navItems.key 保持一致）===
+export const ALL_PAGE_KEYS = [
+  'dashboard', 'accounts', 'quotas', 'regions',
+  'billing', 'cleanup', 'audit', 'settings',
+];
+
+// 规范化前端传来的 allowedPages：过滤非法 key，去重
+function normalizeAllowedPages(input: any): string[] | null {
+  if (input === undefined || input === null) return null;
+  if (!Array.isArray(input)) return null;
+  const set = new Set<string>();
+  for (const key of input) {
+    if (typeof key === 'string' && ALL_PAGE_KEYS.includes(key)) set.add(key);
+  }
+  return Array.from(set);
+}
+
+// 计算用户的最终可见页面列表：admin 拥有全部；viewer 有 allowed_pages 则用它，无则兼容为全部
+function resolveAllowedPages(user: any): string[] {
+  if (!user) return [];
+  if (user.role === 'admin') return [...ALL_PAGE_KEYS];
+  const stored = (user as any).allowed_pages;
+  if (Array.isArray(stored)) return stored.filter((k: any) => typeof k === 'string' && ALL_PAGE_KEYS.includes(k));
+  return [...ALL_PAGE_KEYS]; // 旧数据兼容：未设置视为全部
+}
+
 // Load shared config for JWT secret and admin password
 const CONFIG_PATH = path.join(__dirname, '../../config.json');
 let config: any = {};
@@ -94,7 +120,12 @@ authRouter.get('/me', (req: Request, res: Response) => {
   try {
     const decoded = jwt.verify(authHeader.replace('Bearer ', ''), JWT_SECRET) as any;
     const user = db.getUser(decoded.username);
-    res.json({ username: decoded.username, role: decoded.role, mfaEnabled: !!user?.mfa_enabled });
+    res.json({
+      username: decoded.username,
+      role: decoded.role,
+      mfaEnabled: !!user?.mfa_enabled,
+      allowedPages: resolveAllowedPages(user),
+    });
   } catch { res.status(401).json({ error: 'Token expired' }); }
 });
 
@@ -140,14 +171,68 @@ authRouter.post('/users', (req: Request, res: Response) => {
   try {
     const decoded = jwt.verify(authHeader.replace('Bearer ', ''), JWT_SECRET) as any;
     if (decoded.role !== 'admin') return res.status(403).json({ error: '无权限' });
-    const { username, password, role } = req.body;
+    const { username, password, role, allowedPages } = req.body;
     if (!username || !password) return res.status(400).json({ error: '用户名和密码必填' });
     if (db.getUser(username)) return res.status(400).json({ error: '用户已存在' });
+    const normalizedRole = role || 'viewer';
+    // admin 忽略 allowed_pages（视为全部）；viewer 按传入的规范化后存储，未传视为全部
+    const normalizedPages = normalizedRole === 'admin' ? null : normalizeAllowedPages(allowedPages);
     const hash = bcrypt.hashSync(password, 12);
-    db.createUser({ username, password_hash: hash, role: role || 'viewer', mfa_enabled: false, mfa_secret: null });
-    db.addAuditLog(decoded.userId, 'USER_CREATE', `创建用户 ${username} (${role || 'viewer'})`, decoded.username, req.ip);
+    db.createUser({
+      username,
+      password_hash: hash,
+      role: normalizedRole,
+      mfa_enabled: false,
+      mfa_secret: null,
+      allowed_pages: normalizedPages,
+    });
+    db.addAuditLog(decoded.userId, 'USER_CREATE', `创建用户 ${username} (${normalizedRole})`, decoded.username, req.ip);
     res.json({ success: true, message: `用户 ${username} 已创建` });
   } catch { res.status(401).json({ error: 'Invalid token' }); }
+});
+
+// Update user (role / allowedPages)
+authRouter.put('/users/:id', (req: Request, res: Response) => {
+  const authHeader = req.headers.authorization;
+  if (!authHeader) return res.status(401).json({ error: 'Unauthorized' });
+  try {
+    const decoded = jwt.verify(authHeader.replace('Bearer ', ''), JWT_SECRET) as any;
+    if (decoded.role !== 'admin') return res.status(403).json({ error: '无权限' });
+    const userId = parseInt(req.params.id);
+    if (Number.isNaN(userId)) return res.status(400).json({ error: 'ID 无效' });
+    const data = (db as any).getAllUsers().find((u: any) => u.id === userId);
+    if (!data) return res.status(404).json({ error: '用户不存在' });
+
+    const { role, allowedPages } = req.body;
+    const updates: any = {};
+
+    if (role !== undefined) {
+      if (role !== 'admin' && role !== 'viewer') return res.status(400).json({ error: '角色无效' });
+      // 不允许把自己降级
+      if (userId === decoded.userId && role !== 'admin') {
+        return res.status(400).json({ error: '不能修改自己的角色' });
+      }
+      updates.role = role;
+    }
+
+    const finalRole = updates.role ?? data.role;
+    if (finalRole === 'admin') {
+      // admin 拥有全部页面，清空 allowed_pages
+      updates.allowed_pages = null;
+    } else if (allowedPages !== undefined) {
+      updates.allowed_pages = normalizeAllowedPages(allowedPages);
+    }
+
+    db.updateUser(userId, updates);
+    db.addAuditLog(
+      decoded.userId,
+      'USER_UPDATE',
+      `更新用户 ${data.username}: role=${finalRole}, pages=${JSON.stringify(updates.allowed_pages ?? 'unchanged')}`,
+      decoded.username,
+      req.ip,
+    );
+    res.json({ success: true, message: '已更新' });
+  } catch (e: any) { res.status(401).json({ error: e?.message || 'Invalid token' }); }
 });
 
 // Delete user

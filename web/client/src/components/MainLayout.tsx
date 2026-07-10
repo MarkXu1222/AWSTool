@@ -17,6 +17,18 @@ interface MainLayoutProps {
   onLogout: () => void;
 }
 
+// 页面 key 必须与后端 auth.ts 中 ALL_PAGE_KEYS 保持一致
+export const PAGE_META: { key: string; label: string }[] = [
+  { key: 'dashboard', label: '概览' },
+  { key: 'accounts', label: '账户管理' },
+  { key: 'quotas', label: '配额管理' },
+  { key: 'regions', label: '区域管理' },
+  { key: 'billing', label: '账单分析' },
+  { key: 'cleanup', label: '资源清理' },
+  { key: 'audit', label: '审计日志' },
+  { key: 'settings', label: '系统设置' },
+];
+
 const navItems = [
   { key: 'dashboard', icon: <HomeOutlined />, label: '概览' },
   { key: 'accounts', icon: <TeamOutlined />, label: '账户管理' },
@@ -39,12 +51,41 @@ const mobileNavItems = [
 const MainLayout: React.FC<MainLayoutProps> = ({ onLogout }) => {
   const [currentPage, setCurrentPage] = useState('dashboard');
   const [username, setUsername] = useState('');
+  // 空数组 = 尚未加载完毕，此时不做过滤；加载后仅显示允许的页面
+  const [allowedPages, setAllowedPages] = useState<string[] | null>(null);
 
   useEffect(() => {
-    api.me().then(r => setUsername(r.username || '')).catch(() => {});
+    api.me().then(r => {
+      setUsername(r.username || '');
+      if (Array.isArray(r.allowedPages)) {
+        setAllowedPages(r.allowedPages);
+        // 如果当前页不在允许列表里，回退到第一个允许的页面
+        if (r.allowedPages.length > 0 && !r.allowedPages.includes('dashboard')) {
+          setCurrentPage(r.allowedPages[0]);
+        }
+      }
+    }).catch(() => {});
   }, []);
 
+  // 允许在 me() 未加载完时先渲染完整菜单（loading 态），加载后按权限过滤
+  const isPageAllowed = (key: string) => {
+    if (allowedPages === null) return true;
+    return allowedPages.includes(key);
+  };
+
+  const visibleNavItems = navItems.filter(item => isPageAllowed(item.key));
+  const visibleMobileNavItems = mobileNavItems.filter(item => isPageAllowed(item.key));
+
   const renderPage = () => {
+    // 守卫：当前页不在允许列表中时显示无权限提示（比如通过历史 URL 或旧 state 进入）
+    if (!isPageAllowed(currentPage)) {
+      return (
+        <div style={{ padding: 48, textAlign: 'center', color: '#999' }}>
+          <h3 style={{ color: '#666' }}>无访问权限</h3>
+          <p>你没有权限访问该页面，请联系管理员。</p>
+        </div>
+      );
+    }
     switch (currentPage) {
       case 'dashboard': return <DashboardPage />;
       case 'accounts': return <AccountsPage />;
@@ -71,7 +112,7 @@ const MainLayout: React.FC<MainLayoutProps> = ({ onLogout }) => {
             mode="inline"
             theme="dark"
             selectedKeys={[currentPage]}
-            items={navItems}
+            items={visibleNavItems}
             onClick={({ key }) => setCurrentPage(key)}
           />
           <div className="sider-footer">
@@ -103,7 +144,7 @@ const MainLayout: React.FC<MainLayoutProps> = ({ onLogout }) => {
 
       {/* Mobile bottom navigation */}
       <nav className="bottom-nav">
-        {mobileNavItems.map(item => (
+        {visibleMobileNavItems.map(item => (
           <div
             key={item.key}
             className={`bottom-nav-item ${currentPage === item.key ? 'active' : ''}`}
