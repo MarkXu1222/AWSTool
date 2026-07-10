@@ -24,6 +24,11 @@ const SettingsPage: React.FC<SettingsPageProps> = ({ onLogout }) => {
   const [resetForm] = Form.useForm();
   const [editForm] = Form.useForm();
   const ALL_PAGE_KEYS = PAGE_META.map(p => p.key);
+  const ROLE_OPTIONS = [
+    { label: '管理员 (admin) — 全部权限', value: 'admin' },
+    { label: '部分管理员 (partadmin) — 能操作但仅限勾选页面', value: 'partadmin' },
+    { label: '查看者 (viewer) — 只读', value: 'viewer' },
+  ];
 
   useEffect(() => { checkStatus(); loadUsers(); }, []);
 
@@ -168,7 +173,9 @@ const SettingsPage: React.FC<SettingsPageProps> = ({ onLogout }) => {
             <Table size="small" dataSource={users} rowKey="id" pagination={false}
               columns={[
                 { title: '用户名', dataIndex: 'username', render: (u: string) => <strong>{u}</strong> },
-                { title: '角色', dataIndex: 'role', width: 80, render: (r: string) => <Tag color={r === 'admin' ? 'red' : 'blue'}>{r}</Tag> },
+                { title: '角色', dataIndex: 'role', width: 90, render: (r: string) => (
+                  <Tag color={r === 'admin' ? 'red' : r === 'partadmin' ? 'orange' : 'blue'}>{r}</Tag>
+                )},
                 { title: 'MFA', dataIndex: 'mfa_enabled', width: 50, render: (m: boolean) => m ? '✅' : '❌' },
                 { title: '页面权限', render: (_: any, record: any) => {
                   if (record.role === 'admin') return <Tag color="red">全部</Tag>;
@@ -208,8 +215,8 @@ const SettingsPage: React.FC<SettingsPageProps> = ({ onLogout }) => {
         <Form form={addForm} layout="vertical" initialValues={{ role: 'viewer', allowedPages: ALL_PAGE_KEYS }}>
           <Form.Item name="username" label="用户名" rules={[{ required: true }]}><Input /></Form.Item>
           <Form.Item name="password" label="密码" rules={[{ required: true }, { min: 6, message: '至少 6 位' }]}><Input.Password /></Form.Item>
-          <Form.Item name="role" label="角色">
-            <Select options={[{ label: '管理员 (admin)', value: 'admin' }, { label: '查看者 (viewer)', value: 'viewer' }]} />
+          <Form.Item name="role" label="角色" extra="admin: 全权限 · partadmin: 能操作但页面受限 · viewer: 只读">
+            <Select options={ROLE_OPTIONS} />
           </Form.Item>
           <Form.Item noStyle shouldUpdate={(prev, cur) => prev.role !== cur.role}>
             {({ getFieldValue }) => getFieldValue('role') === 'admin' ? (
@@ -228,8 +235,8 @@ const SettingsPage: React.FC<SettingsPageProps> = ({ onLogout }) => {
       <Modal title={`编辑用户 — ${editUserOpen?.username}`} open={!!editUserOpen}
         onOk={handleEditUser} onCancel={() => setEditUserOpen(null)} okText="保存" destroyOnClose>
         <Form form={editForm} layout="vertical">
-          <Form.Item name="role" label="角色">
-            <Select options={[{ label: '管理员 (admin)', value: 'admin' }, { label: '查看者 (viewer)', value: 'viewer' }]} />
+          <Form.Item name="role" label="角色" extra="admin: 全权限 · partadmin: 能操作但页面受限 · viewer: 只读">
+            <Select options={ROLE_OPTIONS} />
           </Form.Item>
           <Form.Item noStyle shouldUpdate={(prev, cur) => prev.role !== cur.role}>
             {({ getFieldValue }) => getFieldValue('role') === 'admin' ? (

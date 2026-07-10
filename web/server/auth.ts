@@ -28,7 +28,7 @@ function normalizeAllowedPages(input: any): string[] | null {
   return Array.from(set);
 }
 
-// 计算用户的最终可见页面列表：admin 拥有全部；viewer 有 allowed_pages 则用它，无则兼容为全部
+// 计算用户的最终可见页面列表：admin 拥有全部；viewer/partadmin 按 allowed_pages（旧数据无值视为全部）
 function resolveAllowedPages(user: any): string[] {
   if (!user) return [];
   if (user.role === 'admin') return [...ALL_PAGE_KEYS];
@@ -36,6 +36,9 @@ function resolveAllowedPages(user: any): string[] {
   if (Array.isArray(stored)) return stored.filter((k: any) => typeof k === 'string' && ALL_PAGE_KEYS.includes(k));
   return [...ALL_PAGE_KEYS]; // 旧数据兼容：未设置视为全部
 }
+
+// 允许的用户角色
+const VALID_ROLES = ['admin', 'partadmin', 'viewer'] as const;
 
 // Load shared config for JWT secret and admin password
 const CONFIG_PATH = path.join(__dirname, '../../config.json');
@@ -175,7 +178,10 @@ authRouter.post('/users', (req: Request, res: Response) => {
     if (!username || !password) return res.status(400).json({ error: '用户名和密码必填' });
     if (db.getUser(username)) return res.status(400).json({ error: '用户已存在' });
     const normalizedRole = role || 'viewer';
-    // admin 忽略 allowed_pages（视为全部）；viewer 按传入的规范化后存储，未传视为全部
+    if (!(VALID_ROLES as readonly string[]).includes(normalizedRole)) {
+      return res.status(400).json({ error: '角色无效' });
+    }
+    // admin 忽略 allowed_pages（视为全部）；partadmin/viewer 按传入的规范化后存储
     const normalizedPages = normalizedRole === 'admin' ? null : normalizeAllowedPages(allowedPages);
     const hash = bcrypt.hashSync(password, 12);
     db.createUser({
@@ -207,7 +213,7 @@ authRouter.put('/users/:id', (req: Request, res: Response) => {
     const updates: any = {};
 
     if (role !== undefined) {
-      if (role !== 'admin' && role !== 'viewer') return res.status(400).json({ error: '角色无效' });
+      if (!(VALID_ROLES as readonly string[]).includes(role)) return res.status(400).json({ error: '角色无效' });
       // 不允许把自己降级
       if (userId === decoded.userId && role !== 'admin') {
         return res.status(400).json({ error: '不能修改自己的角色' });
