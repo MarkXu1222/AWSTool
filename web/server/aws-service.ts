@@ -95,15 +95,18 @@ async function getAdminCredsForPayer(payerRoleArn: string) {
 async function assumeToAccount(accountId: string) {
   // ★ 方案 A: 优先尝试一级跳 support-quota role
   const supportCreds = await tryAssumeSupportRole(accountId);
-  if (supportCreds) return supportCreds;
+  if (supportCreds) {
+    console.log(`[assume] ${accountId} → support-quota (一级跳)`);
+    return supportCreds;
+  }
 
   // 兜底：如果 accountId 本身就是一个 payer 账号，直接用 payer role 的 admin creds
-  // （payer 账号一般没有 CHILD_ROLE_NAME=OrganizationAccountAccessRole，无法 AssumeRole）
   const selfPayer = PAYERS.find(p => {
     const m = /arn:aws:iam::(\d+):role\//.exec(p.roleArn);
     return m && m[1] === accountId;
   });
   if (selfPayer) {
+    console.log(`[assume] ${accountId} → payer role/tool (selfPayer)`);
     return await getAdminCredsForPayer(selfPayer.roleArn);
   }
 
@@ -115,6 +118,7 @@ async function assumeToAccount(accountId: string) {
     const admin = await getAdminCredsForPayer(knownPayer);
     const sts = new STSClient({ region: DEFAULT_REGION, credentials: admin });
     const resp = await sts.send(new AssumeRoleCommand({ RoleArn: roleArn, RoleSessionName: `web-${accountId}`, DurationSeconds: 3600 }));
+    console.log(`[assume] ${accountId} → OrganizationAccountAccessRole (二级跳, 已知 payer)`);
     return { accessKeyId: resp.Credentials!.AccessKeyId!, secretAccessKey: resp.Credentials!.SecretAccessKey!, sessionToken: resp.Credentials!.SessionToken! };
   }
 
@@ -125,9 +129,11 @@ async function assumeToAccount(accountId: string) {
       const sts = new STSClient({ region: DEFAULT_REGION, credentials: admin });
       const resp = await sts.send(new AssumeRoleCommand({ RoleArn: roleArn, RoleSessionName: `web-${accountId}`, DurationSeconds: 3600 }));
       accountPayerMap.set(accountId, payer.roleArn);
+      console.log(`[assume] ${accountId} → OrganizationAccountAccessRole (二级跳, 探测到 ${payer.name})`);
       return { accessKeyId: resp.Credentials!.AccessKeyId!, secretAccessKey: resp.Credentials!.SecretAccessKey!, sessionToken: resp.Credentials!.SessionToken! };
     } catch { continue; }
   }
+  console.log(`[assume] ${accountId} → 全部失败`);
   throw new Error(`无法 AssumeRole 到 ${accountId}`);
 }
 
