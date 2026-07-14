@@ -347,7 +347,7 @@ const AuditLogPage: React.FC = () => {
               },
             },
             {
-              title: '做了什么',
+              title: '操作',
               render: (_value, record) => {
                 const display = fallbackDisplay(record);
                 return (
