@@ -137,7 +137,37 @@ export const api = {
     return es;
   },
   scanResources: (accountId: string, region: string) => request(`/aws/resources/${accountId}/${region}`),
-  getAuditLog: () => request('/aws/audit'),
+  getAuditLog: (limit = 500) => request(`/aws/audit?limit=${Math.max(1, Math.min(1000, Math.floor(limit)))}`),
+  exportAuditLog: async (format: 'csv' | 'json') => {
+    const token = getToken();
+    const res = await fetch(`${BASE}/aws/audit/export?format=${format}`, {
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+    });
+    if (res.status === 401) {
+      localStorage.removeItem('token');
+      window.location.href = '/';
+      throw new Error('登录已过期');
+    }
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ error: '导出审计日志失败' }));
+      throw new Error(err.error || '导出审计日志失败');
+    }
+
+    const disposition = res.headers.get('Content-Disposition') || '';
+    const filenameMatch = disposition.match(/filename="?([^";]+)"?/i);
+    const filename = filenameMatch?.[1] || `audit-logs.${format}`;
+    const exportedCount = Number(res.headers.get('X-Export-Count') || 0);
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+    return exportedCount;
+  },
   // Regions
   getRegionStatus: () => request('/regions/status'),
   scanRegions: (accountIds?: string[]) => request('/regions/scan', { method: 'POST', body: JSON.stringify({ accountIds }) }),

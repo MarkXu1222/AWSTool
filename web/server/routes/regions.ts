@@ -20,10 +20,12 @@ async function getAccountRegions(accountId: string) {
   const resp = await client.send(new ListRegionsCommand({
     RegionOptStatusContains: ['ENABLED', 'ENABLING', 'DISABLED', 'DISABLING'],
   }));
-  return (resp.Regions || []).map(r => ({
-    region: r.RegionName,
-    status: r.RegionOptStatus, // ENABLED | ENABLING | DISABLED | DISABLING
-  }));
+  return (resp.Regions || [])
+    .filter(r => Boolean(r.RegionName && r.RegionOptStatus))
+    .map(r => ({
+      region: r.RegionName!,
+      status: String(r.RegionOptStatus), // ENABLED | ENABLING | DISABLED | DISABLING
+    }));
 }
 
 // Enable a region for an account
@@ -78,7 +80,7 @@ regionsRouter.post('/scan', async (req: Request, res: Response) => {
 // Scan single account
 regionsRouter.post('/scan/:accountId', async (req: Request, res: Response) => {
   try {
-    const { accountId } = req.params;
+    const accountId = String(req.params.accountId);
     const regions = await getAccountRegions(accountId);
     db.upsertRegionData(accountId, regions);
     res.json({ success: true, data: { accountId, regions } });

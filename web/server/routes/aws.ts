@@ -4,6 +4,7 @@ import { db } from '../db';
 import { generateQuotaDoc, getCompanyForAccount } from '../doc-generator';
 import { COMPANY_PROFILES } from '../doc-templates';
 import { exportBillingInvoices, cleanupWorkDir, ExportTask } from '../billing-exporter';
+import { auditLogsToCsv, enrichAuditLog } from '../audit-presentation';
 import fs from 'fs';
 import path from 'path';
 
@@ -15,6 +16,22 @@ const requireAdmin = (req: Request, res: Response, next: any) => {
     return res.status(403).json({ error: '查看者角色无此权限' });
   }
   next();
+};
+
+// Audit logs contain sensitive operational data. Enforce the current database
+// permission instead of trusting the potentially stale role/pages in the JWT.
+const requireAuditAccess = (req: Request, res: Response, next: any) => {
+  const tokenUser = (req as any).user;
+  const currentUser = tokenUser?.username ? db.getUser(tokenUser.username) : null;
+  if (!currentUser) return res.status(401).json({ error: '用户不存在或登录已失效' });
+  if (currentUser.role === 'admin') return next();
+
+  const allowedPages = (currentUser as any).allowed_pages;
+  // Backward compatibility is limited to legacy null/undefined values.
+  if (allowedPages == null) return next();
+  if (Array.isArray(allowedPages) && allowedPages.includes('audit')) return next();
+  // Corrupt or unexpected permission values must fail closed.
+  return res.status(403).json({ error: '无权访问审计日志' });
 };
 
 // Test connection
@@ -60,7 +77,7 @@ awsRouter.post('/accounts/refresh', async (_req: Request, res: Response) => {
 // Account detail
 awsRouter.get('/accounts/:id/detail', async (req: Request, res: Response) => {
   try {
-    const detail = await aws.getAccountDetail(req.params.id);
+    const detail = await aws.getAccountDetail(String(req.params.id));
     res.json({ success: true, data: detail });
   } catch (e: any) { res.status(500).json({ error: e.message }); }
 });
@@ -122,7 +139,7 @@ export async function refreshDashboardCache() {
 // Federated console sign-in URL — open a child account's console (e.g. Support case) without login
 awsRouter.get('/console-url/:accountId', async (req: Request, res: Response) => {
   try {
-    const { accountId } = req.params;
+    const accountId = String(req.params.accountId);
     const { caseId, destination } = req.query;
     // Default destination: Support case page (or custom)
     let dest = destination as string;
@@ -166,7 +183,7 @@ awsRouter.post('/quotas/generate-doc', async (req: Request, res: Response) => {
 // Get company profile for an account (for doc generation UI)
 awsRouter.get('/quotas/company/:accountId', async (req: Request, res: Response) => {
   try {
-    const company = getCompanyForAccount(req.params.accountId);
+    const company = getCompanyForAccount(String(req.params.accountId));
     res.json({ success: true, data: company });
   } catch (e: any) { res.status(500).json({ error: e.message }); }
 });
@@ -251,7 +268,7 @@ awsRouter.get('/quotas/companies', async (_req: Request, res: Response) => {
 awsRouter.get('/billing/by-service/:accountId', async (req: Request, res: Response) => {
   try {
     const { start, end } = req.query;
-    const data = await aws.getCostByService(req.params.accountId, start as string, end as string);
+    const data = await aws.getCostByService(String(req.params.accountId), start as string, end as string);
     res.json({ success: true, data });
   } catch (e: any) { res.status(500).json({ error: e.message }); }
 });
@@ -260,7 +277,7 @@ awsRouter.get('/billing/by-service/:accountId', async (req: Request, res: Respon
 awsRouter.get('/quotas/:accountId/:serviceCode', async (req: Request, res: Response) => {
   try {
     const { region } = req.query;
-    const quotas = await aws.listServiceQuotas(req.params.accountId, req.params.serviceCode, region as string);
+    const quotas = await aws.listServiceQuotas(String(req.params.accountId), String(req.params.serviceCode), region as string);
     res.json({ success: true, data: quotas });
   } catch (e: any) { res.status(500).json({ error: e.message }); }
 });
@@ -436,7 +453,7 @@ awsRouter.post('/quotas/sync', async (req: Request, res: Response) => {
 // Sync single account (quick refresh — with current value enrichment)
 awsRouter.post('/quotas/sync-account/:accountId', async (req: Request, res: Response) => {
   try {
-    const { accountId } = req.params;
+    const accountId = String(req.params.accountId);
     let requests = await aws.listQuotaRequests(accountId);
     // Enrich with current values (acceptable for single account)
     requests = await aws.enrichCurrentValues(accountId, requests);
@@ -462,7 +479,7 @@ awsRouter.post('/quotas/sync-account/:accountId', async (req: Request, res: Resp
 // Root credentials status (via Credential Report)
 awsRouter.get('/root-credentials/:accountId', async (req: Request, res: Response) => {
   try {
-    const accountId = req.params.accountId;
+    const accountId = String(req.params.accountId);
     const { IAMClient, GenerateCredentialReportCommand, GetCredentialReportCommand } = require('@aws-sdk/client-iam');
     const creds = await (aws as any).assumeToAccount(accountId);
     const iam = new IAMClient({ region: 'us-east-1', credentials: creds });
@@ -511,15 +528,50 @@ awsRouter.post('/root-credentials/:accountId/delete-key', requireAdmin, async (r
 // Scan resources
 awsRouter.get('/resources/:accountId/:region', async (req: Request, res: Response) => {
   try {
-    const resources = await aws.scanResources(req.params.accountId, req.params.region);
+    const resources = await aws.scanResources(String(req.params.accountId), String(req.params.region));
     res.json({ success: true, data: resources });
   } catch (e: any) { res.status(500).json({ error: e.message }); }
 });
 
-// Audit log
-awsRouter.get('/audit', async (_req: Request, res: Response) => {
+// Export full audit log (up to the 5,000 retained records)
+awsRouter.get('/audit/export', requireAuditAccess, async (req: Request, res: Response) => {
   try {
-    const logs = db.getAuditLog();
-    res.json({ success: true, data: logs });
+    const format = String(req.query.format || 'csv').toLowerCase();
+    if (format !== 'csv' && format !== 'json') {
+      return res.status(400).json({ error: '仅支持 csv 或 json 格式' });
+    }
+
+    const logs = db.getAuditLog(5000);
+    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const filename = `audit-logs-${timestamp}.${format}`;
+
+    res.setHeader('Cache-Control', 'no-store');
+    res.setHeader('X-Export-Count', String(logs.length));
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+
+    if (format === 'json') {
+      res.type('application/json; charset=utf-8');
+      return res.send(JSON.stringify({
+        exported_at: new Date().toISOString(),
+        total: logs.length,
+        data: logs.map(enrichAuditLog),
+      }, null, 2));
+    }
+
+    res.type('text/csv; charset=utf-8');
+    return res.send(auditLogsToCsv(logs));
+  } catch (e: any) {
+    return res.status(500).json({ error: e.message || '导出审计日志失败' });
+  }
+});
+
+// Audit log — default 500 rows for the UI; max 1,000 per request
+awsRouter.get('/audit', requireAuditAccess, async (req: Request, res: Response) => {
+  try {
+    const requested = Number(req.query.limit || 500);
+    const limit = Number.isFinite(requested) ? Math.min(1000, Math.max(1, Math.floor(requested))) : 500;
+    const logs = db.getAuditLog(limit).map(enrichAuditLog);
+    res.setHeader('Cache-Control', 'no-store');
+    res.json({ success: true, data: logs, total: logs.length });
   } catch (e: any) { res.status(500).json({ error: e.message }); }
 });

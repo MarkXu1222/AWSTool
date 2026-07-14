@@ -38,7 +38,7 @@ export async function sendNotification(title: string, content: string) {
         },
       }),
     });
-    const data = await resp.json();
+    const data: any = await resp.json();
     if (data.code === 0 || data.StatusCode === 0) {
       console.log(`[Notify] ✅ Sent: ${title}`);
     } else {
@@ -70,7 +70,7 @@ async function sendCard(title: string, template: string, elements: any[]) {
         },
       }),
     });
-    const data = await resp.json();
+    const data: any = await resp.json();
     if (data.code === 0 || data.StatusCode === 0) console.log(`[Notify] ✅ Sent: ${title}`);
     else console.log(`[Notify] ❌ Failed:`, data.msg || JSON.stringify(data));
   } catch (e: any) {

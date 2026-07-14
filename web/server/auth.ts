@@ -204,7 +204,7 @@ authRouter.put('/users/:id', (req: Request, res: Response) => {
   try {
     const decoded = jwt.verify(authHeader.replace('Bearer ', ''), JWT_SECRET) as any;
     if (decoded.role !== 'admin') return res.status(403).json({ error: '无权限' });
-    const userId = parseInt(req.params.id);
+    const userId = parseInt(String(req.params.id), 10);
     if (Number.isNaN(userId)) return res.status(400).json({ error: 'ID 无效' });
     const data = (db as any).getAllUsers().find((u: any) => u.id === userId);
     if (!data) return res.status(404).json({ error: '用户不存在' });
@@ -248,7 +248,7 @@ authRouter.delete('/users/:id', (req: Request, res: Response) => {
   try {
     const decoded = jwt.verify(authHeader.replace('Bearer ', ''), JWT_SECRET) as any;
     if (decoded.role !== 'admin') return res.status(403).json({ error: '无权限' });
-    const userId = parseInt(req.params.id);
+    const userId = parseInt(String(req.params.id), 10);
     if (userId === decoded.userId) return res.status(400).json({ error: '不能删除自己' });
     db.deleteUser(userId);
     db.addAuditLog(decoded.userId, 'USER_DELETE', `删除用户 ID: ${userId}`, decoded.username, req.ip);
@@ -265,7 +265,7 @@ authRouter.post('/users/:id/reset-password', (req: Request, res: Response) => {
     if (decoded.role !== 'admin') return res.status(403).json({ error: '无权限' });
     const { newPassword } = req.body;
     if (!newPassword || newPassword.length < 6) return res.status(400).json({ error: '密码至少 6 位' });
-    const userId = parseInt(req.params.id);
+    const userId = parseInt(String(req.params.id), 10);
     const hash = bcrypt.hashSync(newPassword, 12);
     db.updateUser(userId, { password_hash: hash });
     db.addAuditLog(decoded.userId, 'PASSWORD_RESET', `重置用户 ID: ${userId} 的密码`, decoded.username, req.ip);

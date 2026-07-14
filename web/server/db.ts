@@ -174,8 +174,13 @@ export const db = {
   ) {
     const data = readDB();
     const cleanIp = ip ? ip.replace('::ffff:', '') : null;
+    const lastAuditId = data.audit_log.reduce(
+      (max, log) => Math.max(max, Number(log.id) || 0),
+      0,
+    );
+    const auditId = Math.max(Date.now(), lastAuditId + 1);
     const entry: any = {
-      id: Date.now(),
+      id: auditId,
       user_id: userId,
       username: username || null,
       action,
