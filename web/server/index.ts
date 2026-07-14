@@ -5,6 +5,7 @@ import helmet from 'helmet';
 import path from 'path';
 import { rateLimit } from 'express-rate-limit';
 import { authRouter, authMiddleware } from './auth';
+import { auditMiddleware } from './audit';
 import { awsRouter } from './routes/aws';
 import { regionsRouter } from './routes/regions';
 import { migrateEncryptMFASecrets, backupDB } from './db';
@@ -77,9 +78,9 @@ app.use('/api/auth/login', rateLimit({
 // Auth routes (no auth needed)
 app.use('/api/auth', authRouter);
 
-// Protected API routes
-app.use('/api/aws', authMiddleware, awsRouter);
-app.use('/api/regions', authMiddleware, regionsRouter);
+// Protected API routes (audit middleware records all authenticated API calls)
+app.use('/api/aws', authMiddleware, auditMiddleware, awsRouter);
+app.use('/api/regions', authMiddleware, auditMiddleware, regionsRouter);
 
 // Scheduler status endpoint
 app.get('/api/scheduler/status', authMiddleware, (_req, res) => {

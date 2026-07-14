@@ -164,11 +164,34 @@ export const db = {
   },
 
   // Audit log
-  addAuditLog(userId: number | null, action: string, detail: string, username?: string, ip?: string) {
+  addAuditLog(
+    userId: number | null,
+    action: string,
+    detail: string,
+    username?: string,
+    ip?: string,
+    extras?: { method?: string; path?: string; status?: number; duration_ms?: number; params?: any },
+  ) {
     const data = readDB();
     const cleanIp = ip ? ip.replace('::ffff:', '') : null;
-    data.audit_log.push({ id: Date.now(), user_id: userId, username: username || null, action, detail, ip: cleanIp, created_at: new Date().toISOString() });
-    if (data.audit_log.length > 500) data.audit_log = data.audit_log.slice(-500);
+    const entry: any = {
+      id: Date.now(),
+      user_id: userId,
+      username: username || null,
+      action,
+      detail,
+      ip: cleanIp,
+      created_at: new Date().toISOString(),
+    };
+    if (extras) {
+      if (extras.method !== undefined) entry.method = extras.method;
+      if (extras.path !== undefined) entry.path = extras.path;
+      if (extras.status !== undefined) entry.status = extras.status;
+      if (extras.duration_ms !== undefined) entry.duration_ms = extras.duration_ms;
+      if (extras.params !== undefined) entry.params = extras.params;
+    }
+    data.audit_log.push(entry);
+    if (data.audit_log.length > 5000) data.audit_log = data.audit_log.slice(-5000);
     writeDB(data);
   },
 
