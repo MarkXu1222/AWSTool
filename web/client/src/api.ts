@@ -177,6 +177,9 @@ export const api = {
   getRootCredentials: (accountId: string) => request(`/aws/root-credentials/${accountId}`),
   // Generate temporary ADMIN credentials (valid ~1 hour) for copy into AWS CLI / SDK
   getTempCredentials: (accountId: string) => request(`/aws/temp-credentials/${accountId}`),
+  // Root user privileged tasks (via sts:AssumeRoot centralized root access)
+  deleteRootMFA: (accountId: string) => request(`/aws/root-credentials/${accountId}/delete-mfa`, { method: 'POST' }),
+  recoverRootPassword: (accountId: string) => request(`/aws/root-credentials/${accountId}/recover-password`, { method: 'POST' }),
   changePassword: (currentPassword: string, newPassword: string) =>
     request('/auth/change-password', { method: 'POST', body: JSON.stringify({ currentPassword, newPassword }) }),
   // User management

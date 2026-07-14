@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { Descriptions, Tag, Button, Space, message, Divider, Tooltip, Alert } from 'antd';
-import { ReloadOutlined, CopyOutlined, EyeOutlined, EyeInvisibleOutlined, KeyOutlined, SafetyCertificateOutlined } from '@ant-design/icons';
+import { Descriptions, Tag, Button, Space, message, Divider, Tooltip, Alert, Popconfirm } from 'antd';
+import { ReloadOutlined, CopyOutlined, EyeOutlined, EyeInvisibleOutlined, KeyOutlined, SafetyCertificateOutlined, DeleteOutlined, UnlockOutlined } from '@ant-design/icons';
 import { api } from '../api';
 
 interface TempCreds {
@@ -43,9 +43,48 @@ const RootCredentialsPanel: React.FC<Props> = ({ accountId, rootCredentials }) =
   const [loading, setLoading] = useState(false);
   const [reveal, setReveal] = useState(false);
   const [now, setNow] = useState(Date.now());
+  const [mfaLoading, setMfaLoading] = useState(false);
+  const [pwdLoading, setPwdLoading] = useState(false);
+  // 操作成功后对根用户状态做本地覆盖（无需等待父组件重新拉取）
+  const [statusOverride, setStatusOverride] = useState<Record<string, any>>({});
 
-  // 切换账户时清空已生成的凭证
-  useEffect(() => { setCreds(null); setReveal(false); }, [accountId]);
+  // 切换账户时清空已生成的凭证与本地覆盖
+  useEffect(() => { setCreds(null); setReveal(false); setStatusOverride({}); }, [accountId]);
+
+  const status = { ...rootCredentials, ...statusOverride };
+
+  const handleDeleteMfa = async () => {
+    setMfaLoading(true);
+    try {
+      const res = await api.deleteRootMFA(accountId);
+      if (res.success) {
+        setStatusOverride(o => ({ ...o, mfaActive: false }));
+        message.success('已删除根用户 MFA');
+      } else {
+        message.error(res.error || '删除失败');
+      }
+    } catch (e: any) {
+      message.error(e.message || '删除失败');
+    } finally {
+      setMfaLoading(false);
+    }
+  };
+
+  const handleRecoverPassword = async () => {
+    setPwdLoading(true);
+    try {
+      const res = await api.recoverRootPassword(accountId);
+      if (res.success) {
+        message.success('已触发根用户密码恢复（重置邮件将发送至该账户根邮箱）');
+      } else {
+        message.error(res.error || '恢复失败');
+      }
+    } catch (e: any) {
+      message.error(e.message || '恢复失败');
+    } finally {
+      setPwdLoading(false);
+    }
+  };
 
   // 倒计时：每秒刷新一次
   useEffect(() => {
@@ -96,11 +135,37 @@ const RootCredentialsPanel: React.FC<Props> = ({ accountId, rootCredentials }) =
       {/* 根用户凭证只读状态 */}
       {rootCredentials ? (
         <Descriptions size="small" column={1} bordered>
-          <Descriptions.Item label="密码"><Tag color={rootCredentials.passwordEnabled ? 'green' : 'default'}>{rootCredentials.passwordEnabled ? '已启用' : '未启用'}</Tag></Descriptions.Item>
-          <Descriptions.Item label="Root MFA"><Tag color={rootCredentials.mfaActive ? 'green' : 'red'}>{rootCredentials.mfaActive ? '已启用' : '未启用 ⚠️'}</Tag></Descriptions.Item>
-          <Descriptions.Item label="Access Key 1"><Tag color={rootCredentials.accessKey1Active ? 'red' : 'green'}>{rootCredentials.accessKey1Active ? '存在 ⚠️' : '无'}</Tag></Descriptions.Item>
-          <Descriptions.Item label="Access Key 2"><Tag color={rootCredentials.accessKey2Active ? 'red' : 'green'}>{rootCredentials.accessKey2Active ? '存在 ⚠️' : '无'}</Tag></Descriptions.Item>
-          <Descriptions.Item label="密码最后使用">{rootCredentials.passwordLastUsed || '-'}</Descriptions.Item>
+          <Descriptions.Item label="密码">
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
+              <Tag color={status.passwordEnabled ? 'green' : 'default'}>{status.passwordEnabled ? '已启用' : '未启用'}</Tag>
+              <Popconfirm
+                title="恢复根用户密码"
+                description="将为该账户根用户触发密码恢复流程（AWS 向该账户根邮箱发送重置邮件）。操作会被审计。"
+                okText="恢复" cancelText="取消"
+                onConfirm={handleRecoverPassword}
+              >
+                <Button size="small" type="link" icon={<UnlockOutlined />} loading={pwdLoading}>恢复密码</Button>
+              </Popconfirm>
+            </div>
+          </Descriptions.Item>
+          <Descriptions.Item label="Root MFA">
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
+              <Tag color={status.mfaActive ? 'green' : 'red'}>{status.mfaActive ? '已启用' : '未启用 ⚠️'}</Tag>
+              {status.mfaActive && (
+                <Popconfirm
+                  title="删除根用户 MFA"
+                  description="将停用并删除该账户根用户的虚拟 MFA 设备，此操作不可逆且会被审计。"
+                  okText="删除" okType="danger" cancelText="取消"
+                  onConfirm={handleDeleteMfa}
+                >
+                  <Button size="small" danger type="link" icon={<DeleteOutlined />} loading={mfaLoading}>删除</Button>
+                </Popconfirm>
+              )}
+            </div>
+          </Descriptions.Item>
+          <Descriptions.Item label="Access Key 1"><Tag color={status.accessKey1Active ? 'red' : 'green'}>{status.accessKey1Active ? '存在 ⚠️' : '无'}</Tag></Descriptions.Item>
+          <Descriptions.Item label="Access Key 2"><Tag color={status.accessKey2Active ? 'red' : 'green'}>{status.accessKey2Active ? '存在 ⚠️' : '无'}</Tag></Descriptions.Item>
+          <Descriptions.Item label="密码最后使用">{status.passwordLastUsed || '-'}</Descriptions.Item>
         </Descriptions>
       ) : <span style={{ color: '#999', fontSize: 12 }}>根用户凭证状态不可用（凭证报告获取失败）</span>}
 

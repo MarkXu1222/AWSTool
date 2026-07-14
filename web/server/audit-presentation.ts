@@ -26,6 +26,8 @@ const explicitActions: Record<string, Omit<AuditDisplay, 'target' | 'result' | '
   USER_DELETE: { category: '用户管理', operation: '删除用户' },
   QUOTA_INCREASE: { category: '配额管理', operation: '提交配额提升申请' },
   TEMP_CREDENTIALS: { category: '安全检查', operation: '生成账户 Admin 临时凭证' },
+  ROOT_MFA_DELETE: { category: '安全检查', operation: '删除根用户 MFA' },
+  ROOT_PASSWORD_RECOVER: { category: '安全检查', operation: '恢复根用户密码' },
   REGION_ENABLE: { category: '区域管理', operation: '启用区域' },
   REGION_BATCH_ENABLE: { category: '区域管理', operation: '批量启用区域' },
   REGION_DISABLE: { category: '区域管理', operation: '禁用区域' },
@@ -184,6 +186,14 @@ function describeApiCall(method: string, path: string, params: any): Omit<AuditD
     return { category: '区域管理', operation: '批量启用区域', target: `${count} 个账户 · ${body.region || '未指定区域'}` };
   }
 
+  match = path.match(/^\/api\/aws\/root-credentials\/(\d{12})\/delete-mfa$/);
+  if (match) {
+    return { category: '安全检查', operation: '删除根用户 MFA', target: accountTarget(match[1]) };
+  }
+  match = path.match(/^\/api\/aws\/root-credentials\/(\d{12})\/recover-password$/);
+  if (match) {
+    return { category: '安全检查', operation: '恢复根用户密码', target: accountTarget(match[1]) };
+  }
   match = path.match(/^\/api\/aws\/root-credentials\/(\d{12})(?:\/delete-key)?$/);
   if (match) {
     return {

@@ -1,11 +1,11 @@
 /**
  * AWS Service Layer — reads config from shared config.json
  */
-import { STSClient, AssumeRoleCommand, GetCallerIdentityCommand } from '@aws-sdk/client-sts';
+import { STSClient, AssumeRoleCommand, GetCallerIdentityCommand, AssumeRootCommand } from '@aws-sdk/client-sts';
 import { OrganizationsClient, ListAccountsCommand } from '@aws-sdk/client-organizations';
 import { CostExplorerClient, GetCostAndUsageCommand } from '@aws-sdk/client-cost-explorer';
 import { ServiceQuotasClient, ListServiceQuotasCommand, RequestServiceQuotaIncreaseCommand, ListRequestedServiceQuotaChangeHistoryCommand, GetServiceQuotaCommand } from '@aws-sdk/client-service-quotas';
-import { IAMClient, GetAccountSummaryCommand, ListMFADevicesCommand, ListUsersCommand } from '@aws-sdk/client-iam';
+import { IAMClient, GetAccountSummaryCommand, ListMFADevicesCommand, ListUsersCommand, ListVirtualMFADevicesCommand, DeactivateMFADeviceCommand, DeleteVirtualMFADeviceCommand, CreateLoginProfileCommand } from '@aws-sdk/client-iam';
 import { EC2Client, DescribeInstancesCommand, DescribeVolumesCommand } from '@aws-sdk/client-ec2';
 import { S3Client, ListBucketsCommand } from '@aws-sdk/client-s3';
 import { LambdaClient, ListFunctionsCommand } from '@aws-sdk/client-lambda';
@@ -192,6 +192,80 @@ export async function getTempAdminCredentials(accountId: string) {
     } catch (e) { lastErr = e; continue; }
   }
   throw new Error(`无法为账户 ${accountId} 生成管理员临时凭证：${lastErr?.message || '所有 payer 均尝试失败'}`);
+}
+
+// ===== 集中式根访问 (sts:AssumeRoot) =====
+// AWS 管理的根任务策略 ARN，用于把 root 会话权限收敛到具体特权任务
+const ROOT_TASK_POLICY = {
+  delete: 'arn:aws:iam::aws:policy/root-task/IAMDeleteRootUserCredentials',
+  createPassword: 'arn:aws:iam::aws:policy/root-task/IAMCreateRootUserPassword',
+  audit: 'arn:aws:iam::aws:policy/root-task/IAMAuditRootUserCredentials',
+};
+
+/**
+ * 用管理账户凭证 AssumeRoot 到成员账户的 root，换取短期特权会话凭证（≤15 分钟）。
+ * 注意：AssumeRoot 不支持全球端点，必须使用区域性 STS 端点；SDK v3 指定 region 即为区域端点。
+ * 前提：组织已开启集中式根访问，且 BASE_CREDENTIALS 所属主体具备 sts:AssumeRoot 权限。
+ */
+async function assumeRoot(accountId: string, taskPolicyArn: string) {
+  const sts = new STSClient({ region: DEFAULT_REGION, credentials: BASE_CREDENTIALS });
+  const resp = await sts.send(new AssumeRootCommand({
+    TargetPrincipal: accountId,
+    TaskPolicyArn: { arn: taskPolicyArn },
+    DurationSeconds: 900,
+  }));
+  return {
+    accessKeyId: resp.Credentials!.AccessKeyId!,
+    secretAccessKey: resp.Credentials!.SecretAccessKey!,
+    sessionToken: resp.Credentials!.SessionToken!,
+  };
+}
+
+/**
+ * 删除成员账户根用户的（虚拟）MFA 设备。
+ * 步骤：1) 用管理员凭证 ListVirtualMFADevices 定位 root 的设备 SerialNumber；
+ *      2) AssumeRoot(IAMDeleteRootUserCredentials) 换取 root 会话；
+ *      3) DeactivateMFADevice + DeleteVirtualMFADevice（root 会话须省略 UserName）。
+ */
+export async function deleteRootMFA(accountId: string) {
+  // 1) 用管理员凭证枚举虚拟 MFA 设备，找出分配给 root 的那个
+  const admin = await getTempAdminCredentials(accountId);
+  const adminCreds = { accessKeyId: admin.accessKeyId, secretAccessKey: admin.secretAccessKey, sessionToken: admin.sessionToken };
+  const iamAdmin = new IAMClient({ region: 'us-east-1', credentials: adminCreds });
+  const list = await iamAdmin.send(new ListVirtualMFADevicesCommand({ AssignmentStatus: 'Assigned' }));
+  const rootDevices = (list.VirtualMFADevices || []).filter(d =>
+    (d.User?.Arn || '').endsWith(':root') || (d.SerialNumber || '').includes('root-account-mfa-device')
+  );
+  if (rootDevices.length === 0) {
+    throw new Error('未找到根用户的虚拟 MFA 设备（可能未启用，或为硬件 MFA — 需在该账户根用户控制台手动处理）');
+  }
+
+  // 2) AssumeRoot 换取 root 特权会话
+  const rootCreds = await assumeRoot(accountId, ROOT_TASK_POLICY.delete);
+  const iamRoot = new IAMClient({ region: DEFAULT_REGION, credentials: rootCreds });
+
+  // 3) 逐个停用并删除（root 会话须省略 UserName）
+  const removed: string[] = [];
+  for (const d of rootDevices) {
+    const serial = d.SerialNumber!;
+    await iamRoot.send(new DeactivateMFADeviceCommand({ SerialNumber: serial }));
+    // 仅虚拟设备可删除；停用后从账户移除，避免残留
+    try { await iamRoot.send(new DeleteVirtualMFADeviceCommand({ SerialNumber: serial })); } catch { /* 非虚拟设备忽略 */ }
+    removed.push(serial);
+  }
+  return { accountId, removed };
+}
+
+/**
+ * 恢复（重新启用）成员账户根用户的密码。
+ * AssumeRoot(IAMCreateRootUserPassword) → CreateLoginProfile（root 会话须省略 UserName 与 Password，
+ * 由 AWS 触发根用户密码恢复流程，向该账户根邮箱发送重置邮件）。
+ */
+export async function recoverRootPassword(accountId: string) {
+  const rootCreds = await assumeRoot(accountId, ROOT_TASK_POLICY.createPassword);
+  const iamRoot = new IAMClient({ region: DEFAULT_REGION, credentials: rootCreds });
+  await iamRoot.send(new CreateLoginProfileCommand({}));
+  return { accountId, ok: true };
 }
 
 // ===== Exported service functions =====

@@ -556,6 +556,50 @@ awsRouter.get('/temp-credentials/:accountId', requireFullAdmin, async (req: Requ
   } catch (e: any) { res.status(500).json({ error: e.message }); }
 });
 
+// Delete member account root user MFA via centralized root access (sts:AssumeRoot).
+// Highly privileged & destructive: full-admin only, always audited.
+awsRouter.post('/root-credentials/:accountId/delete-mfa', requireFullAdmin, async (req: Request, res: Response) => {
+  try {
+    const accountId = String(req.params.accountId);
+    if (!/^\d{12}$/.test(accountId)) {
+      return res.status(400).json({ error: '无效的账户 ID' });
+    }
+    const result = await aws.deleteRootMFA(accountId);
+    const user = (req as any).user;
+    db.addAuditLog(
+      user?.userId,
+      'ROOT_MFA_DELETE',
+      `AWS 账户 ${accountId} · 删除根用户 MFA（${result.removed.length} 个设备）`,
+      user?.username,
+      req.ip,
+    );
+    (res.locals as any).audited = true;
+    res.json({ success: true, data: result });
+  } catch (e: any) { res.status(500).json({ error: e.message }); }
+});
+
+// Recover (re-enable) member account root user password via centralized root access (sts:AssumeRoot).
+// Triggers AWS password recovery flow (reset email to the account's root address). Full-admin only, audited.
+awsRouter.post('/root-credentials/:accountId/recover-password', requireFullAdmin, async (req: Request, res: Response) => {
+  try {
+    const accountId = String(req.params.accountId);
+    if (!/^\d{12}$/.test(accountId)) {
+      return res.status(400).json({ error: '无效的账户 ID' });
+    }
+    const result = await aws.recoverRootPassword(accountId);
+    const user = (req as any).user;
+    db.addAuditLog(
+      user?.userId,
+      'ROOT_PASSWORD_RECOVER',
+      `AWS 账户 ${accountId} · 恢复根用户密码`,
+      user?.username,
+      req.ip,
+    );
+    (res.locals as any).audited = true;
+    res.json({ success: true, data: result });
+  } catch (e: any) { res.status(500).json({ error: e.message }); }
+});
+
 // Scan resources
 awsRouter.get('/resources/:accountId/:region', async (req: Request, res: Response) => {
   try {
