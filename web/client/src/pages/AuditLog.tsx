@@ -275,7 +275,8 @@ const AuditLogPage: React.FC = () => {
           rowKey={(record, index) => `${record.id || 'legacy'}-${record.created_at}-${index}`}
           size="middle"
           loading={loading}
-          scroll={{ x: 920 }}
+          tableLayout="fixed"
+          scroll={{ x: 1040 }}
           locale={{ emptyText: <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无符合条件的审计日志" /> }}
           pagination={{
             pageSize: 30,
@@ -320,7 +321,7 @@ const AuditLogPage: React.FC = () => {
             {
               title: '时间',
               dataIndex: 'created_at',
-              width: 150,
+              width: 135,
               sorter: (a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime(),
               render: (value: string) => {
                 const formatted = formatTime(value);
@@ -335,7 +336,7 @@ const AuditLogPage: React.FC = () => {
             {
               title: '用户',
               dataIndex: 'username',
-              width: 105,
+              width: 90,
               render: (username?: string) => <strong>{username || '-'}</strong>,
             },
             {
@@ -348,16 +349,17 @@ const AuditLogPage: React.FC = () => {
             },
             {
               title: '操作',
+              width: 360,
               render: (_value, record) => {
                 const display = fallbackDisplay(record);
                 return (
-                  <div style={{ minWidth: 260 }}>
+                  <div style={{ minWidth: 0, maxWidth: '100%' }}>
                     <div style={{ fontWeight: 600, marginBottom: display.target ? 3 : 0 }}>{display.operation}</div>
                     {display.target && (
                       <Typography.Text
                         type="secondary"
                         ellipsis={{ tooltip: display.target }}
-                        style={{ display: 'block', maxWidth: 430, fontSize: 12 }}
+                        style={{ display: 'block', maxWidth: '100%', fontSize: 12 }}
                       >
                         {display.target}
                       </Typography.Text>
@@ -368,7 +370,7 @@ const AuditLogPage: React.FC = () => {
             },
             {
               title: '结果',
-              width: 130,
+              width: 145,
               render: (_value, record) => {
                 const display = fallbackDisplay(record);
                 return (
@@ -388,8 +390,12 @@ const AuditLogPage: React.FC = () => {
             {
               title: 'IP',
               dataIndex: 'ip',
-              width: 125,
-              render: (ip?: string) => <Typography.Text code>{cleanIP(ip) || '-'}</Typography.Text>,
+              width: 155,
+              render: (ip?: string) => (
+                <Typography.Text code style={{ whiteSpace: 'nowrap', fontSize: 12 }}>
+                  {cleanIP(ip) || '-'}
+                </Typography.Text>
+              ),
             },
           ]}
         />
