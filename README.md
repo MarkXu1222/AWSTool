@@ -22,7 +22,7 @@
 | 模块 | 功能 | 说明 |
 |------|------|------|
 | **概览** | 费用/账户数/进行中 Case 统计 | 数据缓存，秒级加载 |
-| **账户管理** | 列表、详情、费用、MFA、根用户状态 | 含**免登录进入 AWS 控制台** |
+| **账户管理** | 列表、详情、费用、MFA、根用户状态与凭证操作 | 免登录进控制台、生成临时凭证、删 Root MFA、恢复根密码 |
 | **配额管理** | 多区域查询、提升、记录持久化、流式同步 | 含**一键生成提额 PDF 文档** |
 | **区域管理** | opt-in 区域开通状态扫描、单个/批量开通 | 含中文区域名 |
 | **账单分析** | 按账户查看费用、占比、导出 | Cost Explorer |
@@ -127,13 +127,31 @@
 | 区域状态 | 24 小时 | opt-in 区域扫描 |
 | 概览费用缓存 | 2 小时 | Cost Explorer 结果缓存 |
 
-### 7. 强制 MFA + RBAC
+### 7. 强制 MFA + 权限模型（RBAC）
 - **强制 MFA**：新用户首次登录必须绑定 MFA 才能使用（前端引导 + 后端 `authMiddleware` 拦截未绑定用户的业务接口）。
-- **RBAC**：admin / viewer 角色，viewer 写操作（配额提升、删除等）被 `requireAdmin` 拦截。
+- **角色（role）**：
+  - `admin` — 全部页面 + 所有操作 + 用户管理 + 根用户凭证操作
+  - `partadmin` — 仅勾选页面 + 业务操作（配额提升 / 删 key 等），不能管理用户
+  - `viewer` — 仅勾选页面，只读（写操作被 `requireAdmin` 拦截）
+- **页面权限（`allowed_pages`）**：admin 视为全部；partadmin / viewer 按勾选的左侧菜单页面显示（在 设置→用户 中分配）。
+- **根用户凭证权限（`root_access`）**：独立于角色的开关，控制账户"根用户"tab 的三个敏感功能（生成 Admin 临时凭证 / 删 Root MFA / 恢复根密码）。**admin 恒有**；其他用户由管理员在 设置→用户 中单独勾选授予。后端 `requireRootAccess` 从数据库实时校验（不信任 JWT 中的旧角色/权限），前端无该权限则完全隐藏这三个功能。
 
 ### 8. 审计日志
 - 所有操作（登录、配额提升、区域启用、用户管理等）记录用户、IP、操作类型、详情、时间。
 - IP 自动清理 IPv6-mapped 前缀（`::ffff:`）。
+
+### 9. 根用户凭证操作（账户"根用户"tab）
+针对成员账户根用户的三个敏感操作，均受 `root_access` 权限控制（见上方权限模型），且全部记入审计：
+
+| 功能 | 机制 | 有效期 / 说明 |
+|------|------|--------------|
+| 生成 Admin 临时凭证 | AssumeRole 到账户管理员角色（selfPayer 直连 payer role / 成员账户二级跳 `OrganizationAccountAccessRole`），**不**走受限的 support-quota | 1 小时；支持复制 AK/SK/Token、导出为环境变量、倒计时、刷新 |
+| 删除 Root MFA | 集中式根访问 `sts:AssumeRoot`（任务策略 `IAMDeleteRootUserCredentials`）→ `DeactivateMFADevice` + `DeleteVirtualMFADevice` | 先用管理员凭证 `ListVirtualMFADevices` 定位 root 设备；仅虚拟 MFA |
+| 恢复根用户密码 | `sts:AssumeRoot`（任务策略 `IAMCreateRootUserPassword`）→ `CreateLoginProfile`（省略 UserName/Password） | 触发 AWS 密码恢复流程，向该账户根邮箱发送重置邮件 |
+
+- **前提**：删 MFA / 恢复密码依赖 AWS **集中式根访问**（`sts:AssumeRoot`，2024 年底特性）——需组织已启用该功能，且工具用户具备 `sts:AssumeRoot` 权限。AssumeRoot 会话上限 15 分钟，且必须使用区域性 STS 端点（不支持全球端点）。
+- **权限入口**：设置 → 用户 → 添加/编辑用户 → 勾选"根用户凭证权限"（admin 默认拥有）。用户表有"根用户权限"列可一览。
+- **审计动作**：`TEMP_CREDENTIALS`（生成临时凭证）、`ROOT_MFA_DELETE`（删 MFA）、`ROOT_PASSWORD_RECOVER`（恢复密码）。
 
 ---
 
