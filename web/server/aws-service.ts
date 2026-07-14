@@ -72,9 +72,9 @@ async function tryAssumeSupportRole(accountId: string) {
   }
 }
 
-async function getAdminCredsForPayer(payerRoleArn: string) {
+async function getAdminCredsForPayer(payerRoleArn: string, forceFresh = false) {
   const cached = adminCredsCache.get(payerRoleArn);
-  if (cached && Date.now() < cached.expiry) return cached.creds;
+  if (!forceFresh && cached && Date.now() < cached.expiry) return cached.creds;
 
   const sts = new STSClient({ region: DEFAULT_REGION, credentials: BASE_CREDENTIALS });
   const resp = await sts.send(new AssumeRoleCommand({
@@ -135,6 +135,63 @@ async function assumeToAccount(accountId: string) {
   }
   console.log(`[assume] ${accountId} → 全部失败`);
   throw new Error(`无法 AssumeRole 到 ${accountId}`);
+}
+
+/**
+ * 生成账户的 Admin 权限临时凭证（有效期 1 小时）。
+ * 与 assumeToAccount 不同：这里明确走管理员角色（OrganizationAccountAccessRole / payer role），
+ * 不使用受限的 support-quota role，供操作者复制到 AWS CLI / SDK 临时使用。
+ */
+export async function getTempAdminCredentials(accountId: string) {
+  const format = (resp: any) => ({
+    accountId,
+    accessKeyId: resp.Credentials!.AccessKeyId!,
+    secretAccessKey: resp.Credentials!.SecretAccessKey!,
+    sessionToken: resp.Credentials!.SessionToken!,
+    expiration: resp.Credentials!.Expiration, // Date → ISO string after JSON 序列化
+    region: DEFAULT_REGION,
+  });
+
+  // 情况 1：账户本身就是 payer —— 用长期密钥直接 AssumeRole 到 payer role（可拿完整 1 小时）
+  const selfPayer = PAYERS.find(p => {
+    const m = /arn:aws:iam::(\d+):role\//.exec(p.roleArn);
+    return m && m[1] === accountId;
+  });
+  if (selfPayer) {
+    const sts = new STSClient({ region: DEFAULT_REGION, credentials: BASE_CREDENTIALS });
+    const resp = await sts.send(new AssumeRoleCommand({
+      RoleArn: selfPayer.roleArn,
+      RoleSessionName: `admin-${accountId}`,
+      DurationSeconds: 3600,
+    }));
+    console.log(`[temp-cred] ${accountId} → payer admin (selfPayer)`);
+    return format(resp);
+  }
+
+  // 情况 2：成员账户 —— 二级跳: payer admin creds → OrganizationAccountAccessRole
+  // 角色链式 AssumeRole 上限为 1 小时；用 forceFresh 取新鲜 payer 凭证，保证接近完整 1 小时。
+  const roleArn = `arn:aws:iam::${accountId}:role/${CHILD_ROLE_NAME}`;
+  const knownPayer = accountPayerMap.get(accountId);
+  const payerArns = knownPayer
+    ? [knownPayer, ...PAYERS.map(p => p.roleArn).filter(a => a !== knownPayer)]
+    : PAYERS.map(p => p.roleArn);
+
+  let lastErr: any;
+  for (const payerArn of payerArns) {
+    try {
+      const admin = await getAdminCredsForPayer(payerArn, true);
+      const sts = new STSClient({ region: DEFAULT_REGION, credentials: admin });
+      const resp = await sts.send(new AssumeRoleCommand({
+        RoleArn: roleArn,
+        RoleSessionName: `admin-${accountId}`,
+        DurationSeconds: 3600,
+      }));
+      accountPayerMap.set(accountId, payerArn);
+      console.log(`[temp-cred] ${accountId} → OrganizationAccountAccessRole (二级跳)`);
+      return format(resp);
+    } catch (e) { lastErr = e; continue; }
+  }
+  throw new Error(`无法为账户 ${accountId} 生成管理员临时凭证：${lastErr?.message || '所有 payer 均尝试失败'}`);
 }
 
 // ===== Exported service functions =====

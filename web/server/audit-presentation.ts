@@ -25,6 +25,7 @@ const explicitActions: Record<string, Omit<AuditDisplay, 'target' | 'result' | '
   USER_UPDATE: { category: '用户管理', operation: '修改用户资料与权限' },
   USER_DELETE: { category: '用户管理', operation: '删除用户' },
   QUOTA_INCREASE: { category: '配额管理', operation: '提交配额提升申请' },
+  TEMP_CREDENTIALS: { category: '安全检查', operation: '生成账户 Admin 临时凭证' },
   REGION_ENABLE: { category: '区域管理', operation: '启用区域' },
   REGION_BATCH_ENABLE: { category: '区域管理', operation: '批量启用区域' },
   REGION_DISABLE: { category: '区域管理', operation: '禁用区域' },
@@ -190,6 +191,10 @@ function describeApiCall(method: string, path: string, params: any): Omit<AuditD
       operation: path.endsWith('/delete-key') ? '尝试删除根用户访问密钥' : '检查根用户凭证',
       target: accountTarget(match[1]),
     };
+  }
+  match = path.match(/^\/api\/aws\/temp-credentials\/(\d{12})$/);
+  if (match) {
+    return { category: '安全检查', operation: '生成账户 Admin 临时凭证', target: accountTarget(match[1]) };
   }
   match = path.match(/^\/api\/aws\/resources\/(\d{12})\/([^/]+)$/);
   if (match) {

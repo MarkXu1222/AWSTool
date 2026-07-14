@@ -3,6 +3,7 @@ import { Card, Table, Tag, Button, Space, message, Input, Spin, Descriptions, Ta
 import { ReloadOutlined, SearchOutlined, DollarOutlined, SafetyOutlined, CheckCircleOutlined, CloseCircleOutlined, LeftOutlined, LoginOutlined } from '@ant-design/icons';
 import { api } from '../api';
 import { exportToCSV } from '../utils/export';
+import RootCredentialsPanel from '../components/RootCredentialsPanel';
 
 const AccountsPage: React.FC = () => {
   const [accounts, setAccounts] = useState<any[]>([]);
@@ -104,15 +105,9 @@ const AccountsPage: React.FC = () => {
               ))}
             </>
           ) : <span style={{ color: '#999' }}>无数据</span> },
-          { key: 'root', label: '根用户', children: detailLoading ? <div style={{ textAlign: 'center', padding: 30 }}><Spin /></div> : detail?.rootCredentials ? (
-            <Descriptions size="small" column={1} bordered>
-              <Descriptions.Item label="密码"><Tag color={detail.rootCredentials.passwordEnabled ? 'green' : 'default'}>{detail.rootCredentials.passwordEnabled ? '已启用' : '未启用'}</Tag></Descriptions.Item>
-              <Descriptions.Item label="Root MFA"><Tag color={detail.rootCredentials.mfaActive ? 'green' : 'red'}>{detail.rootCredentials.mfaActive ? '已启用' : '未启用 ⚠️'}</Tag></Descriptions.Item>
-              <Descriptions.Item label="Access Key 1"><Tag color={detail.rootCredentials.accessKey1Active ? 'red' : 'green'}>{detail.rootCredentials.accessKey1Active ? '存在 ⚠️' : '无'}</Tag></Descriptions.Item>
-              <Descriptions.Item label="Access Key 2"><Tag color={detail.rootCredentials.accessKey2Active ? 'red' : 'green'}>{detail.rootCredentials.accessKey2Active ? '存在 ⚠️' : '无'}</Tag></Descriptions.Item>
-              <Descriptions.Item label="密码最后使用">{detail.rootCredentials.passwordLastUsed || '-'}</Descriptions.Item>
-            </Descriptions>
-          ) : <span style={{ color: '#999' }}>加载中...</span> },
+          { key: 'root', label: '根用户', children: detailLoading ? <div style={{ textAlign: 'center', padding: 30 }}><Spin /></div> : (
+            <RootCredentialsPanel accountId={selectedAccount.Id} rootCredentials={detail?.rootCredentials} />
+          ) },
         ]} />
       </div>
     );
@@ -224,14 +219,9 @@ const AccountsPage: React.FC = () => {
                           columns={[{ title: '用户', dataIndex: 'user' }, { title: 'MFA', dataIndex: 'hasMFA', width: 50, render: (h: boolean) => h ? '✓' : '✗' }]} />
                       </>
                     ) : '无数据' },
-                    { key: 'root', label: '根用户', children: detailLoading ? <Spin /> : detail?.rootCredentials ? (
-                      <Descriptions size="small" column={1} bordered>
-                        <Descriptions.Item label="密码"><Tag color={detail.rootCredentials.passwordEnabled ? 'green' : 'default'}>{detail.rootCredentials.passwordEnabled ? '已启用' : '未启用'}</Tag></Descriptions.Item>
-                        <Descriptions.Item label="Root MFA"><Tag color={detail.rootCredentials.mfaActive ? 'green' : 'red'}>{detail.rootCredentials.mfaActive ? '已启用' : '未启用 ⚠️'}</Tag></Descriptions.Item>
-                        <Descriptions.Item label="AK1"><Tag color={detail.rootCredentials.accessKey1Active ? 'red' : 'green'}>{detail.rootCredentials.accessKey1Active ? '存在⚠️' : '无'}</Tag></Descriptions.Item>
-                        <Descriptions.Item label="AK2"><Tag color={detail.rootCredentials.accessKey2Active ? 'red' : 'green'}>{detail.rootCredentials.accessKey2Active ? '存在⚠️' : '无'}</Tag></Descriptions.Item>
-                      </Descriptions>
-                    ) : '加载中...' },
+                    { key: 'root', label: '根用户', children: detailLoading ? <Spin /> : (
+                      <RootCredentialsPanel accountId={selectedAccount.Id} rootCredentials={detail?.rootCredentials} />
+                    ) },
                   ]} />
                 </Card>
               </div>

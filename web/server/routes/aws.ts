@@ -18,6 +18,15 @@ const requireAdmin = (req: Request, res: Response, next: any) => {
   next();
 };
 
+// RBAC: 仅超级管理员(admin)。用于高敏感操作，如生成账户级 Admin 临时凭证。
+// partadmin/viewer 一律拒绝，避免权限提升（partadmin 拿到完整 AdministratorAccess 凭证）。
+const requireFullAdmin = (req: Request, res: Response, next: any) => {
+  if ((req as any).user?.role !== 'admin') {
+    return res.status(403).json({ error: '仅超级管理员(admin)可执行此操作' });
+  }
+  next();
+};
+
 // Audit logs contain sensitive operational data. Enforce the current database
 // permission instead of trusting the potentially stale role/pages in the JWT.
 const requireAuditAccess = (req: Request, res: Response, next: any) => {
@@ -523,6 +532,28 @@ awsRouter.get('/root-credentials/:accountId', async (req: Request, res: Response
 // Delete root access key (requires root login — cannot be done via role)
 awsRouter.post('/root-credentials/:accountId/delete-key', requireAdmin, async (req: Request, res: Response) => {
   res.status(400).json({ error: '删除根用户 Access Key 需要使用根用户登录 AWS Console 操作，无法通过 IAM Role 完成。请登录对应账户的 AWS Console 手动删除。' });
+});
+
+// Generate temporary ADMIN credentials for an account (valid ~1 hour) — for copy into AWS CLI / SDK.
+// Highly privileged (AdministratorAccess): restricted to full-admin role and always audited.
+awsRouter.get('/temp-credentials/:accountId', requireFullAdmin, async (req: Request, res: Response) => {
+  try {
+    const accountId = String(req.params.accountId);
+    if (!/^\d{12}$/.test(accountId)) {
+      return res.status(400).json({ error: '无效的账户 ID' });
+    }
+    const creds = await aws.getTempAdminCredentials(accountId);
+    const user = (req as any).user;
+    db.addAuditLog(
+      user?.userId,
+      'TEMP_CREDENTIALS',
+      `AWS 账户 ${accountId} · 生成 Admin 临时凭证 (有效期 1 小时)`,
+      user?.username,
+      req.ip,
+    );
+    (res.locals as any).audited = true;
+    res.json({ success: true, data: creds });
+  } catch (e: any) { res.status(500).json({ error: e.message }); }
 });
 
 // Scan resources

@@ -175,6 +175,8 @@ export const api = {
   enableRegion: (accountId: string, region: string) => request('/regions/enable', { method: 'POST', body: JSON.stringify({ accountId, region }) }),
   enableRegionBatch: (accountIds: string[], region: string) => request('/regions/enable-batch', { method: 'POST', body: JSON.stringify({ accountIds, region }) }),
   getRootCredentials: (accountId: string) => request(`/aws/root-credentials/${accountId}`),
+  // Generate temporary ADMIN credentials (valid ~1 hour) for copy into AWS CLI / SDK
+  getTempCredentials: (accountId: string) => request(`/aws/temp-credentials/${accountId}`),
   changePassword: (currentPassword: string, newPassword: string) =>
     request('/auth/change-password', { method: 'POST', body: JSON.stringify({ currentPassword, newPassword }) }),
   // User management
