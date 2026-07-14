@@ -18,13 +18,15 @@ const requireAdmin = (req: Request, res: Response, next: any) => {
   next();
 };
 
-// RBAC: 仅超级管理员(admin)。用于高敏感操作，如生成账户级 Admin 临时凭证。
-// partadmin/viewer 一律拒绝，避免权限提升（partadmin 拿到完整 AdministratorAccess 凭证）。
-const requireFullAdmin = (req: Request, res: Response, next: any) => {
-  if ((req as any).user?.role !== 'admin') {
-    return res.status(403).json({ error: '仅超级管理员(admin)可执行此操作' });
-  }
-  next();
+// RBAC: 根用户凭证操作权限（独立于角色，可单独分配）。用于账户"根用户"tab 的敏感功能：
+// 生成 Admin 临时凭证 / 删除 Root MFA / 恢复根密码。admin 恒有；其他用户需被显式授予 root_access。
+// 与 requireAuditAccess 一致，从数据库读取当前权限，避免信任 JWT 中可能过期的角色/权限。
+const requireRootAccess = (req: Request, res: Response, next: any) => {
+  const tokenUser = (req as any).user;
+  const currentUser = tokenUser?.username ? db.getUser(tokenUser.username) : null;
+  if (!currentUser) return res.status(401).json({ error: '用户不存在或登录已失效' });
+  if (currentUser.role === 'admin' || (currentUser as any).root_access === true) return next();
+  return res.status(403).json({ error: '无根用户凭证操作权限，请联系管理员分配' });
 };
 
 // Audit logs contain sensitive operational data. Enforce the current database
@@ -536,7 +538,7 @@ awsRouter.post('/root-credentials/:accountId/delete-key', requireAdmin, async (r
 
 // Generate temporary ADMIN credentials for an account (valid ~1 hour) — for copy into AWS CLI / SDK.
 // Highly privileged (AdministratorAccess): restricted to full-admin role and always audited.
-awsRouter.get('/temp-credentials/:accountId', requireFullAdmin, async (req: Request, res: Response) => {
+awsRouter.get('/temp-credentials/:accountId', requireRootAccess, async (req: Request, res: Response) => {
   try {
     const accountId = String(req.params.accountId);
     if (!/^\d{12}$/.test(accountId)) {
@@ -558,7 +560,7 @@ awsRouter.get('/temp-credentials/:accountId', requireFullAdmin, async (req: Requ
 
 // Delete member account root user MFA via centralized root access (sts:AssumeRoot).
 // Highly privileged & destructive: full-admin only, always audited.
-awsRouter.post('/root-credentials/:accountId/delete-mfa', requireFullAdmin, async (req: Request, res: Response) => {
+awsRouter.post('/root-credentials/:accountId/delete-mfa', requireRootAccess, async (req: Request, res: Response) => {
   try {
     const accountId = String(req.params.accountId);
     if (!/^\d{12}$/.test(accountId)) {
@@ -580,7 +582,7 @@ awsRouter.post('/root-credentials/:accountId/delete-mfa', requireFullAdmin, asyn
 
 // Recover (re-enable) member account root user password via centralized root access (sts:AssumeRoot).
 // Triggers AWS password recovery flow (reset email to the account's root address). Full-admin only, audited.
-awsRouter.post('/root-credentials/:accountId/recover-password', requireFullAdmin, async (req: Request, res: Response) => {
+awsRouter.post('/root-credentials/:accountId/recover-password', requireRootAccess, async (req: Request, res: Response) => {
   try {
     const accountId = String(req.params.accountId);
     if (!/^\d{12}$/.test(accountId)) {

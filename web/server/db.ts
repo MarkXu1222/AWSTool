@@ -221,6 +221,7 @@ export const db = {
       role: u.role,
       mfa_enabled: u.mfa_enabled,
       allowed_pages: (u as any).allowed_pages ?? null,
+      root_access: (u as any).root_access === true,
       created_at: u.created_at,
     }));
   },

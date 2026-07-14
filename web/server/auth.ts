@@ -37,6 +37,14 @@ function resolveAllowedPages(user: any): string[] {
   return [...ALL_PAGE_KEYS]; // 旧数据兼容：未设置视为全部
 }
 
+// 根用户凭证操作权限（独立于页面权限）：admin 恒有；其他角色按 root_access 显式授予。
+// 控制账户"根用户"tab 的三个敏感功能：生成 Admin 临时凭证 / 删除 Root MFA / 恢复根密码。
+export function resolveRootAccess(user: any): boolean {
+  if (!user) return false;
+  if (user.role === 'admin') return true;
+  return (user as any).root_access === true;
+}
+
 // 允许的用户角色
 const VALID_ROLES = ['admin', 'partadmin', 'viewer'] as const;
 
@@ -128,6 +136,7 @@ authRouter.get('/me', (req: Request, res: Response) => {
       role: decoded.role,
       mfaEnabled: !!user?.mfa_enabled,
       allowedPages: resolveAllowedPages(user),
+      rootAccess: resolveRootAccess(user),
     });
   } catch { res.status(401).json({ error: 'Token expired' }); }
 });
@@ -174,7 +183,7 @@ authRouter.post('/users', (req: Request, res: Response) => {
   try {
     const decoded = jwt.verify(authHeader.replace('Bearer ', ''), JWT_SECRET) as any;
     if (decoded.role !== 'admin') return res.status(403).json({ error: '无权限' });
-    const { username, password, role, allowedPages } = req.body;
+    const { username, password, role, allowedPages, rootAccess } = req.body;
     if (!username || !password) return res.status(400).json({ error: '用户名和密码必填' });
     if (db.getUser(username)) return res.status(400).json({ error: '用户已存在' });
     const normalizedRole = role || 'viewer';
@@ -191,8 +200,9 @@ authRouter.post('/users', (req: Request, res: Response) => {
       mfa_enabled: false,
       mfa_secret: null,
       allowed_pages: normalizedPages,
+      root_access: !!rootAccess, // admin 恒有（resolveRootAccess 里按角色判定），此处仅对非 admin 生效
     });
-    db.addAuditLog(decoded.userId, 'USER_CREATE', `创建用户 ${username} (${normalizedRole})`, decoded.username, req.ip);
+    db.addAuditLog(decoded.userId, 'USER_CREATE', `创建用户 ${username} (${normalizedRole}${rootAccess ? ', 根用户权限' : ''})`, decoded.username, req.ip);
     res.json({ success: true, message: `用户 ${username} 已创建` });
   } catch { res.status(401).json({ error: 'Invalid token' }); }
 });
@@ -209,7 +219,7 @@ authRouter.put('/users/:id', (req: Request, res: Response) => {
     const data = (db as any).getAllUsers().find((u: any) => u.id === userId);
     if (!data) return res.status(404).json({ error: '用户不存在' });
 
-    const { role, allowedPages } = req.body;
+    const { role, allowedPages, rootAccess } = req.body;
     const updates: any = {};
 
     if (role !== undefined) {
@@ -229,11 +239,16 @@ authRouter.put('/users/:id', (req: Request, res: Response) => {
       updates.allowed_pages = normalizeAllowedPages(allowedPages);
     }
 
+    // 根用户凭证权限（独立开关）；admin 恒有，此处对非 admin 生效
+    if (rootAccess !== undefined) {
+      updates.root_access = !!rootAccess;
+    }
+
     db.updateUser(userId, updates);
     db.addAuditLog(
       decoded.userId,
       'USER_UPDATE',
-      `更新用户 ${data.username}: role=${finalRole}, pages=${JSON.stringify(updates.allowed_pages ?? 'unchanged')}`,
+      `更新用户 ${data.username}: role=${finalRole}, pages=${JSON.stringify(updates.allowed_pages ?? 'unchanged')}, 根用户权限=${updates.root_access ?? 'unchanged'}`,
       decoded.username,
       req.ip,
     );

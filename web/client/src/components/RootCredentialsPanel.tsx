@@ -15,6 +15,8 @@ interface TempCreds {
 interface Props {
   accountId: string;
   rootCredentials: any;
+  // 是否具备根用户凭证操作权限（admin 或被授予 root_access）。无权限时隐藏三个敏感功能。
+  canRoot?: boolean;
 }
 
 async function copy(text: string, label: string) {
@@ -38,7 +40,7 @@ const CredRow: React.FC<{ label: string; value: string; secret?: boolean; reveal
   </div>
 );
 
-const RootCredentialsPanel: React.FC<Props> = ({ accountId, rootCredentials }) => {
+const RootCredentialsPanel: React.FC<Props> = ({ accountId, rootCredentials, canRoot }) => {
   const [creds, setCreds] = useState<TempCreds | null>(null);
   const [loading, setLoading] = useState(false);
   const [reveal, setReveal] = useState(false);
@@ -138,20 +140,22 @@ const RootCredentialsPanel: React.FC<Props> = ({ accountId, rootCredentials }) =
           <Descriptions.Item label="密码">
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
               <Tag color={status.passwordEnabled ? 'green' : 'default'}>{status.passwordEnabled ? '已启用' : '未启用'}</Tag>
-              <Popconfirm
-                title="恢复根用户密码"
-                description="将为该账户根用户触发密码恢复流程（AWS 向该账户根邮箱发送重置邮件）。操作会被审计。"
-                okText="恢复" cancelText="取消"
-                onConfirm={handleRecoverPassword}
-              >
-                <Button size="small" type="link" icon={<UnlockOutlined />} loading={pwdLoading}>恢复密码</Button>
-              </Popconfirm>
+              {canRoot && (
+                <Popconfirm
+                  title="恢复根用户密码"
+                  description="将为该账户根用户触发密码恢复流程（AWS 向该账户根邮箱发送重置邮件）。操作会被审计。"
+                  okText="恢复" cancelText="取消"
+                  onConfirm={handleRecoverPassword}
+                >
+                  <Button size="small" type="link" icon={<UnlockOutlined />} loading={pwdLoading}>恢复密码</Button>
+                </Popconfirm>
+              )}
             </div>
           </Descriptions.Item>
           <Descriptions.Item label="Root MFA">
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
               <Tag color={status.mfaActive ? 'green' : 'red'}>{status.mfaActive ? '已启用' : '未启用 ⚠️'}</Tag>
-              {status.mfaActive && (
+              {canRoot && status.mfaActive && (
                 <Popconfirm
                   title="删除根用户 MFA"
                   description="将停用并删除该账户根用户的虚拟 MFA 设备，此操作不可逆且会被审计。"
@@ -169,6 +173,8 @@ const RootCredentialsPanel: React.FC<Props> = ({ accountId, rootCredentials }) =
         </Descriptions>
       ) : <span style={{ color: '#999', fontSize: 12 }}>根用户凭证状态不可用（凭证报告获取失败）</span>}
 
+      {canRoot && (
+        <>
       <Divider style={{ margin: '12px 0' }} />
 
       {/* Admin 临时凭证 */}
@@ -215,6 +221,8 @@ const RootCredentialsPanel: React.FC<Props> = ({ accountId, rootCredentials }) =
         </div>
       ) : (
         <p style={{ color: '#999', fontSize: 12, margin: 0 }}>点击生成后可复制到 AWS CLI / SDK 使用（AdministratorAccess，有效期 1 小时）。</p>
+      )}
+        </>
       )}
     </div>
   );

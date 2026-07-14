@@ -14,6 +14,7 @@ const AccountsPage: React.FC = () => {
   const [detailLoading, setDetailLoading] = useState(false);
   const [consoleLoading, setConsoleLoading] = useState(false);
   const [isMobile] = useState(() => window.innerWidth < 769);
+  const [canRoot, setCanRoot] = useState(false);
 
   const fetchAccounts = async () => {
     setLoading(true);
@@ -26,6 +27,9 @@ const AccountsPage: React.FC = () => {
   };
 
   useEffect(() => { fetchAccounts(); }, []);
+
+  // 拉取当前用户的根用户凭证权限，决定是否展示根用户 tab 的敏感功能
+  useEffect(() => { api.me().then(r => setCanRoot(!!r.rootAccess)).catch(() => {}); }, []);
 
   // 免登录进入该账户的 AWS 控制台
   const openConsole = async (accountId: string) => {
@@ -106,7 +110,7 @@ const AccountsPage: React.FC = () => {
             </>
           ) : <span style={{ color: '#999' }}>无数据</span> },
           { key: 'root', label: '根用户', children: detailLoading ? <div style={{ textAlign: 'center', padding: 30 }}><Spin /></div> : (
-            <RootCredentialsPanel accountId={selectedAccount.Id} rootCredentials={detail?.rootCredentials} />
+            <RootCredentialsPanel accountId={selectedAccount.Id} rootCredentials={detail?.rootCredentials} canRoot={canRoot} />
           ) },
         ]} />
       </div>
@@ -220,7 +224,7 @@ const AccountsPage: React.FC = () => {
                       </>
                     ) : '无数据' },
                     { key: 'root', label: '根用户', children: detailLoading ? <Spin /> : (
-                      <RootCredentialsPanel accountId={selectedAccount.Id} rootCredentials={detail?.rootCredentials} />
+                      <RootCredentialsPanel accountId={selectedAccount.Id} rootCredentials={detail?.rootCredentials} canRoot={canRoot} />
                     ) },
                   ]} />
                 </Card>

@@ -184,9 +184,9 @@ export const api = {
     request('/auth/change-password', { method: 'POST', body: JSON.stringify({ currentPassword, newPassword }) }),
   // User management
   listUsers: () => request('/auth/users'),
-  createUser: (username: string, password: string, role: string, allowedPages?: string[]) =>
-    request('/auth/users', { method: 'POST', body: JSON.stringify({ username, password, role, allowedPages }) }),
-  updateUser: (id: number, patch: { role?: string; allowedPages?: string[] }) =>
+  createUser: (username: string, password: string, role: string, allowedPages?: string[], rootAccess?: boolean) =>
+    request('/auth/users', { method: 'POST', body: JSON.stringify({ username, password, role, allowedPages, rootAccess }) }),
+  updateUser: (id: number, patch: { role?: string; allowedPages?: string[]; rootAccess?: boolean }) =>
     request(`/auth/users/${id}`, { method: 'PUT', body: JSON.stringify(patch) }),
   deleteUser: (id: number) => request(`/auth/users/${id}`, { method: 'DELETE' }),
   resetUserPassword: (id: number, newPassword: string) =>
