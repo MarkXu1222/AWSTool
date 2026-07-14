@@ -11,6 +11,7 @@ import { S3Client, ListBucketsCommand } from '@aws-sdk/client-s3';
 import { LambdaClient, ListFunctionsCommand } from '@aws-sdk/client-lambda';
 import path from 'path';
 import fs from 'fs';
+import { db } from './db';
 
 // Load shared config
 const CONFIG_PATH = path.join(__dirname, '../../config.json');
@@ -202,23 +203,55 @@ const ROOT_TASK_POLICY = {
   audit: 'arn:aws:iam::aws:policy/root-task/IAMAuditRootUserCredentials',
 };
 
+// 解析某成员账户所属组织的 payer(管理账户) role ARN：优先内存映射，其次账户缓存里的 _payer 名称
+function getPayerRoleArnForAccount(accountId: string): string | null {
+  const known = accountPayerMap.get(accountId);
+  if (known) return known;
+  try {
+    const { accounts } = db.getAccountsCache();
+    const acct = (accounts || []).find((a: any) => a.Id === accountId);
+    if (acct?._payer) {
+      const payer = PAYERS.find(p => p.name === acct._payer);
+      if (payer) return payer.roleArn;
+    }
+  } catch { /* ignore */ }
+  return null;
+}
+
 /**
- * 用管理账户凭证 AssumeRoot 到成员账户的 root，换取短期特权会话凭证（≤15 分钟）。
+ * AssumeRoot 到成员账户的 root，换取短期特权会话凭证（≤15 分钟）。
+ * 关键：AssumeRoot 必须由「目标账户所属组织的管理账户(payer)」发起，不能用工具用户直接调用。
+ * 因此先 AssumeRole 到该账户对应 payer 的 tool 角色（进入管理账户），再从管理账户凭证发起 AssumeRoot。
  * 注意：AssumeRoot 不支持全球端点，必须使用区域性 STS 端点；SDK v3 指定 region 即为区域端点。
- * 前提：组织已开启集中式根访问，且 BASE_CREDENTIALS 所属主体具备 sts:AssumeRoot 权限。
+ * 前提：组织已开启集中式根访问，且该 payer 的 tool 角色具备 sts:AssumeRoot 权限。
  */
 async function assumeRoot(accountId: string, taskPolicyArn: string) {
-  const sts = new STSClient({ region: DEFAULT_REGION, credentials: BASE_CREDENTIALS });
-  const resp = await sts.send(new AssumeRootCommand({
-    TargetPrincipal: accountId,
-    TaskPolicyArn: { arn: taskPolicyArn },
-    DurationSeconds: 900,
-  }));
-  return {
-    accessKeyId: resp.Credentials!.AccessKeyId!,
-    secretAccessKey: resp.Credentials!.SecretAccessKey!,
-    sessionToken: resp.Credentials!.SessionToken!,
+  const doAssume = async (payerRoleArn: string) => {
+    const mgmtCreds = await getAdminCredsForPayer(payerRoleArn); // 管理账户凭证
+    const sts = new STSClient({ region: DEFAULT_REGION, credentials: mgmtCreds });
+    const resp = await sts.send(new AssumeRootCommand({
+      TargetPrincipal: accountId,
+      TaskPolicyArn: { arn: taskPolicyArn },
+      DurationSeconds: 900,
+    }));
+    accountPayerMap.set(accountId, payerRoleArn);
+    return {
+      accessKeyId: resp.Credentials!.AccessKeyId!,
+      secretAccessKey: resp.Credentials!.SecretAccessKey!,
+      sessionToken: resp.Credentials!.SessionToken!,
+    };
   };
+
+  // 已知归属 payer → 直接用它（错误信息最准确）
+  const payerRoleArn = getPayerRoleArnForAccount(accountId);
+  if (payerRoleArn) return await doAssume(payerRoleArn);
+
+  // 归属未知 → 依次尝试各 payer
+  let lastErr: any;
+  for (const p of PAYERS) {
+    try { return await doAssume(p.roleArn); } catch (e) { lastErr = e; }
+  }
+  throw lastErr || new Error(`无法确定账户 ${accountId} 所属组织，AssumeRoot 失败`);
 }
 
 /**
