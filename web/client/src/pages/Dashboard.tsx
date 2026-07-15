@@ -91,6 +91,7 @@ const Dashboard: React.FC<DashboardProps> = ({ onNavigate }) => {
   const [connSummary, setConnSummary] = useState<{ ok: number; total: number }>({ ok: 0, total: 0 });
   const [ready, setReady] = useState(false);
   const [costLoading, setCostLoading] = useState(true);
+  const [connLoading, setConnLoading] = useState(true);
 
   useEffect(() => { loadDashboard(); }, []);
 
@@ -102,28 +103,38 @@ const Dashboard: React.FC<DashboardProps> = ({ onNavigate }) => {
     } catch {}
     finally { setReady(true); }
 
+    // 费用汇总（后端有缓存，秒回）—— 独立加载，不被连接测试拖住
     setCostLoading(true);
-    try {
-      const [summaryRes, connRes] = await Promise.allSettled([api.getDashboardSummary(), api.testConnection()]);
-      if (summaryRes.status === 'fulfilled' && summaryRes.value.success) {
-        const d = summaryRes.value.data || {};
-        setTotalCost(d.totalCost || 0);
-        setTopAccounts(d.topAccounts || []);
-      }
-      if (connRes.status === 'fulfilled' && connRes.value.success) {
-        const results = connRes.value.data || [];
-        const ok = results.filter((r: any) => r.ok).length;
-        setConnSummary({ ok, total: results.length });
-        setConnected(results.length > 0 && ok === results.length);
-      }
-    } catch {}
-    finally { setCostLoading(false); }
+    api.getDashboardSummary()
+      .then((res) => {
+        if (res.success) {
+          const d = res.data || {};
+          setTotalCost(d.totalCost || 0);
+          setTopAccounts(d.topAccounts || []);
+        }
+      })
+      .catch(() => {})
+      .finally(() => setCostLoading(false));
+
+    // 连接测试（实时、较慢）—— 独立加载，自己的 loading，不阻塞费用展示
+    setConnLoading(true);
+    api.testConnection()
+      .then((res) => {
+        if (res.success) {
+          const results = res.data || [];
+          const ok = results.filter((r: any) => r.ok).length;
+          setConnSummary({ ok, total: results.length });
+          setConnected(results.length > 0 && ok === results.length);
+        }
+      })
+      .catch(() => {})
+      .finally(() => setConnLoading(false));
   };
 
   const activeCount = accounts.filter((a: any) => a.Status === 'ACTIVE').length;
   const now = new Date();
   const billingPeriod = `${now.getMonth() + 1}/1 – ${now.getMonth() + 1}/${now.getDate()}`;
-  const connLabel = connSummary.total > 0 ? `${connSummary.ok}/${connSummary.total} 组织已连接` : (costLoading ? '检查中' : '未连接');
+  const connLabel = connSummary.total > 0 ? `${connSummary.ok}/${connSummary.total} 组织已连接` : (connLoading ? '检查中' : '未连接');
 
   // 数字滚动
   const accCountVal = useCountUp(accounts.length, ready);
@@ -183,9 +194,9 @@ const Dashboard: React.FC<DashboardProps> = ({ onNavigate }) => {
         <Col xs={12} sm={12} md={6}>
           <KpiCard icon={<LinkOutlined />} label="连接状态"
             tint={connected ? '#f6ffed' : '#fff2f0'} color={connected ? '#52c41a' : '#ff4d4f'}
-            value={connected ? '正常' : costLoading ? '检查中' : '异常'}
-            valueColor={connected ? '#52c41a' : costLoading ? '#8a94a6' : '#ff4d4f'}
-            loading={costLoading} sub={connLabel}
+            value={connected ? '正常' : connLoading ? '检查中' : '异常'}
+            valueColor={connected ? '#52c41a' : connLoading ? '#8a94a6' : '#ff4d4f'}
+            loading={connLoading} sub={connLabel}
             onClick={onNavigate ? () => onNavigate('settings') : undefined} />
         </Col>
       </Row>

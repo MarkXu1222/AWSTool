@@ -351,18 +351,17 @@ export async function deleteRootAccessKey(accountId: string, accessKeyId: string
 // ===== Exported service functions =====
 
 export async function testConnection() {
-  const results = [];
-  for (const payer of PAYERS) {
-    try {
+  const withTimeout = <T>(p: Promise<T>, ms: number): Promise<T> =>
+    Promise.race([p, new Promise<T>((_, rej) => setTimeout(() => rej(new Error('连接超时')), ms))]);
+  // 各 payer 并行检测，单个账号最多等 8s，避免串行累加与个别账号挂起拖慢整体
+  return Promise.all(PAYERS.map((payer) =>
+    withTimeout((async () => {
       const creds = await getAdminCredsForPayer(payer.roleArn);
       const sts = new STSClient({ region: DEFAULT_REGION, credentials: creds });
       const identity = await sts.send(new GetCallerIdentityCommand({}));
-      results.push({ name: payer.name, account: identity.Account, ok: true });
-    } catch (e: any) {
-      results.push({ name: payer.name, error: e.message, ok: false });
-    }
-  }
-  return results;
+      return { name: payer.name, account: identity.Account, ok: true };
+    })(), 8000).catch((e: any) => ({ name: payer.name, error: e.message, ok: false }))
+  ));
 }
 
 export async function listAccounts() {
