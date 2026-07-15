@@ -29,6 +29,7 @@ const explicitActions: Record<string, Omit<AuditDisplay, 'target' | 'result' | '
   ROOT_MFA_DELETE: { category: '安全检查', operation: '删除根用户 MFA' },
   ROOT_PASSWORD_RECOVER: { category: '安全检查', operation: '恢复根用户密码' },
   ROOT_ACCESSKEY_DELETE: { category: '安全检查', operation: '删除根用户访问密钥' },
+  RESOURCE_DELETE: { category: '资源清理', operation: '删除资源' },
   REGION_ENABLE: { category: '区域管理', operation: '启用区域' },
   REGION_BATCH_ENABLE: { category: '区域管理', operation: '批量启用区域' },
   REGION_DISABLE: { category: '区域管理', operation: '禁用区域' },
@@ -210,6 +211,10 @@ function describeApiCall(method: string, path: string, params: any): Omit<AuditD
   match = path.match(/^\/api\/aws\/temp-credentials\/(\d{12})$/);
   if (match) {
     return { category: '安全检查', operation: '生成账户 Admin 临时凭证', target: accountTarget(match[1]) };
+  }
+  match = path.match(/^\/api\/aws\/resources\/(\d{12})\/delete$/);
+  if (match) {
+    return { category: '资源清理', operation: '删除资源', target: accountTarget(match[1]) };
   }
   match = path.match(/^\/api\/aws\/resources\/(\d{12})\/([^/]+)$/);
   if (match) {

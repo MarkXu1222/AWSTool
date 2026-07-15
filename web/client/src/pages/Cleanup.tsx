@@ -17,6 +17,7 @@ const CleanupPage: React.FC = () => {
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [loading, setLoading] = useState(false);
   const [confirmOpen, setConfirmOpen] = useState(false);
+  const [deleting, setDeleting] = useState(false);
   const [searchText, setSearchText] = useState('');
 
   useEffect(() => { loadAccounts(); }, []);
@@ -53,7 +54,28 @@ const CleanupPage: React.FC = () => {
     finally { setLoading(false); }
   };
 
-  const handleDelete = () => { message.info('删除功能需要在桌面版执行（安全考虑）'); setConfirmOpen(false); };
+  const handleDelete = async () => {
+    const toDelete = resources.filter(r => selectedIds.includes(r.id)).map(r => ({ type: r.type, id: r.id, name: r.name }));
+    if (toDelete.length === 0) { setConfirmOpen(false); return; }
+    setDeleting(true);
+    try {
+      const res = await api.deleteResources(selectedAccount, selectedRegion, toDelete);
+      if (res.success) {
+        const results = res.data || [];
+        const ok = results.filter((r: any) => r.ok).length;
+        const fail = results.length - ok;
+        if (fail === 0) message.success(`已删除 ${ok} 个资源`);
+        else {
+          message.warning(`成功 ${ok} 个，失败 ${fail} 个`);
+          results.filter((r: any) => !r.ok).slice(0, 4).forEach((r: any) => message.error(`${r.type} ${r.id}: ${r.error}`));
+        }
+        setSelectedIds([]);
+        setConfirmOpen(false);
+        await scanResources(); // 重新扫描该区域，反映删除后状态
+      } else { message.error(res.error || '删除失败'); }
+    } catch (e: any) { message.error(e.message || '删除失败'); }
+    finally { setDeleting(false); }
+  };
 
   const filtered = resources.filter(r => !searchText || r.name?.toLowerCase().includes(searchText.toLowerCase()) || r.id?.includes(searchText));
 
@@ -122,9 +144,17 @@ const CleanupPage: React.FC = () => {
 
       {step >= 2 && (
         <>
-          <Alert message="⚠️ 删除操作请在桌面版执行（双重确认安全机制）" type="warning" showIcon style={{ marginBottom: 8 }} />
+          <Space style={{ marginBottom: 8 }} wrap>
+            <Button danger icon={<DeleteOutlined />} disabled={selectedIds.length === 0} onClick={() => setConfirmOpen(true)}>
+              删除选中 ({selectedIds.length})
+            </Button>
+            <span style={{ color: '#94a3b8', fontSize: 12 }}>
+              共 {resources.length} 个资源。删除不可逆:EC2 终止 / EBS 删卷(仅未挂载) / Lambda 删函数;S3 桶请去控制台。
+            </span>
+          </Space>
           <Input placeholder="搜索..." prefix={<SearchOutlined />} value={searchText} onChange={e => setSearchText(e.target.value)} size="small" style={{ marginBottom: 8, maxWidth: 250 }} />
           <Table size="small" dataSource={filtered} rowKey="id" pagination={{ pageSize: 15 }}
+            rowSelection={{ selectedRowKeys: selectedIds, onChange: (keys) => setSelectedIds(keys as string[]) }}
             columns={[
               { title: '服务', dataIndex: 'type', width: 70, render: (t: string) => <Tag>{t}</Tag> },
               { title: '名称', dataIndex: 'name' },
@@ -134,8 +164,9 @@ const CleanupPage: React.FC = () => {
         </>
       )}
 
-      <DangerConfirm open={confirmOpen} title="确认删除" description={<p>将删除 {selectedIds.length} 个资源</p>}
-        confirmText="确认删除" onConfirm={handleDelete} onCancel={() => setConfirmOpen(false)} />
+      <DangerConfirm open={confirmOpen} title="确认删除资源"
+        description={<p>将永久删除选中的 <b>{selectedIds.length}</b> 个资源(不可逆)。EC2 会被终止、EBS 卷会被删除、Lambda 函数会被删除。</p>}
+        confirmText="DELETE" onConfirm={handleDelete} onCancel={() => setConfirmOpen(false)} loading={deleting} />
     </Card>
     </div>
     </div>

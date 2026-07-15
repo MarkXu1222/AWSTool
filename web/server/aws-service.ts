@@ -6,9 +6,9 @@ import { OrganizationsClient, ListAccountsCommand } from '@aws-sdk/client-organi
 import { CostExplorerClient, GetCostAndUsageCommand } from '@aws-sdk/client-cost-explorer';
 import { ServiceQuotasClient, ListServiceQuotasCommand, RequestServiceQuotaIncreaseCommand, ListRequestedServiceQuotaChangeHistoryCommand, GetServiceQuotaCommand } from '@aws-sdk/client-service-quotas';
 import { IAMClient, GetAccountSummaryCommand, ListMFADevicesCommand, ListUsersCommand, ListVirtualMFADevicesCommand, DeactivateMFADeviceCommand, DeleteVirtualMFADeviceCommand, CreateLoginProfileCommand, ListAccessKeysCommand, GetLoginProfileCommand, DeleteAccessKeyCommand } from '@aws-sdk/client-iam';
-import { EC2Client, DescribeInstancesCommand, DescribeVolumesCommand } from '@aws-sdk/client-ec2';
+import { EC2Client, DescribeInstancesCommand, DescribeVolumesCommand, TerminateInstancesCommand, DeleteVolumeCommand } from '@aws-sdk/client-ec2';
 import { S3Client, ListBucketsCommand } from '@aws-sdk/client-s3';
-import { LambdaClient, ListFunctionsCommand } from '@aws-sdk/client-lambda';
+import { LambdaClient, ListFunctionsCommand, DeleteFunctionCommand } from '@aws-sdk/client-lambda';
 import path from 'path';
 import fs from 'fs';
 import { db } from './db';
@@ -647,6 +647,42 @@ export async function scanResources(accountId: string, region: string) {
   } catch {}
 
   return resources;
+}
+
+/**
+ * 删除资源清理里选中的资源（资源清理最后一步）。用管理员凭证执行:
+ * EC2 → TerminateInstances, EBS → DeleteVolume(仅未挂载可删), Lambda → DeleteFunction。
+ * S3 暂不支持(删桶会丢数据/需先清空,风险高)。逐个执行并返回每个资源的成败。
+ */
+export async function deleteResources(
+  accountId: string,
+  region: string,
+  resources: { type: string; id: string; name?: string }[],
+) {
+  const admin = await getTempAdminCredentials(accountId);
+  const creds = { accessKeyId: admin.accessKeyId, secretAccessKey: admin.secretAccessKey, sessionToken: admin.sessionToken };
+  const ec2 = new EC2Client({ region, credentials: creds });
+  const lambda = new LambdaClient({ region, credentials: creds });
+
+  const results: { id: string; type: string; name?: string; ok: boolean; error?: string }[] = [];
+  for (const r of resources) {
+    try {
+      if (r.type === 'EC2') {
+        await ec2.send(new TerminateInstancesCommand({ InstanceIds: [r.id] }));
+      } else if (r.type === 'EBS') {
+        await ec2.send(new DeleteVolumeCommand({ VolumeId: r.id }));
+      } else if (r.type === 'Lambda') {
+        await lambda.send(new DeleteFunctionCommand({ FunctionName: r.id }));
+      } else {
+        results.push({ id: r.id, type: r.type, name: r.name, ok: false, error: `暂不支持删除 ${r.type}（请在控制台操作）` });
+        continue;
+      }
+      results.push({ id: r.id, type: r.type, name: r.name, ok: true });
+    } catch (e: any) {
+      results.push({ id: r.id, type: r.type, name: r.name, ok: false, error: e?.message || String(e) });
+    }
+  }
+  return results;
 }
 
 /**

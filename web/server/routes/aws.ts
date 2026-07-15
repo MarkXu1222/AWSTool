@@ -682,6 +682,32 @@ awsRouter.get('/resources/:accountId/:region', async (req: Request, res: Respons
   } catch (e: any) { res.status(500).json({ error: e.message }); }
 });
 
+// Delete selected resources (资源清理最后一步) — destructive, admin/partadmin only, audited
+awsRouter.post('/resources/:accountId/delete', requireAdmin, async (req: Request, res: Response) => {
+  try {
+    const accountId = String(req.params.accountId);
+    if (!/^\d{12}$/.test(accountId)) return res.status(400).json({ error: '无效的账户 ID' });
+    const { region, resources } = req.body || {};
+    if (!region || !Array.isArray(resources) || resources.length === 0) {
+      return res.status(400).json({ error: '缺少 region 或待删除资源列表' });
+    }
+    if (resources.length > 100) return res.status(400).json({ error: '单次最多删除 100 个资源' });
+
+    const results = await aws.deleteResources(accountId, String(region), resources);
+    const okCount = results.filter(r => r.ok).length;
+    const user = (req as any).user;
+    db.addAuditLog(
+      user?.userId,
+      'RESOURCE_DELETE',
+      `AWS 账户 ${accountId} · ${region} · 删除资源 ${okCount}/${results.length} 成功: ${results.filter(r => r.ok).map(r => `${r.type}:${r.id}`).join(', ') || '无'}`,
+      user?.username,
+      req.ip,
+    );
+    (res.locals as any).audited = true;
+    res.json({ success: true, data: results });
+  } catch (e: any) { res.status(500).json({ error: e.message }); }
+});
+
 // Export full audit log (up to the 5,000 retained records)
 awsRouter.get('/audit/export', requireAuditAccess, async (req: Request, res: Response) => {
   try {
