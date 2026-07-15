@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { Form, Input, Button, message, Alert } from 'antd';
-import { LockOutlined, UserOutlined, SafetyOutlined, CloudServerOutlined, CheckCircleFilled } from '@ant-design/icons';
+import { LockOutlined, UserOutlined, SafetyOutlined, CheckCircleFilled } from '@ant-design/icons';
 import { api } from '../api';
 
 interface LoginPageProps {
@@ -8,14 +8,13 @@ interface LoginPageProps {
 }
 
 const Logo: React.FC<{ size?: number }> = ({ size = 40 }) => (
-  <div style={{
-    width: size, height: size, borderRadius: size * 0.28, flexShrink: 0,
-    background: 'linear-gradient(135deg, #3b82f6, #1e40af)',
-    display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
-    color: '#fff', fontSize: size * 0.5, boxShadow: '0 6px 18px rgba(37,99,235,0.45)',
-  }}>
-    <CloudServerOutlined />
-  </div>
+  <img
+    src="/image.png"
+    alt="AWS Toolbox"
+    width={size}
+    height={size}
+    style={{ width: size, height: size, objectFit: 'contain', borderRadius: size * 0.2, display: 'block', flexShrink: 0 }}
+  />
 );
 
 const FEATURES = [
