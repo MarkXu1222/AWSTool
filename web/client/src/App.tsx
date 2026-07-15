@@ -98,7 +98,7 @@ const App: React.FC = () => {
           Card: { borderRadiusLG: 14 },
           Button: { primaryShadow: 'none', fontWeight: 500 },
           Table: { headerBg: '#f9fafb', rowHoverBg: '#f6f8fb', borderColor: '#eef0f4' },
-          Tabs: { inkBarColor: '#2563eb' },
+          Tabs: { inkBarColor: '#2563eb', titleFontSize: 15 },
           Segmented: { itemSelectedBg: '#2563eb', itemSelectedColor: '#fff' },
         },
       }}>
