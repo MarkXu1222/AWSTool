@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Card, Form, Input, Button, message, Alert } from 'antd';
+import { Form, Input, Button, message, Alert } from 'antd';
 import { LockOutlined, UserOutlined, SafetyOutlined } from '@ant-design/icons';
 import { api } from '../api';
 
@@ -39,43 +39,58 @@ const LoginPage: React.FC<LoginPageProps> = ({ onSuccess }) => {
 
   return (
     <div style={{
-      minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center',
-      background: '#f0f2f5',
+      minHeight: '100vh',
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
       padding: 16,
+      background: 'radial-gradient(1000px 520px at 15% -10%, rgba(37,99,235,0.38), transparent 60%), linear-gradient(135deg, #0f172a 0%, #172554 100%)',
     }}>
-      <Card style={{ width: '100%', maxWidth: 380 }}>
-        <div style={{ textAlign: 'center', marginBottom: 24 }}>
-          <img src="/image.png" alt="AWS Toolbox" style={{ width: 72, height: 72, objectFit: 'contain', marginBottom: 8 }} />
-          <h1 style={{ fontSize: 24, margin: 0 }}>AWS Toolbox</h1>
-          <p style={{ color: '#666', margin: '4px 0 0' }}>Multi-Account Manager</p>
+      <div style={{ width: '100%', maxWidth: 400 }}>
+        {/* Brand header on dark background */}
+        <div style={{ textAlign: 'center', marginBottom: 22 }}>
+          <img src="/image.png" alt="AWS Toolbox"
+            style={{ width: 60, height: 60, objectFit: 'contain', borderRadius: 14, marginBottom: 12, boxShadow: '0 8px 24px rgba(2,6,23,0.45)' }} />
+          <h1 style={{ color: '#fff', fontSize: 26, fontWeight: 700, margin: 0, letterSpacing: '-0.02em' }}>AWS Toolbox</h1>
+          <p style={{ color: 'rgba(255,255,255,0.6)', margin: '6px 0 0', fontSize: 13 }}>多账户管理平台</p>
         </div>
 
-        <Form form={form} layout="vertical" onFinish={handleLogin}>
-          <Form.Item name="username" rules={[{ required: true, message: '请输入用户名' }]}>
-            <Input prefix={<UserOutlined />} placeholder="用户名" size="large" autoComplete="username" />
-          </Form.Item>
+        {/* Login card */}
+        <div style={{ background: '#fff', borderRadius: 16, padding: '28px 26px', boxShadow: '0 24px 60px rgba(2,6,23,0.45)' }}>
+          <Form form={form} layout="vertical" onFinish={handleLogin} requiredMark={false}>
+            <Form.Item name="username" rules={[{ required: true, message: '请输入用户名' }]} style={{ marginBottom: 16 }}>
+              <Input prefix={<UserOutlined style={{ color: '#94a3b8' }} />} placeholder="用户名" size="large"
+                autoComplete="username" spellCheck={false} autoCapitalize="off" />
+            </Form.Item>
 
-          <Form.Item name="password" rules={[{ required: true, message: '请输入密码' }]}>
-            <Input.Password prefix={<LockOutlined />} placeholder="密码" size="large" autoComplete="current-password" />
-          </Form.Item>
+            <Form.Item name="password" rules={[{ required: true, message: '请输入密码' }]} style={{ marginBottom: needMFA ? 16 : 20 }}>
+              <Input.Password prefix={<LockOutlined style={{ color: '#94a3b8' }} />} placeholder="密码" size="large"
+                autoComplete="current-password" />
+            </Form.Item>
+
+            {needMFA && (
+              <Form.Item name="totpCode" rules={[{ required: true, message: '请输入 6 位验证码' }]} style={{ marginBottom: 20 }}>
+                <Input prefix={<SafetyOutlined style={{ color: '#94a3b8' }} />} placeholder="6 位动态验证码" size="large"
+                  maxLength={6} autoFocus inputMode="numeric" autoComplete="one-time-code" spellCheck={false} />
+              </Form.Item>
+            )}
+
+            <Form.Item style={{ marginBottom: 0 }}>
+              <Button type="primary" htmlType="submit" loading={loading} size="large" block>
+                {needMFA ? '验证并登录' : '登录'}
+              </Button>
+            </Form.Item>
+          </Form>
 
           {needMFA && (
-            <Form.Item name="totpCode" rules={[{ required: true, message: '请输入 6 位验证码' }]}>
-              <Input prefix={<SafetyOutlined />} placeholder="MFA 验证码 (6位)" size="large" maxLength={6} autoFocus />
-            </Form.Item>
+            <Alert style={{ marginTop: 16 }} message="请打开 Authenticator App 输入 6 位动态码" type="info" showIcon />
           )}
+        </div>
 
-          <Form.Item>
-            <Button type="primary" htmlType="submit" loading={loading} size="large" block>
-              {needMFA ? '验证并登录' : '登录'}
-            </Button>
-          </Form.Item>
-        </Form>
-
-        {needMFA && (
-          <Alert message="请打开 Authenticator App 输入 6 位动态码" type="info" showIcon />
-        )}
-      </Card>
+        <p style={{ textAlign: 'center', color: 'rgba(255,255,255,0.35)', fontSize: 12, marginTop: 18 }}>
+          © AWS Toolbox · 安全登录需 MFA
+        </p>
+      </div>
     </div>
   );
 };

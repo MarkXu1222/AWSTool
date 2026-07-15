@@ -3,6 +3,7 @@ import { Card, Table, Tag, Button, Space, message, Select, Steps, Alert, Input, 
 import { SearchOutlined, DeleteOutlined, WarningOutlined, DollarOutlined, ArrowRightOutlined } from '@ant-design/icons';
 import { api } from '../api';
 import DangerConfirm from '../components/DangerConfirm';
+import EmptyState from '../components/EmptyState';
 
 const REGIONS = ['us-east-1','us-east-2','us-west-1','us-west-2','eu-west-1','eu-central-1','ap-southeast-1','ap-northeast-1'];
 
@@ -103,10 +104,11 @@ const CleanupPage: React.FC = () => {
       </Space>
 
       {step === 0 && !selectedAccount && (
-        <div style={{ padding: '40px 0', textAlign: 'center', color: '#9CA3AF' }}>
-          <p style={{ fontSize: 14 }}>选择一个账户开始分析资源</p>
-          <p style={{ fontSize: 12, marginTop: 4 }}>系统将分析费用分布并扫描可清理资源，不会自动删除</p>
-        </div>
+        <EmptyState
+          icon={<DollarOutlined />}
+          description="选择一个账户开始分析资源"
+          hint="基于真实账单分析费用分布(服务 / 区域),并扫描可清理资源;不会自动删除"
+        />
       )}
 
       {step >= 1 && (costByService.length > 0 || costByRegion.length > 0) && (
