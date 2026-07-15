@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Card, Table, Tag, Button, Space, message, Input, Select, Tabs, Modal, Form, InputNumber } from 'antd';
+import { Card, Table, Tag, Button, Space, message, Input, Select, Tabs, Modal, Form, InputNumber, Tooltip } from 'antd';
 import { ReloadOutlined, SearchOutlined, DownloadOutlined, FileTextOutlined, FilePdfOutlined, CheckCircleOutlined, CheckCircleFilled, ClockCircleOutlined, CloseCircleOutlined, MinusCircleOutlined } from '@ant-design/icons';
 import { api } from '../api';
 import { exportToCSV, exportQuotaPivotTable, exportQuotaRecords } from '../utils/export';
@@ -143,6 +143,8 @@ const QuotasPage: React.FC = () => {
   const [modalOpen, setModalOpen] = useState(false);
   const [selectedQuota, setSelectedQuota] = useState<any>(null);
   const [activeTab, setActiveTab] = useState('db-records');
+  const [refreshingId, setRefreshingId] = useState<string | null>(null);
+  const [docLoadingId, setDocLoadingId] = useState<string | null>(null);
   const [form] = Form.useForm();
 
   // 手动生成文档相关状态
@@ -300,7 +302,7 @@ const QuotasPage: React.FC = () => {
     } else {
       exportQuotaRecords(dbRecords, accounts, 'quota_requests');
     }
-    message.success('已导出');
+    message.success({ content: '已导出', key: 'quota-export' });
   };
 
   const filtered = quotas.filter(q => !searchText || q.QuotaName?.toLowerCase().includes(searchText.toLowerCase()));
@@ -430,30 +432,43 @@ const QuotasPage: React.FC = () => {
         },
       },
       {
-        title: '操作', key: 'actions', width: 90, fixed: 'right' as const,
+        title: '操作', key: 'actions', width: 88, fixed: 'right' as const,
         render: (_: any, record: any) => (
-          <Space size={2}>
-            <Button type="link" size="small" icon={<FileTextOutlined />} title="生成提额文档" aria-label="生成提额文档" onClick={async (e) => {
-              e.stopPropagation();
-              const hide = message.loading('正在生成文档...', 0);
-              try {
-                await api.generateQuotaDoc({
-                  accountId: record.account_id,
-                  accountName: accounts.find(a => a.Id === record.account_id)?.Name,
-                  serviceCode: record.service_code,
-                  quotaName: record.quota_name,
-                  region: record.region || 'us-east-1',
-                  requestedValue: record.desired_value,
-                  currentValue: record.current_value,
-                });
-                hide();
-                message.success('文档已生成');
-              } catch (err: any) { hide(); message.error(err.message || '生成失败'); }
-            }} />
-            <Button type="link" size="small" icon={<ReloadOutlined />} title="刷新" aria-label="刷新记录" onClick={async (e) => {
-              e.stopPropagation();
-              try { const res = await api.syncSingleAccount(record.account_id); if (res.success) { setDbRecords(res.data || []); message.success('已刷新'); } } catch {}
-            }} />
+          <Space size={4}>
+            <Tooltip title="生成提额文档">
+              <Button type="text" size="small" shape="circle" icon={<FileTextOutlined />} aria-label="生成提额文档"
+                loading={docLoadingId === record.id}
+                onClick={async (e) => {
+                  e.stopPropagation();
+                  setDocLoadingId(record.id);
+                  try {
+                    await api.generateQuotaDoc({
+                      accountId: record.account_id,
+                      accountName: accounts.find(a => a.Id === record.account_id)?.Name,
+                      serviceCode: record.service_code,
+                      quotaName: record.quota_name,
+                      region: record.region || 'us-east-1',
+                      requestedValue: record.desired_value,
+                      currentValue: record.current_value,
+                    });
+                    message.success({ content: '文档已生成', key: 'quota-doc' });
+                  } catch (err: any) { message.error({ content: err.message || '生成失败', key: 'quota-doc' }); }
+                  finally { setDocLoadingId(null); }
+                }} />
+            </Tooltip>
+            <Tooltip title="刷新此账户记录">
+              <Button type="text" size="small" shape="circle" icon={<ReloadOutlined />} aria-label="刷新此账户记录"
+                loading={refreshingId === record.id}
+                onClick={async (e) => {
+                  e.stopPropagation();
+                  setRefreshingId(record.id);
+                  try {
+                    const res = await api.syncSingleAccount(record.account_id);
+                    if (res.success) { setDbRecords(res.data || []); message.success({ content: '已刷新', key: 'quota-refresh' }); }
+                  } catch {}
+                  finally { setRefreshingId(null); }
+                }} />
+            </Tooltip>
           </Space>
         ),
       },
@@ -540,7 +555,7 @@ const QuotasPage: React.FC = () => {
           children: (
             <>
               <Space style={{ marginBottom: 12 }}>
-                <Button onClick={handleSync} loading={allRequestsLoading || syncLoading} type="primary" icon={<ReloadOutlined />}>
+                <Button onClick={handleSync} loading={allRequestsLoading || syncLoading} type="primary" icon={<ReloadOutlined />} size="small">
                   {syncLoading && syncProgress ? `查询中 ${syncProgress.done}/${syncProgress.total}` : '查询所有账户的提升请求'}
                 </Button>
                 <span style={{ fontSize: 12, color: 'rgba(0,0,0,0.45)' }}>
@@ -557,7 +572,7 @@ const QuotasPage: React.FC = () => {
           children: (
             <>
               <Space style={{ marginBottom: 12 }}>
-                <Button onClick={handleSync} loading={syncLoading} icon={<ReloadOutlined />}>
+                <Button onClick={handleSync} loading={syncLoading} icon={<ReloadOutlined />} size="small">
                   {syncLoading && syncProgress ? `同步中 ${syncProgress.done}/${syncProgress.total}` : '同步最新状态'}
                 </Button>
                 <span style={{ fontSize: 12, color: 'rgba(0,0,0,0.45)' }}>
