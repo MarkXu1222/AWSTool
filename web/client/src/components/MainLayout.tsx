@@ -10,6 +10,7 @@ import RegionsPage from '../pages/Regions';
 import AuditLogPage from '../pages/AuditLog';
 import SettingsPage from '../pages/Settings';
 import { api } from '../api';
+import { APP_VERSION } from '../version';
 
 const { Sider, Content } = Layout;
 
@@ -117,7 +118,7 @@ const MainLayout: React.FC<MainLayoutProps> = ({ onLogout }) => {
           />
           <div className="sider-footer">
             <div className="sider-footer-user">{username}</div>
-            <div className="sider-footer-version">v0.1.0</div>
+            <div className="sider-footer-version">v{APP_VERSION}</div>
             <Button
               size="small"
               icon={<LogoutOutlined />}
