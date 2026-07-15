@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Card, Table, Row, Col, Skeleton } from 'antd';
 import { DollarOutlined, TeamOutlined, AlertOutlined, LinkOutlined } from '@ant-design/icons';
 import { api } from '../api';
@@ -82,38 +82,63 @@ const MiniBar: React.FC<{ pct: number }> = ({ pct }) => (
   </div>
 );
 
-// 近 6 月费用趋势(纯 SVG,无依赖)
+// 紧凑金额（图内标注用）: $980 / $1.2k / $12k
+const fmtCompactUSD = (n: number) => {
+  if (n >= 1000) return `$${(n / 1000).toFixed(n >= 10000 ? 0 : 1)}k`;
+  return `$${Math.round(n)}`;
+};
+
+// 近 6 月费用趋势(纯 SVG,无依赖) — 按容器实际宽度等比渲染，避免非等比拉伸导致的失真
 const TrendChart: React.FC<{ points: { month: string; cost: number }[] }> = ({ points }) => {
+  const wrapRef = useRef<HTMLDivElement>(null);
+  const [w, setW] = useState(720);
+  useEffect(() => {
+    const el = wrapRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver(entries => {
+      const cw = entries[0]?.contentRect.width;
+      if (cw) setW(Math.max(320, cw));
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
   if (!points || points.length < 2) {
     return <EmptyState icon={<DollarOutlined />} description="暂无趋势数据" hint="费用数据每小时后台刷新" />;
   }
-  const W = 720, H = 220, padL = 12, padR = 12, padT = 18, padB = 26;
+
+  const W = w, H = 170, padL = 22, padR = 22, padT = 28, padB = 24;
   const n = points.length;
   const maxCost = Math.max(...points.map(p => p.cost), 1);
-  const yMax = maxCost * 1.12;
+  const yMax = maxCost * 1.2;
   const x = (i: number) => padL + (i * (W - padL - padR)) / (n - 1);
   const y = (c: number) => padT + (1 - c / yMax) * (H - padT - padB);
   const line = points.map((p, i) => `${x(i)},${y(p.cost)}`).join(' ');
   const area = `${padL},${H - padB} ${line} ${W - padR},${H - padB}`;
+  const last = n - 1;
+
   return (
-    <svg viewBox={`0 0 ${W} ${H}`} width="100%" height="220" preserveAspectRatio="none" role="img" aria-label="近 6 个月费用趋势">
-      <defs>
-        <linearGradient id="trendFill" x1="0" y1="0" x2="0" y2="1">
-          <stop offset="0%" stopColor="#2563eb" stopOpacity="0.18" />
-          <stop offset="100%" stopColor="#2563eb" stopOpacity="0" />
-        </linearGradient>
-      </defs>
-      <polygon points={area} fill="url(#trendFill)" />
-      <polyline points={line} fill="none" stroke="#2563eb" strokeWidth="2.5" strokeLinejoin="round" strokeLinecap="round" />
-      {points.map((p, i) => (
-        <g key={p.month}>
-          <circle cx={x(i)} cy={y(p.cost)} r="3.5" fill="#fff" stroke="#2563eb" strokeWidth="2">
-            <title>{`${p.month}: ${fmtUSD(p.cost)}`}</title>
-          </circle>
-          <text x={x(i)} y={H - 8} textAnchor="middle" fontSize="11" fill="#8a94a6">{parseInt(p.month.slice(5), 10)}月</text>
-        </g>
-      ))}
-    </svg>
+    <div ref={wrapRef} style={{ width: '100%' }}>
+      <svg viewBox={`0 0 ${W} ${H}`} width="100%" height={H} role="img" aria-label="近 6 个月费用趋势">
+        <defs>
+          <linearGradient id="trendFill" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stopColor="#2563eb" stopOpacity="0.18" />
+            <stop offset="100%" stopColor="#2563eb" stopOpacity="0" />
+          </linearGradient>
+        </defs>
+        <polygon points={area} fill="url(#trendFill)" />
+        <polyline points={line} fill="none" stroke="#2563eb" strokeWidth="2.5" strokeLinejoin="round" strokeLinecap="round" />
+        {points.map((p, i) => (
+          <g key={p.month}>
+            <circle cx={x(i)} cy={y(p.cost)} r={i === last ? 4.5 : 3.5} fill={i === last ? '#2563eb' : '#fff'} stroke="#2563eb" strokeWidth="2">
+              <title>{`${p.month}: ${fmtUSD(p.cost)}`}</title>
+            </circle>
+            <text x={x(i)} y={y(p.cost) - 11} textAnchor="middle" fontSize="11" fontWeight={i === last ? 700 : 500} fill={i === last ? '#2563eb' : '#5b6472'}>{fmtCompactUSD(p.cost)}</text>
+            <text x={x(i)} y={H - 7} textAnchor="middle" fontSize="11" fill="#8a94a6">{parseInt(p.month.slice(5), 10)}月</text>
+          </g>
+        ))}
+      </svg>
+    </div>
   );
 };
 
