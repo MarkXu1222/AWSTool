@@ -141,7 +141,9 @@ export async function refreshDashboardCache() {
     .map(([accountId, cost]) => ({ key: accountId, accountId, cost }))
     .sort((a, b) => b.cost - a.cost)
     .slice(0, 10);
-  const summary = { totalCost, topAccounts };
+  let trend: { month: string; cost: number }[] = [];
+  try { trend = await aws.getCostTrend(6); } catch { /* 趋势失败不影响概览 */ }
+  const summary = { totalCost, topAccounts, trend };
   db.setDashboardCache(summary);
   return { ...summary, cachedAt: new Date().toISOString() };
 }

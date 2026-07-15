@@ -1,8 +1,21 @@
 import React, { useState, useEffect } from 'react';
 import { Card, Table, Tag, Button, Space, message, Input, Select, Tabs, Modal, Form, InputNumber } from 'antd';
-import { ReloadOutlined, SearchOutlined, DownloadOutlined, FileTextOutlined, FilePdfOutlined } from '@ant-design/icons';
+import { ReloadOutlined, SearchOutlined, DownloadOutlined, FileTextOutlined, FilePdfOutlined, CheckCircleOutlined, CheckCircleFilled, ClockCircleOutlined, CloseCircleOutlined, MinusCircleOutlined } from '@ant-design/icons';
 import { api } from '../api';
 import { exportToCSV, exportQuotaPivotTable, exportQuotaRecords } from '../utils/export';
+
+// 提额状态语义色 + 图标
+const STATUS_META: Record<string, { color: string; icon: React.ReactNode }> = {
+  APPROVED: { color: 'green', icon: <CheckCircleOutlined /> },
+  CASE_OPENED: { color: 'blue', icon: <ClockCircleOutlined /> },
+  PENDING: { color: 'orange', icon: <ClockCircleOutlined /> },
+  CASE_CLOSED: { color: 'default', icon: <MinusCircleOutlined /> },
+  DENIED: { color: 'red', icon: <CloseCircleOutlined /> },
+};
+const renderStatus = (s: string) => {
+  const m = STATUS_META[s] || { color: 'default', icon: null };
+  return <Tag icon={m.icon} color={m.color} style={{ fontSize: 10, margin: 0 }}>{s}</Tag>;
+};
 
 // 手动生成文档时可选的常用配额类型（组合了 serviceCode + quotaName，classifyQuota 会据此推断类别 + 单位）
 const QUOTA_PRESETS = [
@@ -343,14 +356,19 @@ const QuotasPage: React.FC = () => {
         render: (r: string) => <span style={{ fontSize: 11 }}>{r || 'us-east-1'}</span>,
       },
       {
-        title: '当前', dataIndex: 'current_value', width: 55,
-        render: (v: any) => <span style={{ fontSize: 12 }}>{v != null ? v : '-'}</span>,
+        title: '当前', dataIndex: 'current_value', width: 62, align: 'right' as const,
+        render: (v: any) => <span style={{ fontSize: 12, fontVariantNumeric: 'tabular-nums' }}>{v != null ? v : '-'}</span>,
       },
       {
-        title: '期望', dataIndex: 'desired_value', width: 50,
+        title: '期望', dataIndex: 'desired_value', width: 74, align: 'right' as const,
         render: (v: number, record: any) => {
           const done = record.current_value != null && record.current_value >= v;
-          return <strong style={{ color: done ? '#52c41a' : undefined, fontSize: 12 }}>{v}{done ? ' ✓' : ''}</strong>;
+          return (
+            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, justifyContent: 'flex-end', fontVariantNumeric: 'tabular-nums' }}>
+              <strong style={{ color: done ? '#52c41a' : '#1a2233', fontSize: 12 }}>{v}</strong>
+              {done && <CheckCircleFilled style={{ color: '#52c41a', fontSize: 12 }} />}
+            </span>
+          );
         },
       },
       {
@@ -363,7 +381,7 @@ const QuotasPage: React.FC = () => {
           { text: 'DENIED', value: 'DENIED' },
         ],
         onFilter: (value: any, record: any) => record.status === value,
-        render: (s: string) => { const c: Record<string, string> = { PENDING: 'orange', CASE_OPENED: 'blue', APPROVED: 'green', DENIED: 'red', CASE_CLOSED: 'default' }; return <Tag color={c[s] || 'default'} style={{ fontSize: 10, margin: 0 }}>{s}</Tag>; },
+        render: (s: string) => renderStatus(s),
       },
       {
         title: 'Case', dataIndex: 'case_id', width: 90,
@@ -415,7 +433,7 @@ const QuotasPage: React.FC = () => {
         title: '操作', key: 'actions', width: 90, fixed: 'right' as const,
         render: (_: any, record: any) => (
           <Space size={2}>
-            <Button type="link" size="small" icon={<FileTextOutlined />} title="生成提额文档" onClick={async (e) => {
+            <Button type="link" size="small" icon={<FileTextOutlined />} title="生成提额文档" aria-label="生成提额文档" onClick={async (e) => {
               e.stopPropagation();
               const hide = message.loading('正在生成文档...', 0);
               try {
@@ -432,7 +450,7 @@ const QuotasPage: React.FC = () => {
                 message.success('文档已生成');
               } catch (err: any) { hide(); message.error(err.message || '生成失败'); }
             }} />
-            <Button type="link" size="small" icon={<ReloadOutlined />} title="刷新" onClick={async (e) => {
+            <Button type="link" size="small" icon={<ReloadOutlined />} title="刷新" aria-label="刷新记录" onClick={async (e) => {
               e.stopPropagation();
               try { const res = await api.syncSingleAccount(record.account_id); if (res.success) { setDbRecords(res.data || []); message.success('已刷新'); } } catch {}
             }} />
@@ -509,7 +527,7 @@ const QuotasPage: React.FC = () => {
                   查询账户 <strong style={{ color: 'rgba(0,0,0,0.85)' }}>{accounts.find(a => a.Id === selectedAccount)?.Name || selectedAccount}</strong> 在所有区域的配额提升记录
                 </span>
               </Space>
-              <Table size="small" dataSource={requests} rowKey="id" columns={getRequestColumns(requests)} scroll={{ x: 900 }} loading={loading}
+              <Table size="small" dataSource={requests} rowKey="id" columns={getRequestColumns(requests)} scroll={{ x: 900 }} sticky loading={loading}
                 pagination={{ pageSize: 15, size: 'small', showTotal: t => `共 ${t} 条` }}
                 locale={{ emptyText: '点击「查询」获取该账户的配额提升记录' }} />
             </>
@@ -529,7 +547,7 @@ const QuotasPage: React.FC = () => {
                   {syncLoading ? `正在查询...` : `将查询 ${accounts.length} 个账户的历史记录`}
                 </span>
               </Space>
-              <Table size="small" dataSource={dbRecords} rowKey="id" columns={getRequestColumns(dbRecords)} scroll={{ x: 900 }} loading={allRequestsLoading && dbRecords.length === 0}
+              <Table size="small" dataSource={dbRecords} rowKey="id" columns={getRequestColumns(dbRecords)} scroll={{ x: 900 }} sticky loading={allRequestsLoading && dbRecords.length === 0}
                 pagination={{ pageSize: 15, showTotal: t => `共 ${t} 条` }} />
             </>
           ),
@@ -548,7 +566,7 @@ const QuotasPage: React.FC = () => {
                     : '从 AWS 拉取最新状态并更新记录'}
                 </span>
               </Space>
-              <Table size="small" dataSource={dbRecords} rowKey="id" columns={getRequestColumns(dbRecords)} scroll={{ x: 900 }} loading={syncLoading && dbRecords.length === 0}
+              <Table size="small" dataSource={dbRecords} rowKey="id" columns={getRequestColumns(dbRecords)} scroll={{ x: 900 }} sticky loading={syncLoading && dbRecords.length === 0}
                 pagination={{ pageSize: 15, showTotal: t => `共 ${t} 条记录`, showSizeChanger: true }} />
             </>
           ),

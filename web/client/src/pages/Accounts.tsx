@@ -1,9 +1,24 @@
 import React, { useState, useEffect } from 'react';
-import { Card, Table, Tag, Button, Space, message, Input, Spin, Descriptions, Tabs, Statistic, Row, Col } from 'antd';
+import { Card, Table, Tag, Button, Space, message, Input, Spin, Descriptions, Tabs, Statistic, Row, Col, Badge } from 'antd';
 import { ReloadOutlined, SearchOutlined, DollarOutlined, SafetyOutlined, CheckCircleOutlined, CloseCircleOutlined, LeftOutlined, LoginOutlined } from '@ant-design/icons';
 import { api } from '../api';
 import { exportToCSV } from '../utils/export';
 import RootCredentialsPanel from '../components/RootCredentialsPanel';
+import { hashColor, initials } from '../utils/color';
+
+// 账户彩色首字母头像
+const AccountAvatar: React.FC<{ name: string; id: string }> = ({ name, id }) => {
+  const c = hashColor(name || id);
+  return (
+    <div style={{
+      width: 34, height: 34, borderRadius: 9, flexShrink: 0,
+      background: c.bg, color: c.fg, fontWeight: 700, fontSize: 14,
+      display: 'flex', alignItems: 'center', justifyContent: 'center',
+    }} aria-hidden="true">
+      {initials(name)}
+    </div>
+  );
+};
 
 const AccountsPage: React.FC = () => {
   const [accounts, setAccounts] = useState<any[]>([]);
@@ -119,17 +134,31 @@ const AccountsPage: React.FC = () => {
 
   // Desktop columns
   const columns = [
+    { title: '账户', key: 'account', width: 300,
+      sorter: (a: any, b: any) => (a.Name || '').localeCompare(b.Name || ''),
+      render: (_: any, a: any) => (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0 }}>
+          <AccountAvatar name={a.Name} id={a.Id} />
+          <div style={{ minWidth: 0 }}>
+            <div style={{ fontWeight: 600, color: '#1a2233', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{a.Name}</div>
+            <div style={{ fontSize: 12, color: '#8a94a6', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={a.Email}>{a.Email}</div>
+          </div>
+        </div>
+      ),
+    },
     { title: 'ID', dataIndex: 'Id', key: 'Id', width: 130, render: (id: string) => <code style={{ fontSize: 11, color: '#64748B' }}>{id}</code> },
-    { title: '名称', dataIndex: 'Name', key: 'Name', width: 140, sorter: (a: any, b: any) => (a.Name || '').localeCompare(b.Name || ''), render: (n: string) => <span style={{ fontWeight: 500 }}>{n}</span> },
-    { title: '邮箱', dataIndex: 'Email', key: 'Email', width: 260, ellipsis: { showTitle: true } },
     { title: '组织', dataIndex: '_payer', key: '_payer', width: 180,
       filters: [...new Set(accounts.map(a => a._payer))].filter(Boolean).map(p => ({ text: p, value: p })),
       onFilter: (value: any, record: any) => record._payer === value,
-      render: (p: string) => <Tag style={{ margin: 0, borderRadius: 4, maxWidth: 168, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={p}>{p}</Tag>, responsive: ['md'] as any },
-    { title: '状态', dataIndex: 'Status', key: 'Status', width: 90, align: 'center' as const,
+      render: (p: string) => {
+        if (!p) return null;
+        const c = hashColor(p);
+        return <Tag style={{ margin: 0, border: 'none', color: c.fg, background: c.bg, maxWidth: 168, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={p}>{p}</Tag>;
+      }, responsive: ['md'] as any },
+    { title: '状态', dataIndex: 'Status', key: 'Status', width: 100, align: 'center' as const,
       filters: [{ text: 'ACTIVE', value: 'ACTIVE' }, { text: 'SUSPENDED', value: 'SUSPENDED' }],
       onFilter: (value: any, record: any) => record.Status === value,
-      render: (s: string) => <Tag color={s === 'ACTIVE' ? 'success' : 'error'} style={{ margin: 0, fontSize: 11 }}>{s}</Tag> },
+      render: (s: string) => <Badge status={s === 'ACTIVE' ? 'success' : 'error'} text={<span style={{ fontSize: 12 }}>{s}</span>} /> },
   ];
 
   return (
