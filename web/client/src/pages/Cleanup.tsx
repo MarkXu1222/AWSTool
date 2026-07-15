@@ -160,7 +160,7 @@ const CleanupPage: React.FC = () => {
             columns={[
               { title: '服务', dataIndex: 'type', width: 70, render: (t: string) => <Tag>{t}</Tag> },
               { title: '名称', dataIndex: 'name' },
-              { title: 'ID', dataIndex: 'id', render: (id: string) => <code style={{ fontSize: 11 }}>{id}</code> },
+              { title: 'ID', dataIndex: 'id', render: (id: string) => <code style={{ fontSize: 12 }}>{id}</code> },
               { title: '详情', dataIndex: 'details', render: (d: string) => <span style={{ color: '#999' }}>{d}</span> },
             ]} />
         </>

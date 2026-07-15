@@ -201,7 +201,7 @@ const RegionsPage: React.FC = () => {
                     <Checkbox checked={selectedAccounts.includes(r.accountId)}
                       onChange={e => { if (e.target.checked) setSelectedAccounts([...selectedAccounts, r.accountId]); else setSelectedAccounts(selectedAccounts.filter(id => id !== r.accountId)); }} />
                   )},
-                  { title: '账户 ID', dataIndex: 'accountId', width: 120, render: (id: string) => <code style={{ fontSize: 11 }}>{id}</code> },
+                  { title: '账户 ID', dataIndex: 'accountId', width: 120, render: (id: string) => <code style={{ fontSize: 12 }}>{id}</code> },
                   { title: '名称', dataIndex: 'name' },
                   { title: '组织', dataIndex: 'payer', width: 90, render: (p: string) => <Tag>{p}</Tag> },
                   { title: '操作', width: 70, render: (_: any, r: any) => (

@@ -325,7 +325,7 @@ const QuotasPage: React.FC = () => {
         render: (id: string) => {
           const a = accounts.find(x => x.Id === id);
           return (
-            <span style={{ fontSize: 11 }}>
+            <span style={{ fontSize: 12 }}>
               {a ? <><strong>{a.Name}</strong><br/></> : ''}
               <code style={{ fontSize: 10, color: 'rgba(0,0,0,0.45)' }}>{id}</code>
               {a?._payer ? <><br/><Tag color="blue" style={{ fontSize: 9, lineHeight: '14px', padding: '0 4px', margin: 0 }}>{a._payer}</Tag></> : ''}
@@ -340,20 +340,20 @@ const QuotasPage: React.FC = () => {
         onFilter: (value: any, record: any) => record.quota_name === value,
         ellipsis: { showTitle: true },
         render: (name: string) => window.innerWidth < 769
-          ? <span style={{ fontSize: 11, cursor: 'pointer' }} onClick={() => Modal.info({ title: '配额名称', content: name })}>{name}</span>
+          ? <span style={{ fontSize: 12, cursor: 'pointer' }} onClick={() => Modal.info({ title: '配额名称', content: name })}>{name}</span>
           : <span style={{ fontSize: 12 }}>{name}</span>,
       },
       {
         title: '服务', dataIndex: 'service_code', width: 55,
         filters: getUniqueFilters(data, 'service_code'),
         onFilter: (value: any, record: any) => record.service_code === value,
-        render: (s: string) => <span style={{ fontSize: 11 }}>{s}</span>,
+        render: (s: string) => <span style={{ fontSize: 12 }}>{s}</span>,
       },
       {
         title: '区域', dataIndex: 'region', width: 100,
         filters: getUniqueFilters(data, 'region'),
         onFilter: (value: any, record: any) => (record.region || 'us-east-1') === value,
-        render: (r: string) => <span style={{ fontSize: 11 }}>{r || 'us-east-1'}</span>,
+        render: (r: string) => <span style={{ fontSize: 12 }}>{r || 'us-east-1'}</span>,
       },
       {
         title: '当前', dataIndex: 'current_value', width: 62, align: 'right' as const,
@@ -413,7 +413,7 @@ const QuotasPage: React.FC = () => {
               ),
             })}>{id.slice(-6)}</code>;
           }
-          return <a onClick={openConsole} style={{ fontSize: 11, fontFamily: 'monospace', cursor: 'pointer' }} title="点击免登录打开该账户的 Support Case">{id}</a>;
+          return <a onClick={openConsole} style={{ fontSize: 12, fontFamily: 'monospace', cursor: 'pointer' }} title="点击免登录打开该账户的 Support Case">{id}</a>;
         },
       },
       {

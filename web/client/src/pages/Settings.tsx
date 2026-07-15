@@ -140,7 +140,7 @@ const SettingsPage: React.FC<SettingsPageProps> = ({ onLogout }) => {
                 <div>
                   <p style={{ marginBottom: 8 }}>用 Authenticator 扫码：</p>
                   <div style={{ textAlign: 'center' }}><Image src={qrCode} width={180} /></div>
-                  <p style={{ fontSize: 11, color: '#999', margin: '8px 0', wordBreak: 'break-all' }}>密钥: <code>{mfaSecret}</code></p>
+                  <p style={{ fontSize: 12, color: '#999', margin: '8px 0', wordBreak: 'break-all' }}>密钥: <code>{mfaSecret}</code></p>
                   <div style={{ display: 'flex', gap: 8 }}>
                     <Input placeholder="6 位验证码" value={confirmCode} onChange={e => setConfirmCode(e.target.value)} maxLength={6} size="large" inputMode="numeric" style={{ flex: 1 }} />
                     <Button type="primary" onClick={confirmMFA} size="large">确认</Button>

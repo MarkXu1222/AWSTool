@@ -174,7 +174,7 @@ const Dashboard: React.FC<DashboardProps> = ({ onNavigate }) => {
       render: (id: string) => {
         const acct = accounts.find((a: any) => a.Id === id);
         return acct
-          ? <span><strong>{acct.Name}</strong><br /><code style={{ fontSize: 11, color: '#8a94a6' }}>{id}</code></span>
+          ? <span><strong>{acct.Name}</strong><br /><code style={{ fontSize: 12, color: '#8a94a6' }}>{id}</code></span>
           : <code>{id}</code>;
       },
     },

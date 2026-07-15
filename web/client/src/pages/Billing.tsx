@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { Card, Table, Tag, Button, message, Statistic, Row, Col, DatePicker, Input, Modal, Select, InputNumber, Space, Alert } from 'antd';
-import { DollarOutlined, ReloadOutlined, SearchOutlined, FilePdfOutlined } from '@ant-design/icons';
+import { Card, Table, Tag, Button, message, DatePicker, Input, Modal, Select, InputNumber, Space, Alert } from 'antd';
+import { ReloadOutlined, SearchOutlined, FilePdfOutlined } from '@ant-design/icons';
 import dayjs from 'dayjs';
 import { api } from '../api';
 import { exportToCSV } from '../utils/export';
@@ -108,21 +108,23 @@ const BillingPage: React.FC = () => {
           <h2 className="page-header-title">账单分析</h2>
           <p className="page-header-subtitle">按账户查看 AWS 费用分布</p>
         </div>
-        <Space size="small">
-          <Button size="small" type="primary" icon={<FilePdfOutlined />} onClick={openExportModal}>批量导出账单 PDF</Button>
-          <Button size="small" onClick={() => exportToCSV(filtered.map(d => ({ 账期: d.period, 账户: d.accountId, '费用(USD)': d.cost.toFixed(4) })), 'billing')}>导出 CSV</Button>
-        </Space>
-      </div>
-      <Row gutter={12} style={{ marginBottom: 12 }}>
-        <Col xs={12} md={8}><Card size="small"><Statistic title="总费用" value={totalCost} precision={2} prefix={<DollarOutlined />} suffix="USD" valueStyle={{ color: 'var(--color-text-primary)' }} /></Card></Col>
-        <Col xs={12} md={8}><Card size="small"><Statistic title="账户数" value={new Set(tableData.map(d => d.accountId)).size} /></Card></Col>
-      </Row>
-      <Card size="small" title="账单分析">
-        <div className="filter-bar">
-          <RangePicker value={dateRange} onChange={(d) => { if (d?.[0] && d?.[1]) setDateRange([d[0], d[1]]); }} picker="month" size="small" />
-          <Button icon={<ReloadOutlined />} onClick={fetchCosts} loading={loading} type="primary" size="small">查询</Button>
+        <div className="stat-chips" style={{ margin: 0 }}>
+          <span className="stat-chip">总费用 <strong>${totalCost.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</strong></span>
+          <span className="stat-chip">账户数 <strong>{new Set(tableData.map(d => d.accountId)).size}</strong></span>
         </div>
-        <Input placeholder="搜索账户ID..." prefix={<SearchOutlined />} value={searchText} onChange={e => setSearchText(e.target.value)} allowClear size="small" style={{ marginBottom: 8, maxWidth: 250 }} />
+      </div>
+      <Card size="small" title="账单分析">
+        <div className="filter-bar" style={{ justifyContent: 'space-between' }}>
+          <Space size={8} wrap>
+            <RangePicker value={dateRange} onChange={(d) => { if (d?.[0] && d?.[1]) setDateRange([d[0], d[1]]); }} picker="month" size="small" />
+            <Button icon={<ReloadOutlined />} onClick={fetchCosts} loading={loading} type="primary" size="small">查询</Button>
+          </Space>
+          <Space size={8} wrap>
+            <Input placeholder="搜索账户ID..." prefix={<SearchOutlined />} value={searchText} onChange={e => setSearchText(e.target.value)} allowClear size="small" style={{ width: 200 }} />
+            <Button size="small" type="primary" icon={<FilePdfOutlined />} onClick={openExportModal}>批量导出账单 PDF</Button>
+            <Button size="small" onClick={() => exportToCSV(filtered.map(d => ({ 账期: d.period, 账户: d.accountId, '费用(USD)': d.cost.toFixed(4) })), 'billing')}>导出 CSV</Button>
+          </Space>
+        </div>
         <Table size="small" dataSource={filtered} loading={loading} pagination={{ pageSize: 20 }} rowKey="key"
           columns={[
             { title: '账期', dataIndex: 'period' },

@@ -377,7 +377,7 @@ const AuditLogPage: React.FC = () => {
                   <div>
                     {resultTag(display)}
                     {(record.status !== undefined || record.duration_ms !== undefined) && (
-                      <div style={{ fontSize: 11, color: '#8c8c8c', marginTop: 2 }}>
+                      <div style={{ fontSize: 12, color: '#8c8c8c', marginTop: 2 }}>
                         {record.status !== undefined ? `HTTP ${record.status}` : ''}
                         {record.status !== undefined && record.duration_ms !== undefined ? ' · ' : ''}
                         {record.duration_ms !== undefined ? `${record.duration_ms}ms` : ''}

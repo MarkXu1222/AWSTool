@@ -146,7 +146,7 @@ const AccountsPage: React.FC = () => {
         </div>
       ),
     },
-    { title: 'ID', dataIndex: 'Id', key: 'Id', width: 130, render: (id: string) => <code style={{ fontSize: 11, color: '#64748B' }}>{id}</code> },
+    { title: 'ID', dataIndex: 'Id', key: 'Id', width: 130, render: (id: string) => <code style={{ fontSize: 12, color: '#64748B' }}>{id}</code> },
     { title: '组织', dataIndex: '_payer', key: '_payer', width: 180,
       filters: [...new Set(accounts.map(a => a._payer))].filter(Boolean).map(p => ({ text: p, value: p })),
       onFilter: (value: any, record: any) => record._payer === value,
