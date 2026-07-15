@@ -52,9 +52,24 @@ const RootCredentialsPanel: React.FC<Props> = ({ accountId, rootCredentials, can
   // 面板内"刷新状态"拉取到的最新数据，覆盖父组件传入的初始 rootCredentials
   const [fetchedStatus, setFetchedStatus] = useState<any>(null);
   const [statusLoading, setStatusLoading] = useState(false);
+  const [deletingKey, setDeletingKey] = useState<string | null>(null);
 
-  // 切换账户时清空已生成的凭证、本地覆盖与刷新结果
-  useEffect(() => { setCreds(null); setReveal(false); setStatusOverride({}); setFetchedStatus(null); }, [accountId]);
+  // 切换账户/挂载时：清空本地覆盖与刷新结果，并从 sessionStorage 恢复仍在有效期内的临时凭证
+  useEffect(() => {
+    setReveal(false); setStatusOverride({}); setFetchedStatus(null);
+    try {
+      const raw = sessionStorage.getItem(`awstool:tempCreds:${accountId}`);
+      if (raw) {
+        const c = JSON.parse(raw);
+        if (c?.expiration && new Date(c.expiration).getTime() > Date.now()) {
+          setCreds(c); setNow(Date.now());
+          return;
+        }
+        sessionStorage.removeItem(`awstool:tempCreds:${accountId}`);
+      }
+    } catch { /* ignore */ }
+    setCreds(null);
+  }, [accountId]);
 
   const status = { ...(fetchedStatus ?? rootCredentials), ...statusOverride };
 
@@ -104,6 +119,27 @@ const RootCredentialsPanel: React.FC<Props> = ({ accountId, rootCredentials, can
     }
   };
 
+  const handleDeleteAccessKey = async (keyId: string) => {
+    setDeletingKey(keyId);
+    try {
+      const res = await api.deleteRootAccessKey(accountId, keyId);
+      if (res.success) {
+        // 从当前展示的密钥列表里移除（本地覆盖，无需重拉）
+        setStatusOverride(o => {
+          const cur = Array.isArray(o.accessKeys) ? o.accessKeys : (status.accessKeys || []);
+          return { ...o, accessKeys: cur.filter((k: any) => k.id !== keyId) };
+        });
+        message.success('已删除访问密钥');
+      } else {
+        message.error(res.error || '删除失败');
+      }
+    } catch (e: any) {
+      message.error(e.message || '删除失败');
+    } finally {
+      setDeletingKey(null);
+    }
+  };
+
   // 倒计时：每秒刷新一次
   useEffect(() => {
     if (!creds) return;
@@ -118,6 +154,8 @@ const RootCredentialsPanel: React.FC<Props> = ({ accountId, rootCredentials, can
       if (res.success) {
         setCreds(res.data);
         setNow(Date.now());
+        // 存入 sessionStorage：切页面/刷新后仍能在有效期内恢复（关标签页清除）
+        try { sessionStorage.setItem(`awstool:tempCreds:${accountId}`, JSON.stringify(res.data)); } catch { /* ignore */ }
         message.success('已生成 Admin 临时凭证（有效期约 1 小时）');
       } else {
         message.error(res.error || '生成失败');
@@ -198,12 +236,22 @@ const RootCredentialsPanel: React.FC<Props> = ({ accountId, rootCredentials, can
               {status.accessKeys.length === 0 ? (
                 <Tag color="green">无</Tag>
               ) : (
-                <Space direction="vertical" size={2} style={{ width: '100%' }}>
+                <Space direction="vertical" size={4} style={{ width: '100%' }}>
                   {status.accessKeys.map((k: any) => (
-                    <div key={k.id} style={{ fontSize: 12 }}>
-                      <Tag color={k.status === 'Active' ? 'red' : 'default'} style={{ marginRight: 4 }}>{k.status === 'Active' ? '存在 ⚠️' : k.status}</Tag>
-                      <code>{k.id}</code>
-                      {k.createDate && <span style={{ color: '#94a3b8', marginLeft: 6 }}>创建于 {new Date(k.createDate).toLocaleDateString()}</span>}
+                    <div key={k.id} style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12 }}>
+                      <Tag color={k.status === 'Active' ? 'red' : 'default'} style={{ margin: 0 }}>{k.status === 'Active' ? '存在 ⚠️' : k.status}</Tag>
+                      <code style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{k.id}</code>
+                      {k.createDate && <span style={{ color: '#94a3b8', flexShrink: 0 }}>{new Date(k.createDate).toLocaleDateString()}</span>}
+                      {canRoot && (
+                        <Popconfirm
+                          title="删除该访问密钥"
+                          description={`将永久删除根用户访问密钥 ${k.id}，不可恢复。`}
+                          okText="删除" okType="danger" cancelText="取消"
+                          onConfirm={() => handleDeleteAccessKey(k.id)}
+                        >
+                          <Button size="small" danger type="link" icon={<DeleteOutlined />} loading={deletingKey === k.id} style={{ padding: '0 4px', flexShrink: 0 }} />
+                        </Popconfirm>
+                      )}
                     </div>
                   ))}
                 </Space>

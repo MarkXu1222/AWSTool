@@ -639,6 +639,32 @@ awsRouter.post('/root-credentials/:accountId/recover-password', requireRootAcces
   } catch (e: any) { res.status(500).json({ error: e.message }); }
 });
 
+// Delete a member account root user access key via centralized root access (sts:AssumeRoot).
+// Destructive & privileged: root-access permission only, always audited.
+awsRouter.post('/root-credentials/:accountId/delete-access-key', requireRootAccess, async (req: Request, res: Response) => {
+  try {
+    const accountId = String(req.params.accountId);
+    if (!/^\d{12}$/.test(accountId)) {
+      return res.status(400).json({ error: '无效的账户 ID' });
+    }
+    const accessKeyId = String((req.body || {}).accessKeyId || '').trim();
+    if (!/^[A-Z0-9]{16,128}$/.test(accessKeyId)) {
+      return res.status(400).json({ error: '无效的 Access Key ID' });
+    }
+    const result = await aws.deleteRootAccessKey(accountId, accessKeyId);
+    const user = (req as any).user;
+    db.addAuditLog(
+      user?.userId,
+      'ROOT_ACCESSKEY_DELETE',
+      `AWS 账户 ${accountId} · 删除根用户访问密钥 ${accessKeyId}`,
+      user?.username,
+      req.ip,
+    );
+    (res.locals as any).audited = true;
+    res.json({ success: true, data: result });
+  } catch (e: any) { res.status(500).json({ error: e.message }); }
+});
+
 // Scan resources
 awsRouter.get('/resources/:accountId/:region', async (req: Request, res: Response) => {
   try {

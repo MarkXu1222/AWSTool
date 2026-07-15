@@ -5,7 +5,7 @@ import { STSClient, AssumeRoleCommand, GetCallerIdentityCommand, AssumeRootComma
 import { OrganizationsClient, ListAccountsCommand } from '@aws-sdk/client-organizations';
 import { CostExplorerClient, GetCostAndUsageCommand } from '@aws-sdk/client-cost-explorer';
 import { ServiceQuotasClient, ListServiceQuotasCommand, RequestServiceQuotaIncreaseCommand, ListRequestedServiceQuotaChangeHistoryCommand, GetServiceQuotaCommand } from '@aws-sdk/client-service-quotas';
-import { IAMClient, GetAccountSummaryCommand, ListMFADevicesCommand, ListUsersCommand, ListVirtualMFADevicesCommand, DeactivateMFADeviceCommand, DeleteVirtualMFADeviceCommand, CreateLoginProfileCommand, ListAccessKeysCommand, GetLoginProfileCommand } from '@aws-sdk/client-iam';
+import { IAMClient, GetAccountSummaryCommand, ListMFADevicesCommand, ListUsersCommand, ListVirtualMFADevicesCommand, DeactivateMFADeviceCommand, DeleteVirtualMFADeviceCommand, CreateLoginProfileCommand, ListAccessKeysCommand, GetLoginProfileCommand, DeleteAccessKeyCommand } from '@aws-sdk/client-iam';
 import { EC2Client, DescribeInstancesCommand, DescribeVolumesCommand } from '@aws-sdk/client-ec2';
 import { S3Client, ListBucketsCommand } from '@aws-sdk/client-s3';
 import { LambdaClient, ListFunctionsCommand } from '@aws-sdk/client-lambda';
@@ -335,6 +335,17 @@ export async function auditRootCredentials(accountId: string) {
   }
 
   return out;
+}
+
+/**
+ * 删除成员账户根用户的指定访问密钥。
+ * AssumeRoot(IAMDeleteRootUserCredentials) 会话内 DeleteAccessKey（省略 UserName，即 root 本身）。
+ */
+export async function deleteRootAccessKey(accountId: string, accessKeyId: string) {
+  const rootCreds = await assumeRoot(accountId, ROOT_TASK_POLICY.delete);
+  const iam = new IAMClient({ region: DEFAULT_REGION, credentials: rootCreds });
+  await iam.send(new DeleteAccessKeyCommand({ AccessKeyId: accessKeyId }));
+  return { accountId, accessKeyId, deleted: true };
 }
 
 // ===== Exported service functions =====
