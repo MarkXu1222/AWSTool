@@ -314,6 +314,12 @@ code, pre {
   padding: 16px !important;
 }
 
+/* === KPI 卡片(概览页)hover 抬升 === */
+.kpi-card { transition: box-shadow 0.2s ease, transform 0.2s ease; }
+.kpi-card-clickable { cursor: pointer; }
+.kpi-card:hover { box-shadow: var(--shadow-card-hover) !important; transform: translateY(-2px); }
+.kpi-card-clickable:focus-visible { outline: 2px solid var(--color-primary); outline-offset: 2px; }
+
 /* === Buttons === */
 .ant-btn {
   border-radius: var(--radius-sm) !important;

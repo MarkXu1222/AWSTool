@@ -87,7 +87,7 @@ const MainLayout: React.FC<MainLayoutProps> = ({ onLogout }) => {
       );
     }
     switch (currentPage) {
-      case 'dashboard': return <DashboardPage />;
+      case 'dashboard': return <DashboardPage onNavigate={setCurrentPage} />;
       case 'accounts': return <AccountsPage />;
       case 'quotas': return <QuotasPage />;
       case 'regions': return <RegionsPage />;

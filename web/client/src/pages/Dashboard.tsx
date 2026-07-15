@@ -4,6 +4,10 @@ import { DollarOutlined, TeamOutlined, AlertOutlined, LinkOutlined } from '@ant-
 import { api } from '../api';
 import EmptyState from '../components/EmptyState';
 
+interface DashboardProps {
+  onNavigate?: (key: string) => void;
+}
+
 const fmtUSD = (n: number) => new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(n || 0);
 
 interface KpiCardProps {
@@ -15,10 +19,20 @@ interface KpiCardProps {
   loading?: boolean;
   sub?: React.ReactNode;
   valueColor?: string;
+  onClick?: () => void;
 }
 
-const KpiCard: React.FC<KpiCardProps> = ({ icon, label, value, tint, color, loading, sub, valueColor }) => (
-  <Card size="small" bodyStyle={{ padding: 18 }}>
+const KpiCard: React.FC<KpiCardProps> = ({ icon, label, value, tint, color, loading, sub, valueColor, onClick }) => (
+  <Card
+    size="small"
+    bodyStyle={{ padding: 18 }}
+    className={onClick ? 'kpi-card kpi-card-clickable' : 'kpi-card'}
+    onClick={onClick}
+    role={onClick ? 'button' : undefined}
+    tabIndex={onClick ? 0 : undefined}
+    aria-label={onClick ? label : undefined}
+    onKeyDown={onClick ? (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onClick(); } } : undefined}
+  >
     <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
       <div style={{
         width: 46, height: 46, borderRadius: 12, background: tint, color,
@@ -41,19 +55,19 @@ const KpiCard: React.FC<KpiCardProps> = ({ icon, label, value, tint, color, load
   </Card>
 );
 
-const Dashboard: React.FC = () => {
+const Dashboard: React.FC<DashboardProps> = ({ onNavigate }) => {
   const [accounts, setAccounts] = useState<any[]>([]);
   const [totalCost, setTotalCost] = useState(0);
   const [topAccounts, setTopAccounts] = useState<any[]>([]);
   const [caseOpened7d, setCaseOpened7d] = useState(0);
   const [connected, setConnected] = useState(false);
-  const [ready, setReady] = useState(false);       // 账户/配额基础数据是否就绪
+  const [connSummary, setConnSummary] = useState<{ ok: number; total: number }>({ ok: 0, total: 0 });
+  const [ready, setReady] = useState(false);
   const [costLoading, setCostLoading] = useState(true);
 
   useEffect(() => { loadDashboard(); }, []);
 
   const loadDashboard = async () => {
-    // Phase 1: 账户 + 配额统计(缓存/DB,近乎瞬时)
     try {
       const [accountsRes, quotaStatsRes] = await Promise.allSettled([
         api.listAccounts(),
@@ -68,7 +82,6 @@ const Dashboard: React.FC = () => {
     } catch {}
     finally { setReady(true); }
 
-    // Phase 2: 费用汇总 + 连接状态
     setCostLoading(true);
     try {
       const [summaryRes, connRes] = await Promise.allSettled([
@@ -80,14 +93,25 @@ const Dashboard: React.FC = () => {
         setTotalCost(d.totalCost || 0);
         setTopAccounts(d.topAccounts || []);
       }
-      if (connRes.status === 'fulfilled') {
-        setConnected(connRes.value.success === true);
+      if (connRes.status === 'fulfilled' && connRes.value.success) {
+        const results = connRes.value.data || [];
+        const ok = results.filter((r: any) => r.ok).length;
+        setConnSummary({ ok, total: results.length });
+        setConnected(results.length > 0 && ok === results.length);
       }
     } catch {}
     finally { setCostLoading(false); }
   };
 
   const activeCount = accounts.filter((a: any) => a.Status === 'ACTIVE').length;
+
+  // 本月计费周期(本月 1 号至今)
+  const now = new Date();
+  const billingPeriod = `${now.getMonth() + 1}/1 – ${now.getMonth() + 1}/${now.getDate()}`;
+
+  const connLabel = connSummary.total > 0
+    ? `${connSummary.ok}/${connSummary.total} 组织已连接`
+    : (costLoading ? '检查中' : '未连接');
 
   const topColumns = [
     {
@@ -133,25 +157,31 @@ const Dashboard: React.FC = () => {
         <Col xs={12} sm={12} md={6}>
           <KpiCard icon={<TeamOutlined />} label="账户总数" tint="#eff4ff" color="#2563eb"
             value={accounts.length} loading={!ready}
-            sub={`${activeCount} 个 Active`} />
+            sub={`${activeCount} 个 Active`}
+            onClick={onNavigate ? () => onNavigate('accounts') : undefined} />
         </Col>
         <Col xs={12} sm={12} md={6}>
           <KpiCard icon={<DollarOutlined />} label="本月费用" tint="#f6ffed" color="#52c41a"
-            value={fmtUSD(totalCost)} loading={costLoading} />
+            value={fmtUSD(totalCost)} loading={costLoading}
+            sub={`计费周期 ${billingPeriod}`}
+            onClick={onNavigate ? () => onNavigate('billing') : undefined} />
         </Col>
         <Col xs={12} sm={12} md={6}>
           <KpiCard icon={<AlertOutlined />} label="进行中 Case (7天)" tint="#fffbe6" color="#faad14"
             value={caseOpened7d} loading={!ready}
-            valueColor={caseOpened7d > 0 ? '#d48806' : '#1a2233'} />
+            valueColor={caseOpened7d > 0 ? '#d48806' : '#1a2233'}
+            sub="近 7 天新增"
+            onClick={onNavigate ? () => onNavigate('quotas') : undefined} />
         </Col>
         <Col xs={12} sm={12} md={6}>
-          <KpiCard icon={<LinkOutlined />}
-            label="连接状态"
+          <KpiCard icon={<LinkOutlined />} label="连接状态"
             tint={connected ? '#f6ffed' : '#fff2f0'}
             color={connected ? '#52c41a' : '#ff4d4f'}
-            value={connected ? '正常' : costLoading ? '检查中' : '断开'}
+            value={connected ? '正常' : costLoading ? '检查中' : '异常'}
             valueColor={connected ? '#52c41a' : costLoading ? '#8a94a6' : '#ff4d4f'}
-            loading={costLoading} />
+            loading={costLoading}
+            sub={connLabel}
+            onClick={onNavigate ? () => onNavigate('settings') : undefined} />
         </Col>
       </Row>
 
