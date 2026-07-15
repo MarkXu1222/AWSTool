@@ -487,16 +487,28 @@ awsRouter.post('/quotas/sync-account/:accountId', async (req: Request, res: Resp
   } catch (e: any) { res.status(500).json({ error: e.message }); }
 });
 
-// Root credentials status (via Credential Report)
+// Root credentials status
+// MFA / 访问密钥用 GetAccountSummary 取实时状态；密码状态与最后使用时间用凭证报告补充。
+// 说明：凭证报告(Credential Report)由 AWS 缓存，最长约 4 小时才刷新，单靠它会显示过期状态
+// （例如刚删的 MFA / 访问密钥仍显示存在）。GetAccountSummary 是实时的，因此优先采用。
 awsRouter.get('/root-credentials/:accountId', async (req: Request, res: Response) => {
   try {
     const accountId = String(req.params.accountId);
-    const { IAMClient, GenerateCredentialReportCommand, GetCredentialReportCommand } = require('@aws-sdk/client-iam');
+    const { IAMClient, GenerateCredentialReportCommand, GetCredentialReportCommand, GetAccountSummaryCommand } = require('@aws-sdk/client-iam');
     const creds = await (aws as any).assumeToAccount(accountId);
     const iam = new IAMClient({ region: 'us-east-1', credentials: creds });
 
+    // 实时状态：root 的 MFA 是否启用、访问密钥数量（非缓存）
+    let summaryMap: any = {};
+    try {
+      const summary = await iam.send(new GetAccountSummaryCommand({}));
+      summaryMap = summary.SummaryMap || {};
+    } catch { /* 忽略，回退到凭证报告 */ }
+    const mfaLive = typeof summaryMap.AccountMFAEnabled === 'number' ? summaryMap.AccountMFAEnabled > 0 : null;
+    const akCount = typeof summaryMap.AccountAccessKeysPresent === 'number' ? summaryMap.AccountAccessKeysPresent : null;
+
+    // 凭证报告：提供密码状态、最后使用时间等细节（AWS 缓存，最长约 4 小时）
     await iam.send(new GenerateCredentialReportCommand({}));
-    // Wait for report to be ready
     await new Promise(r => setTimeout(r, 2000));
 
     let report;
@@ -520,11 +532,15 @@ awsRouter.get('/root-credentials/:accountId', async (req: Request, res: Response
       accountId,
       passwordEnabled: getField('password_enabled') === 'true',
       passwordLastUsed: getField('password_last_used'),
-      mfaActive: getField('mfa_active') === 'true',
-      accessKey1Active: getField('access_key_1_active') === 'true',
+      // MFA / 访问密钥优先用实时 GetAccountSummary，取不到再回退凭证报告
+      mfaActive: mfaLive != null ? mfaLive : (getField('mfa_active') === 'true'),
+      accessKey1Active: akCount != null ? akCount >= 1 : (getField('access_key_1_active') === 'true'),
+      accessKey2Active: akCount != null ? akCount >= 2 : (getField('access_key_2_active') === 'true'),
       accessKey1LastUsed: getField('access_key_1_last_used_date'),
-      accessKey2Active: getField('access_key_2_active') === 'true',
       accessKey2LastUsed: getField('access_key_2_last_used_date'),
+      accessKeysCount: akCount,
+      liveStatus: mfaLive != null, // MFA / 访问密钥是否为实时数据
+      reportGeneratedAt: report.GeneratedTime ? new Date(report.GeneratedTime).toISOString() : null,
     };
 
     res.json({ success: true, data: result });

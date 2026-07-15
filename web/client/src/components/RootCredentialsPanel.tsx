@@ -49,11 +49,27 @@ const RootCredentialsPanel: React.FC<Props> = ({ accountId, rootCredentials, can
   const [pwdLoading, setPwdLoading] = useState(false);
   // 操作成功后对根用户状态做本地覆盖（无需等待父组件重新拉取）
   const [statusOverride, setStatusOverride] = useState<Record<string, any>>({});
+  // 面板内"刷新状态"拉取到的最新数据，覆盖父组件传入的初始 rootCredentials
+  const [fetchedStatus, setFetchedStatus] = useState<any>(null);
+  const [statusLoading, setStatusLoading] = useState(false);
 
-  // 切换账户时清空已生成的凭证与本地覆盖
-  useEffect(() => { setCreds(null); setReveal(false); setStatusOverride({}); }, [accountId]);
+  // 切换账户时清空已生成的凭证、本地覆盖与刷新结果
+  useEffect(() => { setCreds(null); setReveal(false); setStatusOverride({}); setFetchedStatus(null); }, [accountId]);
 
-  const status = { ...rootCredentials, ...statusOverride };
+  const status = { ...(fetchedStatus ?? rootCredentials), ...statusOverride };
+
+  const refreshStatus = async () => {
+    setStatusLoading(true);
+    try {
+      const res = await api.getRootCredentials(accountId);
+      if (res.success) { setFetchedStatus(res.data); setStatusOverride({}); }
+      else message.error(res.error || '刷新失败');
+    } catch (e: any) {
+      message.error(e.message || '刷新失败');
+    } finally {
+      setStatusLoading(false);
+    }
+  };
 
   const handleDeleteMfa = async () => {
     setMfaLoading(true);
@@ -134,8 +150,18 @@ const RootCredentialsPanel: React.FC<Props> = ({ accountId, rootCredentials, can
 
   return (
     <div>
-      {/* 根用户凭证只读状态 */}
-      {rootCredentials ? (
+      {/* 根用户凭证状态 + 刷新 */}
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
+        <span style={{ fontSize: 12, color: '#94a3b8' }}>
+          {(fetchedStatus || rootCredentials)
+            ? (status.liveStatus ? 'MFA / 密钥为实时状态，密码等来自凭证报告' : '状态来自凭证报告（AWS 缓存，最长约 4 小时）')
+            : ''}
+        </span>
+        <Tooltip title="重新读取根用户实时状态">
+          <Button size="small" type="text" icon={<ReloadOutlined />} loading={statusLoading} onClick={refreshStatus}>刷新状态</Button>
+        </Tooltip>
+      </div>
+      {(fetchedStatus || rootCredentials) ? (
         <Descriptions size="small" column={1} bordered>
           <Descriptions.Item label="密码">
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
