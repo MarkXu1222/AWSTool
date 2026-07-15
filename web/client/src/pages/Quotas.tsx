@@ -329,8 +329,8 @@ const QuotasPage: React.FC = () => {
           return (
             <span style={{ fontSize: 12 }}>
               {a ? <><strong>{a.Name}</strong><br/></> : ''}
-              <code style={{ fontSize: 10, color: 'rgba(0,0,0,0.45)' }}>{id}</code>
-              {a?._payer ? <><br/><Tag color="blue" style={{ fontSize: 9, lineHeight: '14px', padding: '0 4px', margin: 0 }}>{a._payer}</Tag></> : ''}
+              <code style={{ fontSize: 11, color: 'rgba(0,0,0,0.55)' }}>{id}</code>
+              {a?._payer ? <><br/><Tag color="blue" style={{ fontSize: 11, lineHeight: '16px', padding: '0 6px', margin: '2px 0 0' }}>{a._payer}</Tag></> : ''}
             </span>
           );
         },
@@ -484,10 +484,6 @@ const QuotasPage: React.FC = () => {
           <h2 className="page-header-title">配额管理</h2>
           <p className="page-header-subtitle">管理不同账号、服务和区域下的资源配额</p>
         </div>
-        <Space size="small">
-          <Button size="small" type="primary" icon={<FilePdfOutlined />} onClick={openDocModal}>生成申请文档</Button>
-          <Button size="small" icon={<DownloadOutlined />} onClick={handleExport}>导出</Button>
-        </Space>
       </div>
 
       {/* 筛选卡片区 */}
@@ -503,6 +499,10 @@ const QuotasPage: React.FC = () => {
         <Select style={{ width: 220 }} value={selectedRegion} onChange={setSelectedRegion} options={REGIONS} size="small" showSearch optionFilterProp="label" />
         <Button type="primary" onClick={fetchQuotas} loading={loading} icon={<ReloadOutlined />} size="small">查询</Button>
         <Button size="small" onClick={() => { setSelectedAccount(''); setSelectedService('ec2'); setSelectedRegion('us-east-1'); setQuotas([]); }}>重置</Button>
+        <div style={{ marginLeft: 'auto', display: 'flex', gap: 8 }}>
+          <Button size="small" type="primary" icon={<FilePdfOutlined />} onClick={openDocModal}>生成申请文档</Button>
+          <Button size="small" icon={<DownloadOutlined />} onClick={handleExport}>导出</Button>
+        </div>
       </div>
 
       {/* Tab + 内容区 */}
