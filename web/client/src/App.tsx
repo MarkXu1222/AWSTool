@@ -90,7 +90,8 @@ const App: React.FC = () => {
           fontSize: 14,
           colorBgLayout: '#f4f5f7',
           colorBorderSecondary: '#e8eaf0',
-          controlHeight: 34,
+          controlHeight: 36,
+          controlHeightSM: 30,
           fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Helvetica Neue', Helvetica, Arial, sans-serif",
         },
         components: {
