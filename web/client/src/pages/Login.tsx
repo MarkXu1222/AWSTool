@@ -43,7 +43,11 @@ const LoginPage: React.FC<LoginPageProps> = ({ onSuccess }) => {
       alignItems: 'center',
       justifyContent: 'center',
       padding: 16,
-      background: 'radial-gradient(760px 360px at 50% -8%, #e8f0ff, transparent 62%), #f4f5f7',
+      backgroundColor: '#0f172a',
+      backgroundImage: 'linear-gradient(rgba(15,23,42,0.35), rgba(15,23,42,0.45)), url(/BG.png)',
+      backgroundSize: 'cover',
+      backgroundPosition: 'center',
+      backgroundRepeat: 'no-repeat',
     }}>
       <div className="login-card" style={{
         width: '100%', maxWidth: 384, background: '#fff', borderRadius: 16,
