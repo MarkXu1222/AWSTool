@@ -7,31 +7,31 @@
 /* === Design Tokens (Ant Design Pro 标准色) === */
 :root {
   /* 布局色 */
-  --color-bg-layout: #f0f2f5;
+  --color-bg-layout: #f4f5f7;
   --color-bg-card: #ffffff;
-  --color-bg-sidebar: #001529;
-  --color-bg-table-header: #fafafa;
-  --color-bg-hover: #f5f5f5;
-  --color-bg-selected: #e6f7ff;
+  --color-bg-sidebar: #0f172a;
+  --color-bg-table-header: #f9fafb;
+  --color-bg-hover: #f6f8fb;
+  --color-bg-selected: #eff4ff;
   /* 文字色 */
-  --color-text-primary: rgba(0, 0, 0, 0.85);
-  --color-text-secondary: rgba(0, 0, 0, 0.65);
-  --color-text-muted: rgba(0, 0, 0, 0.45);
-  --color-text-disabled: rgba(0, 0, 0, 0.25);
+  --color-text-primary: #1a2233;
+  --color-text-secondary: #4a5468;
+  --color-text-muted: #8a94a6;
+  --color-text-disabled: #b6bdca;
   /* 边框 */
-  --color-border: #f0f0f0;
-  --color-border-split: #f0f0f0;
-  /* 主色 (Ant Design 标准蓝) */
-  --color-primary: #1890ff;
-  --color-primary-hover: #40a9ff;
-  --color-primary-bg: #e6f7ff;
+  --color-border: #e8eaf0;
+  --color-border-split: #eef0f4;
+  /* 主色 (现代专业蓝) */
+  --color-primary: #2563eb;
+  --color-primary-hover: #3b82f6;
+  --color-primary-bg: #eff4ff;
   /* 状态色 */
-  --color-success: #52c41a;
-  --color-success-bg: #f6ffed;
-  --color-warning: #faad14;
-  --color-warning-bg: #fffbe6;
-  --color-error: #ff4d4f;
-  --color-error-bg: #fff2f0;
+  --color-success: #16a34a;
+  --color-success-bg: #f0fdf4;
+  --color-warning: #d97706;
+  --color-warning-bg: #fffbeb;
+  --color-error: #dc2626;
+  --color-error-bg: #fef2f2;
   /* 间距 */
   --space-page: 24px;
   --space-section: 16px;
@@ -39,26 +39,45 @@
   --space-sm: 8px;
   --space-md: 12px;
   /* 圆角 */
-  --radius-sm: 2px;
-  --radius-md: 2px;
+  --radius-sm: 8px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+  /* 阴影(层次感) */
+  --shadow-card: 0 1px 2px rgba(16, 24, 40, 0.04), 0 1px 3px rgba(16, 24, 40, 0.06);
+  --shadow-card-hover: 0 4px 12px rgba(16, 24, 40, 0.08), 0 2px 4px rgba(16, 24, 40, 0.04);
+  --shadow-pop: 0 8px 24px rgba(16, 24, 40, 0.12);
   /* 侧边栏宽度 */
-  --sider-width: 208px;
+  --sider-width: 224px;
 }
 
 /* === Reset === */
 * { margin: 0; padding: 0; box-sizing: border-box; }
 body {
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, 'Noto Sans', sans-serif;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Helvetica Neue', Helvetica, Arial, sans-serif;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
   background: var(--color-bg-layout);
   color: var(--color-text-primary);
   font-size: 14px;
   line-height: 1.5715;
 }
 code, pre {
-  font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, Courier, monospace;
+  font-family: 'SFMono-Regular', 'JetBrains Mono', Consolas, 'Liberation Mono', Menlo, Courier, monospace;
   font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+/* 数字/金额对齐更整齐 */
+.ant-statistic-content, .ant-table-cell, .ant-tag { font-variant-numeric: tabular-nums; }
+
+/* 尊重"减少动态效果"偏好 */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
 }
 
 /* === Layout Structure (模仿 ProLayout) === */
@@ -111,13 +130,14 @@ code, pre {
   overflow-x: hidden;
 }
 .desktop-sider .ant-menu-item {
-  height: 40px !important;
-  line-height: 40px !important;
-  margin: 4px 8px !important;
+  height: 42px !important;
+  line-height: 42px !important;
+  margin: 4px 12px !important;
   padding: 0 16px !important;
-  border-radius: 4px !important;
-  color: rgba(255, 255, 255, 0.65) !important;
+  border-radius: 8px !important;
+  color: rgba(255, 255, 255, 0.7) !important;
   font-size: 14px !important;
+  transition: background 0.15s ease, color 0.15s ease !important;
 }
 .desktop-sider .ant-menu-item .anticon {
   font-size: 14px !important;
@@ -133,7 +153,8 @@ code, pre {
 .desktop-sider .ant-menu-item-selected {
   background: var(--color-primary) !important;
   color: #fff !important;
-  font-weight: 500 !important;
+  font-weight: 600 !important;
+  box-shadow: 0 2px 8px rgba(37, 99, 235, 0.35) !important;
 }
 .desktop-sider .ant-menu-item-selected .anticon {
   color: #fff !important;
@@ -174,11 +195,13 @@ code, pre {
   padding-bottom: var(--space-section);
 }
 .page-header-title {
-  font-size: 20px;
-  font-weight: 600;
+  font-size: 22px;
+  font-weight: 700;
   color: var(--color-text-primary);
   margin: 0;
-  line-height: 1.4;
+  line-height: 1.3;
+  letter-spacing: -0.02em;
+  text-wrap: balance;
 }
 .page-header-subtitle {
   font-size: 14px;
@@ -197,11 +220,12 @@ code, pre {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  height: 28px;
+  height: 30px;
   padding: 0 12px;
-  border-radius: 4px;
+  border-radius: 8px;
   background: var(--color-bg-card);
   border: 1px solid var(--color-border);
+  box-shadow: var(--shadow-card);
   font-size: 13px;
   color: var(--color-text-secondary);
   white-space: nowrap;
@@ -245,10 +269,10 @@ code, pre {
 .ant-table-thead > tr > th {
   background: var(--color-bg-table-header) !important;
   border-bottom: 1px solid var(--color-border) !important;
-  color: var(--color-text-primary) !important;
-  font-size: 14px !important;
-  font-weight: 500 !important;
-  padding: 12px 16px !important;
+  color: var(--color-text-secondary) !important;
+  font-size: 13px !important;
+  font-weight: 600 !important;
+  padding: 11px 16px !important;
 }
 .ant-table-tbody > tr > td {
   padding: 12px 16px !important;
@@ -264,9 +288,10 @@ code, pre {
 
 /* === Cards (Ant Design 标准卡片) === */
 .ant-card {
-  border-radius: var(--radius-md) !important;
-  box-shadow: none !important;
+  border-radius: var(--radius-lg) !important;
+  box-shadow: var(--shadow-card) !important;
   border: 1px solid var(--color-border) !important;
+  transition: box-shadow 0.2s ease, border-color 0.2s ease;
 }
 .ant-card-head {
   border-bottom: 1px solid var(--color-border) !important;
@@ -274,8 +299,9 @@ code, pre {
   padding: 0 24px !important;
 }
 .ant-card-head-title {
-  font-size: 16px !important;
-  font-weight: 500 !important;
+  font-size: 15px !important;
+  font-weight: 600 !important;
+  letter-spacing: -0.01em;
 }
 .ant-card-body {
   padding: 24px !important;

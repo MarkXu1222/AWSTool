@@ -78,7 +78,29 @@ const App: React.FC = () => {
 
   return (
     <ErrorBoundary>
-      <ConfigProvider theme={{ algorithm: theme.defaultAlgorithm, token: { colorPrimary: '#1890ff', borderRadius: 4, fontSize: 13 } }}>
+      <ConfigProvider theme={{
+        algorithm: theme.defaultAlgorithm,
+        token: {
+          colorPrimary: '#2563eb',
+          colorInfo: '#2563eb',
+          colorSuccess: '#16a34a',
+          colorWarning: '#d97706',
+          colorError: '#dc2626',
+          borderRadius: 8,
+          fontSize: 14,
+          colorBgLayout: '#f4f5f7',
+          colorBorderSecondary: '#e8eaf0',
+          controlHeight: 34,
+          fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Helvetica Neue', Helvetica, Arial, sans-serif",
+        },
+        components: {
+          Card: { borderRadiusLG: 14 },
+          Button: { primaryShadow: 'none', fontWeight: 500 },
+          Table: { headerBg: '#f9fafb', rowHoverBg: '#f6f8fb', borderColor: '#eef0f4' },
+          Tabs: { inkBarColor: '#2563eb' },
+          Segmented: { itemSelectedBg: '#2563eb', itemSelectedColor: '#fff' },
+        },
+      }}>
         {renderContent()}
       </ConfigProvider>
     </ErrorBoundary>
