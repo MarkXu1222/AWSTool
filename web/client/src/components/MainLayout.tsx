@@ -137,7 +137,9 @@ const MainLayout: React.FC<MainLayoutProps> = ({ onLogout }) => {
         {/* Content area */}
         <Layout>
           <Content className="main-content">
-            {renderPage()}
+            <div key={currentPage} className="page-fade">
+              {renderPage()}
+            </div>
           </Content>
         </Layout>
       </Layout>

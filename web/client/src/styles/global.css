@@ -326,6 +326,29 @@ code, pre {
 .login-card { animation: loginCardIn 0.5s cubic-bezier(0.16, 1, 0.3, 1) both; transform-origin: center top; }
 .login-card .login-logo { animation: loginLogoIn 0.5s 0.08s cubic-bezier(0.16, 1, 0.3, 1) both; }
 
+/* === 全站微交互 === */
+/* 页面切换淡入上浮 */
+@keyframes pageIn {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.page-fade { animation: pageIn 0.28s ease both; }
+
+/* 表格行 hover 更顺滑 */
+.ant-table-tbody > tr > td { transition: background-color 0.15s ease; }
+
+/* 输入 / 选择 聚焦柔和高亮环 */
+.ant-input:focus,
+.ant-input-focused,
+.ant-input-affix-wrapper:focus,
+.ant-input-affix-wrapper-focused,
+.ant-select-focused .ant-select-selector,
+.ant-picker-focused {
+  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.12) !important;
+}
+
+/* Tag / Statistic 数字等 hover 细节由组件自带,保持克制 */
+
 /* === KPI 卡片(概览页)hover 抬升 === */
 .kpi-card { transition: box-shadow 0.2s ease, transform 0.2s ease; }
 .kpi-card-clickable { cursor: pointer; }
