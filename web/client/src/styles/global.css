@@ -314,36 +314,17 @@ code, pre {
   padding: 16px !important;
 }
 
-/* === 登录页(左右分栏) === */
-.login-split { display: flex; min-height: 100vh; }
-.login-brand {
-  flex: 1 1 46%;
-  position: relative;
-  overflow: hidden;
-  padding: 56px 56px 40px;
-  display: flex;
-  flex-direction: column;
-  justify-content: space-between;
-  color: #fff;
-  background:
-    radial-gradient(620px 320px at 78% 8%, rgba(59, 130, 246, 0.35), transparent 60%),
-    radial-gradient(520px 420px at 0% 100%, rgba(37, 99, 235, 0.22), transparent 55%),
-    linear-gradient(150deg, #0b1220 0%, #10214a 52%, #1e3a8a 100%);
+/* === 登录页(极简居中)入场动画 === */
+@keyframes loginCardIn {
+  from { opacity: 0; transform: translateY(12px) scale(0.99); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
 }
-.login-form-panel {
-  flex: 1 1 54%;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 40px 24px;
-  background: #ffffff;
+@keyframes loginLogoIn {
+  from { opacity: 0; transform: scale(0.85); }
+  to { opacity: 1; transform: scale(1); }
 }
-.login-mobile-brand { display: none; }
-@media (max-width: 768px) {
-  .login-brand { display: none; }
-  .login-form-panel { flex: 1 1 100%; }
-  .login-mobile-brand { display: block; }
-}
+.login-card { animation: loginCardIn 0.5s cubic-bezier(0.16, 1, 0.3, 1) both; transform-origin: center top; }
+.login-card .login-logo { animation: loginLogoIn 0.5s 0.08s cubic-bezier(0.16, 1, 0.3, 1) both; }
 
 /* === KPI 卡片(概览页)hover 抬升 === */
 .kpi-card { transition: box-shadow 0.2s ease, transform 0.2s ease; }
@@ -354,9 +335,16 @@ code, pre {
 /* === Buttons === */
 .ant-btn {
   border-radius: var(--radius-sm) !important;
+  transition: transform 0.1s ease, background-color 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease, color 0.2s ease !important;
+}
+.ant-btn:active {
+  transform: scale(0.97);
 }
 .ant-btn-primary {
   box-shadow: none !important;
+}
+.ant-btn-primary:hover {
+  box-shadow: 0 4px 12px rgba(37, 99, 235, 0.3) !important;
 }
 
 /* === Inputs / Select === */
