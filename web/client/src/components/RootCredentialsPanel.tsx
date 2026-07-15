@@ -298,6 +298,7 @@ const RootCredentialsPanel: React.FC<Props> = ({ accountId, rootCredentials, can
         <div>
           <div style={{ marginBottom: 8 }}>
             <Tag color={expired ? 'red' : 'blue'}>{expired ? '已过期，请刷新' : `剩余有效期 ${remainText}`}</Tag>
+            {!expired && <Tag>到期 {new Date(creds.expiration).toLocaleTimeString()}</Tag>}
             <Tag>{creds.region}</Tag>
           </div>
           <CredRow label="Access Key ID" value={creds.accessKeyId} reveal={reveal} />
