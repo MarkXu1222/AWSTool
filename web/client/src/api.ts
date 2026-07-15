@@ -141,7 +141,7 @@ export const api = {
   scanResources: (accountId: string, region: string) => request(`/aws/resources/${accountId}/${region}`),
   deleteResources: (accountId: string, region: string, resources: { type: string; id: string; name?: string }[]) =>
     request(`/aws/resources/${accountId}/delete`, { method: 'POST', body: JSON.stringify({ region, resources }) }),
-  getAuditLog: (limit = 500) => request(`/aws/audit?limit=${Math.max(1, Math.min(1000, Math.floor(limit)))}`),
+  getAuditLog: (limit = 5000) => request(`/aws/audit?limit=${Math.max(1, Math.min(5000, Math.floor(limit)))}`),
   exportAuditLog: async (format: 'csv' | 'json') => {
     const token = getToken();
     const res = await fetch(`${BASE}/aws/audit/export?format=${format}`, {

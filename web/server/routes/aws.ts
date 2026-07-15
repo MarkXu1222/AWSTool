@@ -740,11 +740,11 @@ awsRouter.get('/audit/export', requireAuditAccess, async (req: Request, res: Res
   }
 });
 
-// Audit log — default 500 rows for the UI; max 1,000 per request
+// Audit log — returns the full retained set (up to the 5,000 record cap) by default
 awsRouter.get('/audit', requireAuditAccess, async (req: Request, res: Response) => {
   try {
-    const requested = Number(req.query.limit || 500);
-    const limit = Number.isFinite(requested) ? Math.min(1000, Math.max(1, Math.floor(requested))) : 500;
+    const requested = Number(req.query.limit || 5000);
+    const limit = Number.isFinite(requested) ? Math.min(5000, Math.max(1, Math.floor(requested))) : 5000;
     const logs = db.getAuditLog(limit).map(enrichAuditLog);
     res.setHeader('Cache-Control', 'no-store');
     res.json({ success: true, data: logs, total: logs.length });

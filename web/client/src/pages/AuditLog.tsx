@@ -132,7 +132,7 @@ const AuditLogPage: React.FC = () => {
   const fetchLogs = async () => {
     setLoading(true);
     try {
-      const res = await api.getAuditLog(500);
+      const res = await api.getAuditLog(5000);
       if (res.success) setLogs(res.data || []);
       else message.error(res.error || '加载审计日志失败');
     } catch (e: any) {
@@ -279,9 +279,9 @@ const AuditLogPage: React.FC = () => {
           scroll={{ x: 1040 }}
           locale={{ emptyText: <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无符合条件的审计日志" /> }}
           pagination={{
-            pageSize: 30,
+            pageSize: 50,
             showSizeChanger: true,
-            pageSizeOptions: ['20', '30', '50', '100'],
+            pageSizeOptions: ['20', '50', '100', '200', '500'],
             showTotal: total => `共 ${total} 条`,
           }}
           expandable={{
