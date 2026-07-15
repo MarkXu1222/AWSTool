@@ -58,6 +58,8 @@ export const api = {
   getAccountDetail: (id: string) => request(`/aws/accounts/${id}/detail`),
   getCostByAccount: (start: string, end: string) => request(`/aws/billing/by-account?start=${start}&end=${end}`),
   getCostByService: (accountId: string, start: string, end: string) => request(`/aws/billing/by-service/${accountId}?start=${start}&end=${end}`),
+  // 账单分析：按服务 + 区域两个维度汇总（资源清理第一步）
+  getBillingBreakdown: (accountId: string, start: string, end: string) => request(`/aws/billing/breakdown/${accountId}?start=${start}&end=${end}`),
   listServiceQuotas: (accountId: string, serviceCode: string, region?: string) =>
     request(`/aws/quotas/${accountId}/${serviceCode}?region=${region || ''}`),
   requestQuotaIncrease: (accountId: string, serviceCode: string, quotaCode: string, desiredValue: number, quotaName?: string, region?: string) =>

@@ -12,6 +12,7 @@ const CleanupPage: React.FC = () => {
   const [selectedRegion, setSelectedRegion] = useState('us-east-1');
   const [step, setStep] = useState(0);
   const [costByService, setCostByService] = useState<any[]>([]);
+  const [costByRegion, setCostByRegion] = useState<any[]>([]);
   const [resources, setResources] = useState<any[]>([]);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [loading, setLoading] = useState(false);
@@ -28,16 +29,15 @@ const CleanupPage: React.FC = () => {
       const now = new Date();
       const start = new Date(now.getFullYear(), now.getMonth() - 1, now.getDate()).toISOString().split('T')[0];
       const end = now.toISOString().split('T')[0];
-      const res = await api.getCostByService(selectedAccount, start, end);
+      const res = await api.getBillingBreakdown(selectedAccount, start, end);
       if (res.success) {
-        const services: Record<string, number> = {};
-        (res.data || []).forEach((p: any) => (p.Groups || []).forEach((g: any) => {
-          const cost = parseFloat(g.Metrics?.UnblendedCost?.Amount || '0');
-          if (cost > 0) services[g.Keys[0]] = (services[g.Keys[0]] || 0) + cost;
-        }));
-        setCostByService(Object.entries(services).map(([name, cost]) => ({ name, cost })).sort((a, b) => b.cost - a.cost));
+        setCostByService(res.data.byService || []);
+        setCostByRegion(res.data.byRegion || []);
+        // 扫描区域默认取账单里花费最高的真实区域
+        const billed = (res.data.byRegion || []).map((r: any) => r.region).filter((r: string) => /^[a-z]{2}-[a-z]+-\d+$/.test(r));
+        if (billed.length) setSelectedRegion(billed[0]);
         setStep(1);
-      }
+      } else { message.error(res.error); }
     } catch (e: any) { message.error(e.message); }
     finally { setLoading(false); }
   };
@@ -56,6 +56,10 @@ const CleanupPage: React.FC = () => {
   const handleDelete = () => { message.info('删除功能需要在桌面版执行（安全考虑）'); setConfirmOpen(false); };
 
   const filtered = resources.filter(r => !searchText || r.name?.toLowerCase().includes(searchText.toLowerCase()) || r.id?.includes(searchText));
+
+  // 扫描区域下拉：优先用账单里有花费的真实区域，没有则回退到常用区域列表
+  const billedRegions = costByRegion.map((r: any) => r.region).filter((r: string) => /^[a-z]{2}-[a-z]+-\d+$/.test(r));
+  const scanRegionOptions = (billedRegions.length ? billedRegions : REGIONS).map((r: string) => ({ label: r, value: r }));
 
   return (
     <div>
@@ -83,13 +87,35 @@ const CleanupPage: React.FC = () => {
         </div>
       )}
 
-      {step >= 1 && costByService.length > 0 && (
-        <Card size="small" style={{ marginBottom: 12 }} title={`费用分布 (${costByService.length} 个服务)`}>
-          <Table size="small" pagination={false} dataSource={costByService.slice(0, 8)} rowKey="name"
-            columns={[{ title: '服务', dataIndex: 'name' }, { title: '费用', dataIndex: 'cost', render: (c: number) => `$${c.toFixed(2)}` }]} />
-          <Space style={{ marginTop: 8 }}>
-            <Select style={{ width: 150 }} value={selectedRegion} onChange={setSelectedRegion} options={REGIONS.map(r => ({ label: r, value: r }))} />
-            <Button type="primary" icon={<ArrowRightOutlined />} onClick={scanResources} loading={loading}>扫描资源</Button>
+      {step >= 1 && (costByService.length > 0 || costByRegion.length > 0) && (
+        <Card size="small" style={{ marginBottom: 12 }} title="账单分析（近 30 天，基于 Cost Explorer）">
+          {costByService.length === 0 && costByRegion.length === 0 ? (
+            <Alert type="info" showIcon message="该账户近 30 天没有产生费用" />
+          ) : (
+            <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap' }}>
+              <div style={{ flex: 1, minWidth: 260 }}>
+                <div style={{ fontWeight: 600, marginBottom: 6 }}>按服务（{costByService.length}）</div>
+                <Table size="small" pagination={costByService.length > 8 ? { pageSize: 8, size: 'small' } : false} dataSource={costByService} rowKey="name"
+                  columns={[
+                    { title: '服务', dataIndex: 'name', ellipsis: true },
+                    { title: '费用', dataIndex: 'cost', width: 96, align: 'right' as const, render: (c: number) => `$${c.toFixed(2)}` },
+                  ]} />
+              </div>
+              <div style={{ flex: 1, minWidth: 220 }}>
+                <div style={{ fontWeight: 600, marginBottom: 6 }}>按区域（{costByRegion.length}）</div>
+                <Table size="small" pagination={costByRegion.length > 8 ? { pageSize: 8, size: 'small' } : false} dataSource={costByRegion} rowKey="region"
+                  columns={[
+                    { title: '区域', dataIndex: 'region', render: (r: string) => r === 'global' ? <Tag>全局/无区域</Tag> : <code style={{ fontSize: 12 }}>{r}</code> },
+                    { title: '费用', dataIndex: 'cost', width: 96, align: 'right' as const, render: (c: number) => `$${c.toFixed(2)}` },
+                  ]} />
+              </div>
+            </div>
+          )}
+          <Space style={{ marginTop: 12 }} wrap>
+            <span style={{ color: '#64748B', fontSize: 12 }}>扫描区域:</span>
+            <Select style={{ width: 190 }} value={selectedRegion} onChange={setSelectedRegion} showSearch options={scanRegionOptions} />
+            <Button type="primary" icon={<ArrowRightOutlined />} onClick={scanResources} loading={loading}>扫描该区域资源</Button>
+            {billedRegions.length > 0 && <span style={{ color: '#94a3b8', fontSize: 12 }}>（区域列表来自账单实际花费）</span>}
           </Space>
         </Card>
       )}

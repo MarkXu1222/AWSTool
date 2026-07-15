@@ -284,6 +284,15 @@ awsRouter.get('/billing/by-service/:accountId', async (req: Request, res: Respon
   } catch (e: any) { res.status(500).json({ error: e.message }); }
 });
 
+// Billing breakdown by service AND region (资源清理第一步：基于真实账单)
+awsRouter.get('/billing/breakdown/:accountId', async (req: Request, res: Response) => {
+  try {
+    const { start, end } = req.query;
+    const data = await aws.getBillingBreakdown(String(req.params.accountId), String(start || ''), String(end || ''));
+    res.json({ success: true, data });
+  } catch (e: any) { res.status(500).json({ error: e.message }); }
+});
+
 // List quotas
 awsRouter.get('/quotas/:accountId/:serviceCode', async (req: Request, res: Response) => {
   try {
