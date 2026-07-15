@@ -129,7 +129,7 @@ const AccountsPage: React.FC = () => {
     { title: '状态', dataIndex: 'Status', key: 'Status', width: 90, align: 'center' as const,
       filters: [{ text: 'ACTIVE', value: 'ACTIVE' }, { text: 'SUSPENDED', value: 'SUSPENDED' }],
       onFilter: (value: any, record: any) => record.Status === value,
-      render: (s: string) => <Tag color={s === 'ACTIVE' ? 'success' : 'error'} style={{ margin: 0, borderRadius: 12, fontSize: 11 }}>{s}</Tag> },
+      render: (s: string) => <Tag color={s === 'ACTIVE' ? 'success' : 'error'} style={{ margin: 0, fontSize: 11 }}>{s}</Tag> },
   ];
 
   return (

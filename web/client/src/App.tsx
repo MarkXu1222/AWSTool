@@ -83,9 +83,9 @@ const App: React.FC = () => {
         token: {
           colorPrimary: '#2563eb',
           colorInfo: '#2563eb',
-          colorSuccess: '#16a34a',
-          colorWarning: '#d97706',
-          colorError: '#dc2626',
+          colorSuccess: '#52c41a',
+          colorWarning: '#faad14',
+          colorError: '#ff4d4f',
           borderRadius: 8,
           fontSize: 14,
           colorBgLayout: '#f4f5f7',

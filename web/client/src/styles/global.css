@@ -25,13 +25,13 @@
   --color-primary: #2563eb;
   --color-primary-hover: #3b82f6;
   --color-primary-bg: #eff4ff;
-  /* 状态色 */
-  --color-success: #16a34a;
-  --color-success-bg: #f0fdf4;
-  --color-warning: #d97706;
-  --color-warning-bg: #fffbeb;
-  --color-error: #dc2626;
-  --color-error-bg: #fef2f2;
+  /* 状态色 (AntD 标准语义色,清爽好认) */
+  --color-success: #52c41a;
+  --color-success-bg: #f6ffed;
+  --color-warning: #faad14;
+  --color-warning-bg: #fffbe6;
+  --color-error: #ff4d4f;
+  --color-error-bg: #fff2f0;
   /* 间距 */
   --space-page: 24px;
   --space-section: 16px;
@@ -347,7 +347,7 @@ code, pre {
 
 /* === Tags (状态标签) === */
 .ant-tag {
-  border-radius: var(--radius-sm) !important;
+  border-radius: 6px !important;
   font-size: 12px !important;
 }
 
