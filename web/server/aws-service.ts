@@ -462,37 +462,6 @@ export async function getBillingBreakdown(accountId: string, startDate: string, 
   };
 }
 
-/**
- * 近 N 个月每月总费用(跨所有 payer 求和),用于概览页费用趋势图。
- * 每个 payer 一次 CE MONTHLY 调用(返回 N 个月桶),开销小;由 dashboard 缓存后台刷新。
- */
-export async function getCostTrend(months = 6) {
-  const now = new Date();
-  const start = new Date(now.getFullYear(), now.getMonth() - (months - 1), 1).toISOString().split('T')[0];
-  const end = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1).toISOString().split('T')[0];
-  const monthTotals: Record<string, number> = {};
-  for (const payer of PAYERS) {
-    try {
-      const admin = await getAdminCredsForPayer(payer.roleArn);
-      const ce = new CostExplorerClient({ region: 'us-east-1', credentials: admin });
-      const resp = await ce.send(new GetCostAndUsageCommand({
-        TimePeriod: { Start: start, End: end },
-        Granularity: 'MONTHLY',
-        Metrics: ['UnblendedCost'],
-      }));
-      (resp.ResultsByTime || []).forEach(p => {
-        const m = (p.TimePeriod?.Start || '').slice(0, 7);
-        if (!m) return;
-        const amt = parseFloat(p.Total?.UnblendedCost?.Amount || '0');
-        monthTotals[m] = (monthTotals[m] || 0) + amt;
-      });
-    } catch { /* skip payer */ }
-  }
-  return Object.entries(monthTotals)
-    .sort(([a], [b]) => a.localeCompare(b))
-    .map(([month, cost]) => ({ month, cost }));
-}
-
 export async function listServiceQuotas(accountId: string, serviceCode: string, region?: string) {
   const creds = await assumeToAccount(accountId);
   const client = new ServiceQuotasClient({ region: region || DEFAULT_REGION, credentials: creds });
