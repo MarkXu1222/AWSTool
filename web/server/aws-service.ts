@@ -5,7 +5,7 @@ import { STSClient, AssumeRoleCommand, GetCallerIdentityCommand, AssumeRootComma
 import { OrganizationsClient, ListAccountsCommand } from '@aws-sdk/client-organizations';
 import { CostExplorerClient, GetCostAndUsageCommand } from '@aws-sdk/client-cost-explorer';
 import { ServiceQuotasClient, ListServiceQuotasCommand, RequestServiceQuotaIncreaseCommand, ListRequestedServiceQuotaChangeHistoryCommand, GetServiceQuotaCommand } from '@aws-sdk/client-service-quotas';
-import { IAMClient, GetAccountSummaryCommand, ListMFADevicesCommand, ListUsersCommand, ListVirtualMFADevicesCommand, DeactivateMFADeviceCommand, DeleteVirtualMFADeviceCommand, CreateLoginProfileCommand } from '@aws-sdk/client-iam';
+import { IAMClient, GetAccountSummaryCommand, ListMFADevicesCommand, ListUsersCommand, ListVirtualMFADevicesCommand, DeactivateMFADeviceCommand, DeleteVirtualMFADeviceCommand, CreateLoginProfileCommand, ListAccessKeysCommand, GetLoginProfileCommand } from '@aws-sdk/client-iam';
 import { EC2Client, DescribeInstancesCommand, DescribeVolumesCommand } from '@aws-sdk/client-ec2';
 import { S3Client, ListBucketsCommand } from '@aws-sdk/client-s3';
 import { LambdaClient, ListFunctionsCommand } from '@aws-sdk/client-lambda';
@@ -299,6 +299,42 @@ export async function recoverRootPassword(accountId: string) {
   const iamRoot = new IAMClient({ region: DEFAULT_REGION, credentials: rootCreds });
   await iamRoot.send(new CreateLoginProfileCommand({}));
   return { accountId, ok: true };
+}
+
+/**
+ * 权威实时读取成员账户根用户凭证：AssumeRoot(IAMAuditRootUserCredentials) 会话内
+ * 直接 ListAccessKeys / ListMFADevices / GetLoginProfile（均省略 UserName，即 root 本身）。
+ * 返回真实的访问密钥列表(含 ID/状态)、MFA 设备、密码是否存在。
+ * 每个调用单独 try/catch：若审计策略未授予某项读权限，只把该项标为 error，其余仍可用。
+ */
+export async function auditRootCredentials(accountId: string) {
+  const rootCreds = await assumeRoot(accountId, ROOT_TASK_POLICY.audit);
+  const iam = new IAMClient({ region: DEFAULT_REGION, credentials: rootCreds });
+  const out: any = { accountId, accessKeys: [], mfaDevices: [], passwordEnabled: null };
+
+  try {
+    const r = await iam.send(new ListAccessKeysCommand({}));
+    out.accessKeys = (r.AccessKeyMetadata || []).map(k => ({
+      id: k.AccessKeyId,
+      status: k.Status,
+      createDate: k.CreateDate ? new Date(k.CreateDate).toISOString() : null,
+    }));
+  } catch (e: any) { out.accessKeysError = e?.name || String(e); }
+
+  try {
+    const r = await iam.send(new ListMFADevicesCommand({}));
+    out.mfaDevices = (r.MFADevices || []).map(d => ({ serial: d.SerialNumber }));
+  } catch (e: any) { out.mfaError = e?.name || String(e); }
+
+  try {
+    await iam.send(new GetLoginProfileCommand({}));
+    out.passwordEnabled = true;
+  } catch (e: any) {
+    if (e?.name === 'NoSuchEntityException' || e?.name === 'NoSuchEntity') out.passwordEnabled = false;
+    else out.passwordError = e?.name || String(e);
+  }
+
+  return out;
 }
 
 // ===== Exported service functions =====

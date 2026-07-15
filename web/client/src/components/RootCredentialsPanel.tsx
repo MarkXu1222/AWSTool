@@ -165,7 +165,7 @@ const RootCredentialsPanel: React.FC<Props> = ({ accountId, rootCredentials, can
         <Descriptions size="small" column={1} bordered>
           <Descriptions.Item label="密码">
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
-              <Tag color={status.passwordEnabled ? 'green' : 'default'}>{status.passwordEnabled ? '已启用' : '未启用'}</Tag>
+              <Tag color={status.passwordEnabled == null ? 'default' : (status.passwordEnabled ? 'green' : 'default')}>{status.passwordEnabled == null ? '未知' : (status.passwordEnabled ? '已启用' : '未启用')}</Tag>
               {canRoot && (
                 <Popconfirm
                   title="恢复根用户密码"
@@ -180,8 +180,8 @@ const RootCredentialsPanel: React.FC<Props> = ({ accountId, rootCredentials, can
           </Descriptions.Item>
           <Descriptions.Item label="Root MFA">
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
-              <Tag color={status.mfaActive ? 'green' : 'red'}>{status.mfaActive ? '已启用' : '未启用 ⚠️'}</Tag>
-              {canRoot && status.mfaActive && (
+              <Tag color={status.mfaActive == null ? 'default' : (status.mfaActive ? 'green' : 'red')}>{status.mfaActive == null ? '未知' : (status.mfaActive ? '已启用' : '未启用 ⚠️')}</Tag>
+              {canRoot && status.mfaActive === true && (
                 <Popconfirm
                   title="删除根用户 MFA"
                   description="将停用并删除该账户根用户的虚拟 MFA 设备，此操作不可逆且会被审计。"
@@ -193,9 +193,29 @@ const RootCredentialsPanel: React.FC<Props> = ({ accountId, rootCredentials, can
               )}
             </div>
           </Descriptions.Item>
-          <Descriptions.Item label="Access Key 1"><Tag color={status.accessKey1Active ? 'red' : 'green'}>{status.accessKey1Active ? '存在 ⚠️' : '无'}</Tag></Descriptions.Item>
-          <Descriptions.Item label="Access Key 2"><Tag color={status.accessKey2Active ? 'red' : 'green'}>{status.accessKey2Active ? '存在 ⚠️' : '无'}</Tag></Descriptions.Item>
-          <Descriptions.Item label="密码最后使用">{status.passwordLastUsed || '-'}</Descriptions.Item>
+          {Array.isArray(status.accessKeys) ? (
+            <Descriptions.Item label="Access Keys">
+              {status.accessKeys.length === 0 ? (
+                <Tag color="green">无</Tag>
+              ) : (
+                <Space direction="vertical" size={2} style={{ width: '100%' }}>
+                  {status.accessKeys.map((k: any) => (
+                    <div key={k.id} style={{ fontSize: 12 }}>
+                      <Tag color={k.status === 'Active' ? 'red' : 'default'} style={{ marginRight: 4 }}>{k.status === 'Active' ? '存在 ⚠️' : k.status}</Tag>
+                      <code>{k.id}</code>
+                      {k.createDate && <span style={{ color: '#94a3b8', marginLeft: 6 }}>创建于 {new Date(k.createDate).toLocaleDateString()}</span>}
+                    </div>
+                  ))}
+                </Space>
+              )}
+            </Descriptions.Item>
+          ) : (
+            <>
+              <Descriptions.Item label="Access Key 1"><Tag color={status.accessKey1Active ? 'red' : 'green'}>{status.accessKey1Active ? '存在 ⚠️' : '无'}</Tag></Descriptions.Item>
+              <Descriptions.Item label="Access Key 2"><Tag color={status.accessKey2Active ? 'red' : 'green'}>{status.accessKey2Active ? '存在 ⚠️' : '无'}</Tag></Descriptions.Item>
+            </>
+          )}
+          {status.passwordLastUsed && <Descriptions.Item label="密码最后使用">{status.passwordLastUsed}</Descriptions.Item>}
         </Descriptions>
       ) : <span style={{ color: '#999', fontSize: 12 }}>根用户凭证状态不可用（凭证报告获取失败）</span>}
 

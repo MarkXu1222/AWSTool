@@ -494,6 +494,27 @@ awsRouter.post('/quotas/sync-account/:accountId', async (req: Request, res: Resp
 awsRouter.get('/root-credentials/:accountId', async (req: Request, res: Response) => {
   try {
     const accountId = String(req.params.accountId);
+
+    // 优先：AssumeRoot 审计会话直接读取真实 root 凭证（权威、实时、按具体密钥）
+    try {
+      const live = await (aws as any).auditRootCredentials(accountId);
+      if (!live.accessKeysError) {
+        const keys = live.accessKeys || [];
+        return res.json({ success: true, data: {
+          accountId,
+          source: 'live-root',
+          liveStatus: true,
+          passwordEnabled: live.passwordEnabled,                                   // 可能为 null（该项无权限时）
+          mfaActive: live.mfaError ? null : (live.mfaDevices || []).length > 0,
+          accessKeys: keys,                                                        // [{ id, status, createDate }]
+          accessKey1Active: keys.length >= 1,
+          accessKey2Active: keys.length >= 2,
+          accessKeysCount: keys.length,
+        }});
+      }
+      // ListAccessKeys 被审计策略拒绝 → 落到下面的 GetAccountSummary + 凭证报告
+    } catch { /* AssumeRoot 未开通/无权限 → 回退到凭证报告 */ }
+
     const { IAMClient, GenerateCredentialReportCommand, GetCredentialReportCommand, GetAccountSummaryCommand } = require('@aws-sdk/client-iam');
     const creds = await (aws as any).assumeToAccount(accountId);
     const iam = new IAMClient({ region: 'us-east-1', credentials: creds });
