@@ -35,7 +35,7 @@ const CredRow: React.FC<{ label: string; value: string; secret?: boolean; reveal
       {secret && !reveal ? '••••••••••••••••' : value}
     </code>
     <Tooltip title="复制">
-      <Button size="small" type="text" icon={<CopyOutlined />} onClick={() => copy(value, label)} />
+      <Button size="small" type="text" aria-label={`复制${label}`} icon={<CopyOutlined />} onClick={() => copy(value, label)} />
     </Tooltip>
   </div>
 );
@@ -249,7 +249,7 @@ const RootCredentialsPanel: React.FC<Props> = ({ accountId, rootCredentials, can
                           okText="删除" okType="danger" cancelText="取消"
                           onConfirm={() => handleDeleteAccessKey(k.id)}
                         >
-                          <Button size="small" danger type="link" icon={<DeleteOutlined />} loading={deletingKey === k.id} style={{ padding: '0 4px', flexShrink: 0 }} />
+                          <Button size="small" danger type="link" aria-label={`删除访问密钥 ${k.id}`} icon={<DeleteOutlined />} loading={deletingKey === k.id} style={{ padding: '0 4px', flexShrink: 0 }} />
                         </Popconfirm>
                       )}
                     </div>
@@ -279,7 +279,7 @@ const RootCredentialsPanel: React.FC<Props> = ({ accountId, rootCredentials, can
         <Space size={4}>
           {creds && (
             <Tooltip title={reveal ? '隐藏明文' : '显示明文'}>
-              <Button size="small" type="text" icon={reveal ? <EyeInvisibleOutlined /> : <EyeOutlined />} onClick={() => setReveal(r => !r)} />
+              <Button size="small" type="text" aria-label={reveal ? '隐藏明文' : '显示明文'} icon={reveal ? <EyeInvisibleOutlined /> : <EyeOutlined />} onClick={() => setReveal(r => !r)} />
             </Tooltip>
           )}
           <Button

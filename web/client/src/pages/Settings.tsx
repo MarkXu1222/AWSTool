@@ -199,7 +199,7 @@ const SettingsPage: React.FC<SettingsPageProps> = ({ onLogout }) => {
                     <Button size="small" icon={<EditOutlined />} onClick={() => openEditUser(record)}>编辑</Button>
                     <Button size="small" onClick={() => { setResetPwdOpen(record); resetForm.resetFields(); }}>重置</Button>
                     <Popconfirm title="确定删除？" onConfirm={() => handleDeleteUser(record.id)} okText="删除" cancelText="取消">
-                      <Button size="small" danger icon={<DeleteOutlined />} />
+                      <Button size="small" danger aria-label="删除用户" icon={<DeleteOutlined />} />
                     </Popconfirm>
                   </Space>
                 )},

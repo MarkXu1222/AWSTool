@@ -142,7 +142,7 @@ const AccountsPage: React.FC = () => {
         </div>
         <Space>
           <Button size="small" className="hide-mobile" onClick={() => exportToCSV(filtered.map(a => ({ ID: a.Id, 名称: a.Name, 邮箱: a.Email, 组织: a._payer, 状态: a.Status })), 'accounts')}>导出</Button>
-          <Button size="small" icon={<ReloadOutlined />} onClick={fetchAccounts} loading={loading} />
+          <Button size="small" aria-label="刷新账户列表" icon={<ReloadOutlined />} onClick={fetchAccounts} loading={loading} />
         </Space>
       </div>
 
@@ -194,7 +194,7 @@ const AccountsPage: React.FC = () => {
                   extra={
                     <Space size={4}>
                       <Button type="primary" size="small" icon={<LoginOutlined />} loading={consoleLoading} onClick={() => openConsole(selectedAccount.Id)}>控制台</Button>
-                      <Button type="text" size="small" onClick={() => setSelectedAccount(null)}>✕</Button>
+                      <Button type="text" size="small" aria-label="关闭" onClick={() => setSelectedAccount(null)}>✕</Button>
                     </Space>
                   }>
                   <Tabs size="small" items={[
