@@ -169,20 +169,14 @@ const AccountsPage: React.FC = () => {
           <h2 className="page-header-title">账户管理</h2>
           <p className="page-header-subtitle">管理 AWS 账户、组织归属与状态</p>
         </div>
-        <Space>
-          <Button size="small" className="hide-mobile" onClick={() => exportToCSV(filtered.map(a => ({ ID: a.Id, 名称: a.Name, 邮箱: a.Email, 组织: a._payer, 状态: a.Status })), 'accounts')}>导出</Button>
-          <Button size="small" aria-label="刷新账户列表" icon={<ReloadOutlined />} onClick={fetchAccounts} loading={loading} />
-        </Space>
+        {!isMobile && accounts.length > 0 && (
+          <div className="stat-chips" style={{ margin: 0 }}>
+            <span className="stat-chip">总账户 <strong>{accounts.length}</strong></span>
+            <span className="stat-chip success">Active <strong>{accounts.filter(a => a.Status === 'ACTIVE').length}</strong></span>
+            <span className="stat-chip">组织 <strong>{[...new Set(accounts.map(a => a._payer))].length}</strong></span>
+          </div>
+        )}
       </div>
-
-      {/* Stats Chips */}
-      {!isMobile && accounts.length > 0 && (
-        <div className="stat-chips">
-          <span className="stat-chip">总账户 <strong>{accounts.length}</strong></span>
-          <span className="stat-chip success">Active <strong>{accounts.filter(a => a.Status === 'ACTIVE').length}</strong></span>
-          <span className="stat-chip">组织 <strong>{[...new Set(accounts.map(a => a._payer))].length}</strong></span>
-        </div>
-      )}
 
       {/* Content Card */}
       <Card size="small" bodyStyle={{ padding: '12px 16px' }}>
@@ -190,7 +184,11 @@ const AccountsPage: React.FC = () => {
         <div className="table-toolbar">
           <Input placeholder="搜索 ID、名称、邮箱或组织..." prefix={<SearchOutlined />} value={searchText}
             onChange={e => setSearchText(e.target.value)} allowClear size="small" />
-          <span className="stat-chip">共 <strong>{filtered.length}</strong> 条</span>
+          <Space size={8}>
+            <span className="stat-chip">共 <strong>{filtered.length}</strong> 条</span>
+            <Button size="small" className="hide-mobile" onClick={() => exportToCSV(filtered.map(a => ({ ID: a.Id, 名称: a.Name, 邮箱: a.Email, 组织: a._payer, 状态: a.Status })), 'accounts')}>导出</Button>
+            <Button size="small" aria-label="刷新账户列表" icon={<ReloadOutlined />} onClick={fetchAccounts} loading={loading} />
+          </Space>
         </div>
 
         {/* Mobile: card list */}
