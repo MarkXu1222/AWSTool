@@ -124,8 +124,8 @@ const AccountsPage: React.FC = () => {
               ))}
             </>
           ) : <span style={{ color: '#999' }}>无数据</span> },
-          { key: 'root', label: '根用户', children: detailLoading ? <div style={{ textAlign: 'center', padding: 30 }}><Spin /></div> : (
-            <RootCredentialsPanel accountId={selectedAccount.Id} rootCredentials={detail?.rootCredentials} canRoot={canRoot} />
+          { key: 'root', label: '根用户', children: (
+            <RootCredentialsPanel accountId={selectedAccount.Id} rootCredentials={detail?.rootCredentials} canRoot={canRoot} loading={detailLoading} />
           ) },
         ]} />
       </div>
@@ -250,8 +250,8 @@ const AccountsPage: React.FC = () => {
                           columns={[{ title: '用户', dataIndex: 'user' }, { title: 'MFA', dataIndex: 'hasMFA', width: 50, render: (h: boolean) => h ? '✓' : '✗' }]} />
                       </>
                     ) : '无数据' },
-                    { key: 'root', label: '根用户', children: detailLoading ? <Spin /> : (
-                      <RootCredentialsPanel accountId={selectedAccount.Id} rootCredentials={detail?.rootCredentials} canRoot={canRoot} />
+                    { key: 'root', label: '根用户', children: (
+                      <RootCredentialsPanel accountId={selectedAccount.Id} rootCredentials={detail?.rootCredentials} canRoot={canRoot} loading={detailLoading} />
                     ) },
                   ]} />
                 </Card>

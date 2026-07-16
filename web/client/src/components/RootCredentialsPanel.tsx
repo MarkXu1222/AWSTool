@@ -17,6 +17,8 @@ interface Props {
   rootCredentials: any;
   // 是否具备根用户凭证操作权限（admin 或被授予 root_access）。无权限时隐藏三个敏感功能。
   canRoot?: boolean;
+  // 父组件是否仍在拉取账户详情（含根凭证状态）。为 true 时状态区显示加载中，但操作按钮始终可见。
+  loading?: boolean;
 }
 
 async function copy(text: string, label: string) {
@@ -40,7 +42,7 @@ const CredRow: React.FC<{ label: string; value: string; secret?: boolean; reveal
   </div>
 );
 
-const RootCredentialsPanel: React.FC<Props> = ({ accountId, rootCredentials, canRoot }) => {
+const RootCredentialsPanel: React.FC<Props> = ({ accountId, rootCredentials, canRoot, loading: detailLoading }) => {
   const isMobile = typeof window !== 'undefined' && window.innerWidth < 769;
   const [creds, setCreds] = useState<TempCreds | null>(null);
   const [loading, setLoading] = useState(false);
@@ -266,7 +268,7 @@ const RootCredentialsPanel: React.FC<Props> = ({ accountId, rootCredentials, can
           )}
           {status.passwordLastUsed && <Descriptions.Item label="密码最后使用">{status.passwordLastUsed}</Descriptions.Item>}
         </Descriptions>
-      ) : <span style={{ color: '#999', fontSize: 12 }}>根用户凭证状态不可用（凭证报告获取失败）</span>}
+      ) : detailLoading ? <span style={{ color: '#999', fontSize: 12 }}>正在加载根用户状态…</span> : <span style={{ color: '#999', fontSize: 12 }}>根用户凭证状态不可用（凭证报告获取失败）</span>}
 
       {canRoot && (
         <>

@@ -37,13 +37,19 @@ app.use(cors({
   origin: (origin, callback) => {
     const allowed = [
       'https://markxu.co',
+      'https://www.markxu.co',
+      'http://markxu.co',
       'http://localhost:8000',
       'http://localhost:8001',
       'http://127.0.0.1:8000',
+      'http://localhost:3000',
     ];
-    // Allow requests with no origin (e.g. curl, mobile apps)
+    // 允许无 Origin（curl / 移动端 App）与白名单来源。
+    // 关键：未列入的来源用 callback(null, false) 优雅拒绝（不附加 CORS 头），
+    // 绝不 throw —— 抛错会被 Express 当成 500，导致同源静态资源(带 crossorigin 的 JS/CSS)
+    // 请求返回 500，整站白屏（例如直连 IP / www. / http:// 等来源访问时）。
     if (!origin || allowed.includes(origin)) return callback(null, true);
-    callback(new Error('Not allowed by CORS'));
+    return callback(null, false);
   },
   credentials: true,
 }));
