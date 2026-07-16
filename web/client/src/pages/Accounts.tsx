@@ -28,7 +28,13 @@ const AccountsPage: React.FC = () => {
   const [detail, setDetail] = useState<any>(null);
   const [detailLoading, setDetailLoading] = useState(false);
   const [consoleLoading, setConsoleLoading] = useState(false);
-  const [isMobile] = useState(() => window.innerWidth < 769);
+  // 窄屏（手机 + iPad 竖屏，<992）用全屏详情；随旋转/缩放自适应
+  const [isMobile, setIsMobile] = useState(() => window.innerWidth < 992);
+  useEffect(() => {
+    const onResize = () => setIsMobile(window.innerWidth < 992);
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, []);
   const [canRoot, setCanRoot] = useState(false);
 
   const fetchAccounts = async () => {
