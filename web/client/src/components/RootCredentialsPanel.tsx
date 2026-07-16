@@ -41,6 +41,7 @@ const CredRow: React.FC<{ label: string; value: string; secret?: boolean; reveal
 );
 
 const RootCredentialsPanel: React.FC<Props> = ({ accountId, rootCredentials, canRoot }) => {
+  const isMobile = typeof window !== 'undefined' && window.innerWidth < 769;
   const [creds, setCreds] = useState<TempCreds | null>(null);
   const [loading, setLoading] = useState(false);
   const [reveal, setReveal] = useState(false);
@@ -189,7 +190,7 @@ const RootCredentialsPanel: React.FC<Props> = ({ accountId, rootCredentials, can
   return (
     <div>
       {/* 根用户凭证状态 + 刷新 */}
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6, flexWrap: 'wrap', rowGap: 4 }}>
         <span style={{ fontSize: 12, color: '#94a3b8' }}>
           {(fetchedStatus || rootCredentials)
             ? (status.liveStatus ? 'MFA / 密钥为实时状态，密码等来自凭证报告' : '状态来自凭证报告（AWS 缓存，最长约 4 小时）')
@@ -200,9 +201,9 @@ const RootCredentialsPanel: React.FC<Props> = ({ accountId, rootCredentials, can
         </Tooltip>
       </div>
       {(fetchedStatus || rootCredentials) ? (
-        <Descriptions size="small" column={1} bordered>
+        <Descriptions size="small" column={1} bordered layout={isMobile ? 'vertical' : 'horizontal'}>
           <Descriptions.Item label="密码">
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, flexWrap: 'wrap', rowGap: 6 }}>
               <Tag color={status.passwordEnabled == null ? 'default' : (status.passwordEnabled ? 'green' : 'default')}>{status.passwordEnabled == null ? '未知' : (status.passwordEnabled ? '已启用' : '未启用')}</Tag>
               {canRoot && (
                 <Popconfirm
@@ -217,7 +218,7 @@ const RootCredentialsPanel: React.FC<Props> = ({ accountId, rootCredentials, can
             </div>
           </Descriptions.Item>
           <Descriptions.Item label="Root MFA">
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, flexWrap: 'wrap', rowGap: 6 }}>
               <Tag color={status.mfaActive == null ? 'default' : (status.mfaActive ? 'green' : 'red')}>{status.mfaActive == null ? '未知' : (status.mfaActive ? '已启用' : '未启用 ⚠️')}</Tag>
               {canRoot && status.mfaActive === true && (
                 <Popconfirm
@@ -238,7 +239,7 @@ const RootCredentialsPanel: React.FC<Props> = ({ accountId, rootCredentials, can
               ) : (
                 <Space direction="vertical" size={4} style={{ width: '100%' }}>
                   {status.accessKeys.map((k: any) => (
-                    <div key={k.id} style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12 }}>
+                    <div key={k.id} style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, flexWrap: 'wrap', rowGap: 4 }}>
                       <Tag color={k.status === 'Active' ? 'red' : 'default'} style={{ margin: 0 }}>{k.status === 'Active' ? '存在 ⚠️' : k.status}</Tag>
                       <code style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{k.id}</code>
                       {k.createDate && <span style={{ color: '#94a3b8', flexShrink: 0 }}>{new Date(k.createDate).toLocaleDateString()}</span>}
@@ -272,7 +273,7 @@ const RootCredentialsPanel: React.FC<Props> = ({ accountId, rootCredentials, can
       <Divider style={{ margin: '12px 0' }} />
 
       {/* Admin 临时凭证 */}
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8, flexWrap: 'wrap', rowGap: 6 }}>
         <span style={{ fontWeight: 600, fontSize: 13 }}>
           <SafetyCertificateOutlined style={{ marginRight: 6, color: '#1677ff' }} />Admin 临时凭证
         </span>

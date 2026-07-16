@@ -85,7 +85,7 @@ const AccountsPage: React.FC = () => {
   // Mobile detail view (full screen overlay)
   if (selectedAccount && isMobile) {
     return (
-      <div className="mobile-detail-overlay" style={{ padding: 16 }}>
+      <div className="mobile-detail-overlay" style={{ padding: 16, paddingBottom: 88 }}>
         <div style={{ display: 'flex', alignItems: 'center', marginBottom: 16 }}>
           <Button type="text" icon={<LeftOutlined />} onClick={() => setSelectedAccount(null)}>返回</Button>
           <span style={{ fontWeight: 600, marginLeft: 8 }}>{selectedAccount.Name}</span>
