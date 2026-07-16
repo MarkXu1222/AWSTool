@@ -94,14 +94,14 @@ const AccountsPage: React.FC = () => {
   // Mobile detail view (full screen overlay)
   if (selectedAccount && detailFullScreen) {
     return (
-      <div className="mobile-detail-overlay" style={{ padding: 16, paddingBottom: 88 }}>
-        <div style={{ display: 'flex', alignItems: 'center', marginBottom: 16 }}>
+      <div className="mobile-detail-overlay" style={{ padding: 16, paddingBottom: 88, display: 'flex', flexDirection: 'column' }}>
+        <div style={{ display: 'flex', alignItems: 'center', marginBottom: 16, flexShrink: 0 }}>
           <Button type="text" icon={<LeftOutlined />} onClick={() => setSelectedAccount(null)}>返回</Button>
           <span style={{ fontWeight: 600, marginLeft: 8 }}>{selectedAccount.Name}</span>
           <Tag style={{ marginLeft: 8 }}>{selectedAccount._payer}</Tag>
           <Button type="primary" size="small" icon={<LoginOutlined />} loading={consoleLoading} onClick={() => openConsole(selectedAccount.Id)} style={{ marginLeft: 'auto' }}>控制台</Button>
         </div>
-        <Tabs size="small" items={[
+        <Tabs size="small" className="mobile-detail-tabs" style={{ flex: 1, minHeight: 0 }} items={[
           { key: 'info', label: '基本', children: (
             <Descriptions size="small" column={1} bordered>
               <Descriptions.Item label="ID"><code style={{ fontSize: 12 }}>{selectedAccount.Id}</code></Descriptions.Item>
