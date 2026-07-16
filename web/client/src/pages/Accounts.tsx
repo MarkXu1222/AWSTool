@@ -226,7 +226,7 @@ const AccountsPage: React.FC = () => {
             </div>
             {selectedAccount && (
               <div style={{ width: 360, minWidth: 360 }}>
-                <Card size="small" title={<span>{selectedAccount.Name}</span>}
+                <Card size="small" style={{ height: '100%' }} title={<span>{selectedAccount.Name}</span>}
                   extra={
                     <Space size={4}>
                       <Button type="primary" size="small" icon={<LoginOutlined />} loading={consoleLoading} onClick={() => openConsole(selectedAccount.Id)}>控制台</Button>
