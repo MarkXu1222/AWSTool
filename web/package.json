@@ -1,6 +1,6 @@
 {
   "name": "aws-toolbox-web",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "AWS Toolbox Web Edition — Online with MFA",
   "private": true,
   "scripts": {

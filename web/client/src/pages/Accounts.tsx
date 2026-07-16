@@ -28,10 +28,13 @@ const AccountsPage: React.FC = () => {
   const [detail, setDetail] = useState<any>(null);
   const [detailLoading, setDetailLoading] = useState(false);
   const [consoleLoading, setConsoleLoading] = useState(false);
-  // 窄屏（手机 + iPad 竖屏，<992）用全屏详情；随旋转/缩放自适应
-  const [isMobile, setIsMobile] = useState(() => window.innerWidth < 992);
+  // 列表/侧边栏按 769（与全局 CSS 的底部导航/侧栏断点一致）
+  const [isMobile, setIsMobile] = useState(() => window.innerWidth < 769);
+  // 详情遮罩层断点更宽(<992)：iPad 竖屏/大屏手机点账户也走全屏详情。
+  // 遮罩层是 position:fixed 全屏、自带「返回」，不依赖底部导航，所以可用更大的断点而不冲突。
+  const [detailFullScreen, setDetailFullScreen] = useState(() => window.innerWidth < 992);
   useEffect(() => {
-    const onResize = () => setIsMobile(window.innerWidth < 992);
+    const onResize = () => { setIsMobile(window.innerWidth < 769); setDetailFullScreen(window.innerWidth < 992); };
     window.addEventListener('resize', onResize);
     return () => window.removeEventListener('resize', onResize);
   }, []);
@@ -89,7 +92,7 @@ const AccountsPage: React.FC = () => {
     a.Id?.includes(searchText) || a.Name?.toLowerCase().includes(searchText.toLowerCase()) || a.Email?.toLowerCase().includes(searchText.toLowerCase()));
 
   // Mobile detail view (full screen overlay)
-  if (selectedAccount && isMobile) {
+  if (selectedAccount && detailFullScreen) {
     return (
       <div className="mobile-detail-overlay" style={{ padding: 16, paddingBottom: 88 }}>
         <div style={{ display: 'flex', alignItems: 'center', marginBottom: 16 }}>
