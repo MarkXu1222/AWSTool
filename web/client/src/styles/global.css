@@ -494,12 +494,6 @@ code, pre {
   -webkit-overflow-scrolling: touch;
 }
 
-/* 移动端全屏详情：Tabs 填满剩余高度，内容区铺到底部（长内容内部滚动） */
-.mobile-detail-tabs { display: flex; flex-direction: column; }
-.mobile-detail-tabs > .ant-tabs-nav { flex-shrink: 0; }
-.mobile-detail-tabs > .ant-tabs-content-holder { flex: 1; overflow-y: auto; }
-.mobile-detail-tabs > .ant-tabs-content-holder > .ant-tabs-content { height: 100%; }
-
 /* === Account Cards (mobile) === */
 .account-card {
   background: var(--color-bg-card);
