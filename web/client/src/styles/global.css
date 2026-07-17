@@ -330,7 +330,7 @@ code, pre {
 /* 页面切换淡入上浮 */
 @keyframes pageIn {
   from { opacity: 0; transform: translateY(6px); }
-  to { opacity: 1; transform: translateY(0); }
+  to { opacity: 1; transform: none; }
 }
 .page-fade { animation: pageIn 0.28s ease both; }
 
@@ -488,6 +488,8 @@ code, pre {
 .mobile-detail-overlay {
   position: fixed;
   top: 0; left: 0; right: 0; bottom: 0;
+  height: 100vh;
+  height: 100dvh;
   background: #fff;
   z-index: 999;
   overflow-y: auto;
