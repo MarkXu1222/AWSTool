@@ -30,8 +30,18 @@ async function getAccountRegions(accountId: string) {
 
 // Enable a region for an account
 async function enableRegion(accountId: string, region: string) {
-  const creds = await (aws as any).assumeToAccount(accountId);
-  const client = new AccountClient({ region: 'us-east-1', credentials: creds });
+  // 开通区域需要 account:EnableRegion 权限。assumeToAccount 优先返回受限的 support-quota 角色
+  // （只有 ListRegions/配额相关权限，没有 EnableRegion）→ 开通会报 AccessDenied。
+  // 因此这里改走管理员凭证（OrganizationAccountAccessRole / payer role，含 AdministratorAccess）。
+  const admin = await aws.getTempAdminCredentials(accountId);
+  const client = new AccountClient({
+    region: 'us-east-1',
+    credentials: {
+      accessKeyId: admin.accessKeyId,
+      secretAccessKey: admin.secretAccessKey,
+      sessionToken: admin.sessionToken,
+    },
+  });
   await client.send(new EnableRegionCommand({ RegionName: region }));
 }
 
