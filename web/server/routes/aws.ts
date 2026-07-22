@@ -5,6 +5,7 @@ import { generateQuotaDoc, getCompanyForAccount } from '../doc-generator';
 import { COMPANY_PROFILES } from '../doc-templates';
 import { exportBillingInvoices, cleanupWorkDir, ExportTask } from '../billing-exporter';
 import { auditLogsToCsv, enrichAuditLog } from '../audit-presentation';
+import * as tagCompliance from '../tag-compliance';
 import fs from 'fs';
 import path from 'path';
 
@@ -17,6 +18,57 @@ const requireAdmin = (req: Request, res: Response, next: any) => {
   }
   next();
 };
+
+// ===== MAP 标签合规（编排中央工具账户的 tag-compliance 系统）=====
+
+// 是否已配置（前端据此显示未配置提示）
+awsRouter.get('/tag-compliance/status', async (_req: Request, res: Response) => {
+  res.json({ success: true, data: { configured: tagCompliance.isConfigured() } });
+});
+
+// 读取组织配置 orgs.json
+awsRouter.get('/tag-compliance/config', async (_req: Request, res: Response) => {
+  try {
+    res.json({ success: true, data: await tagCompliance.getOrgsConfig() });
+  } catch (e: any) { res.status(500).json({ error: e.message }); }
+});
+
+// 写入组织配置 orgs.json（viewer 拦截 + 校验 + 审计）
+awsRouter.put('/tag-compliance/config', requireAdmin, async (req: Request, res: Response) => {
+  try {
+    const orgs = Array.isArray(req.body) ? req.body : req.body?.orgs;
+    const r = await tagCompliance.putOrgsConfig(orgs);
+    const user = (req as any).user;
+    db.addAuditLog(user?.userId, 'TAG_CONFIG_UPDATE', `更新 MAP 组织配置 (${r.count} 个组织)`, user?.username, req.ip);
+    (res.locals as any).audited = true;
+    res.json({ success: true, data: r });
+  } catch (e: any) { res.status(400).json({ error: e.message }); }
+});
+
+// 触发扫描（viewer 拦截 + 审计）
+awsRouter.post('/tag-compliance/scan', requireAdmin, async (req: Request, res: Response) => {
+  try {
+    const r = await tagCompliance.startScan();
+    const user = (req as any).user;
+    db.addAuditLog(user?.userId, 'TAG_SCAN_TRIGGER', `触发 MAP 标签扫描: ${r.executionArn}`, user?.username, req.ip);
+    (res.locals as any).audited = true;
+    res.json({ success: true, data: r });
+  } catch (e: any) { res.status(500).json({ error: e.message }); }
+});
+
+// 最近执行记录
+awsRouter.get('/tag-compliance/executions', async (_req: Request, res: Response) => {
+  try {
+    res.json({ success: true, data: await tagCompliance.listExecutions(15) });
+  } catch (e: any) { res.status(500).json({ error: e.message }); }
+});
+
+// 最新报告
+awsRouter.get('/tag-compliance/report', async (_req: Request, res: Response) => {
+  try {
+    res.json({ success: true, data: await tagCompliance.getLatestReport() });
+  } catch (e: any) { res.status(500).json({ error: e.message }); }
+});
 
 // RBAC: 根用户凭证操作权限（独立于角色，可单独分配）。用于账户"根用户"tab 的敏感功能：
 // 生成 Admin 临时凭证 / 删除 Root MFA / 恢复根密码。admin 恒有；其他用户需被显式授予 root_access。

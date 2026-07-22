@@ -14,7 +14,7 @@ authenticator.options = { window: 2 };
 // === 页面访问权限：所有可分配的页面 key（需与前端 MainLayout.navItems.key 保持一致）===
 export const ALL_PAGE_KEYS = [
   'dashboard', 'accounts', 'quotas', 'regions',
-  'billing', 'cleanup', 'audit', 'settings',
+  'billing', 'cleanup', 'tagcompliance', 'audit', 'settings',
 ];
 
 // 规范化前端传来的 allowedPages：过滤非法 key，去重

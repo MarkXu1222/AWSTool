@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { Layout, Menu, Button } from 'antd';
-import { HomeOutlined, TeamOutlined, DashboardOutlined, DollarOutlined, SettingOutlined, LogoutOutlined, DeleteOutlined, FileSearchOutlined, GlobalOutlined } from '@ant-design/icons';
+import { HomeOutlined, TeamOutlined, DashboardOutlined, DollarOutlined, SettingOutlined, LogoutOutlined, DeleteOutlined, FileSearchOutlined, GlobalOutlined, TagsOutlined } from '@ant-design/icons';
 import DashboardPage from '../pages/Dashboard';
 import AccountsPage from '../pages/Accounts';
 import QuotasPage from '../pages/Quotas';
@@ -9,6 +9,7 @@ import CleanupPage from '../pages/Cleanup';
 import RegionsPage from '../pages/Regions';
 import AuditLogPage from '../pages/AuditLog';
 import SettingsPage from '../pages/Settings';
+import TagCompliancePage from '../pages/TagCompliance';
 import { api } from '../api';
 import { APP_VERSION } from '../version';
 
@@ -26,6 +27,7 @@ export const PAGE_META: { key: string; label: string }[] = [
   { key: 'regions', label: '区域管理' },
   { key: 'billing', label: '账单分析' },
   { key: 'cleanup', label: '资源清理' },
+  { key: 'tagcompliance', label: 'MAP 标签' },
   { key: 'audit', label: '审计日志' },
   { key: 'settings', label: '系统设置' },
 ];
@@ -37,6 +39,7 @@ const navItems = [
   { key: 'regions', icon: <GlobalOutlined />, label: '区域管理' },
   { key: 'billing', icon: <DollarOutlined />, label: '账单分析' },
   { key: 'cleanup', icon: <DeleteOutlined />, label: '资源清理' },
+  { key: 'tagcompliance', icon: <TagsOutlined />, label: 'MAP 标签' },
   { key: 'audit', icon: <FileSearchOutlined />, label: '审计日志' },
   { key: 'settings', icon: <SettingOutlined />, label: '系统设置' },
 ];
@@ -94,6 +97,7 @@ const MainLayout: React.FC<MainLayoutProps> = ({ onLogout }) => {
       case 'regions': return <RegionsPage />;
       case 'billing': return <BillingPage />;
       case 'cleanup': return <CleanupPage />;
+      case 'tagcompliance': return <TagCompliancePage />;
       case 'audit': return <AuditLogPage />;
       case 'settings': return <SettingsPage onLogout={onLogout} />;
       default: return <DashboardPage />;

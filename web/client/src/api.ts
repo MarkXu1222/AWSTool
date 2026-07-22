@@ -142,6 +142,13 @@ export const api = {
   deleteResources: (accountId: string, region: string, resources: { type: string; id: string; name?: string }[]) =>
     request(`/aws/resources/${accountId}/delete`, { method: 'POST', body: JSON.stringify({ region, resources }) }),
   getAuditLog: (limit = 5000) => request(`/aws/audit?limit=${Math.max(1, Math.min(5000, Math.floor(limit)))}`),
+  // MAP 标签合规
+  tagStatus: () => request('/aws/tag-compliance/status'),
+  tagGetConfig: () => request('/aws/tag-compliance/config'),
+  tagPutConfig: (orgs: any[]) => request('/aws/tag-compliance/config', { method: 'PUT', body: JSON.stringify(orgs) }),
+  tagScan: () => request('/aws/tag-compliance/scan', { method: 'POST' }),
+  tagExecutions: () => request('/aws/tag-compliance/executions'),
+  tagReport: () => request('/aws/tag-compliance/report'),
   exportAuditLog: async (format: 'csv' | 'json') => {
     const token = getToken();
     const res = await fetch(`${BASE}/aws/audit/export?format=${format}`, {
