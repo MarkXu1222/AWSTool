@@ -74,8 +74,15 @@ function classifyQuota(serviceCode: string, quotaName: string) {
     const macType = q.includes('m4') ? 'mac.m4' : q.includes('m1') ? 'mac1' : 'mac.m2';
     return { service: 'Amazon EC2', officialName: `EC2 Dedicated Hosts ${macType} (Dedicated Host Limit)`, unit: 'Hosts', category: 'mac' as const };
   }
-  if (q.includes('workspace')) {
-    return { service: 'Amazon WorkSpaces', officialName: 'WorkSpaces', unit: 'WorkSpaces', category: 'workspace' as const };
+  if (s.includes('workspace') || q.includes('workspace')) {
+    // WorkSpaces 本身(数量) 与 Images(镜像) 区分处理
+    const isImage = q.includes('image');
+    return {
+      service: 'Amazon WorkSpaces',
+      officialName: isImage ? 'Images' : 'WorkSpaces',
+      unit: isImage ? 'Images' : 'WorkSpaces',
+      category: 'workspace' as const,
+    };
   }
   if (q.includes('fargate')) {
     return { service: 'AWS Fargate', officialName: 'Fargate On-Demand resource count', unit: 'Tasks', category: 'fargate' as const };
