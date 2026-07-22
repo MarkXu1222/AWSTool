@@ -80,11 +80,13 @@ function classifyQuota(serviceCode: string, quotaName: string) {
   if (q.includes('fargate')) {
     return { service: 'AWS Fargate', officialName: 'Fargate On-Demand resource count', unit: 'Tasks', category: 'fargate' as const };
   }
+  // EC2 On-Demand 各实例族（Standard / P / G/VT / Inf / Trn / F / DL / X / High Memory / HPC 等）
+  // 直接沿用传入的官方配额名，避免误判（例如 "Inf instances" 含子串 "f instances" 会被错判成 F）
+  if (q.includes('on-demand') && q.includes('instances')) {
+    return { service: 'Amazon EC2', officialName: quotaName, unit: 'vCPUs', category: 'vcpu' as const };
+  }
   if (q.includes('g and vt') || q.includes('g instances')) {
     return { service: 'Amazon EC2', officialName: 'Running On-Demand G and VT instances', unit: 'vCPUs', category: 'vcpu' as const };
-  }
-  if (q.includes('f instances') || /\bf\b/.test(q)) {
-    return { service: 'Amazon EC2', officialName: 'Running On-Demand F instances', unit: 'vCPUs', category: 'vcpu' as const };
   }
   if (q.includes('domain')) {
     return { service: 'Amazon Route 53', officialName: 'Domain count limit', unit: 'Domains', category: 'other' as const };

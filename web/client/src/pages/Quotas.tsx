@@ -20,8 +20,13 @@ const renderStatus = (s: string) => {
 // 手动生成文档时可选的常用配额类型（组合了 serviceCode + quotaName，classifyQuota 会据此推断类别 + 单位）
 const QUOTA_PRESETS = [
   { label: 'EC2 Standard vCPU (A/C/D/H/I/M/R/T/Z)', serviceCode: 'ec2', quotaName: 'Running On-Demand Standard (A, C, D, H, I, M, R, T, Z) instances', unit: 'vCPUs' },
+  { label: 'EC2 P vCPU (GPU: p3/p4/p5)', serviceCode: 'ec2', quotaName: 'Running On-Demand P instances', unit: 'vCPUs' },
   { label: 'EC2 G/VT vCPU (GPU)', serviceCode: 'ec2', quotaName: 'Running On-Demand G and VT instances', unit: 'vCPUs' },
+  { label: 'EC2 Inf vCPU (Inferentia 推理)', serviceCode: 'ec2', quotaName: 'Running On-Demand Inf instances', unit: 'vCPUs' },
+  { label: 'EC2 Trn vCPU (Trainium 训练)', serviceCode: 'ec2', quotaName: 'Running On-Demand Trn instances', unit: 'vCPUs' },
   { label: 'EC2 F vCPU (FPGA)', serviceCode: 'ec2', quotaName: 'Running On-Demand F instances', unit: 'vCPUs' },
+  { label: 'EC2 X vCPU (高内存 X1/X2)', serviceCode: 'ec2', quotaName: 'Running On-Demand X instances', unit: 'vCPUs' },
+  { label: 'EC2 High Memory vCPU', serviceCode: 'ec2', quotaName: 'Running On-Demand High Memory instances', unit: 'vCPUs' },
   { label: 'EC2 Elastic IPs (EIP)', serviceCode: 'ec2', quotaName: 'EC2-VPC Elastic IPs', unit: 'EIPs' },
   { label: 'EC2 Mac Dedicated Hosts (mac.m2)', serviceCode: 'ec2', quotaName: 'Running Dedicated mac.m2 Hosts', unit: 'Hosts' },
   { label: 'EC2 Mac Dedicated Hosts (mac.m4)', serviceCode: 'ec2', quotaName: 'Running Dedicated mac.m4 Hosts', unit: 'Hosts' },
