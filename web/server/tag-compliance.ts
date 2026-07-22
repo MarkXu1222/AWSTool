@@ -13,6 +13,10 @@
 import { STSClient, AssumeRoleCommand } from '@aws-sdk/client-sts';
 import { SFNClient, StartExecutionCommand, ListExecutionsCommand } from '@aws-sdk/client-sfn';
 import { S3Client, GetObjectCommand, PutObjectCommand, ListObjectsV2Command } from '@aws-sdk/client-s3';
+import { IAMClient, GetRoleCommand } from '@aws-sdk/client-iam';
+import { ResourceExplorer2Client, ListViewsCommand } from '@aws-sdk/client-resource-explorer-2';
+import { CloudFormationClient, DescribeStackSetCommand } from '@aws-sdk/client-cloudformation';
+import { OrganizationsClient, DescribeOrganizationCommand, ListRootsCommand, ListAccountsCommand } from '@aws-sdk/client-organizations';
 import path from 'path';
 import fs from 'fs';
 
@@ -161,4 +165,116 @@ export async function getLatestReport(): Promise<{ key: string; generatedAt?: st
   const m = latestKey.match(/compliance-reports\/([^/]+)\/([^/]+)\//);
   const generatedAt = m ? `${m[1]} ${m[2].slice(0, 2)}:${m[2].slice(2, 4)}:${m[2].slice(4, 6)}` : undefined;
   return { key: latestKey, generatedAt, report: JSON.parse(text) };
+}
+
+// ---- 接入组织前置自检（A 档） ----
+// 中央工具账户 ID（auto-tagger-role / search-role 都信任它）
+function centralAccountId(): string {
+  const m = String(TC.roleArn || '').match(/arn:aws:iam::(\d+):/);
+  return m ? m[1] : '382309211956';
+}
+
+const PAYERS: { name: string; roleArn: string }[] = Array.isArray(config.payers) ? config.payers : [];
+
+// 用平台基础凭证 assume 某个 payer 的 role/tool，拿到该 payer 账户内的临时凭证
+async function assumePayer(payerAccountId: string) {
+  const payer = PAYERS.find((p) => (p.roleArn || '').includes(`:${payerAccountId}:`));
+  if (!payer) return null;
+  const sts = new STSClient({ region: REGION, credentials: BASE_CREDENTIALS });
+  const resp = await sts.send(new AssumeRoleCommand({
+    RoleArn: payer.roleArn,
+    RoleSessionName: 'toolbox-tc-precheck',
+    DurationSeconds: 900,
+  }));
+  return {
+    accessKeyId: resp.Credentials!.AccessKeyId!,
+    secretAccessKey: resp.Credentials!.SecretAccessKey!,
+    sessionToken: resp.Credentials!.SessionToken!,
+  };
+}
+
+export interface PrecheckResult {
+  reachable: boolean;
+  reason?: string;
+  payerAccountId: string;
+  centralAccountId: string;
+  orgId?: string;
+  rootOuId?: string;
+  accountCount?: number;
+  orgError?: string;
+  checks: {
+    searchRole?: { status: 'ok' | 'missing' | 'unknown'; arn?: string; detail?: string };
+    orgView?: { status: 'ok' | 'missing' | 'unknown'; arn?: string; detail?: string };
+    stackSet?: { status: 'ok' | 'missing' | 'unknown'; detail?: string };
+  };
+}
+
+/**
+ * 探测某个 payer 是否已具备接入 tag-compliance 的前置条件。
+ * 尽力而为：任何一项检测失败（多半是 role/tool 权限不足）都不抛错，
+ * 而是标记为 unknown，前端仍会给出对应的一键 CLI。
+ */
+export async function precheckOrg(payerAccountId: string): Promise<PrecheckResult> {
+  const central = centralAccountId();
+  const creds = await assumePayer(payerAccountId);
+  if (!creds) {
+    return {
+      reachable: false,
+      reason: '该 payer 不在平台配置（config.payers）中，无法自动检测，可手动填写后添加',
+      payerAccountId,
+      centralAccountId: central,
+      checks: {},
+    };
+  }
+  const region = 'us-east-1';
+  const result: PrecheckResult = { reachable: true, payerAccountId, centralAccountId: central, checks: {} };
+
+  // 组织信息：org_id / 根 OU / 账户数
+  try {
+    const org = new OrganizationsClient({ region, credentials: creds });
+    const o = await org.send(new DescribeOrganizationCommand({}));
+    result.orgId = o.Organization?.Id;
+    const roots = await org.send(new ListRootsCommand({}));
+    result.rootOuId = roots.Roots?.[0]?.Id;
+    let count = 0;
+    let token: string | undefined;
+    do {
+      const p = await org.send(new ListAccountsCommand({ NextToken: token }));
+      count += (p.Accounts || []).length;
+      token = p.NextToken;
+    } while (token);
+    result.accountCount = count;
+  } catch (e: any) {
+    result.orgError = e.name || e.message;
+  }
+
+  // search-role：Resource Explorer 搜索角色
+  try {
+    const iam = new IAMClient({ region, credentials: creds });
+    const r = await iam.send(new GetRoleCommand({ RoleName: 'resource-explorer-search-role' }));
+    result.checks.searchRole = { status: 'ok', arn: r.Role?.Arn };
+  } catch (e: any) {
+    result.checks.searchRole = { status: e.name === 'NoSuchEntityException' ? 'missing' : 'unknown', detail: e.name };
+  }
+
+  // OrgView：Resource Explorer 聚合视图
+  try {
+    const re = new ResourceExplorer2Client({ region, credentials: creds });
+    const v = await re.send(new ListViewsCommand({}));
+    const orgView = (v.Views || []).find((arn) => arn.includes(':view/OrgView/'));
+    result.checks.orgView = orgView ? { status: 'ok', arn: orgView } : { status: 'missing' };
+  } catch (e: any) {
+    result.checks.orgView = { status: 'unknown', detail: e.name };
+  }
+
+  // StackSet：AutoTaggerRole（打标角色，SERVICE_MANAGED 自动部署到成员账户）
+  try {
+    const cfn = new CloudFormationClient({ region, credentials: creds });
+    await cfn.send(new DescribeStackSetCommand({ StackSetName: 'AutoTaggerRole', CallAs: 'SELF' }));
+    result.checks.stackSet = { status: 'ok' };
+  } catch (e: any) {
+    result.checks.stackSet = { status: e.name === 'StackSetNotFoundException' ? 'missing' : 'unknown', detail: e.name };
+  }
+
+  return result;
 }

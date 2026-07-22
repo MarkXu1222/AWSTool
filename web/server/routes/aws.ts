@@ -70,6 +70,15 @@ awsRouter.get('/tag-compliance/report', async (_req: Request, res: Response) => 
   } catch (e: any) { res.status(500).json({ error: e.message }); }
 });
 
+// 接入组织前置自检：给定 payer 账户，尽力探测 search-role / OrgView / StackSet / 组织信息
+awsRouter.get('/tag-compliance/precheck', async (req: Request, res: Response) => {
+  try {
+    const payer = String(req.query.payer || '').trim();
+    if (!/^\d{12}$/.test(payer)) return res.status(400).json({ error: '请提供 12 位 payer 账户 ID' });
+    res.json({ success: true, data: await tagCompliance.precheckOrg(payer) });
+  } catch (e: any) { res.status(500).json({ error: e.message }); }
+});
+
 // RBAC: 根用户凭证操作权限（独立于角色，可单独分配）。用于账户"根用户"tab 的敏感功能：
 // 生成 Admin 临时凭证 / 删除 Root MFA / 恢复根密码。admin 恒有；其他用户需被显式授予 root_access。
 // 与 requireAuditAccess 一致，从数据库读取当前权限，避免信任 JWT 中可能过期的角色/权限。

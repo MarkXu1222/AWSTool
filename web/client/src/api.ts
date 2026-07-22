@@ -149,6 +149,7 @@ export const api = {
   tagScan: () => request('/aws/tag-compliance/scan', { method: 'POST' }),
   tagExecutions: () => request('/aws/tag-compliance/executions'),
   tagReport: () => request('/aws/tag-compliance/report'),
+  tagPrecheck: (payer: string) => request(`/aws/tag-compliance/precheck?payer=${encodeURIComponent(payer)}`),
   exportAuditLog: async (format: 'csv' | 'json') => {
     const token = getToken();
     const res = await fetch(`${BASE}/aws/audit/export?format=${format}`, {
