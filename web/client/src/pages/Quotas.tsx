@@ -620,6 +620,9 @@ const QuotasPage: React.FC = () => {
         <Select style={{ width: 220 }} value={selectedRegion} onChange={setSelectedRegion} options={REGIONS} size="small" showSearch optionFilterProp="label" />
         <Button type="primary" onClick={fetchQuotas} loading={loading} icon={<ReloadOutlined />} size="small">查询</Button>
         <Button size="small" onClick={() => { setSelectedAccount(''); setSelectedService('ec2'); setSelectedRegion('us-east-1'); setQuotas([]); }}>重置</Button>
+        <Tooltip title={selectedAccount ? '选择常用配额类型，查看当前值并一键提额/下载文档' : '请先选择账户'}>
+          <Button size="small" type="primary" icon={<ThunderboltOutlined />} onClick={openQuick}>快速提额</Button>
+        </Tooltip>
         <div style={{ marginLeft: 'auto', display: 'flex', gap: 8 }}>
           <Button size="small" type="primary" icon={<FilePdfOutlined />} onClick={openDocModal}>生成申请文档</Button>
           <Button size="small" icon={<DownloadOutlined />} onClick={handleExport}>导出</Button>
@@ -636,9 +639,6 @@ const QuotasPage: React.FC = () => {
               <div className="table-toolbar">
                 <Input placeholder="搜索配额名称..." prefix={<SearchOutlined />} value={searchText}
                   onChange={e => setSearchText(e.target.value)} allowClear size="small" />
-                <Tooltip title={selectedAccount ? '选择常用配额类型，查看当前值并一键提额/下载文档' : '请先在上方选择账户'}>
-                  <Button size="small" type="primary" icon={<ThunderboltOutlined />} onClick={openQuick}>快速提额</Button>
-                </Tooltip>
                 <span style={{ fontSize: 12, color: 'rgba(0,0,0,0.45)' }}>{filtered.length} 条</span>
               </div>
               <Table size="small" dataSource={filtered} rowKey="QuotaCode" loading={loading}
