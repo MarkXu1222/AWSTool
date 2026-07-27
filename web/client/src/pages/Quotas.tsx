@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { Card, Table, Tag, Button, Space, message, Input, Select, Tabs, Modal, Form, InputNumber, Tooltip } from 'antd';
-import { ReloadOutlined, SearchOutlined, DownloadOutlined, FileTextOutlined, FilePdfOutlined, CheckCircleOutlined, CheckCircleFilled, ClockCircleOutlined, CloseCircleOutlined, MinusCircleOutlined } from '@ant-design/icons';
+import { ReloadOutlined, SearchOutlined, DownloadOutlined, FileTextOutlined, FilePdfOutlined, CheckCircleOutlined, CheckCircleFilled, ClockCircleOutlined, CloseCircleOutlined, MinusCircleOutlined, ThunderboltOutlined } from '@ant-design/icons';
 import { api } from '../api';
 import { exportToCSV, exportQuotaPivotTable, exportQuotaRecords } from '../utils/export';
 
@@ -159,6 +159,17 @@ const QuotasPage: React.FC = () => {
   const [companies, setCompanies] = useState<{ key: string; displayName: string; industry: string }[]>([]);
   const [docGenerating, setDocGenerating] = useState(false);
 
+  // 快速提额（搜索框旁）相关状态
+  const [quickOpen, setQuickOpen] = useState(false);
+  const [quickPresetIdx, setQuickPresetIdx] = useState<number | undefined>(undefined);
+  const [quickRegion, setQuickRegion] = useState('us-east-1');
+  const [quickResolving, setQuickResolving] = useState(false);
+  const [quickQuota, setQuickQuota] = useState<any>(null);       // 解析出的真实配额(含 QuotaCode/Value/Adjustable)
+  const [quickNotFound, setQuickNotFound] = useState(false);
+  const [quickTarget, setQuickTarget] = useState<number | null>(null);
+  const [quickSubmitting, setQuickSubmitting] = useState(false);
+  const [quickDocLoading, setQuickDocLoading] = useState(false);
+
   useEffect(() => { loadAccounts(); loadDbRecords(); loadCompanies(); }, []);
 
   const loadAccounts = async () => { const res = await api.listAccounts(); if (res.success) setAccounts(res.data); };
@@ -207,6 +218,80 @@ const QuotasPage: React.FC = () => {
     } catch {
       // form 校验失败
     }
+  };
+
+  // ===== 快速提额（搜索框旁）=====
+  const openQuick = () => {
+    if (!selectedAccount) { message.warning('请先在上方选择账户'); return; }
+    setQuickPresetIdx(undefined);
+    setQuickQuota(null);
+    setQuickNotFound(false);
+    setQuickTarget(null);
+    setQuickRegion(selectedRegion || 'us-east-1');
+    setQuickOpen(true);
+  };
+
+  // 选中预设后：调 listServiceQuotas 按 quotaName 解析出真实配额（QuotaCode + 当前值）
+  const resolveQuick = async (presetIdx?: number, region?: string) => {
+    if (presetIdx == null || !selectedAccount) return;
+    const preset = QUOTA_PRESETS[presetIdx];
+    const rgn = region || quickRegion;
+    setQuickResolving(true);
+    setQuickQuota(null);
+    setQuickNotFound(false);
+    try {
+      const res = await api.listServiceQuotas(selectedAccount, preset.serviceCode, rgn);
+      if (res.success) {
+        const list = res.data || [];
+        const nameLc = preset.quotaName.toLowerCase();
+        const q = list.find((x: any) => x.QuotaName === preset.quotaName)
+          || list.find((x: any) => (x.QuotaName || '').toLowerCase() === nameLc);
+        if (q) {
+          setQuickQuota(q);
+          const base = (q.Value && q.Value !== Infinity) ? q.Value : 0;
+          setQuickTarget(base > 0 ? base * 2 : 256);
+        } else {
+          setQuickNotFound(true);
+        }
+      } else { message.error(res.error || '查询失败'); }
+    } catch (e: any) { message.error(e.message); }
+    finally { setQuickResolving(false); }
+  };
+
+  const handleQuickIncrease = async () => {
+    if (!quickQuota) return;
+    if (!quickTarget || (quickQuota.Value != null && quickQuota.Value !== Infinity && quickTarget <= quickQuota.Value)) {
+      message.warning('期望值需大于当前值'); return;
+    }
+    setQuickSubmitting(true);
+    try {
+      const res = await api.requestQuotaIncrease(selectedAccount, quickQuota.ServiceCode, quickQuota.QuotaCode, quickTarget, quickQuota.QuotaName, quickRegion);
+      if (res.success) { message.success('配额提升请求已提交！'); loadDbRecords(); }
+      else message.error(res.error);
+    } catch (e: any) { message.error(e.message); }
+    finally { setQuickSubmitting(false); }
+  };
+
+  const handleQuickDoc = async () => {
+    if (quickPresetIdx == null) { message.warning('请先选择配额类型'); return; }
+    if (!quickTarget) { message.warning('请输入申请数量'); return; }
+    const preset = QUOTA_PRESETS[quickPresetIdx];
+    const acct = accounts.find(a => a.Id === selectedAccount);
+    setQuickDocLoading(true);
+    const hide = message.loading('正在生成文档...', 0);
+    try {
+      await api.generateQuotaDoc({
+        accountId: selectedAccount,
+        accountName: acct?.Name,
+        serviceCode: preset.serviceCode,
+        quotaName: preset.quotaName,
+        region: quickRegion,
+        requestedValue: Number(quickTarget),
+        currentValue: (quickQuota?.Value != null && quickQuota.Value !== Infinity) ? quickQuota.Value : undefined,
+      });
+      hide(); message.success('文档已生成');
+    } catch (e: any) { hide(); message.error(e.message || '生成失败'); }
+    finally { setQuickDocLoading(false); }
   };
 
   const fetchQuotas = async () => {
@@ -521,6 +606,9 @@ const QuotasPage: React.FC = () => {
               <div className="table-toolbar">
                 <Input placeholder="搜索配额名称..." prefix={<SearchOutlined />} value={searchText}
                   onChange={e => setSearchText(e.target.value)} allowClear size="small" />
+                <Tooltip title={selectedAccount ? '选择常用配额类型，查看当前值并一键提额/下载文档' : '请先在上方选择账户'}>
+                  <Button size="small" type="primary" icon={<ThunderboltOutlined />} onClick={openQuick}>快速提额</Button>
+                </Tooltip>
                 <span style={{ fontSize: 12, color: 'rgba(0,0,0,0.45)' }}>{filtered.length} 条</span>
               </div>
               <Table size="small" dataSource={filtered} rowKey="QuotaCode" loading={loading}
@@ -654,6 +742,70 @@ const QuotasPage: React.FC = () => {
             <InputNumber style={{ width: '100%' }} min={1} />
           </Form.Item>
         </Form>
+      </Modal>
+
+      {/* 快速提额（搜索框旁）*/}
+      <Modal
+        title={<span><ThunderboltOutlined style={{ marginRight: 6, color: '#faad14' }} />快速提额</span>}
+        open={quickOpen}
+        onCancel={() => setQuickOpen(false)}
+        footer={null}
+        width={560}
+      >
+        <p style={{ color: 'rgba(0,0,0,0.55)', fontSize: 12, marginTop: 0 }}>
+          账户 <Tag color="blue">{accounts.find(a => a.Id === selectedAccount)?.Name || selectedAccount}</Tag>
+          选择配额类型即可看到当前值，输入目标数字一键提额，或直接下载申请文档。
+        </p>
+        <Space direction="vertical" style={{ width: '100%' }} size="middle">
+          <div>
+            <div style={{ fontSize: 12, color: 'rgba(0,0,0,0.65)', marginBottom: 4 }}>配额类型（来自申请文档常用项）</div>
+            <Select
+              style={{ width: '100%' }}
+              placeholder="选择配额类型"
+              value={quickPresetIdx}
+              onChange={(idx) => { setQuickPresetIdx(idx); resolveQuick(idx, quickRegion); }}
+              showSearch optionFilterProp="label"
+              options={QUOTA_PRESETS.map((p, i) => ({ label: p.label, value: i }))}
+            />
+          </div>
+          <div>
+            <div style={{ fontSize: 12, color: 'rgba(0,0,0,0.65)', marginBottom: 4 }}>区域</div>
+            <Select
+              style={{ width: '100%' }}
+              value={quickRegion}
+              onChange={(r) => { setQuickRegion(r); if (quickPresetIdx != null) resolveQuick(quickPresetIdx, r); }}
+              showSearch optionFilterProp="label"
+              options={REGIONS.filter(r => r.value).map(r => ({ label: r.label, value: r.value }))}
+            />
+          </div>
+
+          {quickResolving && <div style={{ fontSize: 12, color: 'rgba(0,0,0,0.45)' }}>正在查询当前配额...</div>}
+          {!quickResolving && quickQuota && (
+            <div style={{ background: '#f6ffed', border: '1px solid #b7eb8f', borderRadius: 6, padding: '8px 12px' }}>
+              <div style={{ fontSize: 13, marginBottom: 4 }}>{quickQuota.QuotaName}</div>
+              <div>
+                当前值: <Tag color="blue">{quickQuota.Value === Infinity ? '∞' : quickQuota.Value}{quickQuota.Unit && quickQuota.Unit !== 'None' ? ` ${quickQuota.Unit}` : ''}</Tag>
+                {quickQuota.Adjustable ? <Tag color="success" style={{ margin: 0 }}>可调</Tag> : <Tag style={{ margin: 0 }}>不可调</Tag>}
+              </div>
+            </div>
+          )}
+          {!quickResolving && quickNotFound && (
+            <div style={{ background: '#fff7e6', border: '1px solid #ffd591', borderRadius: 6, padding: '8px 12px', fontSize: 12, color: '#d46b08' }}>
+              该区域未找到此配额（可能此服务在该区域不可用，或需换个区域）。仍可下载申请文档。
+            </div>
+          )}
+
+          <div>
+            <div style={{ fontSize: 12, color: 'rgba(0,0,0,0.65)', marginBottom: 4 }}>期望值 / 申请数量</div>
+            <InputNumber style={{ width: '100%' }} min={1} value={quickTarget ?? undefined}
+              onChange={(v) => setQuickTarget(v as number)} placeholder="输入目标数字" />
+          </div>
+
+          <Space style={{ justifyContent: 'flex-end', width: '100%' }}>
+            <Button icon={<FilePdfOutlined />} loading={quickDocLoading} onClick={handleQuickDoc} disabled={quickPresetIdx == null}>下载申请文档</Button>
+            <Button type="primary" icon={<ThunderboltOutlined />} loading={quickSubmitting} onClick={handleQuickIncrease} disabled={!quickQuota || !quickQuota.Adjustable}>一键提额</Button>
+          </Space>
+        </Space>
       </Modal>
     </Card>
     </div>
