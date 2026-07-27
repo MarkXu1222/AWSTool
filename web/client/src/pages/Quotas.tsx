@@ -169,6 +169,10 @@ const QuotasPage: React.FC = () => {
   const [quickTarget, setQuickTarget] = useState<number | null>(null);
   const [quickSubmitting, setQuickSubmitting] = useState(false);
   const [quickDocLoading, setQuickDocLoading] = useState(false);
+  // 账户无法识别公司时，弹出公司挑选并用 companyKey 重试
+  const [companyPickerOpen, setCompanyPickerOpen] = useState(false);
+  const [pickerCompany, setPickerCompany] = useState<string | undefined>(undefined);
+  const [pendingDocParams, setPendingDocParams] = useState<any>(null);
 
   useEffect(() => { loadAccounts(); loadDbRecords(); loadCompanies(); }, []);
 
@@ -272,26 +276,52 @@ const QuotasPage: React.FC = () => {
     finally { setQuickSubmitting(false); }
   };
 
+  // 生成文档；若账户无法识别公司，则弹出公司列表让用户挑选后用 companyKey 重试
+  const runGenerateDoc = async (params: any): Promise<boolean> => {
+    const hide = message.loading('正在生成文档...', 0);
+    try {
+      await api.generateQuotaDoc(params);
+      hide(); message.success('文档已生成');
+      return true;
+    } catch (e: any) {
+      hide();
+      const msg = e?.message || '';
+      if (/无法识别账户|所属公司|account cache/i.test(msg)) {
+        setPendingDocParams(params);
+        setPickerCompany(undefined);
+        setCompanyPickerOpen(true);
+      } else {
+        message.error(msg || '生成失败');
+      }
+      return false;
+    }
+  };
+
   const handleQuickDoc = async () => {
     if (quickPresetIdx == null) { message.warning('请先选择配额类型'); return; }
     if (!quickTarget) { message.warning('请输入申请数量'); return; }
     const preset = QUOTA_PRESETS[quickPresetIdx];
     const acct = accounts.find(a => a.Id === selectedAccount);
     setQuickDocLoading(true);
-    const hide = message.loading('正在生成文档...', 0);
-    try {
-      await api.generateQuotaDoc({
-        accountId: selectedAccount,
-        accountName: acct?.Name,
-        serviceCode: preset.serviceCode,
-        quotaName: preset.quotaName,
-        region: quickRegion,
-        requestedValue: Number(quickTarget),
-        currentValue: (quickQuota?.Value != null && quickQuota.Value !== Infinity) ? quickQuota.Value : undefined,
-      });
-      hide(); message.success('文档已生成');
-    } catch (e: any) { hide(); message.error(e.message || '生成失败'); }
-    finally { setQuickDocLoading(false); }
+    await runGenerateDoc({
+      accountId: selectedAccount,
+      accountName: acct?.Name,
+      serviceCode: preset.serviceCode,
+      quotaName: preset.quotaName,
+      region: quickRegion,
+      requestedValue: Number(quickTarget),
+      currentValue: (quickQuota?.Value != null && quickQuota.Value !== Infinity) ? quickQuota.Value : undefined,
+    });
+    setQuickDocLoading(false);
+  };
+
+  // 用户在公司列表里选定后，带 companyKey 重试生成
+  const handlePickerConfirm = async () => {
+    if (!pickerCompany) { message.warning('请选择公司'); return; }
+    setQuickDocLoading(true);
+    const ok = await runGenerateDoc({ ...(pendingDocParams || {}), companyKey: pickerCompany });
+    setQuickDocLoading(false);
+    if (ok) setCompanyPickerOpen(false);
   };
 
   const fetchQuotas = async () => {
@@ -806,6 +836,30 @@ const QuotasPage: React.FC = () => {
             <Button type="primary" icon={<ThunderboltOutlined />} loading={quickSubmitting} onClick={handleQuickIncrease} disabled={!quickQuota || !quickQuota.Adjustable}>一键提额</Button>
           </Space>
         </Space>
+      </Modal>
+
+      {/* 账户无法识别公司时，挑选公司后重试生成文档 */}
+      <Modal
+        title="选择所属公司"
+        open={companyPickerOpen}
+        onOk={handlePickerConfirm}
+        onCancel={() => setCompanyPickerOpen(false)}
+        okText="用此公司生成文档"
+        cancelText="取消"
+        confirmLoading={quickDocLoading}
+        width={480}
+      >
+        <p style={{ color: 'rgba(0,0,0,0.55)', fontSize: 12, marginTop: 0 }}>
+          未能自动识别账户 <code>{pendingDocParams?.accountId || ''}</code> 所属公司，请手动选择一个公司用于生成申请文档。
+        </p>
+        <Select
+          style={{ width: '100%' }}
+          placeholder="选择公司"
+          value={pickerCompany}
+          onChange={setPickerCompany}
+          showSearch optionFilterProp="label"
+          options={companies.map(c => ({ label: `${c.displayName} — ${c.industry}`, value: c.key }))}
+        />
       </Modal>
     </Card>
     </div>
