@@ -208,11 +208,26 @@ export async function refreshDashboardCache() {
 }
 
 
-// Federated console sign-in URL — open a child account's console (e.g. Support case) without login
+// Federated console sign-in URL — open a child account's console without login.
+// access=support（默认，只读 support-quota 角色）| admin（专用 admin-console 角色，完整管理员权限）
 awsRouter.get('/console-url/:accountId', async (req: Request, res: Response) => {
   try {
     const accountId = String(req.params.accountId);
-    const { caseId, destination } = req.query;
+    if (!/^\d{12}$/.test(accountId)) return res.status(400).json({ error: '无效的账户 ID' });
+    const { caseId, destination, access } = req.query;
+    const mode: 'support' | 'admin' = access === 'admin' ? 'admin' : 'support';
+
+    // 安全门禁：Admin 控制台 = 完整管理员权限，等同生成 Admin 临时凭证，
+    // 需具备根用户权限（admin 角色或被授予 root_access）。只读选项对所有登录用户开放。
+    if (mode === 'admin') {
+      const tokenUser = (req as any).user;
+      const currentUser = tokenUser?.username ? db.getUser(tokenUser.username) : null;
+      if (!currentUser) return res.status(401).json({ error: '用户不存在或登录已失效' });
+      if (!(currentUser.role === 'admin' || (currentUser as any).root_access === true)) {
+        return res.status(403).json({ error: '无权以 Admin 权限登录控制台，请联系管理员分配根用户权限' });
+      }
+    }
+
     // Default destination: Support case page (or custom)
     let dest = destination as string;
     if (!dest && caseId) {
@@ -221,7 +236,14 @@ awsRouter.get('/console-url/:accountId', async (req: Request, res: Response) => 
     if (!dest) {
       dest = 'https://console.aws.amazon.com/';
     }
-    const url = await aws.getConsoleSigninUrl(accountId, dest);
+    const url = await aws.getConsoleSigninUrl(accountId, dest, mode);
+
+    // Admin 控制台登录属高权限操作，写审计
+    if (mode === 'admin') {
+      const user = (req as any).user;
+      db.addAuditLog(user?.userId, 'CONSOLE_ADMIN_LOGIN', `AWS 账户 ${accountId} · 生成 Admin 控制台免登录链接`, user?.username, req.ip);
+      (res.locals as any).audited = true;
+    }
     res.json({ success: true, url });
   } catch (e: any) { res.status(500).json({ error: e.message }); }
 });

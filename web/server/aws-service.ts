@@ -32,6 +32,9 @@ const DEFAULT_REGION = config.region || process.env.AWS_DEFAULT_REGION || 'us-ea
 const CHILD_ROLE_NAME = config.childRoleName || process.env.CHILD_ROLE_NAME || 'OrganizationAccountAccessRole';
 // 一级跳专用: 每个账户里都建有并信任主账号的 role (方案 A: 优先用它，失败 fallback 到 payer 二级跳)
 const SUPPORT_ROLE_NAME = config.supportRoleName || process.env.SUPPORT_ROLE_NAME || 'support-quota';
+// 专用 Admin 控制台角色（一级跳，AdministratorAccess，信任平台身份）。与 support-quota 对称，
+// 用于控制台「Admin」选项：直接 AssumeRole 到目标账户的该角色，不复用 tool/OAAR 二级跳。
+const ADMIN_ROLE_NAME = config.adminRoleName || process.env.ADMIN_ROLE_NAME || 'admin-console';
 
 // Payers from config.json or env
 let PAYERS: { name: string; roleArn: string }[] = config.payers || [];
@@ -367,6 +370,9 @@ export async function testConnection() {
 export async function listAccounts() {
   const allAccounts: any[] = [];
   for (const payer of PAYERS) {
+    // payer(组织管理)账户 ID：从 role ARN 里解析，用于标记该组织的管理账户
+    const payerIdMatch = /arn:aws:iam::(\d+):role\//.exec(payer.roleArn);
+    const payerAccountId = payerIdMatch ? payerIdMatch[1] : null;
     try {
       const admin = await getAdminCredsForPayer(payer.roleArn);
       const client = new OrganizationsClient({ region: 'us-east-1', credentials: admin });
@@ -374,7 +380,7 @@ export async function listAccounts() {
       do {
         const resp = await client.send(new ListAccountsCommand({ NextToken: nextToken }));
         for (const a of resp.Accounts || []) {
-          allAccounts.push({ ...a, _payer: payer.name });
+          allAccounts.push({ ...a, _payer: payer.name, _isPayer: payerAccountId != null && a.Id === payerAccountId });
           if (a.Id) accountPayerMap.set(a.Id, payer.roleArn);
         }
         nextToken = resp.NextToken;
@@ -685,13 +691,53 @@ export async function deleteResources(
 }
 
 /**
+ * 严格一级跳假设指定角色（供控制台登录用）。直接用平台基础凭证 AssumeRole 到
+ * arn:aws:iam::<accountId>:role/<roleName>，失败时抛出明确错误（不做静默兜底），
+ * 以便前端能区分「该账户未部署该角色」与其它问题。不使用 supportRoleUnavailable 缓存，
+ * 保证刚创建的角色能立即生效。
+ */
+async function assumeRoleStrict(accountId: string, roleName: string, sessionPrefix: string) {
+  const roleArn = `arn:aws:iam::${accountId}:role/${roleName}`;
+  const sts = new STSClient({ region: DEFAULT_REGION, credentials: BASE_CREDENTIALS });
+  const resp = await sts.send(new AssumeRoleCommand({
+    RoleArn: roleArn,
+    RoleSessionName: `${sessionPrefix}-${accountId}`.slice(0, 64),
+    DurationSeconds: 3600,
+  }));
+  return {
+    accessKeyId: resp.Credentials!.AccessKeyId!,
+    secretAccessKey: resp.Credentials!.SecretAccessKey!,
+    sessionToken: resp.Credentials!.SessionToken!,
+  };
+}
+
+/**
  * Generate a federated AWS Console sign-in URL for a child account.
  * Lets the user open the account's console (e.g. a Support case) without manual login.
  * Uses STS federation — free, no Business plan required.
+ *
+ * access:
+ *   - 'support'（默认）→ 一级跳 support-quota 角色（只读 + Support + 配额）
+ *   - 'admin'          → 一级跳专用 admin-console 角色（AdministratorAccess）
+ * 两者均为专用角色的一级跳；若目标账户未部署对应角色，抛出明确错误。
  */
-export async function getConsoleSigninUrl(accountId: string, destinationUrl: string) {
-  // Get temporary credentials for the target account
-  const creds = await assumeToAccount(accountId);
+export async function getConsoleSigninUrl(
+  accountId: string,
+  destinationUrl: string,
+  access: 'support' | 'admin' = 'support',
+) {
+  // Get temporary credentials for the target account (专用角色一级跳)
+  const roleName = access === 'admin' ? ADMIN_ROLE_NAME : SUPPORT_ROLE_NAME;
+  let creds;
+  try {
+    creds = await assumeRoleStrict(accountId, roleName, `console-${access}`);
+  } catch (e: any) {
+    throw new Error(
+      `无法以 ${access === 'admin' ? 'Admin' : '只读(support-quota)'} 权限登录账户 ${accountId} 的控制台：` +
+      `未能假设角色 role/${roleName}（${e?.name || e?.message || '假设失败'}）。` +
+      `请确认该账户已部署 ${roleName} 角色并信任平台身份。`,
+    );
+  }
 
   // Step 1: Get a sign-in token from AWS federation endpoint
   const sessionJson = JSON.stringify({

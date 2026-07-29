@@ -513,7 +513,7 @@ const QuotasPage: React.FC = () => {
           const openConsole = async () => {
             const hide = message.loading('正在生成免登录链接...', 0);
             try {
-              const res = await api.getConsoleUrl(record.account_id, id);
+              const res = await api.getConsoleUrl(record.account_id, { caseId: id });
               hide();
               if (res.success && res.url) {
                 window.open(res.url, '_blank');

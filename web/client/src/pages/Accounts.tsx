@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
-import { Card, Table, Tag, Button, Space, message, Input, Spin, Descriptions, Tabs, Statistic, Row, Col, Badge } from 'antd';
-import { ReloadOutlined, SearchOutlined, DollarOutlined, SafetyOutlined, CheckCircleOutlined, CloseCircleOutlined, LeftOutlined, LoginOutlined } from '@ant-design/icons';
+import { Card, Table, Tag, Button, Space, message, Input, Spin, Descriptions, Tabs, Statistic, Row, Col, Badge, Dropdown } from 'antd';
+import { ReloadOutlined, SearchOutlined, DollarOutlined, SafetyOutlined, CheckCircleOutlined, CloseCircleOutlined, LeftOutlined, LoginOutlined, DownOutlined } from '@ant-design/icons';
 import { api } from '../api';
 import { exportToCSV } from '../utils/export';
 import RootCredentialsPanel from '../components/RootCredentialsPanel';
@@ -55,12 +55,12 @@ const AccountsPage: React.FC = () => {
   // 拉取当前用户的根用户凭证权限，决定是否展示根用户 tab 的敏感功能
   useEffect(() => { api.me().then(r => setCanRoot(!!r.rootAccess)).catch(() => {}); }, []);
 
-  // 免登录进入该账户的 AWS 控制台
-  const openConsole = async (accountId: string) => {
+  // 免登录进入该账户的 AWS 控制台。access: 'support'(只读) | 'admin'(完整管理员, 需 root 权限)
+  const openConsole = async (accountId: string, access: 'support' | 'admin' = 'support') => {
     setConsoleLoading(true);
-    const hide = message.loading('正在生成免登录链接...', 0);
+    const hide = message.loading(access === 'admin' ? '正在生成 Admin 免登录链接...' : '正在生成只读免登录链接...', 0);
     try {
-      const res = await api.getConsoleUrl(accountId);
+      const res = await api.getConsoleUrl(accountId, { access });
       hide();
       if (res.success && res.url) {
         window.open(res.url, '_blank');
@@ -70,6 +70,23 @@ const AccountsPage: React.FC = () => {
     } catch (e: any) { hide(); message.error(e.message); }
     finally { setConsoleLoading(false); }
   };
+
+  // 控制台下拉菜单：只读(support-quota) 对所有人开放；Admin 仅对有根用户权限者显示
+  const consoleMenu = (accountId: string) => ({
+    items: [
+      { key: 'support', icon: <SafetyOutlined />, label: '只读控制台（support-quota）' },
+      ...(canRoot ? [{ key: 'admin', icon: <LoginOutlined />, label: 'Admin 控制台（完整权限）', danger: true }] : []),
+    ],
+    onClick: ({ key }: { key: string }) => openConsole(accountId, key as 'support' | 'admin'),
+  });
+
+  const ConsoleButton: React.FC<{ accountId: string; style?: React.CSSProperties }> = ({ accountId, style }) => (
+    <Dropdown menu={consoleMenu(accountId)} trigger={['click']}>
+      <Button type="primary" size="small" icon={<LoginOutlined />} loading={consoleLoading} style={style}>
+        控制台 <DownOutlined style={{ fontSize: 10 }} />
+      </Button>
+    </Dropdown>
+  );
 
   const openDetail = async (account: any) => {
     setSelectedAccount(account);
@@ -91,6 +108,12 @@ const AccountsPage: React.FC = () => {
   const filtered = accounts.filter(a => !searchText ||
     a.Id?.includes(searchText) || a.Name?.toLowerCase().includes(searchText.toLowerCase()) || a.Email?.toLowerCase().includes(searchText.toLowerCase()));
 
+  // Payer(组织管理账户)始终置顶，其余按名称排序。这样筛选某个组织时，该组织的 payer 一定显示在第一位。
+  const sorted = [...filtered].sort((a, b) => {
+    if (!!a._isPayer !== !!b._isPayer) return a._isPayer ? -1 : 1;
+    return (a.Name || '').localeCompare(b.Name || '');
+  });
+
   // Mobile detail view (full screen overlay)
   if (selectedAccount && detailFullScreen) {
     return (
@@ -99,7 +122,8 @@ const AccountsPage: React.FC = () => {
           <Button type="text" icon={<LeftOutlined />} onClick={() => setSelectedAccount(null)}>返回</Button>
           <span style={{ fontWeight: 600, marginLeft: 8 }}>{selectedAccount.Name}</span>
           <Tag style={{ marginLeft: 8 }}>{selectedAccount._payer}</Tag>
-          <Button type="primary" size="small" icon={<LoginOutlined />} loading={consoleLoading} onClick={() => openConsole(selectedAccount.Id)} style={{ marginLeft: 'auto' }}>控制台</Button>
+          {selectedAccount._isPayer && <Tag color="gold" style={{ marginLeft: 4 }}>Payer</Tag>}
+          <ConsoleButton accountId={selectedAccount.Id} style={{ marginLeft: 'auto' }} />
         </div>
         <Tabs size="small" items={[
           { key: 'info', label: '基本', children: (
@@ -149,7 +173,10 @@ const AccountsPage: React.FC = () => {
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0 }}>
           <AccountAvatar name={a.Name} id={a.Id} />
           <div style={{ minWidth: 0 }}>
-            <div style={{ fontWeight: 600, color: '#1a2233', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{a.Name}</div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
+              <span style={{ fontWeight: 600, color: '#1a2233', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{a.Name}</span>
+              {a._isPayer && <Tag color="gold" style={{ margin: 0, fontSize: 10, lineHeight: '16px', padding: '0 5px', flexShrink: 0 }}>Payer</Tag>}
+            </div>
             <div style={{ fontSize: 12, color: '#8a94a6', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={a.Email}>{a.Email}</div>
           </div>
         </div>
@@ -204,10 +231,10 @@ const AccountsPage: React.FC = () => {
         {isMobile ? (
           <div>
             {loading && <div style={{ textAlign: 'center', padding: 20 }}><Spin /></div>}
-            {filtered.slice(0, 50).map(a => (
+            {sorted.slice(0, 50).map(a => (
               <div key={a.Id} className="account-card" onClick={() => openDetail(a)}>
                 <div className="account-card-info">
-                  <h4>{a.Name}</h4>
+                  <h4>{a.Name} {a._isPayer && <Tag color="gold" style={{ margin: 0, fontSize: 10, lineHeight: '16px', padding: '0 5px' }}>Payer</Tag>}</h4>
                   <p>{a.Id} · {a._payer}</p>
                 </div>
                 <Tag color={a.Status === 'ACTIVE' ? 'green' : 'red'}>{a.Status}</Tag>
@@ -219,17 +246,17 @@ const AccountsPage: React.FC = () => {
           /* Desktop: table + side panel */
           <div style={{ display: 'flex', gap: 16 }}>
             <div style={{ flex: 1 }}>
-              <Table columns={columns} dataSource={filtered} rowKey="Id" loading={loading} size="small"
+              <Table columns={columns} dataSource={sorted} rowKey="Id" loading={loading} size="small"
                 pagination={{ pageSize: 15, size: 'small', showTotal: t => `共 ${t} 条`, showSizeChanger: true }}
                 locale={{ emptyText: '暂无匹配账户，请调整搜索关键词' }}
                 onRow={r => ({ onClick: () => openDetail(r), style: { cursor: 'pointer' } })} />
             </div>
             {selectedAccount && (
               <div style={{ width: 360, minWidth: 360 }}>
-                <Card size="small" style={{ height: '100%' }} title={<span>{selectedAccount.Name}</span>}
+                <Card size="small" style={{ height: '100%' }} title={<span>{selectedAccount.Name}{selectedAccount._isPayer && <Tag color="gold" style={{ marginLeft: 8 }}>Payer</Tag>}</span>}
                   extra={
                     <Space size={4}>
-                      <Button type="primary" size="small" icon={<LoginOutlined />} loading={consoleLoading} onClick={() => openConsole(selectedAccount.Id)}>控制台</Button>
+                      <ConsoleButton accountId={selectedAccount.Id} />
                       <Button type="text" size="small" aria-label="关闭" onClick={() => setSelectedAccount(null)}>✕</Button>
                     </Space>
                   }>

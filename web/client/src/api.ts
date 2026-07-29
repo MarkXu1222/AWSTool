@@ -67,8 +67,14 @@ export const api = {
   listQuotaRequests: () => request('/aws/quotas/requests'),
   getQuotaStats: () => request('/aws/quotas/stats'),
   getDashboardSummary: () => request('/aws/dashboard/summary'),
-  getConsoleUrl: (accountId: string, caseId?: string) =>
-    request(`/aws/console-url/${accountId}${caseId ? `?caseId=${caseId}` : ''}`),
+  // 免登录控制台链接。access: 'support'(默认,只读) | 'admin'(完整管理员,需 root 权限)
+  getConsoleUrl: (accountId: string, opts?: { caseId?: string; access?: 'support' | 'admin' }) => {
+    const params = new URLSearchParams();
+    if (opts?.caseId) params.set('caseId', opts.caseId);
+    if (opts?.access) params.set('access', opts.access);
+    const qs = params.toString();
+    return request(`/aws/console-url/${accountId}${qs ? `?${qs}` : ''}`);
+  },
   // List company profiles (for manual doc-generation UI)
   listCompanies: () => request('/aws/quotas/companies'),
   // Batch export AWS Console Billing → Bills PDFs, returns a zip
