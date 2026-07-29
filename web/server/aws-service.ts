@@ -32,11 +32,8 @@ const DEFAULT_REGION = config.region || process.env.AWS_DEFAULT_REGION || 'us-ea
 const CHILD_ROLE_NAME = config.childRoleName || process.env.CHILD_ROLE_NAME || 'OrganizationAccountAccessRole';
 // 一级跳专用: 每个账户里都建有并信任主账号的 role (方案 A: 优先用它，失败 fallback 到 payer 二级跳)
 const SUPPORT_ROLE_NAME = config.supportRoleName || process.env.SUPPORT_ROLE_NAME || 'support-quota';
-// 专用 Admin 控制台角色（一级跳，AdministratorAccess，信任平台身份）。与 support-quota 对称，
-// 用于控制台「Admin」选项：直接 AssumeRole 到目标账户的该角色，不复用 tool/OAAR 二级跳。
-const ADMIN_ROLE_NAME = config.adminRoleName || process.env.ADMIN_ROLE_NAME || 'admin-console';
-// 哪些组织(按 payer 名称)在账户页控制台提供「只读(support-quota) / Admin(admin-console)」双选项。
-// 仅这些组织(及其成员、未来新成员)部署了专用 support-quota + admin-console 角色；其余账户走 auto 回退。
+// 哪些组织(按 payer 名称)在账户页控制台提供「只读(support-quota) / Admin」双选项。
+// 只读 = 一级跳 support-quota；Admin = 默认 OrganizationAccountAccessRole（成员二级跳，管理账户用 role/tool）。
 const CONSOLE_ADMIN_PAYERS: string[] = Array.isArray(config.consoleAdminPayers) ? config.consoleAdminPayers : [];
 
 // Payers from config.json or env
@@ -717,16 +714,57 @@ async function assumeRoleStrict(accountId: string, roleName: string, sessionPref
 }
 
 /**
+ * Admin 控制台凭证：使用默认 OrganizationAccountAccessRole。
+ * - accountId 是某 payer 的管理账户：管理账户没有 OAAR，用该 payer 的 role/tool（管理员一级跳）。
+ * - 否则(成员账户)：payer admin 凭证 → 二级跳 OrganizationAccountAccessRole。
+ */
+async function assumeAdminViaOAAR(accountId: string) {
+  const ADMIN_CHILD_ROLE = 'OrganizationAccountAccessRole';
+  const selfPayer = PAYERS.find(p => {
+    const m = /arn:aws:iam::(\d+):role\//.exec(p.roleArn);
+    return m && m[1] === accountId;
+  });
+  if (selfPayer) {
+    return await getAdminCredsForPayer(selfPayer.roleArn);
+  }
+  const known = accountPayerMap.get(accountId) || getPayerRoleArnForAccount(accountId);
+  const payerArns = known
+    ? [known, ...PAYERS.map(p => p.roleArn).filter(a => a !== known)]
+    : PAYERS.map(p => p.roleArn);
+  let lastErr: any;
+  for (const payerArn of payerArns) {
+    try {
+      const admin = await getAdminCredsForPayer(payerArn);
+      const sts = new STSClient({ region: DEFAULT_REGION, credentials: admin });
+      const resp = await sts.send(new AssumeRoleCommand({
+        RoleArn: `arn:aws:iam::${accountId}:role/${ADMIN_CHILD_ROLE}`,
+        RoleSessionName: `console-admin-${accountId}`.slice(0, 64),
+        DurationSeconds: 3600,
+      }));
+      accountPayerMap.set(accountId, payerArn);
+      return {
+        accessKeyId: resp.Credentials!.AccessKeyId!,
+        secretAccessKey: resp.Credentials!.SecretAccessKey!,
+        sessionToken: resp.Credentials!.SessionToken!,
+      };
+    } catch (e) { lastErr = e; continue; }
+  }
+  throw new Error(
+    `无法以 Admin 权限登录账户 ${accountId} 的控制台：未能经 OrganizationAccountAccessRole 假设` +
+    `（${lastErr?.name || lastErr?.message || '所有 payer 均尝试失败'}）。`,
+  );
+}
+
+/**
  * Generate a federated AWS Console sign-in URL for a child account.
  * Lets the user open the account's console (e.g. a Support case) without manual login.
  * Uses STS federation — free, no Business plan required.
  *
  * access:
- *   - 'auto'（默认）   → 原有回退链（support-quota 一级跳 → payer tool → 子角色二级跳），
- *                        供未部署专用角色的普通账户使用，保证控制台始终能打开。
- *   - 'support'        → 一级跳专用 support-quota 角色（只读 + Support + 配额）
- *   - 'admin'          → 一级跳专用 admin-console 角色（AdministratorAccess）
- * support/admin 为专用角色的一级跳；若目标账户未部署对应角色，抛出明确错误。
+ *   - 'auto'（默认）→ 原有回退链（support-quota 一级跳 → payer tool → 子角色二级跳），
+ *                     供未部署专用角色的普通账户使用，保证控制台始终能打开。
+ *   - 'support'     → 一级跳专用 support-quota 角色（只读 + Support + 配额）
+ *   - 'admin'       → 默认 OrganizationAccountAccessRole（成员二级跳；payer 管理账户用 role/tool）
  */
 export async function getConsoleSigninUrl(
   accountId: string,
@@ -735,16 +773,18 @@ export async function getConsoleSigninUrl(
 ) {
   // Get temporary credentials for the target account
   let creds;
-  if (access === 'support' || access === 'admin') {
-    // 专用角色一级跳
-    const roleName = access === 'admin' ? ADMIN_ROLE_NAME : SUPPORT_ROLE_NAME;
+  if (access === 'admin') {
+    // Admin：默认 OrganizationAccountAccessRole
+    creds = await assumeAdminViaOAAR(accountId);
+  } else if (access === 'support') {
+    // 只读：一级跳专用 support-quota 角色
     try {
-      creds = await assumeRoleStrict(accountId, roleName, `console-${access}`);
+      creds = await assumeRoleStrict(accountId, SUPPORT_ROLE_NAME, 'console-support');
     } catch (e: any) {
       throw new Error(
-        `无法以 ${access === 'admin' ? 'Admin' : '只读(support-quota)'} 权限登录账户 ${accountId} 的控制台：` +
-        `未能假设角色 role/${roleName}（${e?.name || e?.message || '假设失败'}）。` +
-        `请确认该账户已部署 ${roleName} 角色并信任平台身份。`,
+        `无法以 只读(support-quota) 权限登录账户 ${accountId} 的控制台：` +
+        `未能假设角色 role/${SUPPORT_ROLE_NAME}（${e?.name || e?.message || '假设失败'}）。` +
+        `请确认该账户已部署 ${SUPPORT_ROLE_NAME} 角色并信任平台身份。`,
       );
     }
   } else {
