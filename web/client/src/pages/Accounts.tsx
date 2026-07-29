@@ -55,12 +55,13 @@ const AccountsPage: React.FC = () => {
   // 拉取当前用户的根用户凭证权限，决定是否展示根用户 tab 的敏感功能
   useEffect(() => { api.me().then(r => setCanRoot(!!r.rootAccess)).catch(() => {}); }, []);
 
-  // 免登录进入该账户的 AWS 控制台。access: 'support'(只读) | 'admin'(完整管理员, 需 root 权限)
-  const openConsole = async (accountId: string, access: 'support' | 'admin' = 'support') => {
+  // 免登录进入该账户的 AWS 控制台。
+  // access 省略 → auto（原有回退链，普通账户用）；'support' → 只读；'admin' → 完整管理员(需 root 权限)
+  const openConsole = async (accountId: string, access?: 'support' | 'admin') => {
     setConsoleLoading(true);
-    const hide = message.loading(access === 'admin' ? '正在生成 Admin 免登录链接...' : '正在生成只读免登录链接...', 0);
+    const hide = message.loading(access === 'admin' ? '正在生成 Admin 免登录链接...' : '正在生成免登录链接...', 0);
     try {
-      const res = await api.getConsoleUrl(accountId, { access });
+      const res = await api.getConsoleUrl(accountId, access ? { access } : undefined);
       hide();
       if (res.success && res.url) {
         window.open(res.url, '_blank');
@@ -80,13 +81,23 @@ const AccountsPage: React.FC = () => {
     onClick: ({ key }: { key: string }) => openConsole(accountId, key as 'support' | 'admin'),
   });
 
-  const ConsoleButton: React.FC<{ accountId: string; style?: React.CSSProperties }> = ({ accountId, style }) => (
-    <Dropdown menu={consoleMenu(accountId)} trigger={['click']}>
-      <Button type="primary" size="small" icon={<LoginOutlined />} loading={consoleLoading} style={style}>
-        控制台 <DownOutlined style={{ fontSize: 10 }} />
-      </Button>
-    </Dropdown>
-  );
+  // 仅 SK1/SK2 等配置了 consoleAdminPayers 的组织(account._consoleDual)显示双选项下拉；
+  // 其余账户保持单个「控制台」按钮，走 auto 回退链。
+  const ConsoleButton: React.FC<{ account: any; style?: React.CSSProperties }> = ({ account, style }) => {
+    if (!account?._consoleDual) {
+      return (
+        <Button type="primary" size="small" icon={<LoginOutlined />} loading={consoleLoading} style={style}
+          onClick={() => openConsole(account.Id)}>控制台</Button>
+      );
+    }
+    return (
+      <Dropdown menu={consoleMenu(account.Id)} trigger={['click']}>
+        <Button type="primary" size="small" icon={<LoginOutlined />} loading={consoleLoading} style={style}>
+          控制台 <DownOutlined style={{ fontSize: 10 }} />
+        </Button>
+      </Dropdown>
+    );
+  };
 
   const openDetail = async (account: any) => {
     setSelectedAccount(account);
@@ -123,7 +134,7 @@ const AccountsPage: React.FC = () => {
           <span style={{ fontWeight: 600, marginLeft: 8 }}>{selectedAccount.Name}</span>
           <Tag style={{ marginLeft: 8 }}>{selectedAccount._payer}</Tag>
           {selectedAccount._isPayer && <Tag color="gold" style={{ marginLeft: 4 }}>Payer</Tag>}
-          <ConsoleButton accountId={selectedAccount.Id} style={{ marginLeft: 'auto' }} />
+          <ConsoleButton account={selectedAccount} style={{ marginLeft: 'auto' }} />
         </div>
         <Tabs size="small" items={[
           { key: 'info', label: '基本', children: (
@@ -256,7 +267,7 @@ const AccountsPage: React.FC = () => {
                 <Card size="small" style={{ height: '100%' }} title={<span>{selectedAccount.Name}{selectedAccount._isPayer && <Tag color="gold" style={{ marginLeft: 8 }}>Payer</Tag>}</span>}
                   extra={
                     <Space size={4}>
-                      <ConsoleButton accountId={selectedAccount.Id} />
+                      <ConsoleButton account={selectedAccount} />
                       <Button type="text" size="small" aria-label="关闭" onClick={() => setSelectedAccount(null)}>✕</Button>
                     </Space>
                   }>

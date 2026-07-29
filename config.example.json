@@ -10,6 +10,8 @@
   ],
   "childRoleName": "OrganizationAccountAccessRole",
   "supportRoleName": "support-quota",
+  "adminRoleName": "admin-console",
+  "consoleAdminPayers": ["org-name-1"],
   "web": {
     "port": 3000,
     "adminPassword": "CHANGE_ME_STRONG_PASSWORD",

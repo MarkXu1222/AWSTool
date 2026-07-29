@@ -215,7 +215,7 @@ awsRouter.get('/console-url/:accountId', async (req: Request, res: Response) => 
     const accountId = String(req.params.accountId);
     if (!/^\d{12}$/.test(accountId)) return res.status(400).json({ error: '无效的账户 ID' });
     const { caseId, destination, access } = req.query;
-    const mode: 'support' | 'admin' = access === 'admin' ? 'admin' : 'support';
+    const mode: 'auto' | 'support' | 'admin' = access === 'admin' ? 'admin' : access === 'support' ? 'support' : 'auto';
 
     // 安全门禁：Admin 控制台 = 完整管理员权限，等同生成 Admin 临时凭证，
     // 需具备根用户权限（admin 角色或被授予 root_access）。只读选项对所有登录用户开放。
