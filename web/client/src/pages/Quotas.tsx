@@ -18,7 +18,7 @@ const renderStatus = (s: string) => {
 };
 
 // 手动生成文档时可选的常用配额类型（组合了 serviceCode + quotaName，classifyQuota 会据此推断类别 + 单位）
-const QUOTA_PRESETS = [
+export const QUOTA_PRESETS = [
   { label: 'EC2 Standard vCPU (A/C/D/H/I/M/R/T/Z)', serviceCode: 'ec2', quotaName: 'Running On-Demand Standard (A, C, D, H, I, M, R, T, Z) instances', unit: 'vCPUs' },
   { label: 'EC2 P vCPU (GPU: p3/p4/p5)', serviceCode: 'ec2', quotaName: 'Running On-Demand P instances', unit: 'vCPUs' },
   { label: 'EC2 G/VT vCPU (GPU)', serviceCode: 'ec2', quotaName: 'Running On-Demand G and VT instances', unit: 'vCPUs' },
@@ -93,7 +93,7 @@ const SERVICES = [
   { label: 'ECR', value: 'ecr' },
 ];
 
-const REGIONS = [
+export const REGIONS = [
   { label: '全部区域', value: '' },
   // 默认区域
   { label: 'us-east-1 (弗吉尼亚)', value: 'us-east-1' },

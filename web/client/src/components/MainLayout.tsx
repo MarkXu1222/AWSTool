@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { Layout, Menu, Button } from 'antd';
-import { HomeOutlined, TeamOutlined, DashboardOutlined, DollarOutlined, SettingOutlined, LogoutOutlined, DeleteOutlined, FileSearchOutlined, GlobalOutlined, TagsOutlined } from '@ant-design/icons';
+import { HomeOutlined, TeamOutlined, DashboardOutlined, DollarOutlined, SettingOutlined, LogoutOutlined, DeleteOutlined, FileSearchOutlined, GlobalOutlined, TagsOutlined, ThunderboltOutlined } from '@ant-design/icons';
 import DashboardPage from '../pages/Dashboard';
 import AccountsPage from '../pages/Accounts';
 import QuotasPage from '../pages/Quotas';
@@ -10,6 +10,7 @@ import RegionsPage from '../pages/Regions';
 import AuditLogPage from '../pages/AuditLog';
 import SettingsPage from '../pages/Settings';
 import TagCompliancePage from '../pages/TagCompliance';
+import BulkQuotaPage from '../pages/BulkQuota';
 import { api } from '../api';
 import { APP_VERSION } from '../version';
 
@@ -32,10 +33,15 @@ export const PAGE_META: { key: string; label: string }[] = [
   { key: 'settings', label: '系统设置' },
 ];
 
+// 批量提额页 key。注意：它不在 PAGE_META / 后端 ALL_PAGE_KEYS 里，
+// 可见性完全由独立权限 bulkQuotaAccess 决定，不能通过「页面权限」勾选获得。
+export const BULK_QUOTA_PAGE_KEY = 'bulkquota';
+
 const navItems = [
   { key: 'dashboard', icon: <HomeOutlined />, label: '概览' },
   { key: 'accounts', icon: <TeamOutlined />, label: '账户管理' },
   { key: 'quotas', icon: <DashboardOutlined />, label: '配额管理' },
+  { key: BULK_QUOTA_PAGE_KEY, icon: <ThunderboltOutlined />, label: '批量提额' },
   { key: 'regions', icon: <GlobalOutlined />, label: '区域管理' },
   { key: 'billing', icon: <DollarOutlined />, label: '账单分析' },
   { key: 'cleanup', icon: <DeleteOutlined />, label: '资源清理' },
@@ -57,10 +63,13 @@ const MainLayout: React.FC<MainLayoutProps> = ({ onLogout }) => {
   const [username, setUsername] = useState('');
   // 空数组 = 尚未加载完毕，此时不做过滤；加载后仅显示允许的页面
   const [allowedPages, setAllowedPages] = useState<string[] | null>(null);
+  // 批量提额独立权限；未加载完前按无权限处理，避免菜单闪现
+  const [bulkQuotaAccess, setBulkQuotaAccess] = useState(false);
 
   useEffect(() => {
     api.me().then(r => {
       setUsername(r.username || '');
+      setBulkQuotaAccess(!!r.bulkQuotaAccess);
       if (Array.isArray(r.allowedPages)) {
         setAllowedPages(r.allowedPages);
         // 如果当前页不在允许列表里，回退到第一个允许的页面
@@ -73,6 +82,8 @@ const MainLayout: React.FC<MainLayoutProps> = ({ onLogout }) => {
 
   // 允许在 me() 未加载完时先渲染完整菜单（loading 态），加载后按权限过滤
   const isPageAllowed = (key: string) => {
+    // 批量提额只看独立权限，与页面权限无关
+    if (key === BULK_QUOTA_PAGE_KEY) return bulkQuotaAccess;
     if (allowedPages === null) return true;
     return allowedPages.includes(key);
   };
@@ -94,6 +105,7 @@ const MainLayout: React.FC<MainLayoutProps> = ({ onLogout }) => {
       case 'dashboard': return <DashboardPage onNavigate={setCurrentPage} />;
       case 'accounts': return <AccountsPage />;
       case 'quotas': return <QuotasPage />;
+      case BULK_QUOTA_PAGE_KEY: return <BulkQuotaPage />;
       case 'regions': return <RegionsPage />;
       case 'billing': return <BillingPage />;
       case 'cleanup': return <CleanupPage />;

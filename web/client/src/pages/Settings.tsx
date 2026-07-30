@@ -72,7 +72,7 @@ const SettingsPage: React.FC<SettingsPageProps> = ({ onLogout }) => {
     try {
       // admin 忽略 allowedPages (后端会视为全部)；viewer 传勾选的
       const allowedPages = values.role === 'admin' ? undefined : (values.allowedPages || []);
-      const res = await api.createUser(values.username, values.password, values.role, allowedPages, !!values.rootAccess);
+      const res = await api.createUser(values.username, values.password, values.role, allowedPages, !!values.rootAccess, !!values.bulkQuotaAccess);
       if (res.success) { message.success(res.message); setAddUserOpen(false); addForm.resetFields(); loadUsers(); }
       else message.error(res.error);
     } catch (e: any) { message.error(e.message); }
@@ -81,7 +81,7 @@ const SettingsPage: React.FC<SettingsPageProps> = ({ onLogout }) => {
   const openEditUser = (record: any) => {
     // 未设置 allowed_pages (旧数据/admin) 时默认勾全
     const initialPages = Array.isArray(record.allowed_pages) ? record.allowed_pages : ALL_PAGE_KEYS;
-    editForm.setFieldsValue({ role: record.role, allowedPages: initialPages, rootAccess: !!record.root_access });
+    editForm.setFieldsValue({ role: record.role, allowedPages: initialPages, rootAccess: !!record.root_access, bulkQuotaAccess: !!record.bulk_quota_access });
     setEditUserOpen(record);
   };
 
@@ -89,7 +89,7 @@ const SettingsPage: React.FC<SettingsPageProps> = ({ onLogout }) => {
     const values = await editForm.validateFields();
     try {
       const allowedPages = values.role === 'admin' ? undefined : (values.allowedPages || []);
-      const res = await api.updateUser(editUserOpen.id, { role: values.role, allowedPages, rootAccess: !!values.rootAccess });
+      const res = await api.updateUser(editUserOpen.id, { role: values.role, allowedPages, rootAccess: !!values.rootAccess, bulkQuotaAccess: !!values.bulkQuotaAccess });
       if (res.success) { message.success(res.message || '已更新'); setEditUserOpen(null); editForm.resetFields(); loadUsers(); }
       else message.error(res.error);
     } catch (e: any) { message.error(e.message); }
@@ -194,6 +194,9 @@ const SettingsPage: React.FC<SettingsPageProps> = ({ onLogout }) => {
                 { title: '根用户权限', dataIndex: 'root_access', width: 90, render: (v: boolean, record: any) => (
                   record.role === 'admin' ? <Tag color="red">全部</Tag> : (v ? <Tag color="purple">✓ 已授权</Tag> : <Tag>—</Tag>)
                 )},
+                { title: '批量提额', dataIndex: 'bulk_quota_access', width: 90, render: (v: boolean, record: any) => (
+                  record.role === 'admin' ? <Tag color="red">全部</Tag> : (v ? <Tag color="volcano">✓ 已授权</Tag> : <Tag>—</Tag>)
+                )},
                 { title: '操作', width: 180, render: (_: any, record: any) => (
                   <Space size="small">
                     <Button size="small" icon={<EditOutlined />} onClick={() => openEditUser(record)}>编辑</Button>
@@ -215,7 +218,7 @@ const SettingsPage: React.FC<SettingsPageProps> = ({ onLogout }) => {
 
       {/* Add user modal */}
       <Modal title="添加用户" open={addUserOpen} onOk={handleAddUser} onCancel={() => setAddUserOpen(false)} okText="创建" destroyOnClose>
-        <Form form={addForm} layout="vertical" initialValues={{ role: 'viewer', allowedPages: ALL_PAGE_KEYS, rootAccess: false }}>
+        <Form form={addForm} layout="vertical" initialValues={{ role: 'viewer', allowedPages: ALL_PAGE_KEYS, rootAccess: false, bulkQuotaAccess: false }}>
           <Form.Item name="username" label="用户名" rules={[{ required: true }]}><Input /></Form.Item>
           <Form.Item name="password" label="密码" rules={[{ required: true }, { min: 6, message: '至少 6 位' }]}><Input.Password /></Form.Item>
           <Form.Item name="role" label="角色" extra="admin: 全权限 · partadmin: 能操作但页面受限 · viewer: 只读">
@@ -233,6 +236,10 @@ const SettingsPage: React.FC<SettingsPageProps> = ({ onLogout }) => {
                 <Form.Item name="rootAccess" valuePropName="checked" label="根用户凭证权限"
                   extra="允许在账户『根用户』tab 生成 Admin 临时凭证、删除 Root MFA、恢复根密码">
                   <Checkbox>授予根用户凭证操作权限</Checkbox>
+                </Form.Item>
+                <Form.Item name="bulkQuotaAccess" valuePropName="checked" label="批量提额权限"
+                  extra="允许使用『批量提额』页：对某 payer 及其组织下所有账户在多区域批量提交提额请求。未授予时该菜单不可见">
+                  <Checkbox>授予批量提额权限</Checkbox>
                 </Form.Item>
               </>
             )}
@@ -259,6 +266,10 @@ const SettingsPage: React.FC<SettingsPageProps> = ({ onLogout }) => {
                 <Form.Item name="rootAccess" valuePropName="checked" label="根用户凭证权限"
                   extra="允许在账户『根用户』tab 生成 Admin 临时凭证、删除 Root MFA、恢复根密码">
                   <Checkbox>授予根用户凭证操作权限</Checkbox>
+                </Form.Item>
+                <Form.Item name="bulkQuotaAccess" valuePropName="checked" label="批量提额权限"
+                  extra="允许使用『批量提额』页：对某 payer 及其组织下所有账户在多区域批量提交提额请求。未授予时该菜单不可见">
+                  <Checkbox>授予批量提额权限</Checkbox>
                 </Form.Item>
               </>
             )}

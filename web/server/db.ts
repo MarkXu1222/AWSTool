@@ -222,6 +222,7 @@ export const db = {
       mfa_enabled: u.mfa_enabled,
       allowed_pages: (u as any).allowed_pages ?? null,
       root_access: (u as any).root_access === true,
+      bulk_quota_access: (u as any).bulk_quota_access === true,
       created_at: u.created_at,
     }));
   },

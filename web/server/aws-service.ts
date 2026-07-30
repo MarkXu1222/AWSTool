@@ -469,6 +469,42 @@ export async function getBillingBreakdown(accountId: string, startDate: string, 
   };
 }
 
+/** 平台已配置的 payer 列表（名称 + 账户 ID），供批量提额等按组织操作的功能使用 */
+export function listConfiguredPayers(): { name: string; accountId: string; roleArn: string }[] {
+  return PAYERS.map(p => {
+    const m = /arn:aws:iam::(\d+):role\//.exec(p.roleArn || '');
+    return { name: p.name, accountId: m ? m[1] : '', roleArn: p.roleArn };
+  }).filter(p => p.accountId);
+}
+
+/**
+ * 直接向某个 payer 的 Organizations 查询其组织下账户（不依赖账户缓存，
+ * 新加入的 payer 也能立即拿到最新列表）。返回 ACTIVE 账户，并标出哪个是管理账户。
+ */
+export async function listOrgAccountsForPayer(payerAccountId: string) {
+  const payer = PAYERS.find(p => (p.roleArn || '').includes(`:${payerAccountId}:`));
+  if (!payer) throw new Error(`payer ${payerAccountId} 不在平台配置中`);
+  const admin = await getAdminCredsForPayer(payer.roleArn);
+  const client = new OrganizationsClient({ region: DEFAULT_REGION, credentials: admin });
+  const accounts: any[] = [];
+  let nextToken: string | undefined;
+  do {
+    const resp = await client.send(new ListAccountsCommand({ NextToken: nextToken }));
+    for (const a of resp.Accounts || []) {
+      if ((a.Status || (a as any).State) !== 'ACTIVE') continue;
+      accounts.push({
+        Id: a.Id,
+        Name: a.Name,
+        Email: a.Email,
+        isPayer: a.Id === payerAccountId,
+      });
+      if (a.Id) accountPayerMap.set(a.Id, payer.roleArn);
+    }
+    nextToken = resp.NextToken;
+  } while (nextToken);
+  return { payerName: payer.name, payerAccountId, accounts };
+}
+
 export async function listServiceQuotas(accountId: string, serviceCode: string, region?: string) {
   const creds = await assumeToAccount(accountId);
   const client = new ServiceQuotasClient({ region: region || DEFAULT_REGION, credentials: creds });

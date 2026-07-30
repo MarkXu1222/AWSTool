@@ -62,6 +62,15 @@ export const api = {
   getBillingBreakdown: (accountId: string, start: string, end: string) => request(`/aws/billing/breakdown/${accountId}?start=${start}&end=${end}`),
   listServiceQuotas: (accountId: string, serviceCode: string, region?: string) =>
     request(`/aws/quotas/${accountId}/${serviceCode}?region=${region || ''}`),
+  // 批量 payer 提额（需独立的批量提额权限）
+  bulkQuotaPayers: () => request('/aws/bulk-quota/payers'),
+  bulkQuotaAccounts: (payerAccountId: string) => request(`/aws/bulk-quota/accounts/${payerAccountId}`),
+  bulkQuotaResolve: (payer: string, region: string, serviceCode: string, quotaName: string) =>
+    request(`/aws/bulk-quota/resolve?payer=${encodeURIComponent(payer)}&region=${encodeURIComponent(region)}&serviceCode=${encodeURIComponent(serviceCode)}&quotaName=${encodeURIComponent(quotaName)}`),
+  bulkQuotaSubmit: (body: { payerAccountId: string; regions: string[]; serviceCode: string; quotaCode: string; quotaName: string; desiredValue: number; scope: string }) =>
+    request('/aws/bulk-quota/submit', { method: 'POST', body: JSON.stringify(body) }),
+  bulkQuotaJob: (jobId: string) => request(`/aws/bulk-quota/job/${jobId}`),
+
   // Bedrock 配额（TPM/RPM/TPD），可一次查询多个区域
   getBedrockQuotas: (accountId: string, regions: string[]) =>
     request(`/aws/bedrock/quotas/${accountId}?regions=${encodeURIComponent(regions.join(','))}`),
@@ -216,9 +225,9 @@ export const api = {
     request('/auth/change-password', { method: 'POST', body: JSON.stringify({ currentPassword, newPassword }) }),
   // User management
   listUsers: () => request('/auth/users'),
-  createUser: (username: string, password: string, role: string, allowedPages?: string[], rootAccess?: boolean) =>
-    request('/auth/users', { method: 'POST', body: JSON.stringify({ username, password, role, allowedPages, rootAccess }) }),
-  updateUser: (id: number, patch: { role?: string; allowedPages?: string[]; rootAccess?: boolean }) =>
+  createUser: (username: string, password: string, role: string, allowedPages?: string[], rootAccess?: boolean, bulkQuotaAccess?: boolean) =>
+    request('/auth/users', { method: 'POST', body: JSON.stringify({ username, password, role, allowedPages, rootAccess, bulkQuotaAccess }) }),
+  updateUser: (id: number, patch: { role?: string; allowedPages?: string[]; rootAccess?: boolean; bulkQuotaAccess?: boolean }) =>
     request(`/auth/users/${id}`, { method: 'PUT', body: JSON.stringify(patch) }),
   deleteUser: (id: number) => request(`/auth/users/${id}`, { method: 'DELETE' }),
   resetUserPassword: (id: number, newPassword: string) =>

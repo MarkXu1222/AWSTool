@@ -134,6 +134,17 @@ const requireRootAccess = (req: Request, res: Response, next: any) => {
   return res.status(403).json({ error: '无根用户凭证操作权限，请联系管理员分配' });
 };
 
+// RBAC: 批量 payer 提额权限（独立开关，必须显式授予）。
+// 该功能会对整个组织所有账户批量提交提额请求，影响面大，因此与页面权限解耦，
+// 且同样从数据库读取当前权限，不信任 JWT 里可能过期的角色。
+const requireBulkQuotaAccess = (req: Request, res: Response, next: any) => {
+  const tokenUser = (req as any).user;
+  const currentUser = tokenUser?.username ? db.getUser(tokenUser.username) : null;
+  if (!currentUser) return res.status(401).json({ error: '用户不存在或登录已失效' });
+  if (currentUser.role === 'admin' || (currentUser as any).bulk_quota_access === true) return next();
+  return res.status(403).json({ error: '无批量提额权限，请联系管理员分配' });
+};
+
 // Audit logs contain sensitive operational data. Enforce the current database
 // permission instead of trusting the potentially stale role/pages in the JWT.
 const requireAuditAccess = (req: Request, res: Response, next: any) => {
@@ -418,6 +429,183 @@ awsRouter.get('/billing/breakdown/:accountId', async (req: Request, res: Respons
     const data = await aws.getBillingBreakdown(String(req.params.accountId), String(start || ''), String(end || ''));
     res.json({ success: true, data });
   } catch (e: any) { res.status(500).json({ error: e.message }); }
+});
+
+// ============================================================
+// 批量 payer 提额（独立权限 requireBulkQuotaAccess）
+// 对某个 payer 自身 + 其组织下所有 ACTIVE 账户，在多个区域批量提交提额请求。
+// 任务量可能很大（账户数 × 区域数），因此后台异步执行 + 前端轮询进度。
+// ============================================================
+interface BulkQuotaJob {
+  id: string;
+  createdBy?: string;
+  payerAccountId: string;
+  payerName: string;
+  regions: string[];
+  serviceCode: string;
+  quotaCode: string;
+  quotaName: string;
+  desiredValue: number;
+  scope: string;
+  total: number;
+  done: number;
+  ok: number;
+  failed: number;
+  status: 'running' | 'completed' | 'error';
+  error?: string;
+  startedAt: string;
+  finishedAt?: string;
+  results: { accountId: string; accountName: string; region: string; status: 'ok' | 'failed'; message?: string; requestId?: string }[];
+}
+const bulkQuotaJobs = new Map<string, BulkQuotaJob>();
+const BULK_QUOTA_MAX_TASKS = 2000;
+
+// 最多保留最近 20 个任务，避免内存无限增长
+function pruneBulkQuotaJobs() {
+  if (bulkQuotaJobs.size <= 20) return;
+  const sorted = [...bulkQuotaJobs.values()].sort((a, b) => a.startedAt.localeCompare(b.startedAt));
+  for (const j of sorted.slice(0, bulkQuotaJobs.size - 20)) bulkQuotaJobs.delete(j.id);
+}
+
+// 可选的 payer 列表（只有 payer，不含成员账户）
+awsRouter.get('/bulk-quota/payers', requireBulkQuotaAccess, async (_req: Request, res: Response) => {
+  try {
+    const payers = aws.listConfiguredPayers();
+    // 用账户缓存补充 payer 账户的真实名称，便于识别
+    const { accounts } = db.getAccountsCache();
+    const data = payers.map(p => {
+      const acct = (accounts || []).find((a: any) => a.Id === p.accountId);
+      return { name: p.name, accountId: p.accountId, accountName: acct?.Name || '' };
+    }).sort((a, b) => a.name.localeCompare(b.name));
+    res.json({ success: true, data });
+  } catch (e: any) { res.status(500).json({ error: e.message }); }
+});
+
+// 某 payer 组织下的 ACTIVE 账户（实时查 Organizations，不依赖缓存）
+awsRouter.get('/bulk-quota/accounts/:payerAccountId', requireBulkQuotaAccess, async (req: Request, res: Response) => {
+  try {
+    const payerAccountId = String(req.params.payerAccountId);
+    if (!/^\d{12}$/.test(payerAccountId)) return res.status(400).json({ error: '无效的 payer 账户 ID' });
+    res.json({ success: true, data: await aws.listOrgAccountsForPayer(payerAccountId) });
+  } catch (e: any) { res.status(500).json({ error: e.message }); }
+});
+
+// 解析配额：在 payer 账户里按配额名找出真实 QuotaCode / 当前值 / 是否可调
+awsRouter.get('/bulk-quota/resolve', requireBulkQuotaAccess, async (req: Request, res: Response) => {
+  try {
+    const payer = String(req.query.payer || '').trim();
+    const region = String(req.query.region || 'us-east-1').trim();
+    const serviceCode = String(req.query.serviceCode || '').trim();
+    const quotaName = String(req.query.quotaName || '').trim();
+    if (!/^\d{12}$/.test(payer)) return res.status(400).json({ error: '无效的 payer 账户 ID' });
+    if (!serviceCode || !quotaName) return res.status(400).json({ error: '缺少 serviceCode / quotaName' });
+    const quotas = await aws.listServiceQuotas(payer, serviceCode, region);
+    const target = quotaName.toLowerCase();
+    const found = quotas.find((q: any) => String(q.QuotaName || '').toLowerCase() === target)
+      || quotas.find((q: any) => String(q.QuotaName || '').toLowerCase().includes(target));
+    if (!found) return res.json({ success: true, data: null });
+    res.json({
+      success: true,
+      data: {
+        quotaCode: found.QuotaCode, quotaName: found.QuotaName, serviceCode,
+        value: found.Value, unit: found.Unit, adjustable: !!found.Adjustable, region,
+      },
+    });
+  } catch (e: any) { res.status(500).json({ error: e.message }); }
+});
+
+// 提交批量提额任务
+awsRouter.post('/bulk-quota/submit', requireBulkQuotaAccess, async (req: Request, res: Response) => {
+  try {
+    const { payerAccountId, regions, serviceCode, quotaCode, quotaName, desiredValue, scope } = req.body || {};
+    if (!/^\d{12}$/.test(String(payerAccountId || ''))) return res.status(400).json({ error: '无效的 payer 账户 ID' });
+    const regionList: string[] = Array.isArray(regions)
+      ? [...new Set(regions.map((r: any) => String(r).trim()).filter((r: string) => /^[a-z]{2}(-[a-z]+)+-\d$/.test(r)))]
+      : [];
+    if (regionList.length === 0) return res.status(400).json({ error: '请至少选择一个区域' });
+    if (!serviceCode || !quotaCode) return res.status(400).json({ error: '缺少 serviceCode / quotaCode' });
+    const target = Number(desiredValue);
+    if (!isFinite(target) || target <= 0) return res.status(400).json({ error: '期望值必须为正数' });
+    const mode = scope === 'payer' ? 'payer' : scope === 'members' ? 'members' : 'all';
+
+    const { payerName, accounts } = await aws.listOrgAccountsForPayer(String(payerAccountId));
+    const targets = accounts.filter((a: any) =>
+      mode === 'all' ? true : mode === 'payer' ? a.isPayer : !a.isPayer);
+    if (targets.length === 0) return res.status(400).json({ error: '按所选范围没有匹配的账户' });
+    const total = targets.length * regionList.length;
+    if (total > BULK_QUOTA_MAX_TASKS) {
+      return res.status(400).json({ error: `任务量 ${total} 超过上限 ${BULK_QUOTA_MAX_TASKS}，请减少区域或拆分执行` });
+    }
+
+    const user = (req as any).user;
+    const job: BulkQuotaJob = {
+      id: `bq-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      createdBy: user?.username,
+      payerAccountId: String(payerAccountId), payerName,
+      regions: regionList, serviceCode, quotaCode, quotaName: quotaName || quotaCode,
+      desiredValue: target, scope: mode,
+      total, done: 0, ok: 0, failed: 0,
+      status: 'running', startedAt: new Date().toISOString(), results: [],
+    };
+    bulkQuotaJobs.set(job.id, job);
+    pruneBulkQuotaJobs();
+
+    db.addAuditLog(user?.userId, 'BULK_QUOTA_SUBMIT',
+      `批量提额 payer ${payerName}(${payerAccountId}) | ${job.quotaName} | ${serviceCode} | 区域 ${regionList.join(',')} | 范围 ${mode} | ${targets.length} 账户 × ${regionList.length} 区域 = ${total} 请求 | 提升至 ${target}`,
+      user?.username, req.ip);
+    (res.locals as any).audited = true;
+
+    // 后台执行：有界并发，逐条记录结果，失败不影响其它任务
+    (async () => {
+      const tasks: { account: any; region: string }[] = [];
+      for (const a of targets) for (const r of regionList) tasks.push({ account: a, region: r });
+      const CONCURRENCY = 5;
+      let cursor = 0;
+      const worker = async () => {
+        while (cursor < tasks.length) {
+          const idx = cursor++;
+          const t = tasks[idx];
+          try {
+            const result = await aws.requestQuotaIncrease(t.account.Id, serviceCode, quotaCode, target, t.region);
+            db.upsertQuotaRequest({
+              id: (result as any)?.Id || `${t.account.Id}-${t.region}-${Date.now()}`,
+              account_id: t.account.Id, service_code: serviceCode, quota_code: quotaCode,
+              quota_name: job.quotaName, desired_value: target,
+              status: (result as any)?.Status || 'PENDING', region: t.region,
+              submitted_by: user?.username, case_id: (result as any)?.CaseId || null,
+              created_at: new Date().toISOString(),
+            });
+            job.ok++;
+            job.results.push({ accountId: t.account.Id, accountName: t.account.Name || '', region: t.region, status: 'ok', requestId: (result as any)?.Id });
+          } catch (e: any) {
+            job.failed++;
+            job.results.push({ accountId: t.account.Id, accountName: t.account.Name || '', region: t.region, status: 'failed', message: e?.name ? `${e.name}: ${e.message}` : String(e?.message || e) });
+          } finally {
+            job.done++;
+          }
+        }
+      };
+      try {
+        await Promise.all(Array.from({ length: Math.min(CONCURRENCY, tasks.length) }, worker));
+        job.status = 'completed';
+      } catch (e: any) {
+        job.status = 'error';
+        job.error = e?.message || String(e);
+      } finally {
+        job.finishedAt = new Date().toISOString();
+        console.log(`[BulkQuota] job ${job.id} ${job.status}: ok=${job.ok} failed=${job.failed} total=${job.total}`);
+      }
+    })();
+
+    res.json({ success: true, data: { jobId: job.id, total, accounts: targets.length, regions: regionList.length } });
+  } catch (e: any) { res.status(500).json({ error: e.message }); }
+});
+
+// 查询批量提额任务进度
+awsRouter.get('/bulk-quota/job/:jobId', requireBulkQuotaAccess, async (req: Request, res: Response) => {
+  const job = bulkQuotaJobs.get(String(req.params.jobId));
+  if (!job) return res.status(404).json({ error: '任务不存在或已过期' });
+  res.json({ success: true, data: job });
 });
 
 // Bedrock 配额（TPM/RPM/TPD，多区域一键查询）
