@@ -544,12 +544,9 @@ const TagCompliancePage: React.FC = () => {
                   render: (v: string) => {
                     const meta = orgMeta[v];
                     return (
-                      <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
-                        {meta?.payerName
-                          ? <Tag color="geekblue" style={{ margin: 0 }}>{meta.payerName}</Tag>
-                          : meta?.payerAccountId
-                            ? <Tag style={{ margin: 0 }}>{meta.payerAccountId}</Tag>
-                            : null}
+                      <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                        {meta?.payerName && <Tag color="geekblue" style={{ margin: 0 }}>{meta.payerName}</Tag>}
+                        {meta?.payerAccountId && <code style={{ fontSize: 12, color: '#64748B' }}>{meta.payerAccountId}</code>}
                         <code style={{ fontSize: 12 }}>{v}</code>
                       </span>
                     );
@@ -567,6 +564,7 @@ const TagCompliancePage: React.FC = () => {
               description={<ul style={{ margin: 0, paddingLeft: 18 }}>{report.failed_orgs.map((o: any, i: number) => (
                 <li key={i}>
                   {orgMeta[o.org_id]?.payerName && <strong>{orgMeta[o.org_id].payerName} </strong>}
+                  {orgMeta[o.org_id]?.payerAccountId && <code style={{ color: '#64748B' }}>{orgMeta[o.org_id].payerAccountId} </code>}
                   <code>{o.org_id}</code> — {o.status}: {String(o.error).slice(0, 200)}
                 </li>
               ))}</ul>} />
