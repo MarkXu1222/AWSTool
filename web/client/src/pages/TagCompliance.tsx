@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { Card, Table, Tag, Button, Space, message, Tabs, Alert, Statistic, Row, Col, Popconfirm, Input, Tooltip, Spin, Modal, Form, Collapse, Typography, Descriptions } from 'antd';
-import { ReloadOutlined, PlayCircleOutlined, SaveOutlined, TagsOutlined, PlusOutlined, CheckCircleFilled, CloseCircleFilled, QuestionCircleFilled, SearchOutlined } from '@ant-design/icons';
+import { ReloadOutlined, PlayCircleOutlined, SaveOutlined, TagsOutlined, PlusOutlined, CheckCircleFilled, CloseCircleFilled, QuestionCircleFilled, SearchOutlined, ThunderboltOutlined } from '@ant-design/icons';
 import { api } from '../api';
 
 const STATUS_COLOR: Record<string, string> = {
@@ -12,6 +12,19 @@ const STATUS_COLOR: Record<string, string> = {
 const fmtTime = (v?: string) => v ? new Date(v).toLocaleString('zh-CN', { hour12: false }) : '-';
 
 type CheckStatus = 'ok' | 'missing' | 'unknown';
+type ProvisionStatus = 'ok' | 'created' | 'skipped' | 'pending' | 'failed';
+interface ProvisionStep { key: string; label: string; status: ProvisionStatus; detail?: string }
+interface ProvisionResult {
+  payerAccountId: string; centralAccountId: string; orgId?: string; rootOuId?: string;
+  steps: ProvisionStep[]; searchRoleArn?: string; viewArn?: string; needsRetry: boolean;
+}
+const PROV_META: Record<ProvisionStatus, { color: string; text: string }> = {
+  created: { color: 'green', text: '已创建' },
+  ok: { color: 'green', text: '已就绪' },
+  skipped: { color: 'blue', text: '已存在' },
+  pending: { color: 'orange', text: '进行中' },
+  failed: { color: 'red', text: '失败' },
+};
 interface Precheck {
   reachable: boolean; reason?: string; payerAccountId: string; centralAccountId: string;
   orgId?: string; rootOuId?: string; accountCount?: number; orgError?: string;
@@ -87,9 +100,13 @@ const AddOrgModal: React.FC<{
   const [tagValue, setTagValue] = useState('');
   const [excludeAccounts, setExcludeAccounts] = useState('');
 
+  const [provisioning, setProvisioning] = useState(false);
+  const [provResult, setProvResult] = useState<ProvisionResult | null>(null);
+
   const reset = () => {
     setPayer(''); setData(null); setChecking(false);
     setOrgId(''); setSearchRoleArn(''); setViewArn(''); setTagValue(''); setExcludeAccounts('');
+    setProvisioning(false); setProvResult(null);
   };
 
   const handleClose = () => { reset(); onClose(); };
@@ -109,6 +126,39 @@ const AddOrgModal: React.FC<{
       if (!d.reachable) message.warning(d.reason || '无法自动检测，可手动填写');
     } catch (e: any) { message.error(e.message); }
     finally { setChecking(false); }
+  };
+
+  // 一键接入：调用后端自动补齐前置资源，完成后自动重新检测并回填
+  const handleProvision = async () => {
+    if (!/^\d{12}$/.test(payer.trim())) { message.warning('请输入 12 位 payer 账户 ID'); return; }
+    setProvisioning(true); setProvResult(null);
+    const hide = message.loading('正在自动补齐前置资源（可能需要 30 秒以上）...', 0);
+    try {
+      const r = await api.tagProvision(payer.trim());
+      hide();
+      if (!r.success) { message.error(r.error || '接入失败'); return; }
+      const d: ProvisionResult = r.data;
+      setProvResult(d);
+      const failed = d.steps.filter(s => s.status === 'failed');
+      if (failed.length) message.error(`${failed.length} 项失败，请展开查看原因`);
+      else if (d.needsRetry) message.warning('部分资源仍在创建中（多为 Resource Explorer 聚合索引），稍后再点一次「一键接入」即可完成');
+      else message.success('前置资源已就绪');
+      // 用最新状态重新探测并回填字段
+      const pr = await api.tagPrecheck(payer.trim());
+      if (pr.success) {
+        const pd: Precheck = pr.data;
+        setData(pd);
+        if (pd.orgId) setOrgId(pd.orgId);
+        if (pd.checks?.searchRole?.arn) setSearchRoleArn(pd.checks.searchRole.arn);
+        if (pd.checks?.orgView?.arn) setViewArn(pd.checks.orgView.arn);
+        setExcludeAccounts(prev => prev || pd.payerAccountId);
+      }
+      // precheck 可能还没反映出刚建好的资源，用 provision 返回值兜底回填
+      if (d.searchRoleArn) setSearchRoleArn(prev => prev || d.searchRoleArn!);
+      if (d.viewArn) setViewArn(prev => prev || d.viewArn!);
+      if (d.orgId) setOrgId(prev => prev || d.orgId!);
+    } catch (e: any) { hide(); message.error(e.message); }
+    finally { setProvisioning(false); }
   };
 
   const handleAdd = () => {
@@ -137,11 +187,17 @@ const AddOrgModal: React.FC<{
     <Modal open={open} onCancel={handleClose} title="添加组织到标签合规" width={720}
       footer={[
         <Button key="cancel" onClick={handleClose}>取消</Button>,
+        <Popconfirm key="prov" title="自动补齐前置资源？"
+          description="将在该 payer 账户创建：Resource Explorer 聚合索引 / OrgView / search-role / AutoTaggerRole StackSet（部署到全组织）。操作幂等，可重复执行。"
+          okText="开始" cancelText="取消" onConfirm={handleProvision}>
+          <Button type="primary" ghost icon={<ThunderboltOutlined />} loading={provisioning}
+            disabled={!/^\d{12}$/.test(payer.trim())}>一键接入</Button>
+        </Popconfirm>,
         <Button key="add" type="primary" icon={<PlusOutlined />} onClick={handleAdd}>加入下方配置</Button>,
       ]}>
       <Alert type="info" showIcon style={{ marginBottom: 16 }}
-        message="输入该组织 payer（管理账户）ID，平台会尽力自动探测前置条件并回填字段"
-        description="加入后会追加到下方 orgs.json 编辑框，仍需点「保存到 S3」才真正生效，方便你先核对。" />
+        message="输入该组织 payer（管理账户）ID，「检测」看前置条件，「一键接入」自动补齐"
+        description="一键接入会用平台已有的 payer 管理员权限自动创建缺失资源，无需本地 CLI。完成后字段自动回填，仍需「加入下方配置」并点「保存到 S3」才生效。" />
 
       <Space.Compact style={{ width: '100%', marginBottom: 16 }}>
         <Input addonBefore="Payer 账户 ID" value={payer} maxLength={12}
@@ -149,6 +205,26 @@ const AddOrgModal: React.FC<{
           onPressEnter={handleDetect} placeholder="12 位账户 ID" />
         <Button type="primary" icon={<SearchOutlined />} loading={checking} onClick={handleDetect}>检测</Button>
       </Space.Compact>
+
+      {provResult && (
+        <Card size="small" title="一键接入执行结果" style={{ marginBottom: 12 }} bodyStyle={{ padding: '8px 12px' }}>
+          {provResult.steps.map(s => (
+            <div key={s.key} style={{ display: 'flex', alignItems: 'flex-start', gap: 8, padding: '4px 0' }}>
+              <Tag color={PROV_META[s.status]?.color} style={{ margin: 0, minWidth: 60, textAlign: 'center' }}>
+                {PROV_META[s.status]?.text || s.status}
+              </Tag>
+              <div style={{ minWidth: 0 }}>
+                <div style={{ fontSize: 13 }}>{s.label}</div>
+                {s.detail && <div style={{ fontSize: 11, color: 'rgba(0,0,0,0.45)', wordBreak: 'break-all' }}>{s.detail}</div>}
+              </div>
+            </div>
+          ))}
+          {provResult.needsRetry && (
+            <Alert type="warning" showIcon style={{ marginTop: 8 }} message="仍有未完成项，稍后再点一次「一键接入」即可继续"
+              description="Resource Explorer 聚合索引的创建/升级由 AWS 异步完成，可能需要较长时间；OrgView 必须等它就绪后才能创建。" />
+          )}
+        </Card>
+      )}
 
       {data && (
         <>
@@ -177,7 +253,7 @@ const AddOrgModal: React.FC<{
                   {st !== 'ok' && (
                     <Collapse ghost size="small" style={{ marginLeft: 16 }}
                       items={[{
-                        key: 'cli', label: <span style={{ fontSize: 12 }}>查看一键修复命令</span>,
+                        key: 'cli', label: <span style={{ fontSize: 12 }}>手动 CLI 命令（备用，推荐直接用「一键接入」）</span>,
                         children: (
                           <Typography.Paragraph copyable={{ text: cli }} style={{ marginBottom: 0 }}>
                             <pre style={{ background: '#0f172a', color: '#e2e8f0', padding: 12, borderRadius: 6, fontSize: 11, overflowX: 'auto', margin: 0 }}>{cli}</pre>
@@ -211,6 +287,8 @@ const TagCompliancePage: React.FC = () => {
   const [scanning, setScanning] = useState(false);
   const [report, setReport] = useState<any>(null);
   const [reportMeta, setReportMeta] = useState<{ generatedAt?: string } | null>(null);
+  // org_id → { payerAccountId, payerName }，用于在组织列前面显示 payer 名字
+  const [orgMeta, setOrgMeta] = useState<Record<string, { payerAccountId: string; payerName: string }>>({});
   const [executions, setExecutions] = useState<any[]>([]);
   const [orgsText, setOrgsText] = useState('');
   const [orgsCount, setOrgsCount] = useState(0);
@@ -248,6 +326,7 @@ const TagCompliancePage: React.FC = () => {
       if (r.success) {
         setReport(r.data?.report || null);
         setReportMeta(r.data ? { generatedAt: r.data.generatedAt } : null);
+        setOrgMeta(r.data?.orgMeta || {});
       } else message.error(r.error || '读取报告失败');
     } catch (e: any) { message.error(e.message); }
     finally { setLoading(false); }
@@ -339,7 +418,20 @@ const TagCompliancePage: React.FC = () => {
           <Card size="small" title={`各组织明细（${byOrg.length}）`} bodyStyle={{ padding: 0 }}>
             <Table size="small" dataSource={byOrg} rowKey="org_id" pagination={false}
               columns={[
-                { title: '组织', dataIndex: 'org_id', render: (v: string) => <code style={{ fontSize: 12 }}>{v}</code> },
+                { title: '组织', dataIndex: 'org_id',
+                  render: (v: string) => {
+                    const meta = orgMeta[v];
+                    return (
+                      <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
+                        {meta?.payerName
+                          ? <Tag color="geekblue" style={{ margin: 0 }}>{meta.payerName}</Tag>
+                          : meta?.payerAccountId
+                            ? <Tag style={{ margin: 0 }}>{meta.payerAccountId}</Tag>
+                            : null}
+                        <code style={{ fontSize: 12 }}>{v}</code>
+                      </span>
+                    );
+                  } },
                 { title: '状态', dataIndex: 'status', width: 120, render: (s: string) => <Tag color={STATUS_COLOR[s] || 'default'}>{s}</Tag> },
                 { title: '发现', dataIndex: 'found', width: 80, align: 'right' as const },
                 { title: '打标', dataIndex: 'tagged', width: 80, align: 'right' as const, render: (n: number) => <span style={{ color: '#52c41a' }}>{n}</span> },
@@ -350,7 +442,12 @@ const TagCompliancePage: React.FC = () => {
           {Array.isArray(report.failed_orgs) && report.failed_orgs.length > 0 && (
             <Alert style={{ marginTop: 12 }} type="error" showIcon
               message={`基础设施故障组织（${report.failed_orgs.length}）`}
-              description={<ul style={{ margin: 0, paddingLeft: 18 }}>{report.failed_orgs.map((o: any, i: number) => <li key={i}><code>{o.org_id}</code> — {o.status}: {String(o.error).slice(0, 200)}</li>)}</ul>} />
+              description={<ul style={{ margin: 0, paddingLeft: 18 }}>{report.failed_orgs.map((o: any, i: number) => (
+                <li key={i}>
+                  {orgMeta[o.org_id]?.payerName && <strong>{orgMeta[o.org_id].payerName} </strong>}
+                  <code>{o.org_id}</code> — {o.status}: {String(o.error).slice(0, 200)}
+                </li>
+              ))}</ul>} />
           )}
         </>
       )}

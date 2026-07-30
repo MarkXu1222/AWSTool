@@ -160,6 +160,9 @@ export const api = {
   tagExecutions: () => request('/aws/tag-compliance/executions'),
   tagReport: () => request('/aws/tag-compliance/report'),
   tagPrecheck: (payer: string) => request(`/aws/tag-compliance/precheck?payer=${encodeURIComponent(payer)}`),
+  // 一键接入：自动补齐该 payer 组织的前置资源
+  tagProvision: (payerAccountId: string) =>
+    request('/aws/tag-compliance/provision', { method: 'POST', body: JSON.stringify({ payerAccountId }) }),
   exportAuditLog: async (format: 'csv' | 'json') => {
     const token = getToken();
     const res = await fetch(`${BASE}/aws/audit/export?format=${format}`, {

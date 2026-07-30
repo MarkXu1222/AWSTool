@@ -63,10 +63,28 @@ awsRouter.get('/tag-compliance/executions', async (_req: Request, res: Response)
   } catch (e: any) { res.status(500).json({ error: e.message }); }
 });
 
-// 最新报告
+// 最新报告（附带 org_id → payer 名称映射，便于前端展示归属）
 awsRouter.get('/tag-compliance/report', async (_req: Request, res: Response) => {
   try {
-    res.json({ success: true, data: await tagCompliance.getLatestReport() });
+    const [report, orgMeta] = await Promise.all([
+      tagCompliance.getLatestReport(),
+      tagCompliance.getOrgPayerMap().catch(() => ({})),
+    ]);
+    res.json({ success: true, data: report ? { ...report, orgMeta } : { orgMeta, report: null } });
+  } catch (e: any) { res.status(500).json({ error: e.message }); }
+});
+
+// 一键接入：自动补齐该 payer 组织的前置资源（RE 跨账户访问/聚合索引/OrgView/search-role/StackSet）
+awsRouter.post('/tag-compliance/provision', requireAdmin, async (req: Request, res: Response) => {
+  try {
+    const payer = String(req.body?.payerAccountId || '').trim();
+    if (!/^\d{12}$/.test(payer)) return res.status(400).json({ error: '请提供 12 位 payer 账户 ID' });
+    const r = await tagCompliance.provisionOrg(payer);
+    const user = (req as any).user;
+    const summary = r.steps.map(s => `${s.label}:${s.status}`).join(', ');
+    db.addAuditLog(user?.userId, 'TAG_ORG_PROVISION', `一键接入 MAP 标签合规 payer ${payer} — ${summary}`, user?.username, req.ip);
+    (res.locals as any).audited = true;
+    res.json({ success: true, data: r });
   } catch (e: any) { res.status(500).json({ error: e.message }); }
 });
 

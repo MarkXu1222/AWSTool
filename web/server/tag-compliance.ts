@@ -13,12 +13,22 @@
 import { STSClient, AssumeRoleCommand } from '@aws-sdk/client-sts';
 import { SFNClient, StartExecutionCommand, ListExecutionsCommand } from '@aws-sdk/client-sfn';
 import { S3Client, GetObjectCommand, PutObjectCommand, ListObjectsV2Command } from '@aws-sdk/client-s3';
-import { IAMClient, GetRoleCommand } from '@aws-sdk/client-iam';
-import { ResourceExplorer2Client, ListViewsCommand } from '@aws-sdk/client-resource-explorer-2';
-import { CloudFormationClient, DescribeStackSetCommand } from '@aws-sdk/client-cloudformation';
-import { OrganizationsClient, DescribeOrganizationCommand, ListRootsCommand, ListAccountsCommand } from '@aws-sdk/client-organizations';
+import { IAMClient, GetRoleCommand, CreateRoleCommand, AttachRolePolicyCommand, ListAttachedRolePoliciesCommand } from '@aws-sdk/client-iam';
+import {
+  ResourceExplorer2Client, ListViewsCommand, CreateViewCommand,
+  GetIndexCommand, CreateIndexCommand, UpdateIndexTypeCommand,
+} from '@aws-sdk/client-resource-explorer-2';
+import {
+  CloudFormationClient, DescribeStackSetCommand, CreateStackSetCommand,
+  CreateStackInstancesCommand, ListStackInstancesCommand,
+} from '@aws-sdk/client-cloudformation';
+import {
+  OrganizationsClient, DescribeOrganizationCommand, ListRootsCommand, ListAccountsCommand,
+  EnableAWSServiceAccessCommand, ListAWSServiceAccessForOrganizationCommand,
+} from '@aws-sdk/client-organizations';
 import path from 'path';
 import fs from 'fs';
+import { db } from './db';
 
 const CONFIG_PATH = path.join(__dirname, '../../config.json');
 let config: any = {};
@@ -277,4 +287,473 @@ export async function precheckOrg(payerAccountId: string): Promise<PrecheckResul
   }
 
   return result;
+}
+
+// ============================================================
+// 组织 → payer 名称映射
+// orgs.json 里没有 payer 名字，但 search_role_arn 里带着 payer 账户 ID，
+// 用它去 config.payers 里反查名字，供报告/配置页展示。
+// ============================================================
+export async function getOrgPayerMap(): Promise<Record<string, { payerAccountId: string; payerName: string }>> {
+  const map: Record<string, { payerAccountId: string; payerName: string }> = {};
+  let orgs: any[] = [];
+  try { orgs = await getOrgsConfig(); } catch { return map; }
+
+  // 账户缓存兜底：payer 不在 config.payers 里但在我们组织树内时，仍能拿到账户名
+  let cached: any[] = [];
+  try { cached = (db.getAccountsCache()?.accounts || []) as any[]; } catch { /* 缓存不可用则忽略 */ }
+
+  for (const o of orgs) {
+    const orgId = o?.org_id;
+    if (!orgId) continue;
+    const m = /arn:aws:iam::(\d+):role\//.exec(String(o.search_role_arn || ''));
+    const payerAccountId = m ? m[1] : '';
+    const payer = payerAccountId ? PAYERS.find(p => (p.roleArn || '').includes(`:${payerAccountId}:`)) : undefined;
+    const cachedAcct = payerAccountId ? cached.find((a: any) => a.Id === payerAccountId) : undefined;
+    map[orgId] = {
+      payerAccountId,
+      payerName: payer?.name || cachedAcct?.Name || '',
+    };
+  }
+  return map;
+}
+
+// ============================================================
+// 一键接入：自动补齐组织的前置资源
+// 对应 RE-AUTOTAG「添加新组织」文档的 2.2 / 2.3 / 2.4 步，
+// 用平台已有的 payer role/tool 管理员凭证执行，全部幂等，可重复运行。
+// ============================================================
+
+const AUTO_TAGGER_STACKSET_NAME = 'AutoTaggerRole';
+const SEARCH_ROLE_NAME = 'resource-explorer-search-role';
+const ORG_VIEW_NAME = 'OrgView';
+
+// auto-tagger-role StackSet 模板（与 RE-AUTOTAG 项目 stacksets/auto-tagger-role.yaml 保持一致）。
+// 打标用 TagResources API，除 tag:TagResources 外还需各服务自身的打标权限，故权限列表很长。
+const AUTO_TAGGER_ROLE_TEMPLATE = `AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  StackSet #3 - IAM Role for central auto-tagger Lambda to assume.
+  Deploy to ONE region per account (IAM is global).
+
+Parameters:
+  CentralToolingAccountId:
+    Type: String
+    Description: Account ID of the central tooling account where Lambda runs
+
+Resources:
+  AutoTaggerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: auto-tagger-role
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: !Sub "arn:aws:iam::\${CentralToolingAccountId}:root"
+            Action: sts:AssumeRole
+            Condition:
+              StringLike:
+                "aws:PrincipalArn": !Sub "arn:aws:iam::\${CentralToolingAccountId}:role/tag-compliance*"
+      Policies:
+        - PolicyName: AutoTagPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - tag:TagResources
+                  - tag:GetResources
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - ec2:CreateTags
+                  - lambda:TagResource
+                  - ecs:TagResource
+                  - eks:TagResource
+                  - elasticloadbalancing:AddTags
+                  - autoscaling:CreateOrUpdateTags
+                  - apprunner:TagResource
+                  - elasticbeanstalk:AddTags
+                  - batch:TagResource
+                  - s3:PutBucketTagging
+                  - s3:GetBucketTagging
+                  - elasticfilesystem:TagResource
+                  - fsx:TagResource
+                  - storagegateway:AddTagsToResource
+                  - backup:TagResource
+                  - rds:AddTagsToResource
+                  - dynamodb:TagResource
+                  - elasticache:AddTagsToResource
+                  - redshift:CreateTags
+                  - es:AddTags
+                  - memorydb:TagResource
+                  - dms:AddTagsToResource
+                  - cloudfront:TagResource
+                  - globalaccelerator:TagResource
+                  - network-firewall:TagResource
+                  - sqs:TagQueue
+                  - sns:TagResource
+                  - events:TagResource
+                  - states:TagResource
+                  - kinesis:AddTagsToStream
+                  - firehose:TagDeliveryStream
+                  - kafka:TagResource
+                  - airflow:TagResource
+                  - mq:CreateTags
+                  - appsync:TagResource
+                  - athena:TagResource
+                  - glue:TagResource
+                  - emr-serverless:TagResource
+                  - elasticmapreduce:AddTags
+                  - kinesisanalytics:TagResource
+                  - quicksight:TagResource
+                  - sagemaker:AddTags
+                  - bedrock:TagResource
+                  - comprehend:TagResource
+                  - rekognition:TagResource
+                  - kendra:TagResource
+                  - personalize:TagResource
+                  - forecast:TagResource
+                  - kms:TagResource
+                  - secretsmanager:TagResource
+                  - acm-pca:TagCertificateAuthority
+                  - wafv2:TagResource
+                  - cognito-idp:TagResource
+                  - cognito-identity:TagResource
+                  - logs:TagLogGroup
+                  - logs:TagResource
+                  - cloudwatch:TagResource
+                  - cloudtrail:AddTags
+                  - config:TagResource
+                  - ssm:AddTagsToResource
+                  - cloudformation:TagResource
+                  - iam:TagRole
+                  - iam:TagUser
+                  - iam:TagPolicy
+                  - iam:TagInstanceProfile
+                  - iam:TagOpenIDConnectProvider
+                  - iam:TagSAMLProvider
+                  - ecr:TagResource
+                  - ds:AddTagsToResource
+                  - ses:TagResource
+                  - connect:TagResource
+                  - gamelift:TagResource
+                  - ivs:TagResource
+                  - codepipeline:TagResource
+                  - codecommit:TagResource
+                  - codeconnections:TagResource
+                  - transfer:TagResource
+                  - datasync:TagResource
+                  - m2:TagResource
+                  - refactor-spaces:TagResource
+                  - vpc-lattice:TagResource
+                  - servicediscovery:TagResource
+                  - directconnect:TagResource
+                  - shield:TagResource
+                  - lex:TagResource
+                  - healthlake:TagResource
+                  - omics:TagResource
+                  - frauddetector:TagResource
+                  - iot:TagResource
+                  - iotevents:TagResource
+                  - iotfleetwise:TagResource
+                  - iotsitewise:TagResource
+                  - iottwinmaker:TagResource
+                  - greengrass:TagResource
+                  - databrew:TagResource
+                  - kinesisvideo:TagResource
+                  - dataexchange:TagResource
+                  - emr-containers:TagResource
+                  - synthetics:TagResource
+                  - rum:TagResource
+                  - ssm-incidents:TagResource
+                  - fis:TagResource
+                  - codebuild:TagResource
+                  - codeartifact:TagResource
+                  - mediapackage:TagResource
+                  - mediatailor:TagResource
+                  - mobiletargeting:TagResource
+                  - pipes:TagResource
+                  - resource-explorer-2:TagResource
+                  - oam:TagResource
+                  - ram:TagResource
+                  - amplify:TagResource
+                  - appstream:TagResource
+                  - workspaces:CreateTags
+                  - workspaces-web:TagResource
+                  - grafana:TagResource
+                  - aps:TagResource
+                  - appflow:TagResource
+                  - managedblockchain:TagResource
+                  - outposts:TagResource
+                  - groundstation:TagResource
+                  - backup-gateway:TagResource
+                  - route53-recovery-control:TagResource
+                  - route53-recovery-readiness:TagResource
+                  - devicefarm:TagResource
+                  - app-integrations:TagResource
+                  - dax:TagResource
+                  - aoss:TagResource
+                  - glacier:TagResource
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - apigateway:PUT
+                  - apigateway:POST
+                  - apigateway:DELETE
+                  - apigateway:GET
+                Resource:
+                  - !Sub "arn:aws:apigateway:*::/tags/*"
+              - Effect: Allow
+                Action:
+                  - apigateway:GET
+                  - apigateway:PATCH
+                Resource:
+                  - !Sub "arn:aws:apigateway:*::*"
+      Tags:
+        - Key: Purpose
+          Value: AutoTagger
+`;
+
+export type ProvisionStatus = 'ok' | 'created' | 'skipped' | 'pending' | 'failed';
+export interface ProvisionStep {
+  key: string;
+  label: string;
+  status: ProvisionStatus;
+  detail?: string;
+}
+export interface ProvisionResult {
+  payerAccountId: string;
+  centralAccountId: string;
+  orgId?: string;
+  rootOuId?: string;
+  steps: ProvisionStep[];
+  searchRoleArn?: string;
+  viewArn?: string;
+  /** 是否还有未完成项（多为 RE 聚合索引仍在创建/升级），需稍后重跑 */
+  needsRetry: boolean;
+}
+
+const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
+
+/**
+ * 幂等地为某个 payer 组织补齐 tag-compliance 前置资源。
+ * 步骤：开启 RE 跨账户访问 → payer 聚合索引 → OrgView → search-role → AutoTaggerRole StackSet。
+ * 任一步失败不会中断后续独立步骤；RE 索引尚未 ACTIVE 时相关步骤标为 pending，稍后重跑即可。
+ */
+export async function provisionOrg(payerAccountId: string): Promise<ProvisionResult> {
+  const central = centralAccountId();
+  const region = 'us-east-1';
+  const steps: ProvisionStep[] = [];
+  const out: ProvisionResult = { payerAccountId, centralAccountId: central, steps, needsRetry: false };
+
+  const creds = await assumePayer(payerAccountId);
+  if (!creds) {
+    throw new Error('该 payer 不在平台配置（config.payers）中，无法自动接入；请先加入 payer 或手动执行 CLI');
+  }
+
+  const org = new OrganizationsClient({ region, credentials: creds });
+  const re = new ResourceExplorer2Client({ region, credentials: creds });
+  const iam = new IAMClient({ region, credentials: creds });
+  const cfn = new CloudFormationClient({ region, credentials: creds });
+
+  // 组织信息（org_id / 根 OU）
+  try {
+    const o = await org.send(new DescribeOrganizationCommand({}));
+    out.orgId = o.Organization?.Id;
+    const roots = await org.send(new ListRootsCommand({}));
+    out.rootOuId = roots.Roots?.[0]?.Id;
+  } catch (e: any) {
+    steps.push({ key: 'org', label: '读取组织信息', status: 'failed', detail: e.name || e.message });
+    out.needsRetry = true;
+    return out;
+  }
+
+  // ---- 1. 开启 Resource Explorer 组织级服务访问 ----
+  try {
+    let enabled = false;
+    let token: string | undefined;
+    do {
+      const p = await org.send(new ListAWSServiceAccessForOrganizationCommand({ NextToken: token }));
+      if ((p.EnabledServicePrincipals || []).some(s => s.ServicePrincipal === 'resource-explorer-2.amazonaws.com')) enabled = true;
+      token = p.NextToken;
+    } while (token && !enabled);
+    if (enabled) {
+      steps.push({ key: 'serviceAccess', label: '开启 Resource Explorer 跨账户访问', status: 'skipped', detail: '已开启' });
+    } else {
+      await org.send(new EnableAWSServiceAccessCommand({ ServicePrincipal: 'resource-explorer-2.amazonaws.com' }));
+      steps.push({ key: 'serviceAccess', label: '开启 Resource Explorer 跨账户访问', status: 'created' });
+    }
+  } catch (e: any) {
+    steps.push({ key: 'serviceAccess', label: '开启 Resource Explorer 跨账户访问', status: 'failed', detail: e.name || e.message });
+    out.needsRetry = true;
+  }
+
+  // ---- 2. payer 自身的 Resource Explorer 聚合索引 ----
+  // Quick Setup 不覆盖管理账户；组织级 View 要求管理账户在该区域有 AGGREGATOR 索引。
+  let indexReady = false;
+  try {
+    let idx: any = null;
+    try { idx = await re.send(new GetIndexCommand({})); }
+    catch (e: any) { if (e.name !== 'ResourceNotFoundException') throw e; }
+
+    if (!idx) {
+      await re.send(new CreateIndexCommand({}));
+      // 新建索引默认 LOCAL，需等 ACTIVE 后升级为 AGGREGATOR
+      for (let i = 0; i < 20; i++) {
+        await sleep(3000);
+        try {
+          const s = await re.send(new GetIndexCommand({}));
+          if (s.State === 'ACTIVE') { idx = s; break; }
+        } catch { /* 继续等 */ }
+      }
+      if (!idx) {
+        steps.push({ key: 'reIndex', label: 'payer 聚合索引 (Resource Explorer)', status: 'pending', detail: '索引已创建，正在初始化，请稍后重跑以继续升级为聚合索引' });
+        out.needsRetry = true;
+      }
+    }
+
+    if (idx) {
+      if (idx.Type === 'AGGREGATOR' && idx.State === 'ACTIVE') {
+        indexReady = true;
+        steps.push({ key: 'reIndex', label: 'payer 聚合索引 (Resource Explorer)', status: 'skipped', detail: '已是 ACTIVE 聚合索引' });
+      } else if (idx.Type === 'LOCAL' && idx.State === 'ACTIVE') {
+        await re.send(new UpdateIndexTypeCommand({ Arn: idx.Arn!, Type: 'AGGREGATOR' }));
+        steps.push({ key: 'reIndex', label: 'payer 聚合索引 (Resource Explorer)', status: 'pending', detail: '已提交 LOCAL→AGGREGATOR 升级，AWS 侧生效可能需要较长时间，稍后重跑' });
+        out.needsRetry = true;
+      } else {
+        steps.push({ key: 'reIndex', label: 'payer 聚合索引 (Resource Explorer)', status: 'pending', detail: `索引状态 ${idx.State}/${idx.Type}，等待 ACTIVE 后重跑` });
+        out.needsRetry = true;
+      }
+    }
+  } catch (e: any) {
+    steps.push({ key: 'reIndex', label: 'payer 聚合索引 (Resource Explorer)', status: 'failed', detail: e.name || e.message });
+    out.needsRetry = true;
+  }
+
+  // ---- 3. 组织级 OrgView ----
+  try {
+    const views = await re.send(new ListViewsCommand({}));
+    const existing = (views.Views || []).find(a => a.includes(`:view/${ORG_VIEW_NAME}/`));
+    if (existing) {
+      out.viewArn = existing;
+      steps.push({ key: 'orgView', label: '组织级 OrgView', status: 'skipped', detail: '已存在' });
+    } else if (!indexReady) {
+      steps.push({ key: 'orgView', label: '组织级 OrgView', status: 'pending', detail: '需等聚合索引就绪后才能创建，稍后重跑' });
+      out.needsRetry = true;
+    } else {
+      const v = await re.send(new CreateViewCommand({
+        ViewName: ORG_VIEW_NAME,
+        IncludedProperties: [{ Name: 'tags' }],
+        Scope: `arn:aws:organizations::${payerAccountId}:organization/${out.orgId}`,
+      }));
+      out.viewArn = v.View?.ViewArn;
+      steps.push({ key: 'orgView', label: '组织级 OrgView', status: 'created', detail: out.viewArn });
+    }
+  } catch (e: any) {
+    steps.push({ key: 'orgView', label: '组织级 OrgView', status: 'failed', detail: e.name || e.message });
+    out.needsRetry = true;
+  }
+
+  // ---- 4. search-role（信任中央工具账户） ----
+  try {
+    const trust = {
+      Version: '2012-10-17',
+      Statement: [{
+        Effect: 'Allow',
+        Principal: { AWS: `arn:aws:iam::${central}:root` },
+        Action: 'sts:AssumeRole',
+      }],
+    };
+    let exists = false;
+    try {
+      const r = await iam.send(new GetRoleCommand({ RoleName: SEARCH_ROLE_NAME }));
+      exists = true;
+      out.searchRoleArn = r.Role?.Arn;
+    } catch (e: any) { if (e.name !== 'NoSuchEntityException') throw e; }
+
+    if (!exists) {
+      const r = await iam.send(new CreateRoleCommand({
+        RoleName: SEARCH_ROLE_NAME,
+        AssumeRolePolicyDocument: JSON.stringify(trust),
+        Description: 'Resource Explorer search role for central tag-compliance scanner',
+        MaxSessionDuration: 3600,
+        Tags: [{ Key: 'Purpose', Value: 'TagCompliance' }],
+      }));
+      out.searchRoleArn = r.Role?.Arn;
+    }
+    // 幂等挂策略
+    const wanted = [
+      'arn:aws:iam::aws:policy/AWSResourceExplorerReadOnlyAccess',
+      'arn:aws:iam::aws:policy/AWSOrganizationsReadOnlyAccess',
+    ];
+    const attached = await iam.send(new ListAttachedRolePoliciesCommand({ RoleName: SEARCH_ROLE_NAME }));
+    const have = new Set((attached.AttachedPolicies || []).map(p => p.PolicyArn));
+    for (const arn of wanted) {
+      if (!have.has(arn)) await iam.send(new AttachRolePolicyCommand({ RoleName: SEARCH_ROLE_NAME, PolicyArn: arn }));
+    }
+    steps.push({
+      key: 'searchRole', label: 'Resource Explorer 搜索角色',
+      status: exists ? 'skipped' : 'created',
+      detail: out.searchRoleArn,
+    });
+  } catch (e: any) {
+    steps.push({ key: 'searchRole', label: 'Resource Explorer 搜索角色', status: 'failed', detail: e.name || e.message });
+    out.needsRetry = true;
+  }
+
+  // ---- 5. AutoTaggerRole StackSet + 部署到根 OU ----
+  try {
+    let stackSetExists = false;
+    try {
+      await cfn.send(new DescribeStackSetCommand({ StackSetName: AUTO_TAGGER_STACKSET_NAME, CallAs: 'SELF' }));
+      stackSetExists = true;
+    } catch (e: any) { if (e.name !== 'StackSetNotFoundException') throw e; }
+
+    if (!stackSetExists) {
+      await cfn.send(new CreateStackSetCommand({
+        StackSetName: AUTO_TAGGER_STACKSET_NAME,
+        Description: 'IAM role for central tag-compliance auto-tagger (managed by AWSTool)',
+        TemplateBody: AUTO_TAGGER_ROLE_TEMPLATE,
+        PermissionModel: 'SERVICE_MANAGED',
+        AutoDeployment: { Enabled: true, RetainStacksOnAccountRemoval: false },
+        ManagedExecution: { Active: true },
+        Capabilities: ['CAPABILITY_NAMED_IAM'],
+        Parameters: [{ ParameterKey: 'CentralToolingAccountId', ParameterValue: central }],
+        CallAs: 'SELF',
+        Tags: [{ Key: 'ManagedBy', Value: 'AWSTool' }, { Key: 'Purpose', Value: 'TagCompliance' }],
+      }));
+    }
+
+    // 仅在还没有任何实例时才下发，避免重复触发操作
+    const instances = await cfn.send(new ListStackInstancesCommand({ StackSetName: AUTO_TAGGER_STACKSET_NAME, CallAs: 'SELF' }));
+    const instanceCount = (instances.Summaries || []).length;
+    if (instanceCount === 0) {
+      if (!out.rootOuId) throw new Error('未取到根 OU，无法下发 StackSet 实例');
+      await cfn.send(new CreateStackInstancesCommand({
+        StackSetName: AUTO_TAGGER_STACKSET_NAME,
+        DeploymentTargets: { OrganizationalUnitIds: [out.rootOuId] },
+        Regions: [region],
+        OperationPreferences: { FailureTolerancePercentage: 100, MaxConcurrentPercentage: 100 },
+        CallAs: 'SELF',
+      }));
+      steps.push({
+        key: 'stackSet', label: '打标角色 StackSet (AutoTaggerRole)',
+        status: 'created',
+        detail: stackSetExists ? '已存在 StackSet，已下发到根 OU（异步进行中）' : '已创建 StackSet 并下发到根 OU（异步进行中）',
+      });
+    } else {
+      steps.push({
+        key: 'stackSet', label: '打标角色 StackSet (AutoTaggerRole)',
+        status: 'skipped',
+        detail: `已有 ${instanceCount} 个成员账户实例；新成员由 AutoDeployment 自动覆盖`,
+      });
+    }
+  } catch (e: any) {
+    steps.push({ key: 'stackSet', label: '打标角色 StackSet (AutoTaggerRole)', status: 'failed', detail: e.name || e.message });
+    out.needsRetry = true;
+  }
+
+  return out;
 }
