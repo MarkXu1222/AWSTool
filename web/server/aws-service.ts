@@ -482,6 +482,156 @@ export async function listServiceQuotas(accountId: string, serviceCode: string, 
   return quotas;
 }
 
+// ============================================================
+// Bedrock 配额（TPM / RPM / TPD）
+// AWS 的 Bedrock 配额名是一整句话，例如：
+//   "On-demand model inference tokens per minute for Anthropic Claude 3.5 Sonnet (doubled for cross-region calls)"
+// 需要从中解析出「指标类型 / 推理范围(scope) / 模型名 / provider」，再透视成一行三列(TPM/RPM/TPD)。
+// ============================================================
+const BEDROCK_QUOTA_SCOPES = ['Global Cross-Region', 'Cross-Region', 'On-Demand', 'Latency-Optimized', 'Other'];
+// 模型名 → 规范 provider。按关键词匹配（含模型家族别名），避免出现 "GPT-5.4"/"Stable" 这类
+// 由“取首个单词”产生的伪 provider，也避免 MiniMax/Minimax 大小写重复项。
+const BEDROCK_PROVIDER_HINTS: Array<[string, string]> = [
+  ['guardrail', 'Bedrock (服务级)'],
+  ['anthropic', 'Anthropic'], ['claude', 'Anthropic'],
+  ['nova', 'Amazon'], ['titan', 'Amazon'], ['amazon', 'Amazon'],
+  ['llama', 'Meta'], ['meta', 'Meta'],
+  ['pixtral', 'Mistral'], ['magistral', 'Mistral'], ['ministral', 'Mistral'],
+  ['voxtral', 'Mistral'], ['devstral', 'Mistral'], ['mistral', 'Mistral'],
+  ['cohere', 'Cohere'], ['command', 'Cohere'],
+  ['jamba', 'AI21'], ['ai21', 'AI21'],
+  ['stable diffusion', 'Stability'], ['stable image', 'Stability'], ['sdxl', 'Stability'],
+  ['stability', 'Stability'], ['stable', 'Stability'],
+  ['deepseek', 'DeepSeek'],
+  ['qwen', 'Qwen'],
+  ['palmyra', 'Writer'], ['writer', 'Writer'],
+  ['luma', 'Luma'],
+  ['gpt', 'OpenAI'], ['openai', 'OpenAI'],
+  ['marengo', 'TwelveLabs'], ['pegasus', 'TwelveLabs'], ['twelve', 'TwelveLabs'],
+  ['gemma', 'Google'], ['gemini', 'Google'], ['google', 'Google'],
+  ['kimi', 'Moonshot'], ['moonshot', 'Moonshot'],
+  ['minimax', 'MiniMax'],
+  ['nemotron', 'NVIDIA'], ['nvidia', 'NVIDIA'],
+  ['z.ai', 'Z.ai'], ['zhipu', 'Z.ai'], ['glm', 'Z.ai'],
+];
+
+function inferBedrockProvider(...values: string[]): string {
+  const hay = values.filter(Boolean).join(' ').toLowerCase();
+  for (const [needle, label] of BEDROCK_PROVIDER_HINTS) {
+    if (hay.includes(needle)) return label;
+  }
+  // 认不出来就归为 Other（模型名仍然完整展示），不猜首个单词以免产生伪 provider
+  return 'Other';
+}
+
+const BEDROCK_METRIC_PHRASE = /\s*(?:tokens per minute|requests per minute|tokens per day)\s*/i;
+
+/** 从配额名里提取模型名："... tokens per minute for <模型名>" */
+function extractBedrockModelName(quotaName: string): string {
+  const m = /(?:tokens per minute|requests per minute|tokens per day)\s+for\s+(.+)/i.exec(quotaName);
+  let model: string;
+  if (m) {
+    model = m[1];
+  } else {
+    // 服务级配额（如 Guardrails）没有 "for <模型>" 结构：剥掉前缀与指标短语，保留动作名
+    model = quotaName;
+    const prefixes = [
+      'Global cross-region model inference ', 'Cross-region model inference ',
+      'On-demand latency-optimized model inference ', 'On-demand model inference ',
+      'Model invocation max ',
+    ];
+    for (const p of prefixes) {
+      if (model.toLowerCase().startsWith(p.toLowerCase())) { model = model.slice(p.length); break; }
+    }
+    model = model
+      .replace(/^\(Guardrails\)\s*/i, '')
+      .replace(/^On-demand\s+/i, '')
+      .replace(BEDROCK_METRIC_PHRASE, ' ')
+      .trim();
+  }
+  return model.replace(/\s*\(doubled for cross-region calls\)/i, '').replace(/\s+/g, ' ').trim();
+}
+
+/** 判定指标类型与推理范围。注意 scope 判定顺序：global cross-region 必须先于 cross-region */
+function classifyBedrockQuota(quotaName: string): { metric: 'TPM' | 'RPM' | 'TPD' | null; scope: string } {
+  const nl = quotaName.toLowerCase();
+  let metric: 'TPM' | 'RPM' | 'TPD' | null = null;
+  if (nl.includes('tokens per minute')) metric = 'TPM';
+  else if (nl.includes('requests per minute')) metric = 'RPM';
+  else if (nl.includes('tokens per day')) metric = 'TPD';
+
+  let scope = 'Other';
+  if (nl.includes('global cross-region')) scope = 'Global Cross-Region';
+  else if (nl.includes('cross-region')) scope = 'Cross-Region';
+  else if (nl.includes('latency-optimized')) scope = 'Latency-Optimized';
+  else if (nl.includes('on-demand')) scope = 'On-Demand';
+  return { metric, scope };
+}
+
+/**
+ * 查询指定账户在多个区域的 Bedrock 按需推理配额。
+ * 区域间并发；单个区域失败(未开通/无权限)只记录错误，不影响其它区域。
+ * 每行保留各指标的 QuotaCode 与 Adjustable，因此前端可直接一键提额。
+ */
+export async function listBedrockQuotas(accountId: string, regions?: string[]) {
+  const creds = await assumeToAccount(accountId);
+  const targetRegions = (regions && regions.length ? regions : ['us-east-1']);
+  const errors: Array<{ region: string; message: string }> = [];
+  const rowMap = new Map<string, any>();
+
+  await Promise.all(targetRegions.map(async (region) => {
+    try {
+      const client = new ServiceQuotasClient({ region, credentials: creds });
+      let nextToken: string | undefined;
+      do {
+        const resp = await client.send(new ListServiceQuotasCommand({ ServiceCode: 'bedrock', MaxResults: 100, NextToken: nextToken }));
+        for (const q of resp.Quotas || []) {
+          const name = q.QuotaName || '';
+          const nl = name.toLowerCase();
+          if (!/tokens per minute|requests per minute|tokens per day/.test(nl)) continue;
+          // 只看按需推理配额，排除批量/预置/微调
+          if (/batch|provisioned|customization|fine-tun/.test(nl)) continue;
+
+          const { metric, scope } = classifyBedrockQuota(name);
+          if (!metric) continue;
+          const model = extractBedrockModelName(name);
+          const provider = inferBedrockProvider(model, name);
+          const key = `${region}|${provider}|${model}|${scope}`;
+          let row = rowMap.get(key);
+          if (!row) {
+            row = { region, provider, model, scope, metrics: {} as Record<string, any> };
+            rowMap.set(key, row);
+          }
+          const value = Number(q.Value ?? 0);
+          const prev = row.metrics[metric];
+          // 同一 key 可能命中多条同类型配额，保留较大值
+          if (!prev || value > prev.value) {
+            row.metrics[metric] = {
+              value,
+              quotaCode: q.QuotaCode || '',
+              quotaName: name,
+              adjustable: !!q.Adjustable,
+              unit: q.Unit || '',
+            };
+          }
+        }
+        nextToken = resp.NextToken;
+      } while (nextToken);
+    } catch (e: any) {
+      errors.push({ region, message: e?.message || String(e) });
+    }
+  }));
+
+  const scopeOrder = new Map(BEDROCK_QUOTA_SCOPES.map((s, i) => [s, i] as [string, number]));
+  const rows = [...rowMap.values()].sort((a, b) =>
+    a.region.localeCompare(b.region) ||
+    a.provider.localeCompare(b.provider) ||
+    a.model.localeCompare(b.model) ||
+    ((scopeOrder.get(a.scope) ?? 99) - (scopeOrder.get(b.scope) ?? 99)),
+  );
+  return { rows, errors, regions: targetRegions, scopes: BEDROCK_QUOTA_SCOPES };
+}
+
 export async function requestQuotaIncrease(accountId: string, serviceCode: string, quotaCode: string, desiredValue: number, region?: string) {
   const creds = await assumeToAccount(accountId);
   const client = new ServiceQuotasClient({ region: region || DEFAULT_REGION, credentials: creds });

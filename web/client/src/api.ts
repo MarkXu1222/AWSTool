@@ -62,6 +62,10 @@ export const api = {
   getBillingBreakdown: (accountId: string, start: string, end: string) => request(`/aws/billing/breakdown/${accountId}?start=${start}&end=${end}`),
   listServiceQuotas: (accountId: string, serviceCode: string, region?: string) =>
     request(`/aws/quotas/${accountId}/${serviceCode}?region=${region || ''}`),
+  // Bedrock 配额（TPM/RPM/TPD），可一次查询多个区域
+  getBedrockQuotas: (accountId: string, regions: string[]) =>
+    request(`/aws/bedrock/quotas/${accountId}?regions=${encodeURIComponent(regions.join(','))}`),
+
   requestQuotaIncrease: (accountId: string, serviceCode: string, quotaCode: string, desiredValue: number, quotaName?: string, region?: string) =>
     request('/aws/quotas/increase', { method: 'POST', body: JSON.stringify({ accountId, serviceCode, quotaCode, desiredValue, quotaName, region }) }),
   listQuotaRequests: () => request('/aws/quotas/requests'),

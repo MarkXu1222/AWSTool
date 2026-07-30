@@ -132,6 +132,29 @@ const REGIONS = [
   { label: 'mx-central-1 (墨西哥)', value: 'mx-central-1' },
 ];
 
+// Bedrock 可用区域（按需推理常用区域）；配额按区域独立，可多选一次性查询
+const BEDROCK_REGIONS = [
+  'us-east-1', 'us-east-2', 'us-west-2',
+  'eu-west-1', 'eu-west-2', 'eu-west-3', 'eu-central-1', 'eu-north-1',
+  'ap-northeast-1', 'ap-northeast-2', 'ap-northeast-3',
+  'ap-south-1', 'ap-southeast-1', 'ap-southeast-2',
+  'ca-central-1', 'sa-east-1',
+];
+// scope = 推理范围（与后端 BEDROCK_QUOTA_SCOPES 保持一致）
+const BEDROCK_SCOPES = ['Global Cross-Region', 'Cross-Region', 'On-Demand', 'Latency-Optimized', 'Other'];
+const BEDROCK_SCOPE_COLOR: Record<string, string> = {
+  'Global Cross-Region': 'purple',
+  'Cross-Region': 'blue',
+  'On-Demand': 'green',
+  'Latency-Optimized': 'orange',
+  'Other': 'default',
+};
+const fmtQuotaNum = (v: any) => {
+  const n = Number(v);
+  if (!isFinite(n)) return '∞';
+  return n.toLocaleString('en-US');
+};
+
 const QuotasPage: React.FC = () => {
   const [accounts, setAccounts] = useState<any[]>([]);
   const [selectedAccount, setSelectedAccount] = useState('');
@@ -173,6 +196,17 @@ const QuotasPage: React.FC = () => {
   const [companyPickerOpen, setCompanyPickerOpen] = useState(false);
   const [pickerCompany, setPickerCompany] = useState<string | undefined>(undefined);
   const [pendingDocParams, setPendingDocParams] = useState<any>(null);
+
+  // Bedrock 配额相关状态
+  const [bedrockRegions, setBedrockRegions] = useState<string[]>(['us-east-1']);
+  const [bedrockRows, setBedrockRows] = useState<any[]>([]);
+  const [bedrockLoading, setBedrockLoading] = useState(false);
+  const [bedrockErrors, setBedrockErrors] = useState<{ region: string; message: string }[]>([]);
+  const [bedrockProvider, setBedrockProvider] = useState<string>('');
+  const [bedrockScopes, setBedrockScopes] = useState<string[]>(BEDROCK_SCOPES);
+  const [bedrockSearch, setBedrockSearch] = useState('');
+  // 提额弹窗的区域覆盖：Bedrock 行的区域可能与顶部筛选的区域不同
+  const [incRegionOverride, setIncRegionOverride] = useState<string | null>(null);
 
   useEffect(() => { loadAccounts(); loadDbRecords(); loadCompanies(); }, []);
 
@@ -403,11 +437,37 @@ const QuotasPage: React.FC = () => {
     }
   };
 
+  // Bedrock 配额一键查询（多区域并发由后端处理）
+  const fetchBedrockQuotas = async () => {
+    if (!selectedAccount) { message.warning('请先在上方选择账户'); return; }
+    if (bedrockRegions.length === 0) { message.warning('请至少选择一个区域'); return; }
+    setBedrockLoading(true);
+    try {
+      const res = await api.getBedrockQuotas(selectedAccount, bedrockRegions);
+      if (res.success) {
+        setBedrockRows(res.data.rows || []);
+        setBedrockErrors(res.data.errors || []);
+        const count = (res.data.rows || []).length;
+        if (count === 0) message.info('未查询到 Bedrock 配额（该账户/区域可能未开通 Bedrock）');
+        else message.success(`已查询到 ${count} 条 Bedrock 配额`);
+      } else message.error(res.error);
+    } catch (e: any) { message.error(e.message); }
+    finally { setBedrockLoading(false); }
+  };
+
+  // 打开提额弹窗（Bedrock 行需带上该行自己的区域）
+  const openIncrease = (quota: any, region?: string) => {
+    setSelectedQuota(quota);
+    setIncRegionOverride(region || null);
+    form.setFieldsValue({ desiredValue: quota.Value ? quota.Value * 2 : undefined });
+    setModalOpen(true);
+  };
+
   const handleIncrease = async () => {
     if (!selectedQuota) return;
     const values = await form.validateFields();
     try {
-      const res = await api.requestQuotaIncrease(selectedAccount, selectedQuota.ServiceCode, selectedQuota.QuotaCode, values.desiredValue, selectedQuota.QuotaName, selectedRegion);
+      const res = await api.requestQuotaIncrease(selectedAccount, selectedQuota.ServiceCode, selectedQuota.QuotaCode, values.desiredValue, selectedQuota.QuotaName, incRegionOverride || selectedRegion);
       if (res.success) { message.success('配额提升请求已提交！'); setModalOpen(false); loadDbRecords(); }
       else message.error(res.error);
     } catch (e: any) { message.error(e.message); }
@@ -416,6 +476,11 @@ const QuotasPage: React.FC = () => {
   const handleExport = () => {
     if (activeTab === 'quotas') {
       exportToCSV(filtered.map(q => ({ 服务: q.ServiceCode, 配额: q.QuotaName, 当前值: q.Value, 单位: q.Unit, 可调整: q.Adjustable ? '是' : '否', 区域: selectedRegion })), `quotas_${selectedService}`);
+    } else if (activeTab === 'bedrock') {
+      exportToCSV(bedrockFiltered.map(r => ({
+        区域: r.region, Provider: r.provider, 模型: r.model, 推理范围: r.scope,
+        TPM: r.metrics?.TPM?.value ?? '', RPM: r.metrics?.RPM?.value ?? '', TPD: r.metrics?.TPD?.value ?? '',
+      })), 'bedrock_quotas');
     } else if (activeTab === 'requests') {
       exportQuotaRecords(requests, accounts, `quota_${selectedAccount}`);
     } else if (activeTab === 'all-requests') {
@@ -427,6 +492,19 @@ const QuotasPage: React.FC = () => {
   };
 
   const filtered = quotas.filter(q => !searchText || q.QuotaName?.toLowerCase().includes(searchText.toLowerCase()));
+
+  // Bedrock 配额筛选：Provider + 推理范围(多选) + 关键词（分词 AND 匹配）
+  const bedrockProviders = [...new Set(bedrockRows.map(r => r.provider).filter(p => p && p !== 'Unknown'))].sort();
+  const bedrockFiltered = bedrockRows.filter(r => {
+    if (bedrockProvider && r.provider !== bedrockProvider) return false;
+    if (!bedrockScopes.includes(r.scope)) return false;
+    if (bedrockSearch) {
+      const hay = `${r.region} ${r.provider} ${r.model} ${r.scope}`.toLowerCase();
+      const tokens = bedrockSearch.toLowerCase().split(/\s+/).filter(Boolean);
+      if (!tokens.every(t => hay.includes(t))) return false;
+    }
+    return true;
+  });
 
   // 从数据中提取唯一值用于筛选
   const getUniqueFilters = (data: any[], field: string) => {
@@ -649,9 +727,88 @@ const QuotasPage: React.FC = () => {
                   { title: '配额名称', dataIndex: 'QuotaName', ellipsis: { showTitle: true } },
                   { title: '当前值', dataIndex: 'Value', width: 90, align: 'center', sorter: (a: any, b: any) => a.Value - b.Value, render: (v: number, r: any) => <span style={{ fontWeight: 500 }}>{v === Infinity ? '∞' : v}{r.Unit && r.Unit !== 'None' ? ` ${r.Unit}` : ''}</span> },
                   { title: '可调', dataIndex: 'Adjustable', width: 60, align: 'center', filters: [{ text: '是', value: true }, { text: '否', value: false }], onFilter: (value: any, r: any) => r.Adjustable === value, render: (a: boolean) => a ? <Tag color="success" style={{ margin: 0 }}>是</Tag> : <span style={{ color: 'rgba(0,0,0,0.25)' }}>否</span> },
-                  { title: '操作', key: 'act', width: 80, fixed: 'right' as const, render: (_: any, r: any) => r.Adjustable ? <Button size="small" type="link" onClick={() => { setSelectedQuota(r); form.setFieldsValue({ desiredValue: r.Value * 2 }); setModalOpen(true); }}>提升</Button> : null },
+                  { title: '操作', key: 'act', width: 80, fixed: 'right' as const, render: (_: any, r: any) => r.Adjustable ? <Button size="small" type="link" onClick={() => openIncrease(r)}>提升</Button> : null },
                 ]} />
             </>
+          ),
+        },
+        {
+          key: 'bedrock', label: `Bedrock 配额 (${bedrockFiltered.length})`,
+          children: selectedAccount ? (
+            <>
+              {/* 查询条：多选区域 + 一键查询 */}
+              <div className="table-toolbar" style={{ flexWrap: 'wrap' }}>
+                <Select mode="multiple" allowClear style={{ minWidth: 320, flex: 1 }} size="small"
+                  placeholder="选择要查询的区域（可多选）"
+                  value={bedrockRegions} onChange={setBedrockRegions}
+                  maxTagCount="responsive"
+                  options={BEDROCK_REGIONS.map(r => ({ label: r, value: r }))} />
+                <Button type="primary" size="small" icon={<ReloadOutlined />} loading={bedrockLoading} onClick={fetchBedrockQuotas}>
+                  一键查询
+                </Button>
+                <Button size="small" onClick={() => setBedrockRegions(['us-east-1'])}>仅 us-east-1</Button>
+                <Button size="small" onClick={() => setBedrockRegions(BEDROCK_REGIONS)}>全选区域</Button>
+              </div>
+
+              {/* 筛选条：Provider / 推理范围 / 关键词 */}
+              <div className="table-toolbar" style={{ flexWrap: 'wrap' }}>
+                <Select style={{ width: 150 }} size="small" value={bedrockProvider} onChange={setBedrockProvider}
+                  options={[{ label: '全部 Provider', value: '' }, ...bedrockProviders.map(p => ({ label: p, value: p }))]} />
+                <Select mode="multiple" style={{ minWidth: 260 }} size="small" allowClear
+                  placeholder="推理范围" value={bedrockScopes} onChange={setBedrockScopes}
+                  maxTagCount="responsive"
+                  options={BEDROCK_SCOPES.map(s => ({ label: s, value: s }))} />
+                <Input placeholder="搜索模型 / 区域 / 范围..." prefix={<SearchOutlined />} size="small" allowClear
+                  style={{ width: 220 }} value={bedrockSearch} onChange={e => setBedrockSearch(e.target.value)} />
+                <span style={{ fontSize: 12, color: 'rgba(0,0,0,0.45)' }}>{bedrockFiltered.length} / {bedrockRows.length} 条</span>
+              </div>
+
+              {bedrockErrors.length > 0 && (
+                <div style={{ fontSize: 12, color: '#d46b08', marginBottom: 8 }}>
+                  部分区域查询失败（多为未开通 Bedrock）：{bedrockErrors.map(e => e.region).join(', ')}
+                </div>
+              )}
+
+              <Table size="small" dataSource={bedrockFiltered} loading={bedrockLoading}
+                rowKey={(r: any) => `${r.region}|${r.provider}|${r.model}|${r.scope}`}
+                pagination={{ pageSize: 15, showTotal: t => `共 ${t} 条`, size: 'small', showSizeChanger: true }}
+                scroll={{ x: 900 }}
+                locale={{ emptyText: '选择区域后点击「一键查询」获取该账户的 Bedrock TPM / RPM / TPD 配额' }}
+                columns={[
+                  { title: '区域', dataIndex: 'region', width: 120, sorter: (a: any, b: any) => a.region.localeCompare(b.region) },
+                  { title: 'Provider', dataIndex: 'provider', width: 110,
+                    render: (p: string) => <Tag style={{ margin: 0 }}>{p}</Tag> },
+                  { title: '模型', dataIndex: 'model', ellipsis: { showTitle: true },
+                    sorter: (a: any, b: any) => a.model.localeCompare(b.model) },
+                  { title: '推理范围', dataIndex: 'scope', width: 150,
+                    render: (s: string) => <Tag color={BEDROCK_SCOPE_COLOR[s] || 'default'} style={{ margin: 0, fontSize: 11 }}>{s}</Tag> },
+                  ...(['TPM', 'RPM', 'TPD'] as const).map(metric => ({
+                    title: metric === 'TPM' ? 'TPM (令牌/分)' : metric === 'RPM' ? 'RPM (请求/分)' : 'TPD (令牌/天)',
+                    key: metric, width: 145, align: 'right' as const,
+                    sorter: (a: any, b: any) => (a.metrics?.[metric]?.value ?? -1) - (b.metrics?.[metric]?.value ?? -1),
+                    render: (_: any, r: any) => {
+                      const m = r.metrics?.[metric];
+                      if (!m) return <span style={{ color: 'rgba(0,0,0,0.25)' }}>-</span>;
+                      return (
+                        <span>
+                          <span style={{ fontWeight: 500 }}>{fmtQuotaNum(m.value)}</span>
+                          {m.adjustable && (
+                            <Tooltip title={`提升该配额：${m.quotaName}`}>
+                              <Button type="link" size="small" style={{ paddingLeft: 4, paddingRight: 0 }}
+                                onClick={() => openIncrease(
+                                  { ServiceCode: 'bedrock', QuotaCode: m.quotaCode, QuotaName: m.quotaName, Value: m.value, Adjustable: true },
+                                  r.region,
+                                )}>提升</Button>
+                            </Tooltip>
+                          )}
+                        </span>
+                      );
+                    },
+                  })),
+                ]} />
+            </>
+          ) : (
+            <div style={{ padding: '40px 0', textAlign: 'center', color: 'rgba(0,0,0,0.45)' }}>请先在上方选择一个账户，再选择区域点击「一键查询」</div>
           ),
         },
         {
@@ -716,7 +873,7 @@ const QuotasPage: React.FC = () => {
         {selectedQuota && (
           <Form form={form} layout="vertical">
             <p>配额: <strong>{selectedQuota.QuotaName}</strong></p>
-            <p>当前值: <Tag color="blue">{selectedQuota.Value}{selectedQuota.Unit && selectedQuota.Unit !== 'None' ? ` ${selectedQuota.Unit}` : ''}</Tag> 区域: <Tag color="purple">{selectedRegion}</Tag></p>
+            <p>当前值: <Tag color="blue">{fmtQuotaNum(selectedQuota.Value)}{selectedQuota.Unit && selectedQuota.Unit !== 'None' ? ` ${selectedQuota.Unit}` : ''}</Tag> 区域: <Tag color="purple">{incRegionOverride || selectedRegion}</Tag></p>
             <Form.Item name="desiredValue" label="期望值" rules={[{ required: true, message: '请输入期望值' }]}>
               <InputNumber style={{ width: '100%' }} min={(selectedQuota.Value || 0) + 1} />
             </Form.Item>

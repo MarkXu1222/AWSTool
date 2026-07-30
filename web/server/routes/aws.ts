@@ -376,6 +376,21 @@ awsRouter.get('/billing/breakdown/:accountId', async (req: Request, res: Respons
   } catch (e: any) { res.status(500).json({ error: e.message }); }
 });
 
+// Bedrock 配额（TPM/RPM/TPD，多区域一键查询）
+// 路径特意用 /bedrock/quotas 前缀，避免与下面的 /quotas/:accountId/:serviceCode 通配冲突
+awsRouter.get('/bedrock/quotas/:accountId', async (req: Request, res: Response) => {
+  try {
+    const accountId = String(req.params.accountId);
+    if (!/^\d{12}$/.test(accountId)) return res.status(400).json({ error: '无效的账户 ID' });
+    const regions = String(req.query.regions || '')
+      .split(',')
+      .map(r => r.trim())
+      .filter(r => /^[a-z]{2}(-[a-z]+)+-\d$/.test(r));
+    const data = await aws.listBedrockQuotas(accountId, regions);
+    res.json({ success: true, data });
+  } catch (e: any) { res.status(500).json({ error: e.message }); }
+});
+
 // List quotas
 awsRouter.get('/quotas/:accountId/:serviceCode', async (req: Request, res: Response) => {
   try {
