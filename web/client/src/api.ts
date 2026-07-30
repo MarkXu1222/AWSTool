@@ -65,9 +65,8 @@ export const api = {
   // 批量 payer 提额（需独立的批量提额权限）
   bulkQuotaPayers: () => request('/aws/bulk-quota/payers'),
   bulkQuotaAccounts: (payerAccountId: string) => request(`/aws/bulk-quota/accounts/${payerAccountId}`),
-  bulkQuotaResolve: (payer: string, region: string, serviceCode: string, quotaName: string) =>
-    request(`/aws/bulk-quota/resolve?payer=${encodeURIComponent(payer)}&region=${encodeURIComponent(region)}&serviceCode=${encodeURIComponent(serviceCode)}&quotaName=${encodeURIComponent(quotaName)}`),
-  bulkQuotaSubmit: (body: { payerAccountId: string; regions: string[]; serviceCode: string; quotaCode: string; quotaName: string; desiredValue: number; scope: string }) =>
+  // 只需传配额名 + 目标值，QuotaCode 由后端解析；已达标账户后端会自动跳过
+  bulkQuotaSubmit: (body: { payerAccountId: string; regions: string[]; serviceCode: string; quotaName: string; desiredValue: number; scope: string }) =>
     request('/aws/bulk-quota/submit', { method: 'POST', body: JSON.stringify(body) }),
   bulkQuotaJob: (jobId: string) => request(`/aws/bulk-quota/job/${jobId}`),
 

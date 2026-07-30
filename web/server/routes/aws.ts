@@ -451,11 +451,12 @@ interface BulkQuotaJob {
   done: number;
   ok: number;
   failed: number;
+  skipped: number;
   status: 'running' | 'completed' | 'error';
   error?: string;
   startedAt: string;
   finishedAt?: string;
-  results: { accountId: string; accountName: string; region: string; status: 'ok' | 'failed'; message?: string; requestId?: string }[];
+  results: { accountId: string; accountName: string; region: string; status: 'ok' | 'failed' | 'skipped'; message?: string; requestId?: string; currentValue?: number }[];
 }
 const bulkQuotaJobs = new Map<string, BulkQuotaJob>();
 const BULK_QUOTA_MAX_TASKS = 2000;
@@ -490,43 +491,33 @@ awsRouter.get('/bulk-quota/accounts/:payerAccountId', requireBulkQuotaAccess, as
   } catch (e: any) { res.status(500).json({ error: e.message }); }
 });
 
-// 解析配额：在 payer 账户里按配额名找出真实 QuotaCode / 当前值 / 是否可调
-awsRouter.get('/bulk-quota/resolve', requireBulkQuotaAccess, async (req: Request, res: Response) => {
-  try {
-    const payer = String(req.query.payer || '').trim();
-    const region = String(req.query.region || 'us-east-1').trim();
-    const serviceCode = String(req.query.serviceCode || '').trim();
-    const quotaName = String(req.query.quotaName || '').trim();
-    if (!/^\d{12}$/.test(payer)) return res.status(400).json({ error: '无效的 payer 账户 ID' });
-    if (!serviceCode || !quotaName) return res.status(400).json({ error: '缺少 serviceCode / quotaName' });
-    const quotas = await aws.listServiceQuotas(payer, serviceCode, region);
-    const target = quotaName.toLowerCase();
-    const found = quotas.find((q: any) => String(q.QuotaName || '').toLowerCase() === target)
-      || quotas.find((q: any) => String(q.QuotaName || '').toLowerCase().includes(target));
-    if (!found) return res.json({ success: true, data: null });
-    res.json({
-      success: true,
-      data: {
-        quotaCode: found.QuotaCode, quotaName: found.QuotaName, serviceCode,
-        value: found.Value, unit: found.Unit, adjustable: !!found.Adjustable, region,
-      },
-    });
-  } catch (e: any) { res.status(500).json({ error: e.message }); }
-});
-
-// 提交批量提额任务
+// 提交批量提额任务（QuotaCode 由服务端按配额名解析，前端只需选类型 + 填数字）
 awsRouter.post('/bulk-quota/submit', requireBulkQuotaAccess, async (req: Request, res: Response) => {
   try {
-    const { payerAccountId, regions, serviceCode, quotaCode, quotaName, desiredValue, scope } = req.body || {};
+    const { payerAccountId, regions, serviceCode, quotaName, desiredValue, scope } = req.body || {};
     if (!/^\d{12}$/.test(String(payerAccountId || ''))) return res.status(400).json({ error: '无效的 payer 账户 ID' });
     const regionList: string[] = Array.isArray(regions)
       ? [...new Set(regions.map((r: any) => String(r).trim()).filter((r: string) => /^[a-z]{2}(-[a-z]+)+-\d$/.test(r)))]
       : [];
     if (regionList.length === 0) return res.status(400).json({ error: '请至少选择一个区域' });
-    if (!serviceCode || !quotaCode) return res.status(400).json({ error: '缺少 serviceCode / quotaCode' });
+    if (!serviceCode || !quotaName) return res.status(400).json({ error: '缺少 serviceCode / quotaName' });
     const target = Number(desiredValue);
     if (!isFinite(target) || target <= 0) return res.status(400).json({ error: '期望值必须为正数' });
     const mode = scope === 'payer' ? 'payer' : scope === 'members' ? 'members' : 'all';
+
+    // 服务端解析 QuotaCode（前端只需选配额类型 + 填数字）。
+    // QuotaCode 跨账户一致，先用 payer 解析；某区域拿不到就换下一个选中的区域再试。
+    let quotaCode = '';
+    let resolvedName = String(quotaName);
+    for (const r of regionList) {
+      try {
+        const hit = await aws.resolveQuotaCodeByName(String(payerAccountId), serviceCode, String(quotaName), r);
+        if (hit?.quotaCode) { quotaCode = hit.quotaCode; resolvedName = hit.quotaName || resolvedName; break; }
+      } catch { /* 换下一个区域再试 */ }
+    }
+    if (!quotaCode) {
+      return res.status(400).json({ error: `在所选区域内均未找到配额「${quotaName}」（${serviceCode}），请确认该服务在这些区域可用` });
+    }
 
     const { payerName, accounts } = await aws.listOrgAccountsForPayer(String(payerAccountId));
     const targets = accounts.filter((a: any) =>
@@ -542,9 +533,9 @@ awsRouter.post('/bulk-quota/submit', requireBulkQuotaAccess, async (req: Request
       id: `bq-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
       createdBy: user?.username,
       payerAccountId: String(payerAccountId), payerName,
-      regions: regionList, serviceCode, quotaCode, quotaName: quotaName || quotaCode,
+      regions: regionList, serviceCode, quotaCode, quotaName: resolvedName,
       desiredValue: target, scope: mode,
-      total, done: 0, ok: 0, failed: 0,
+      total, done: 0, ok: 0, failed: 0, skipped: 0,
       status: 'running', startedAt: new Date().toISOString(), results: [],
     };
     bulkQuotaJobs.set(job.id, job);
@@ -566,17 +557,35 @@ awsRouter.post('/bulk-quota/submit', requireBulkQuotaAccess, async (req: Request
           const idx = cursor++;
           const t = tasks[idx];
           try {
+            // 先读当前值：已达到/超过目标就跳过，避免无谓地开 Support Case
+            const current = await aws.getServiceQuotaValue(t.account.Id, serviceCode, quotaCode, t.region);
+            if (current === null) {
+              job.skipped++;
+              job.results.push({ accountId: t.account.Id, accountName: t.account.Name || '', region: t.region, status: 'skipped', message: '该区域无此配额（服务可能未在此区域提供）' });
+              continue;
+            }
+            if (current.value >= target) {
+              job.skipped++;
+              job.results.push({ accountId: t.account.Id, accountName: t.account.Name || '', region: t.region, status: 'skipped', message: `已达标（当前 ${current.value} ≥ 目标 ${target}）`, currentValue: current.value });
+              continue;
+            }
+            if (!current.adjustable) {
+              job.skipped++;
+              job.results.push({ accountId: t.account.Id, accountName: t.account.Name || '', region: t.region, status: 'skipped', message: '该配额不可调整', currentValue: current.value });
+              continue;
+            }
             const result = await aws.requestQuotaIncrease(t.account.Id, serviceCode, quotaCode, target, t.region);
             db.upsertQuotaRequest({
               id: (result as any)?.Id || `${t.account.Id}-${t.region}-${Date.now()}`,
               account_id: t.account.Id, service_code: serviceCode, quota_code: quotaCode,
               quota_name: job.quotaName, desired_value: target,
+              current_value: current.value,
               status: (result as any)?.Status || 'PENDING', region: t.region,
               submitted_by: user?.username, case_id: (result as any)?.CaseId || null,
               created_at: new Date().toISOString(),
             });
             job.ok++;
-            job.results.push({ accountId: t.account.Id, accountName: t.account.Name || '', region: t.region, status: 'ok', requestId: (result as any)?.Id });
+            job.results.push({ accountId: t.account.Id, accountName: t.account.Name || '', region: t.region, status: 'ok', requestId: (result as any)?.Id, currentValue: current.value });
           } catch (e: any) {
             job.failed++;
             job.results.push({ accountId: t.account.Id, accountName: t.account.Name || '', region: t.region, status: 'failed', message: e?.name ? `${e.name}: ${e.message}` : String(e?.message || e) });
@@ -593,7 +602,7 @@ awsRouter.post('/bulk-quota/submit', requireBulkQuotaAccess, async (req: Request
         job.error = e?.message || String(e);
       } finally {
         job.finishedAt = new Date().toISOString();
-        console.log(`[BulkQuota] job ${job.id} ${job.status}: ok=${job.ok} failed=${job.failed} total=${job.total}`);
+        console.log(`[BulkQuota] job ${job.id} ${job.status}: ok=${job.ok} skipped=${job.skipped} failed=${job.failed} total=${job.total}`);
       }
     })();
 

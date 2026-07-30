@@ -668,6 +668,34 @@ export async function listBedrockQuotas(accountId: string, regions?: string[]) {
   return { rows, errors, regions: targetRegions, scopes: BEDROCK_QUOTA_SCOPES };
 }
 
+/**
+ * 读取单个配额在指定账户/区域的当前生效值。
+ * 返回 null 表示该账户/区域没有这个配额（服务未在该区域提供等），调用方据此跳过。
+ */
+export async function getServiceQuotaValue(accountId: string, serviceCode: string, quotaCode: string, region?: string) {
+  const creds = await assumeToAccount(accountId);
+  const client = new ServiceQuotasClient({ region: region || DEFAULT_REGION, credentials: creds });
+  try {
+    const resp = await client.send(new GetServiceQuotaCommand({ ServiceCode: serviceCode, QuotaCode: quotaCode }));
+    const q = resp.Quota;
+    if (!q) return null;
+    return { value: Number(q.Value ?? 0), adjustable: !!q.Adjustable, unit: q.Unit || '', quotaName: q.QuotaName || '' };
+  } catch (e: any) {
+    if (e?.name === 'NoSuchResourceException') return null;
+    throw e;
+  }
+}
+
+/** 在指定账户/区域按配额名解析出 QuotaCode（QuotaCode 跨账户一致，可复用到全组织） */
+export async function resolveQuotaCodeByName(accountId: string, serviceCode: string, quotaName: string, region?: string) {
+  const quotas = await listServiceQuotas(accountId, serviceCode, region);
+  const target = quotaName.trim().toLowerCase();
+  const found = quotas.find((q: any) => String(q.QuotaName || '').toLowerCase() === target)
+    || quotas.find((q: any) => String(q.QuotaName || '').toLowerCase().includes(target));
+  if (!found) return null;
+  return { quotaCode: found.QuotaCode as string, quotaName: found.QuotaName as string, value: Number(found.Value ?? 0), adjustable: !!found.Adjustable };
+}
+
 export async function requestQuotaIncrease(accountId: string, serviceCode: string, quotaCode: string, desiredValue: number, region?: string) {
   const creds = await assumeToAccount(accountId);
   const client = new ServiceQuotasClient({ region: region || DEFAULT_REGION, credentials: creds });

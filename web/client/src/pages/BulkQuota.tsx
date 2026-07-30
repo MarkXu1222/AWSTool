@@ -15,20 +15,12 @@ const SCOPE_LABEL: Record<Scope, string> = {
   members: '仅组织下成员账户',
 };
 
-interface ResolvedQuota {
-  quotaCode: string; quotaName: string; serviceCode: string;
-  value: number; unit?: string; adjustable: boolean; region: string;
-}
-
 const BulkQuotaPage: React.FC = () => {
   const [payers, setPayers] = useState<any[]>([]);
   const [payer, setPayer] = useState<string>('');
   const [regions, setRegions] = useState<string[]>(['us-east-1']);
   const [scope, setScope] = useState<Scope>('all');
   const [presetIdx, setPresetIdx] = useState<number | undefined>(undefined);
-  const [resolved, setResolved] = useState<ResolvedQuota | null>(null);
-  const [resolving, setResolving] = useState(false);
-  const [notFound, setNotFound] = useState(false);
   const [target, setTarget] = useState<number | null>(null);
 
   const [accounts, setAccounts] = useState<any[]>([]);
@@ -59,28 +51,8 @@ const BulkQuotaPage: React.FC = () => {
 
   const onPayerChange = (v: string) => {
     setPayer(v);
-    setResolved(null); setNotFound(false); setTarget(null);
     setJobId(null); setJob(null);
     loadAccounts(v);
-    if (presetIdx != null) resolve(presetIdx, v, regions[0]);
-  };
-
-  // 用 payer 账户解析真实 QuotaCode 与当前值（QuotaCode 跨账户一致，可复用到全组织）
-  const resolve = async (idx?: number, payerId?: string, region?: string) => {
-    const i = idx ?? presetIdx;
-    const p = payerId ?? payer;
-    const rgn = region || regions[0] || 'us-east-1';
-    if (i == null || !p) return;
-    const preset = QUOTA_PRESETS[i];
-    setResolving(true); setResolved(null); setNotFound(false);
-    try {
-      const r = await api.bulkQuotaResolve(p, rgn, preset.serviceCode, preset.quotaName);
-      if (!r.success) { message.error(r.error || '解析失败'); return; }
-      if (!r.data) { setNotFound(true); return; }
-      setResolved(r.data);
-      setTarget(prev => prev ?? (r.data.value ? r.data.value * 2 : null));
-    } catch (e: any) { message.error(e.message); }
-    finally { setResolving(false); }
   };
 
   // 轮询任务进度
@@ -102,16 +74,16 @@ const BulkQuotaPage: React.FC = () => {
 
   const targetAccounts = accounts.filter(a => scope === 'all' ? true : scope === 'payer' ? a.isPayer : !a.isPayer);
   const totalRequests = targetAccounts.length * regions.length;
-  const canSubmit = !!payer && regions.length > 0 && !!resolved?.quotaCode && !!target && target > (resolved?.value ?? 0) && totalRequests > 0;
+  const preset = presetIdx != null ? QUOTA_PRESETS[presetIdx] : null;
+  const canSubmit = !!payer && regions.length > 0 && !!preset && !!target && target > 0 && totalRequests > 0;
 
   const handleSubmit = async () => {
-    if (!canSubmit || !resolved || !target) return;
+    if (!canSubmit || !preset || !target) return;
     setSubmitting(true);
     try {
       const r = await api.bulkQuotaSubmit({
-        payerAccountId: payer, regions, serviceCode: resolved.serviceCode,
-        quotaCode: resolved.quotaCode, quotaName: resolved.quotaName,
-        desiredValue: target, scope,
+        payerAccountId: payer, regions, serviceCode: preset.serviceCode,
+        quotaName: preset.quotaName, desiredValue: target, scope,
       });
       if (r.success) {
         setJobId(r.data.jobId);
@@ -175,14 +147,15 @@ const BulkQuotaPage: React.FC = () => {
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
           <span style={{ fontSize: 12, color: 'rgba(0,0,0,0.65)' }}>配额类型</span>
           <Select size="small" style={{ width: 380 }} value={presetIdx} placeholder="选择要提升的配额"
-            showSearch optionFilterProp="label" disabled={!payer}
-            onChange={idx => { setPresetIdx(idx); setTarget(null); resolve(idx, payer, regions[0]); }}
+            showSearch optionFilterProp="label"
+            onChange={idx => setPresetIdx(idx)}
             options={QUOTA_PRESETS.map((p, i) => ({ label: p.label, value: i }))} />
           <span style={{ fontSize: 12, color: 'rgba(0,0,0,0.65)' }}>期望值</span>
-          <InputNumber size="small" style={{ width: 140 }} value={target ?? undefined} min={(resolved?.value ?? 0) + 1}
-            onChange={v => setTarget(v as number)} disabled={!resolved} placeholder="目标数值" />
+          <InputNumber size="small" style={{ width: 140 }} value={target ?? undefined} min={1}
+            onChange={v => setTarget(v as number)} placeholder="直接填数字" />
+          {preset?.unit && <span style={{ fontSize: 12, color: 'rgba(0,0,0,0.45)' }}>{preset.unit}</span>}
           <Popconfirm title="确认批量提交提额请求？"
-            description={`将对 ${SCOPE_LABEL[scope]}（${targetAccounts.length} 个账户）× ${regions.length} 个区域，共提交 ${totalRequests} 个请求，提升「${resolved?.quotaName || ''}」至 ${target ?? ''}。此操作不可撤销。`}
+            description={`将检查 ${SCOPE_LABEL[scope]}（${targetAccounts.length} 个账户）× ${regions.length} 个区域，共 ${totalRequests} 个目标，把「${preset?.label || ''}」提升至 ${target ?? ''}。已达标的会自动跳过，其余提交提额请求（不可撤销）。`}
             okText="确认提交" cancelText="取消" onConfirm={handleSubmit} disabled={!canSubmit}>
             <Button size="small" type="primary" danger icon={<ThunderboltOutlined />} loading={submitting} disabled={!canSubmit}>
               批量提交{totalRequests > 0 ? `（${totalRequests}）` : ''}
@@ -190,23 +163,8 @@ const BulkQuotaPage: React.FC = () => {
           </Popconfirm>
         </div>
 
-        {/* 解析结果 */}
-        <div style={{ marginTop: 10, fontSize: 12 }}>
-          {resolving && <span style={{ color: 'rgba(0,0,0,0.45)' }}>正在解析配额...</span>}
-          {!resolving && notFound && (
-            <span style={{ color: '#d4380d' }}>在 payer 账户 {regions[0] || 'us-east-1'} 未找到该配额，可能该服务在此区域不可用，请换区域或换配额类型</span>
-          )}
-          {!resolving && resolved && (
-            <Space wrap size={8}>
-              <Tag color="blue" style={{ margin: 0 }}>{resolved.quotaName}</Tag>
-              <span>QuotaCode <code>{resolved.quotaCode}</code></span>
-              <span>payer 当前值 <strong>{resolved.value}</strong>{resolved.unit && resolved.unit !== 'None' ? ` ${resolved.unit}` : ''}</span>
-              {resolved.adjustable
-                ? <Tag color="success" style={{ margin: 0 }}>可调整</Tag>
-                : <Tag color="error" style={{ margin: 0 }}>不可调整（提交会被 AWS 拒绝）</Tag>}
-              <span style={{ color: 'rgba(0,0,0,0.45)' }}>（当前值取自 payer；各成员账户实际值可能不同）</span>
-            </Space>
-          )}
+        <div style={{ marginTop: 10, fontSize: 12, color: 'rgba(0,0,0,0.45)' }}>
+          提交后逐账户读取该区域的当前配额值：<strong>已达到或超过目标值的自动跳过</strong>，不可调整的、该区域没有此配额的也会跳过，只对确实需要提升的账户发起请求。
         </div>
       </Card>
 
@@ -218,10 +176,11 @@ const BulkQuotaPage: React.FC = () => {
             {job.status === 'completed' ? '已完成' : job.status === 'error' ? '异常' : '执行中'}
           </Tag>}>
           <Row gutter={12} style={{ marginBottom: 8 }}>
-            <Col span={6}><Statistic title="总请求" value={job.total} valueStyle={{ fontSize: 18 }} /></Col>
-            <Col span={6}><Statistic title="已完成" value={job.done} valueStyle={{ fontSize: 18 }} /></Col>
-            <Col span={6}><Statistic title="成功" value={job.ok} valueStyle={{ fontSize: 18, color: '#52c41a' }} /></Col>
-            <Col span={6}><Statistic title="失败" value={job.failed} valueStyle={{ fontSize: 18, color: job.failed > 0 ? '#ff4d4f' : undefined }} /></Col>
+            <Col span={5}><Statistic title="目标总数" value={job.total} valueStyle={{ fontSize: 18 }} /></Col>
+            <Col span={5}><Statistic title="已处理" value={job.done} valueStyle={{ fontSize: 18 }} /></Col>
+            <Col span={5}><Statistic title="已提交" value={job.ok} valueStyle={{ fontSize: 18, color: '#52c41a' }} /></Col>
+            <Col span={5}><Statistic title="跳过" value={job.skipped ?? 0} valueStyle={{ fontSize: 18, color: '#8a94a6' }} /></Col>
+            <Col span={4}><Statistic title="失败" value={job.failed} valueStyle={{ fontSize: 18, color: job.failed > 0 ? '#ff4d4f' : undefined }} /></Col>
           </Row>
           <Progress percent={job.total ? Math.round((job.done / job.total) * 100) : 0}
             status={job.status === 'error' ? 'exception' : job.done >= job.total ? 'success' : 'active'} />
@@ -230,23 +189,40 @@ const BulkQuotaPage: React.FC = () => {
               <span style={{ fontSize: 12, color: 'rgba(0,0,0,0.45)' }}>结果已写入「配额管理 → 提升记录」</span>
               <Button size="small" icon={<DownloadOutlined />} onClick={() => exportToCSV(jobResults.map(r => ({
                 账户: r.accountId, 名称: r.accountName, 区域: r.region,
-                结果: r.status === 'ok' ? '成功' : '失败', 请求ID: r.requestId || '', 错误: r.message || '',
+                结果: r.status === 'ok' ? '已提交' : r.status === 'skipped' ? '跳过' : '失败',
+                当前值: r.currentValue ?? '', 说明: r.message || '', 请求ID: r.requestId || '',
               })), `bulk_quota_${job.payerName}`)}>导出结果</Button>
             </Space>
           )}
           {failedResults.length > 0 && (
-            <Alert type="error" showIcon style={{ marginTop: 8 }}
-              message={`失败 ${failedResults.length} 条`}
-              description={
-                <Table size="small" pagination={{ pageSize: 5, size: 'small' }} rowKey={(r: any) => `${r.accountId}-${r.region}`}
-                  dataSource={failedResults}
-                  columns={[
-                    { title: '账户', dataIndex: 'accountId', width: 130, render: (v: string) => <code style={{ fontSize: 11 }}>{v}</code> },
-                    { title: '名称', dataIndex: 'accountName', ellipsis: true },
-                    { title: '区域', dataIndex: 'region', width: 120 },
-                    { title: '原因', dataIndex: 'message', ellipsis: { showTitle: true } },
-                  ]} />
-              } />
+            <Alert type="error" showIcon style={{ marginTop: 8 }} message={`有 ${failedResults.length} 条失败，详见下方明细（可按「结果」筛选）`} />
+          )}
+
+          {jobResults.length > 0 && (
+            <Table size="small" style={{ marginTop: 8 }} rowKey={(r: any) => `${r.accountId}-${r.region}`}
+              dataSource={jobResults}
+              pagination={{ pageSize: 10, size: 'small', showTotal: t => `共 ${t} 条` }}
+              columns={[
+                { title: '账户', dataIndex: 'accountId', width: 130, render: (v: string) => <code style={{ fontSize: 11 }}>{v}</code> },
+                { title: '名称', dataIndex: 'accountName', ellipsis: true },
+                { title: '区域', dataIndex: 'region', width: 130 },
+                { title: '结果', dataIndex: 'status', width: 100,
+                  filters: [
+                    { text: '已提交', value: 'ok' },
+                    { text: '跳过', value: 'skipped' },
+                    { text: '失败', value: 'failed' },
+                  ],
+                  onFilter: (v: any, r: any) => r.status === v,
+                  render: (s: string) => s === 'ok'
+                    ? <Tag color="green" style={{ margin: 0 }}>已提交</Tag>
+                    : s === 'skipped'
+                      ? <Tag style={{ margin: 0 }}>跳过</Tag>
+                      : <Tag color="red" style={{ margin: 0 }}>失败</Tag> },
+                { title: '当前值', dataIndex: 'currentValue', width: 90, align: 'right' as const,
+                  render: (v: any) => v ?? <span style={{ color: 'rgba(0,0,0,0.25)' }}>-</span> },
+                { title: '说明', dataIndex: 'message', ellipsis: { showTitle: true },
+                  render: (v: string) => v || <span style={{ color: 'rgba(0,0,0,0.25)' }}>-</span> },
+              ]} />
           )}
         </Card>
       )}
