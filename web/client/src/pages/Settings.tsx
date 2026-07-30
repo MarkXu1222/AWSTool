@@ -16,6 +16,7 @@ const SettingsPage: React.FC<SettingsPageProps> = ({ onLogout }) => {
   const [loading, setLoading] = useState(false);
   const [connection, setConnection] = useState<any[]>([]);
   const [checking, setChecking] = useState(true);
+  const [settingsTab, setSettingsTab] = useState('connection');
   const [users, setUsers] = useState<any[]>([]);
   const [addUserOpen, setAddUserOpen] = useState(false);
   const [resetPwdOpen, setResetPwdOpen] = useState<any>(null);
@@ -120,8 +121,9 @@ const SettingsPage: React.FC<SettingsPageProps> = ({ onLogout }) => {
           <p className="page-header-subtitle">管理连接、安全策略和用户</p>
         </div>
       </div>
-      <div style={{ maxWidth: 640 }}>
-      <Tabs items={[
+      {/* 表单类 tab 限宽更易读；用户管理是宽表格，放开占满整宽 */}
+      <div style={{ maxWidth: settingsTab === 'users' ? undefined : 640 }}>
+      <Tabs activeKey={settingsTab} onChange={setSettingsTab} items={[
         { key: 'connection', label: '连接', children: (
           <Card size="small" title="连接状态">
             {connection.length === 0 && checking && <span style={{ color: '#999' }}>检查中...</span>}
@@ -178,7 +180,7 @@ const SettingsPage: React.FC<SettingsPageProps> = ({ onLogout }) => {
                   <Tag color={r === 'admin' ? 'red' : r === 'partadmin' ? 'orange' : 'blue'} style={{ margin: 0 }}>{r}</Tag>
                 )},
                 { title: 'MFA', dataIndex: 'mfa_enabled', width: 60, align: 'center' as const, render: (m: boolean) => m ? '✅' : '❌' },
-                { title: '页面权限', width: 260, render: (_: any, record: any) => {
+                { title: '页面权限', width: 340, render: (_: any, record: any) => {
                   if (record.role === 'admin') return <Tag color="red" style={{ margin: 0 }}>全部</Tag>;
                   const pages: string[] = Array.isArray(record.allowed_pages) ? record.allowed_pages : ALL_PAGE_KEYS;
                   if (pages.length === ALL_PAGE_KEYS.length) return <Tag color="green" style={{ margin: 0 }}>全部</Tag>;
