@@ -743,9 +743,9 @@ const QuotasPage: React.FC = () => {
           key: 'bedrock', label: `Bedrock 配额 (${bedrockFiltered.length})`,
           children: (
             <>
-              {/* 查询条：多选区域 + 一键查询 */}
-              <div className="table-toolbar" style={{ flexWrap: 'wrap' }}>
-                <Select mode="multiple" allowClear style={{ minWidth: 320, flex: 1 }} size="small"
+              {/* 查询条：多选区域 + 一键查询（靠左紧凑排列） */}
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginBottom: 12 }}>
+                <Select mode="multiple" allowClear style={{ width: 420 }} size="small"
                   placeholder="选择要查询的区域（可多选）"
                   value={bedrockRegions} onChange={setBedrockRegions}
                   maxTagCount="responsive"
@@ -758,11 +758,12 @@ const QuotasPage: React.FC = () => {
                 {!selectedAccount && <span style={{ fontSize: 12, color: '#d46b08' }}>请先在上方选择账户</span>}
               </div>
 
-              {/* 筛选条：Provider / 推理范围 / 关键词 */}
-              <div className="table-toolbar" style={{ flexWrap: 'wrap' }}>
+              {/* 筛选条：Provider / 推理范围 / 关键词（靠左紧凑排列，不用 table-toolbar 的两端对齐） */}
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginBottom: 12 }}>
                 <Select style={{ width: 150 }} size="small" value={bedrockProvider} onChange={setBedrockProvider}
+                  showSearch optionFilterProp="label"
                   options={[{ label: '全部 Provider', value: '' }, ...bedrockProviders.map(p => ({ label: p, value: p }))]} />
-                <Select mode="multiple" style={{ minWidth: 260 }} size="small" allowClear
+                <Select mode="multiple" style={{ width: 300 }} size="small" allowClear
                   placeholder="推理范围" value={bedrockScopes} onChange={setBedrockScopes}
                   maxTagCount="responsive"
                   options={BEDROCK_SCOPES.map(s => ({ label: s, value: s }))} />
