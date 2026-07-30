@@ -20,7 +20,7 @@ import {
 } from '@aws-sdk/client-resource-explorer-2';
 import {
   CloudFormationClient, DescribeStackSetCommand, CreateStackSetCommand,
-  CreateStackInstancesCommand, ListStackInstancesCommand,
+  CreateStackInstancesCommand, ListStackInstancesCommand, ListStackSetOperationsCommand,
 } from '@aws-sdk/client-cloudformation';
 import {
   OrganizationsClient, DescribeOrganizationCommand, ListRootsCommand, ListAccountsCommand,
@@ -756,4 +756,268 @@ export async function provisionOrg(payerAccountId: string): Promise<ProvisionRes
   }
 
   return out;
+}
+
+// ============================================================
+// Resource Explorer 索引自动化（替代控制台 Quick Setup）
+// 两个 SERVICE_MANAGED StackSet：
+//   - 聚合索引：只部署到聚合区域（每个账户只能有一个 AGGREGATOR 区域）
+//   - 本地索引：部署到除聚合区域外的其它区域
+// 另外单独给 payer 管理账户直接建索引（SERVICE_MANAGED 不覆盖管理账户）。
+// 整体是异步的：下发后用 getReIndexStatus 轮询进度。
+// ============================================================
+
+export const RE_AGGREGATOR_STACKSET = 'ResourceExplorerAggregatorIndex';
+export const RE_LOCAL_STACKSET = 'ResourceExplorerLocalIndexes';
+
+const RE_AGGREGATOR_TEMPLATE = `AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Resource Explorer Aggregator Index + Default View.
+  Deploy to ONE region per account (the aggregator region).
+
+Resources:
+  Index:
+    Type: AWS::ResourceExplorer2::Index
+    Properties:
+      Type: AGGREGATOR
+      Tags:
+        Purpose: ResourceExplorer
+
+  View:
+    Type: AWS::ResourceExplorer2::View
+    Properties:
+      ViewName: DefaultView
+      IncludedProperties:
+        - Name: tags
+      Tags:
+        Purpose: ResourceExplorer
+    DependsOn: Index
+
+  DefaultViewAssociation:
+    Type: AWS::ResourceExplorer2::DefaultViewAssociation
+    Properties:
+      ViewArn: !Ref View
+`;
+
+const RE_LOCAL_TEMPLATE = `AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Resource Explorer Local Indexes + Views.
+  Deploy to ALL regions EXCEPT the aggregator region.
+
+Resources:
+  Index:
+    Type: AWS::ResourceExplorer2::Index
+    Properties:
+      Type: LOCAL
+      Tags:
+        Purpose: ResourceExplorer
+
+  View:
+    Type: AWS::ResourceExplorer2::View
+    Properties:
+      ViewName: LocalView
+      IncludedProperties:
+        - Name: tags
+      Tags:
+        Purpose: ResourceExplorer
+    DependsOn: Index
+`;
+
+export interface ReIndexDeployResult {
+  payerAccountId: string;
+  rootOuId?: string;
+  aggregatorRegion: string;
+  localRegions: string[];
+  steps: ProvisionStep[];
+}
+
+const REGION_RE = /^[a-z]{2}(-[a-z]+)+-\d$/;
+
+/**
+ * 为整个组织下发 Resource Explorer 索引（幂等）。
+ * 只在缺失的区域下发实例，已有实例的区域跳过；返回后用 getReIndexStatus 轮询。
+ */
+export async function deployReIndexes(
+  payerAccountId: string,
+  aggregatorRegion = 'us-east-1',
+  localRegions: string[] = [],
+): Promise<ReIndexDeployResult> {
+  if (!REGION_RE.test(aggregatorRegion)) throw new Error(`聚合区域不合法: ${aggregatorRegion}`);
+  const locals = [...new Set(localRegions.filter(r => REGION_RE.test(r) && r !== aggregatorRegion))];
+
+  const creds = await assumePayer(payerAccountId);
+  if (!creds) throw new Error('该 payer 不在平台配置（config.payers）中，无法自动部署索引');
+
+  const steps: ProvisionStep[] = [];
+  const out: ReIndexDeployResult = { payerAccountId, aggregatorRegion, localRegions: locals, steps };
+
+  const org = new OrganizationsClient({ region: aggregatorRegion, credentials: creds });
+  const cfn = new CloudFormationClient({ region: aggregatorRegion, credentials: creds });
+
+  try {
+    const roots = await org.send(new ListRootsCommand({}));
+    out.rootOuId = roots.Roots?.[0]?.Id;
+    if (!out.rootOuId) throw new Error('未取到根 OU');
+  } catch (e: any) {
+    steps.push({ key: 'root', label: '读取根 OU', status: 'failed', detail: e.name || e.message });
+    return out;
+  }
+
+  // 确保 StackSet 存在（幂等）
+  async function ensureStackSet(name: string, template: string, desc: string) {
+    try {
+      await cfn.send(new DescribeStackSetCommand({ StackSetName: name, CallAs: 'SELF' }));
+      return false; // 已存在
+    } catch (e: any) {
+      if (e.name !== 'StackSetNotFoundException') throw e;
+    }
+    await cfn.send(new CreateStackSetCommand({
+      StackSetName: name,
+      Description: desc,
+      TemplateBody: template,
+      PermissionModel: 'SERVICE_MANAGED',
+      AutoDeployment: { Enabled: true, RetainStacksOnAccountRemoval: false },
+      ManagedExecution: { Active: true },
+      CallAs: 'SELF',
+      Tags: [{ Key: 'ManagedBy', Value: 'AWSTool' }, { Key: 'Purpose', Value: 'ResourceExplorer' }],
+    }));
+    return true; // 新建
+  }
+
+  // 已部署实例覆盖的区域
+  async function deployedRegions(name: string): Promise<Set<string>> {
+    const regions = new Set<string>();
+    let token: string | undefined;
+    do {
+      const p = await cfn.send(new ListStackInstancesCommand({ StackSetName: name, CallAs: 'SELF', NextToken: token }));
+      for (const s of p.Summaries || []) if (s.Region) regions.add(s.Region);
+      token = p.NextToken;
+    } while (token);
+    return regions;
+  }
+
+  // ---- 聚合索引 StackSet ----
+  try {
+    const created = await ensureStackSet(RE_AGGREGATOR_STACKSET, RE_AGGREGATOR_TEMPLATE, 'Resource Explorer aggregator index (managed by AWSTool)');
+    const have = await deployedRegions(RE_AGGREGATOR_STACKSET);
+    if (have.has(aggregatorRegion)) {
+      steps.push({ key: 'aggStackSet', label: `聚合索引 StackSet (${aggregatorRegion})`, status: 'skipped', detail: '该区域已有实例' });
+    } else {
+      const op = await cfn.send(new CreateStackInstancesCommand({
+        StackSetName: RE_AGGREGATOR_STACKSET,
+        DeploymentTargets: { OrganizationalUnitIds: [out.rootOuId!] },
+        Regions: [aggregatorRegion],
+        OperationPreferences: { FailureTolerancePercentage: 100, MaxConcurrentPercentage: 100 },
+        CallAs: 'SELF',
+      }));
+      steps.push({
+        key: 'aggStackSet', label: `聚合索引 StackSet (${aggregatorRegion})`, status: 'created',
+        detail: `${created ? '已创建 StackSet 并' : ''}已下发到根 OU（异步，operationId ${op.OperationId}）`,
+      });
+    }
+  } catch (e: any) {
+    steps.push({ key: 'aggStackSet', label: `聚合索引 StackSet (${aggregatorRegion})`, status: 'failed', detail: e.name || e.message });
+  }
+
+  // ---- 本地索引 StackSet ----
+  if (locals.length === 0) {
+    steps.push({ key: 'localStackSet', label: '本地索引 StackSet', status: 'skipped', detail: '未选择其它区域' });
+  } else {
+    try {
+      const created = await ensureStackSet(RE_LOCAL_STACKSET, RE_LOCAL_TEMPLATE, 'Resource Explorer local indexes (managed by AWSTool)');
+      const have = await deployedRegions(RE_LOCAL_STACKSET);
+      const missing = locals.filter(r => !have.has(r));
+      if (missing.length === 0) {
+        steps.push({ key: 'localStackSet', label: '本地索引 StackSet', status: 'skipped', detail: `所选 ${locals.length} 个区域均已有实例` });
+      } else {
+        const op = await cfn.send(new CreateStackInstancesCommand({
+          StackSetName: RE_LOCAL_STACKSET,
+          DeploymentTargets: { OrganizationalUnitIds: [out.rootOuId!] },
+          Regions: missing,
+          OperationPreferences: { FailureTolerancePercentage: 100, MaxConcurrentPercentage: 100 },
+          CallAs: 'SELF',
+        }));
+        steps.push({
+          key: 'localStackSet', label: '本地索引 StackSet', status: 'created',
+          detail: `${created ? '已创建 StackSet 并' : ''}已下发 ${missing.length} 个区域: ${missing.join(', ')}（异步，operationId ${op.OperationId}）`,
+        });
+      }
+    } catch (e: any) {
+      steps.push({ key: 'localStackSet', label: '本地索引 StackSet', status: 'failed', detail: e.name || e.message });
+    }
+  }
+
+  // ---- payer 管理账户自身的本地索引（SERVICE_MANAGED 不覆盖管理账户）----
+  if (locals.length > 0) {
+    const results = await Promise.allSettled(locals.map(async (region) => {
+      const re = new ResourceExplorer2Client({ region, credentials: creds });
+      try {
+        await re.send(new GetIndexCommand({}));
+        return 'exists';
+      } catch (e: any) {
+        if (e.name !== 'ResourceNotFoundException') throw e;
+      }
+      await re.send(new CreateIndexCommand({}));
+      return 'created';
+    }));
+    const created = results.filter(r => r.status === 'fulfilled' && r.value === 'created').length;
+    const exists = results.filter(r => r.status === 'fulfilled' && r.value === 'exists').length;
+    const failed = results.filter(r => r.status === 'rejected').length;
+    steps.push({
+      key: 'payerLocalIndexes',
+      label: 'payer 管理账户本地索引',
+      status: failed > 0 ? (created + exists > 0 ? 'pending' : 'failed') : (created > 0 ? 'created' : 'skipped'),
+      detail: `新建 ${created} / 已存在 ${exists} / 失败 ${failed}（管理账户不在 StackSet 覆盖范围，单独创建）`,
+    });
+  }
+
+  return out;
+}
+
+export interface ReIndexStackSetStatus {
+  name: string;
+  exists: boolean;
+  instanceCount: number;
+  regions: string[];
+  statusCounts: Record<string, number>;
+  latestOperation?: { operationId?: string; action?: string; status?: string; timestamp?: Date };
+}
+
+/** 查询两个索引 StackSet 的部署进度，供前端轮询 */
+export async function getReIndexStatus(payerAccountId: string, region = 'us-east-1'): Promise<{ payerAccountId: string; stackSets: ReIndexStackSetStatus[] }> {
+  const creds = await assumePayer(payerAccountId);
+  if (!creds) throw new Error('该 payer 不在平台配置（config.payers）中');
+  const cfn = new CloudFormationClient({ region, credentials: creds });
+
+  const stackSets: ReIndexStackSetStatus[] = [];
+  for (const name of [RE_AGGREGATOR_STACKSET, RE_LOCAL_STACKSET]) {
+    const entry: ReIndexStackSetStatus = { name, exists: false, instanceCount: 0, regions: [], statusCounts: {} };
+    try {
+      await cfn.send(new DescribeStackSetCommand({ StackSetName: name, CallAs: 'SELF' }));
+      entry.exists = true;
+    } catch (e: any) {
+      if (e.name === 'StackSetNotFoundException') { stackSets.push(entry); continue; }
+      throw e;
+    }
+    const regions = new Set<string>();
+    let token: string | undefined;
+    do {
+      const p = await cfn.send(new ListStackInstancesCommand({ StackSetName: name, CallAs: 'SELF', NextToken: token }));
+      for (const s of p.Summaries || []) {
+        entry.instanceCount++;
+        if (s.Region) regions.add(s.Region);
+        const st = s.StackInstanceStatus?.DetailedStatus || s.Status || 'UNKNOWN';
+        entry.statusCounts[st] = (entry.statusCounts[st] || 0) + 1;
+      }
+      token = p.NextToken;
+    } while (token);
+    entry.regions = [...regions].sort();
+    try {
+      const ops = await cfn.send(new ListStackSetOperationsCommand({ StackSetName: name, CallAs: 'SELF', MaxResults: 1 }));
+      const op = (ops.Summaries || [])[0];
+      if (op) entry.latestOperation = { operationId: op.OperationId, action: op.Action, status: op.Status, timestamp: op.CreationTimestamp };
+    } catch { /* 操作列表拿不到不影响主结果 */ }
+    stackSets.push(entry);
+  }
+  return { payerAccountId, stackSets };
 }

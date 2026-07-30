@@ -74,6 +74,32 @@ awsRouter.get('/tag-compliance/report', async (_req: Request, res: Response) => 
   } catch (e: any) { res.status(500).json({ error: e.message }); }
 });
 
+// 下发 Resource Explorer 索引 StackSet（替代控制台 Quick Setup，异步执行）
+awsRouter.post('/tag-compliance/re-indexes', requireAdmin, async (req: Request, res: Response) => {
+  try {
+    const payer = String(req.body?.payerAccountId || '').trim();
+    if (!/^\d{12}$/.test(payer)) return res.status(400).json({ error: '请提供 12 位 payer 账户 ID' });
+    const aggregatorRegion = String(req.body?.aggregatorRegion || 'us-east-1').trim();
+    const localRegions = Array.isArray(req.body?.localRegions) ? req.body.localRegions.map((r: any) => String(r).trim()) : [];
+    const r = await tagCompliance.deployReIndexes(payer, aggregatorRegion, localRegions);
+    const user = (req as any).user;
+    db.addAuditLog(user?.userId, 'TAG_RE_INDEX_DEPLOY',
+      `下发 RE 索引 payer ${payer} — 聚合 ${aggregatorRegion}, 本地 ${r.localRegions.length} 区域; ${r.steps.map(s => `${s.label}:${s.status}`).join(', ')}`,
+      user?.username, req.ip);
+    (res.locals as any).audited = true;
+    res.json({ success: true, data: r });
+  } catch (e: any) { res.status(500).json({ error: e.message }); }
+});
+
+// 查询 RE 索引 StackSet 部署进度（供前端轮询）
+awsRouter.get('/tag-compliance/re-indexes/status', async (req: Request, res: Response) => {
+  try {
+    const payer = String(req.query.payer || '').trim();
+    if (!/^\d{12}$/.test(payer)) return res.status(400).json({ error: '请提供 12 位 payer 账户 ID' });
+    res.json({ success: true, data: await tagCompliance.getReIndexStatus(payer) });
+  } catch (e: any) { res.status(500).json({ error: e.message }); }
+});
+
 // 一键接入：自动补齐该 payer 组织的前置资源（RE 跨账户访问/聚合索引/OrgView/search-role/StackSet）
 awsRouter.post('/tag-compliance/provision', requireAdmin, async (req: Request, res: Response) => {
   try {

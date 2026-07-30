@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Card, Table, Tag, Button, Space, message, Tabs, Alert, Statistic, Row, Col, Popconfirm, Input, Tooltip, Spin, Modal, Form, Collapse, Typography, Descriptions } from 'antd';
+import { Card, Table, Tag, Button, Space, message, Tabs, Alert, Statistic, Row, Col, Popconfirm, Input, Tooltip, Spin, Modal, Form, Collapse, Typography, Descriptions, Select } from 'antd';
 import { ReloadOutlined, PlayCircleOutlined, SaveOutlined, TagsOutlined, PlusOutlined, CheckCircleFilled, CloseCircleFilled, QuestionCircleFilled, SearchOutlined, ThunderboltOutlined } from '@ant-design/icons';
 import { api } from '../api';
 
@@ -18,6 +18,16 @@ interface ProvisionResult {
   payerAccountId: string; centralAccountId: string; orgId?: string; rootOuId?: string;
   steps: ProvisionStep[]; searchRoleArn?: string; viewArn?: string; needsRetry: boolean;
 }
+// Resource Explorer 支持的常用区域（用于索引部署选择）
+const RE_ALL_REGIONS = [
+  'us-east-1', 'us-east-2', 'us-west-1', 'us-west-2',
+  'eu-west-1', 'eu-west-2', 'eu-west-3', 'eu-central-1', 'eu-north-1', 'eu-south-1',
+  'ap-northeast-1', 'ap-northeast-2', 'ap-northeast-3', 'ap-south-1',
+  'ap-southeast-1', 'ap-southeast-2', 'ca-central-1', 'sa-east-1',
+];
+// 默认本地索引区域：除 us-east-1（默认聚合区）外的常规区域
+const RE_DEFAULT_LOCAL_REGIONS = RE_ALL_REGIONS.filter(r => r !== 'us-east-1');
+
 const PROV_META: Record<ProvisionStatus, { color: string; text: string }> = {
   created: { color: 'green', text: '已创建' },
   ok: { color: 'green', text: '已就绪' },
@@ -102,11 +112,48 @@ const AddOrgModal: React.FC<{
 
   const [provisioning, setProvisioning] = useState(false);
   const [provResult, setProvResult] = useState<ProvisionResult | null>(null);
+  // Resource Explorer 索引部署
+  const [aggRegion, setAggRegion] = useState('us-east-1');
+  const [localRegions, setLocalRegions] = useState<string[]>(RE_DEFAULT_LOCAL_REGIONS);
+  const [reDeploying, setReDeploying] = useState(false);
+  const [reSteps, setReSteps] = useState<ProvisionStep[] | null>(null);
+  const [reStatus, setReStatus] = useState<any[] | null>(null);
+  const [reStatusLoading, setReStatusLoading] = useState(false);
+
+  const loadReStatus = async (silent = false) => {
+    if (!/^\d{12}$/.test(payer.trim())) { if (!silent) message.warning('请输入 12 位 payer 账户 ID'); return; }
+    setReStatusLoading(true);
+    try {
+      const r = await api.tagReIndexStatus(payer.trim());
+      if (r.success) setReStatus(r.data?.stackSets || []);
+      else if (!silent) message.error(r.error || '查询失败');
+    } catch (e: any) { if (!silent) message.error(e.message); }
+    finally { setReStatusLoading(false); }
+  };
+
+  const handleDeployReIndexes = async () => {
+    if (!/^\d{12}$/.test(payer.trim())) { message.warning('请输入 12 位 payer 账户 ID'); return; }
+    setReDeploying(true); setReSteps(null);
+    const hide = message.loading('正在下发 Resource Explorer 索引 StackSet...', 0);
+    try {
+      const r = await api.tagDeployReIndexes(payer.trim(), aggRegion, localRegions);
+      hide();
+      if (!r.success) { message.error(r.error || '下发失败'); return; }
+      setReSteps(r.data?.steps || []);
+      const failed = (r.data?.steps || []).filter((s: ProvisionStep) => s.status === 'failed');
+      if (failed.length) message.error(`${failed.length} 项失败，请查看明细`);
+      else message.success('已下发，索引创建由 AWS 异步完成，可点「刷新进度」查看');
+      loadReStatus(true);
+    } catch (e: any) { hide(); message.error(e.message); }
+    finally { setReDeploying(false); }
+  };
 
   const reset = () => {
     setPayer(''); setData(null); setChecking(false);
     setOrgId(''); setSearchRoleArn(''); setViewArn(''); setTagValue(''); setExcludeAccounts('');
     setProvisioning(false); setProvResult(null);
+    setAggRegion('us-east-1'); setLocalRegions(RE_DEFAULT_LOCAL_REGIONS);
+    setReDeploying(false); setReSteps(null); setReStatus(null); setReStatusLoading(false);
   };
 
   const handleClose = () => { reset(); onClose(); };
@@ -205,6 +252,81 @@ const AddOrgModal: React.FC<{
           onPressEnter={handleDetect} placeholder="12 位账户 ID" />
         <Button type="primary" icon={<SearchOutlined />} loading={checking} onClick={handleDetect}>检测</Button>
       </Space.Compact>
+
+      <Collapse size="small" style={{ marginBottom: 12 }}
+        items={[{
+          key: 're',
+          label: <span>Resource Explorer 索引部署（替代控制台 Quick Setup）</span>,
+          children: (
+            <>
+              <Alert type="info" showIcon style={{ marginBottom: 12 }}
+                message="给组织内所有账户建立 Resource Explorer 索引"
+                description="扫描器靠 Resource Explorer 发现资源，每个账户的每个区域都需要索引，缺索引的区域会成为扫描盲区。这里用两个 StackSet 全组织下发：聚合区域建 AGGREGATOR，其余区域建 LOCAL。索引创建由 AWS 异步完成（整组织可能 15-30 分钟以上），下发后可随时刷新进度。" />
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginBottom: 8 }}>
+                <span style={{ fontSize: 12 }}>聚合区域</span>
+                <Select size="small" style={{ width: 150 }} value={aggRegion}
+                  onChange={v => { setAggRegion(v); setLocalRegions(prev => prev.filter(r => r !== v)); }}
+                  options={RE_ALL_REGIONS.map(r => ({ label: r, value: r }))} />
+                <span style={{ fontSize: 12 }}>本地索引区域</span>
+                <Select size="small" mode="multiple" allowClear style={{ minWidth: 320, flex: 1 }}
+                  maxTagCount="responsive" placeholder="选择其它区域（不含聚合区域）"
+                  value={localRegions} onChange={v => setLocalRegions(v.filter((r: string) => r !== aggRegion))}
+                  options={RE_ALL_REGIONS.filter(r => r !== aggRegion).map(r => ({ label: r, value: r }))} />
+              </div>
+              <Space wrap style={{ marginBottom: 8 }}>
+                <Button size="small" onClick={() => setLocalRegions(RE_ALL_REGIONS.filter(r => r !== aggRegion))}>全选</Button>
+                <Button size="small" onClick={() => setLocalRegions([])}>清空（只建聚合区）</Button>
+                <Popconfirm title="下发 Resource Explorer 索引？"
+                  description={`将在该组织所有成员账户部署索引：聚合区 ${aggRegion} + 本地区 ${localRegions.length} 个。操作幂等，已有实例的区域会跳过。`}
+                  okText="下发" cancelText="取消" onConfirm={handleDeployReIndexes}>
+                  <Button size="small" type="primary" ghost loading={reDeploying}
+                    disabled={!/^\d{12}$/.test(payer.trim())}>下发索引</Button>
+                </Popconfirm>
+                <Button size="small" icon={<ReloadOutlined />} loading={reStatusLoading} onClick={() => loadReStatus()}>刷新进度</Button>
+              </Space>
+
+              {reSteps && (
+                <div style={{ marginBottom: 8 }}>
+                  {reSteps.map(s => (
+                    <div key={s.key} style={{ display: 'flex', alignItems: 'flex-start', gap: 8, padding: '3px 0' }}>
+                      <Tag color={PROV_META[s.status]?.color} style={{ margin: 0, minWidth: 60, textAlign: 'center' }}>
+                        {PROV_META[s.status]?.text || s.status}
+                      </Tag>
+                      <div style={{ minWidth: 0 }}>
+                        <div style={{ fontSize: 13 }}>{s.label}</div>
+                        {s.detail && <div style={{ fontSize: 11, color: 'rgba(0,0,0,0.45)', wordBreak: 'break-all' }}>{s.detail}</div>}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {reStatus && (
+                <Table size="small" pagination={false} rowKey="name" dataSource={reStatus}
+                  locale={{ emptyText: '暂无数据' }}
+                  columns={[
+                    { title: 'StackSet', dataIndex: 'name', render: (v: string) => <code style={{ fontSize: 11 }}>{v}</code> },
+                    { title: '存在', dataIndex: 'exists', width: 70, align: 'center' as const,
+                      render: (v: boolean) => v ? <Tag color="green" style={{ margin: 0 }}>是</Tag> : <Tag style={{ margin: 0 }}>否</Tag> },
+                    { title: '实例数', dataIndex: 'instanceCount', width: 80, align: 'right' as const },
+                    { title: '覆盖区域', dataIndex: 'regions', ellipsis: true,
+                      render: (v: string[]) => <span style={{ fontSize: 11 }}>{(v || []).join(', ') || '-'}</span> },
+                    { title: '实例状态', dataIndex: 'statusCounts', width: 200,
+                      render: (v: Record<string, number>) => {
+                        const entries = Object.entries(v || {});
+                        if (!entries.length) return '-';
+                        return <span>{entries.map(([k, n]) => (
+                          <Tag key={k} color={k === 'SUCCEEDED' || k === 'CURRENT' ? 'green' : k === 'FAILED' ? 'red' : 'orange'}
+                            style={{ margin: '0 4px 0 0', fontSize: 10 }}>{k} {n}</Tag>
+                        ))}</span>;
+                      } },
+                    { title: '最近操作', dataIndex: 'latestOperation', width: 150,
+                      render: (op: any) => op ? <Tag color={STATUS_COLOR[op.status] || 'default'} style={{ margin: 0, fontSize: 10 }}>{op.action} {op.status}</Tag> : '-' },
+                  ]} />
+              )}
+            </>
+          ),
+        }]} />
 
       {provResult && (
         <Card size="small" title="一键接入执行结果" style={{ marginBottom: 12 }} bodyStyle={{ padding: '8px 12px' }}>

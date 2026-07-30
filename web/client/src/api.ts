@@ -163,6 +163,11 @@ export const api = {
   // 一键接入：自动补齐该 payer 组织的前置资源
   tagProvision: (payerAccountId: string) =>
     request('/aws/tag-compliance/provision', { method: 'POST', body: JSON.stringify({ payerAccountId }) }),
+  // Resource Explorer 索引：下发 StackSet（替代 Quick Setup）与查询进度
+  tagDeployReIndexes: (payerAccountId: string, aggregatorRegion: string, localRegions: string[]) =>
+    request('/aws/tag-compliance/re-indexes', { method: 'POST', body: JSON.stringify({ payerAccountId, aggregatorRegion, localRegions }) }),
+  tagReIndexStatus: (payer: string) =>
+    request(`/aws/tag-compliance/re-indexes/status?payer=${encodeURIComponent(payer)}`),
   exportAuditLog: async (format: 'csv' | 'json') => {
     const token = getToken();
     const res = await fetch(`${BASE}/aws/audit/export?format=${format}`, {
