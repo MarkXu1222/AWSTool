@@ -171,33 +171,38 @@ const SettingsPage: React.FC<SettingsPageProps> = ({ onLogout }) => {
           <Card size="small" title="用户管理"
             extra={<Button size="small" icon={<UserAddOutlined />} onClick={() => setAddUserOpen(true)}>添加</Button>}>
             <Table size="small" dataSource={users} rowKey="id" pagination={false}
+              scroll={{ x: 'max-content' }}
               columns={[
-                { title: '用户名', dataIndex: 'username', render: (u: string) => <strong>{u}</strong> },
-                { title: '角色', dataIndex: 'role', width: 90, render: (r: string) => (
-                  <Tag color={r === 'admin' ? 'red' : r === 'partadmin' ? 'orange' : 'blue'}>{r}</Tag>
+                { title: '用户名', dataIndex: 'username', width: 110, render: (u: string) => <strong>{u}</strong> },
+                { title: '角色', dataIndex: 'role', width: 100, render: (r: string) => (
+                  <Tag color={r === 'admin' ? 'red' : r === 'partadmin' ? 'orange' : 'blue'} style={{ margin: 0 }}>{r}</Tag>
                 )},
-                { title: 'MFA', dataIndex: 'mfa_enabled', width: 50, render: (m: boolean) => m ? '✅' : '❌' },
-                { title: '页面权限', render: (_: any, record: any) => {
-                  if (record.role === 'admin') return <Tag color="red">全部</Tag>;
+                { title: 'MFA', dataIndex: 'mfa_enabled', width: 60, align: 'center' as const, render: (m: boolean) => m ? '✅' : '❌' },
+                { title: '页面权限', width: 260, render: (_: any, record: any) => {
+                  if (record.role === 'admin') return <Tag color="red" style={{ margin: 0 }}>全部</Tag>;
                   const pages: string[] = Array.isArray(record.allowed_pages) ? record.allowed_pages : ALL_PAGE_KEYS;
-                  if (pages.length === ALL_PAGE_KEYS.length) return <Tag color="green">全部</Tag>;
-                  if (pages.length === 0) return <Tag>无</Tag>;
+                  if (pages.length === ALL_PAGE_KEYS.length) return <Tag color="green" style={{ margin: 0 }}>全部</Tag>;
+                  if (pages.length === 0) return <Tag style={{ margin: 0 }}>无</Tag>;
                   return (
-                    <Space size={4} wrap>
+                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
                       {pages.map(k => {
                         const meta = PAGE_META.find(p => p.key === k);
-                        return <Tag key={k}>{meta?.label || k}</Tag>;
+                        return <Tag key={k} style={{ margin: 0 }}>{meta?.label || k}</Tag>;
                       })}
-                    </Space>
+                    </div>
                   );
                 }},
-                { title: '根用户权限', dataIndex: 'root_access', width: 90, render: (v: boolean, record: any) => (
-                  record.role === 'admin' ? <Tag color="red">全部</Tag> : (v ? <Tag color="purple">✓ 已授权</Tag> : <Tag>—</Tag>)
+                { title: '根用户权限', dataIndex: 'root_access', width: 110, align: 'center' as const, render: (v: boolean, record: any) => (
+                  record.role === 'admin'
+                    ? <Tag color="red" style={{ margin: 0 }}>全部</Tag>
+                    : (v ? <Tag color="purple" style={{ margin: 0 }}>已授权</Tag> : <Tag style={{ margin: 0 }}>—</Tag>)
                 )},
-                { title: '批量提额', dataIndex: 'bulk_quota_access', width: 90, render: (v: boolean, record: any) => (
-                  record.role === 'admin' ? <Tag color="red">全部</Tag> : (v ? <Tag color="volcano">✓ 已授权</Tag> : <Tag>—</Tag>)
+                { title: '批量提额', dataIndex: 'bulk_quota_access', width: 110, align: 'center' as const, render: (v: boolean, record: any) => (
+                  record.role === 'admin'
+                    ? <Tag color="red" style={{ margin: 0 }}>全部</Tag>
+                    : (v ? <Tag color="volcano" style={{ margin: 0 }}>已授权</Tag> : <Tag style={{ margin: 0 }}>—</Tag>)
                 )},
-                { title: '操作', width: 180, render: (_: any, record: any) => (
+                { title: '操作', width: 190, fixed: 'right' as const, render: (_: any, record: any) => (
                   <Space size="small">
                     <Button size="small" icon={<EditOutlined />} onClick={() => openEditUser(record)}>编辑</Button>
                     <Button size="small" onClick={() => { setResetPwdOpen(record); resetForm.resetFields(); }}>重置</Button>
