@@ -142,6 +142,12 @@ const BEDROCK_REGIONS = [
 ];
 // scope = 推理范围（与后端 BEDROCK_QUOTA_SCOPES 保持一致）
 const BEDROCK_SCOPES = ['Global Cross-Region', 'Cross-Region', 'On-Demand', 'Latency-Optimized', 'Other'];
+// Provider 固定候选（与后端 inferBedrockProvider 的规范名一致），查询前也能直接选
+const BEDROCK_PROVIDERS = [
+  'Anthropic', 'Amazon', 'Meta', 'Mistral', 'Cohere', 'AI21', 'DeepSeek', 'Qwen',
+  'OpenAI', 'Google', 'Moonshot', 'MiniMax', 'NVIDIA', 'Z.ai', 'Stability',
+  'TwelveLabs', 'Writer', 'Luma', 'Bedrock (服务级)', 'Other',
+];
 const BEDROCK_SCOPE_COLOR: Record<string, string> = {
   'Global Cross-Region': 'purple',
   'Cross-Region': 'blue',
@@ -494,7 +500,8 @@ const QuotasPage: React.FC = () => {
   const filtered = quotas.filter(q => !searchText || q.QuotaName?.toLowerCase().includes(searchText.toLowerCase()));
 
   // Bedrock 配额筛选：Provider + 推理范围(多选) + 关键词（分词 AND 匹配）
-  const bedrockProviders = [...new Set(bedrockRows.map(r => r.provider).filter(p => p && p !== 'Unknown'))].sort();
+  // Provider 候选 = 固定清单 ∪ 实际查到的（保证查询前就能选，查询后也不漏新 provider）
+  const bedrockProviders = [...new Set([...BEDROCK_PROVIDERS, ...bedrockRows.map(r => r.provider).filter(Boolean)])];
   const bedrockFiltered = bedrockRows.filter(r => {
     if (bedrockProvider && r.provider !== bedrockProvider) return false;
     if (!bedrockScopes.includes(r.scope)) return false;
@@ -734,7 +741,7 @@ const QuotasPage: React.FC = () => {
         },
         {
           key: 'bedrock', label: `Bedrock 配额 (${bedrockFiltered.length})`,
-          children: selectedAccount ? (
+          children: (
             <>
               {/* 查询条：多选区域 + 一键查询 */}
               <div className="table-toolbar" style={{ flexWrap: 'wrap' }}>
@@ -748,6 +755,7 @@ const QuotasPage: React.FC = () => {
                 </Button>
                 <Button size="small" onClick={() => setBedrockRegions(['us-east-1'])}>仅 us-east-1</Button>
                 <Button size="small" onClick={() => setBedrockRegions(BEDROCK_REGIONS)}>全选区域</Button>
+                {!selectedAccount && <span style={{ fontSize: 12, color: '#d46b08' }}>请先在上方选择账户</span>}
               </div>
 
               {/* 筛选条：Provider / 推理范围 / 关键词 */}
@@ -773,7 +781,9 @@ const QuotasPage: React.FC = () => {
                 rowKey={(r: any) => `${r.region}|${r.provider}|${r.model}|${r.scope}`}
                 pagination={{ pageSize: 15, showTotal: t => `共 ${t} 条`, size: 'small', showSizeChanger: true }}
                 scroll={{ x: 900 }}
-                locale={{ emptyText: '选择区域后点击「一键查询」获取该账户的 Bedrock TPM / RPM / TPD 配额' }}
+                locale={{ emptyText: selectedAccount
+                  ? '选择区域后点击「一键查询」获取该账户的 Bedrock TPM / RPM / TPD 配额'
+                  : '请先在上方选择账户，再选择区域点击「一键查询」' }}
                 columns={[
                   { title: '区域', dataIndex: 'region', width: 120, sorter: (a: any, b: any) => a.region.localeCompare(b.region) },
                   { title: 'Provider', dataIndex: 'provider', width: 110,
@@ -807,8 +817,6 @@ const QuotasPage: React.FC = () => {
                   })),
                 ]} />
             </>
-          ) : (
-            <div style={{ padding: '40px 0', textAlign: 'center', color: 'rgba(0,0,0,0.45)' }}>请先在上方选择一个账户，再选择区域点击「一键查询」</div>
           ),
         },
         {
