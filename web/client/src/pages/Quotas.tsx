@@ -116,6 +116,7 @@ export const REGIONS = [
   // Opt-in 区域
   { label: 'af-south-1 (开普敦)', value: 'af-south-1' },
   { label: 'ap-east-1 (香港)', value: 'ap-east-1' },
+  { label: 'ap-east-2 (台北)', value: 'ap-east-2' },
   { label: 'ap-south-2 (海得拉巴)', value: 'ap-south-2' },
   { label: 'ap-southeast-3 (雅加达)', value: 'ap-southeast-3' },
   { label: 'ap-southeast-4 (墨尔本)', value: 'ap-southeast-4' },

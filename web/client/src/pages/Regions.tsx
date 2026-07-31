@@ -4,7 +4,7 @@ import { GlobalOutlined, ReloadOutlined, SearchOutlined } from '@ant-design/icon
 import { api } from '../api';
 
 const OPT_IN_REGIONS = [
-  'af-south-1', 'ap-east-1', 'ap-south-2', 'ap-southeast-3',
+  'af-south-1', 'ap-east-1', 'ap-east-2', 'ap-south-2', 'ap-southeast-3',
   'ap-southeast-4', 'ap-southeast-5', 'ap-southeast-6', 'ap-southeast-7',
   'ca-west-1', 'eu-central-2', 'eu-south-1', 'eu-south-2',
   'il-central-1', 'me-central-1', 'me-south-1', 'mx-central-1',
@@ -13,7 +13,7 @@ const OPT_IN_REGIONS = [
 // 区域中文名
 const REGION_CN: Record<string, string> = {
   'af-south-1': '开普敦（南非）',
-  'ap-east-1': '香港',
+  'ap-east-1': '香港', 'ap-east-2': '台北',
   'ap-south-2': '海得拉巴（印度）',
   'ap-southeast-3': '雅加达（印尼）',
   'ap-southeast-4': '墨尔本（澳大利亚）',

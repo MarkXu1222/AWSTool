@@ -600,6 +600,11 @@ awsRouter.post('/bulk-quota/submit', requireBulkQuotaAccess, async (req: Request
               job.results.push({ accountId: t.account.Id, accountName: t.account.Name || '', region: t.region, status: 'skipped', message: '该区域无此配额（服务可能未在此区域提供）' });
               continue;
             }
+            if ((current as any).regionNotEnabled) {
+              job.skipped++;
+              job.results.push({ accountId: t.account.Id, accountName: t.account.Name || '', region: t.region, status: 'skipped', message: '该账户未启用此 opt-in 区域，请先在「区域管理」开通' });
+              continue;
+            }
             if (current.value >= target) {
               job.skipped++;
               job.results.push({ accountId: t.account.Id, accountName: t.account.Name || '', region: t.region, status: 'skipped', message: `已达标（当前 ${current.value} ≥ 目标 ${target}）`, currentValue: current.value });

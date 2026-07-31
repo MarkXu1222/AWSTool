@@ -340,6 +340,7 @@ export const REGION_DISPLAY: Record<string, string> = {
   'ap-northeast-3': 'Osaka (ap-northeast-3)',
   'ap-south-1': 'Mumbai (ap-south-1)',
   'ap-east-1': 'Hong Kong (ap-east-1)',
+  'ap-east-2': 'Taipei (ap-east-2)',
   'sa-east-1': 'São Paulo (sa-east-1)',
   'ca-central-1': 'Canada (ca-central-1)',
 };

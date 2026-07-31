@@ -682,6 +682,12 @@ export async function getServiceQuotaValue(accountId: string, serviceCode: strin
     return { value: Number(q.Value ?? 0), adjustable: !!q.Adjustable, unit: q.Unit || '', quotaName: q.QuotaName || '' };
   } catch (e: any) {
     if (e?.name === 'NoSuchResourceException') return null;
+    // opt-in 区域未在该账户启用时，STS 凭证不被该区域接受。
+    // 这不是错误，属于「该账户在此区域不可用」，交由调用方按跳过处理。
+    if (e?.name === 'UnrecognizedClientException' || e?.name === 'InvalidClientTokenId'
+      || e?.name === 'AuthFailure' || e?.name === 'OptInRequired') {
+      return { value: -1, adjustable: false, unit: '', quotaName: '', regionNotEnabled: true } as any;
+    }
     throw e;
   }
 }
@@ -714,7 +720,7 @@ export async function listQuotaRequests(accountId: string) {
     'eu-west-1', 'eu-west-2', 'eu-west-3', 'eu-north-1', 'eu-central-1',
     'ap-southeast-1', 'ap-southeast-2', 'ap-southeast-3', 'ap-southeast-4', 'ap-southeast-5',
     'ap-northeast-1', 'ap-northeast-2', 'ap-northeast-3',
-    'ap-south-1', 'ap-south-2', 'ap-east-1',
+    'ap-south-1', 'ap-south-2', 'ap-east-1', 'ap-east-2',
     'sa-east-1', 'ca-central-1', 'ca-west-1',
     'af-south-1', 'me-south-1', 'me-central-1',
     'eu-south-1', 'eu-south-2', 'eu-central-2',
