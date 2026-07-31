@@ -259,37 +259,49 @@ async function assumeRoot(accountId: string, taskPolicyArn: string) {
 
 /**
  * 删除成员账户根用户的（虚拟）MFA 设备。
- * 步骤：1) 用管理员凭证 ListVirtualMFADevices 定位 root 的设备 SerialNumber；
- *      2) AssumeRoot(IAMDeleteRootUserCredentials) 换取 root 会话；
- *      3) DeactivateMFADevice + DeleteVirtualMFADevice（root 会话须省略 UserName）。
+ * 步骤：1) AssumeRoot(IAMDeleteRootUserCredentials) 换取【目标账户】的 root 会话；
+ *      2) 在该会话内 ListMFADevices（省略 UserName 即 root 自身）拿到设备 SerialNumber；
+ *      3) DeactivateMFADevice + DeleteVirtualMFADevice。
+ *
+ * 注意：这里必须用目标账户的 root 会话来枚举设备。早期实现用管理账户凭证
+ * ListVirtualMFADevices，那列出的是【payer 管理账户自己】的 root MFA，
+ * 会导致「拿 A 账户的设备序列号去 B 账户删除」，既删不掉又有误删风险。
  */
 export async function deleteRootMFA(accountId: string) {
-  // 1) 用管理员凭证枚举虚拟 MFA 设备，找出分配给 root 的那个
-  const admin = await getTempAdminCredentials(accountId);
-  const adminCreds = { accessKeyId: admin.accessKeyId, secretAccessKey: admin.secretAccessKey, sessionToken: admin.sessionToken };
-  const iamAdmin = new IAMClient({ region: 'us-east-1', credentials: adminCreds });
-  const list = await iamAdmin.send(new ListVirtualMFADevicesCommand({ AssignmentStatus: 'Assigned' }));
-  const rootDevices = (list.VirtualMFADevices || []).filter(d =>
-    (d.User?.Arn || '').endsWith(':root') || (d.SerialNumber || '').includes('root-account-mfa-device')
-  );
-  if (rootDevices.length === 0) {
-    throw new Error('未找到根用户的虚拟 MFA 设备（可能未启用，或为硬件 MFA — 需在该账户根用户控制台手动处理）');
-  }
-
-  // 2) AssumeRoot 换取 root 特权会话
+  // 1) 先换取目标账户的 root 特权会话
   const rootCreds = await assumeRoot(accountId, ROOT_TASK_POLICY.delete);
   const iamRoot = new IAMClient({ region: DEFAULT_REGION, credentials: rootCreds });
 
+  // 2) 在目标账户 root 会话内枚举它自己的 MFA 设备
+  const mfaList = await iamRoot.send(new ListMFADevicesCommand({}));
+  const devices = (mfaList.MFADevices || []).filter(d => !!d.SerialNumber);
+  if (devices.length === 0) {
+    throw new Error(`账户 ${accountId} 的根用户未启用 MFA，无需删除`);
+  }
+
   // 3) 逐个停用并删除（root 会话须省略 UserName）
   const removed: string[] = [];
-  for (const d of rootDevices) {
+  const failed: { serial: string; reason: string }[] = [];
+  for (const d of devices) {
     const serial = d.SerialNumber!;
-    await iamRoot.send(new DeactivateMFADeviceCommand({ SerialNumber: serial }));
-    // 仅虚拟设备可删除；停用后从账户移除，避免残留
-    try { await iamRoot.send(new DeleteVirtualMFADeviceCommand({ SerialNumber: serial })); } catch { /* 非虚拟设备忽略 */ }
-    removed.push(serial);
+    // 安全校验：序列号必须属于目标账户，避免跨账户误删
+    if (serial.startsWith('arn:') && !serial.includes(`::${accountId}:`) && !serial.includes(`:${accountId}:`)) {
+      failed.push({ serial, reason: '该 MFA 序列号不属于目标账户，已跳过' });
+      continue;
+    }
+    try {
+      await iamRoot.send(new DeactivateMFADeviceCommand({ SerialNumber: serial }));
+      // 仅虚拟设备可删除；硬件 MFA 停用即可
+      try { await iamRoot.send(new DeleteVirtualMFADeviceCommand({ SerialNumber: serial })); } catch { /* 非虚拟设备忽略 */ }
+      removed.push(serial);
+    } catch (e: any) {
+      failed.push({ serial, reason: `${e?.name || 'Error'}: ${e?.message || ''}`.slice(0, 200) });
+    }
   }
-  return { accountId, removed };
+  if (removed.length === 0 && failed.length > 0) {
+    throw new Error(`删除失败：${failed.map(f => `${f.serial} (${f.reason})`).join('; ')}`);
+  }
+  return { accountId, removed, failed };
 }
 
 /**
@@ -300,7 +312,19 @@ export async function deleteRootMFA(accountId: string) {
 export async function recoverRootPassword(accountId: string) {
   const rootCreds = await assumeRoot(accountId, ROOT_TASK_POLICY.createPassword);
   const iamRoot = new IAMClient({ region: DEFAULT_REGION, credentials: rootCreds });
-  await iamRoot.send(new CreateLoginProfileCommand({}));
+  try {
+    await iamRoot.send(new CreateLoginProfileCommand({}));
+  } catch (e: any) {
+    // 该账户根用户已有密码：CreateLoginProfile 会报 EntityAlreadyExists。
+    // 这种情况不是故障，应引导去「忘记密码」流程，而不是抛原始 AWS 错误。
+    if (e?.name === 'EntityAlreadyExistsException' || /already exists/i.test(String(e?.message || ''))) {
+      throw new Error(
+        `账户 ${accountId} 的根用户已设置密码，无需恢复。` +
+        `若要重置，请在该账户登录页用根邮箱走「忘记密码」流程，或先删除现有密码后再恢复。`,
+      );
+    }
+    throw e;
+  }
   return { accountId, ok: true };
 }
 
