@@ -5,7 +5,7 @@ import { STSClient, AssumeRoleCommand, GetCallerIdentityCommand, AssumeRootComma
 import { OrganizationsClient, ListAccountsCommand } from '@aws-sdk/client-organizations';
 import { CostExplorerClient, GetCostAndUsageCommand } from '@aws-sdk/client-cost-explorer';
 import { ServiceQuotasClient, ListServiceQuotasCommand, RequestServiceQuotaIncreaseCommand, ListRequestedServiceQuotaChangeHistoryCommand, GetServiceQuotaCommand } from '@aws-sdk/client-service-quotas';
-import { IAMClient, GetAccountSummaryCommand, ListMFADevicesCommand, ListUsersCommand, ListVirtualMFADevicesCommand, DeactivateMFADeviceCommand, DeleteVirtualMFADeviceCommand, CreateLoginProfileCommand, ListAccessKeysCommand, GetLoginProfileCommand, DeleteAccessKeyCommand } from '@aws-sdk/client-iam';
+import { IAMClient, GetAccountSummaryCommand, ListMFADevicesCommand, ListUsersCommand, ListVirtualMFADevicesCommand, DeactivateMFADeviceCommand, DeleteVirtualMFADeviceCommand, DeleteLoginProfileCommand, ListAccessKeysCommand, GetLoginProfileCommand, DeleteAccessKeyCommand } from '@aws-sdk/client-iam';
 import { EC2Client, DescribeInstancesCommand, DescribeVolumesCommand, TerminateInstancesCommand, DeleteVolumeCommand } from '@aws-sdk/client-ec2';
 import { S3Client, ListBucketsCommand } from '@aws-sdk/client-s3';
 import { LambdaClient, ListFunctionsCommand, DeleteFunctionCommand } from '@aws-sdk/client-lambda';
@@ -305,27 +305,28 @@ export async function deleteRootMFA(accountId: string) {
 }
 
 /**
- * 恢复（重新启用）成员账户根用户的密码。
- * AssumeRoot(IAMCreateRootUserPassword) → CreateLoginProfile（root 会话须省略 UserName 与 Password，
- * 由 AWS 触发根用户密码恢复流程，向该账户根邮箱发送重置邮件）。
+ * 允许恢复成员账户根用户密码。
+ *
+ * 做法：AssumeRoot(IAMDeleteRootUserCredentials) → DeleteLoginProfile（省略 UserName 即 root 本身），
+ * 即【删除该账户根用户现有的密码】。删除后根用户处于「无密码」状态，
+ * 之后到该账户登录页用根邮箱走「忘记密码」，AWS 会发重置邮件，由所有者自行设置新密码。
+ *
+ * 为什么不是 CreateLoginProfile：那是给 root 直接设一个新密码，
+ * 且在已有密码时会报 EntityAlreadyExists；我们要的是把密码控制权交还给邮箱持有者。
  */
 export async function recoverRootPassword(accountId: string) {
-  const rootCreds = await assumeRoot(accountId, ROOT_TASK_POLICY.createPassword);
+  const rootCreds = await assumeRoot(accountId, ROOT_TASK_POLICY.delete);
   const iamRoot = new IAMClient({ region: DEFAULT_REGION, credentials: rootCreds });
   try {
-    await iamRoot.send(new CreateLoginProfileCommand({}));
+    await iamRoot.send(new DeleteLoginProfileCommand({}));
   } catch (e: any) {
-    // 该账户根用户已有密码：CreateLoginProfile 会报 EntityAlreadyExists。
-    // 这种情况不是故障，应引导去「忘记密码」流程，而不是抛原始 AWS 错误。
-    if (e?.name === 'EntityAlreadyExistsException' || /already exists/i.test(String(e?.message || ''))) {
-      throw new Error(
-        `账户 ${accountId} 的根用户已设置密码，无需恢复。` +
-        `若要重置，请在该账户登录页用根邮箱走「忘记密码」流程，或先删除现有密码后再恢复。`,
-      );
+    // 本来就没有密码：已经是可走「忘记密码」的状态，视为幂等成功
+    if (e?.name === 'NoSuchEntityException' || e?.name === 'NoSuchEntity') {
+      return { accountId, ok: true, alreadyNoPassword: true };
     }
     throw e;
   }
-  return { accountId, ok: true };
+  return { accountId, ok: true, alreadyNoPassword: false };
 }
 
 /**
@@ -374,6 +375,8 @@ export async function deleteRootAccessKey(accountId: string, accessKeyId: string
   await iam.send(new DeleteAccessKeyCommand({ AccessKeyId: accessKeyId }));
   return { accountId, accessKeyId, deleted: true };
 }
+
+
 
 // ===== Exported service functions =====
 

@@ -1019,7 +1019,7 @@ awsRouter.post('/root-credentials/:accountId/recover-password', requireRootAcces
     db.addAuditLog(
       user?.userId,
       'ROOT_PASSWORD_RECOVER',
-      `AWS 账户 ${accountId} · 恢复根用户密码`,
+      `AWS 账户 ${accountId} · 允许恢复根用户密码（删除现有根密码，改由根邮箱自助重置）`,
       user?.username,
       req.ip,
     );
