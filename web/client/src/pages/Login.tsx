@@ -56,7 +56,7 @@ const LoginPage: React.FC<LoginPageProps> = ({ onSuccess }) => {
       }}>
         {/* Brand */}
         <div style={{ textAlign: 'center', marginBottom: 26 }}>
-          <img className="login-logo" src="/image.png" alt="AWS Toolbox" width={56} height={56}
+          <img className="login-logo" src="/logo.png" alt="AWS Toolbox" width={56} height={56}
             style={{ width: 56, height: 56, objectFit: 'contain', borderRadius: 12, display: 'block', margin: '0 auto 12px' }} />
           <h1 style={{ fontSize: 22, fontWeight: 700, margin: 0, color: '#1a2233', letterSpacing: '-0.01em' }}>AWS Toolbox</h1>
           <p style={{ color: '#8a94a6', fontSize: 13, margin: '4px 0 0' }}>登录以继续</p>
