@@ -411,6 +411,48 @@ const TagCompliancePage: React.FC = () => {
   const [reportMeta, setReportMeta] = useState<{ generatedAt?: string } | null>(null);
   // org_id → { payerAccountId, payerName }，用于在组织列前面显示 payer 名字
   const [orgMeta, setOrgMeta] = useState<Record<string, { payerAccountId: string; payerName: string }>>({});
+  // 报告通知邮箱（SNS 订阅）
+  const [notifySubs, setNotifySubs] = useState<any[]>([]);
+  const [notifyConfigured, setNotifyConfigured] = useState(true);
+  const [notifyLoading, setNotifyLoading] = useState(false);
+  const [newEmail, setNewEmail] = useState('');
+  const [addingEmail, setAddingEmail] = useState(false);
+
+  const loadNotifyEmails = async () => {
+    setNotifyLoading(true);
+    try {
+      const r = await api.tagNotifyEmails();
+      if (r.success) {
+        setNotifyConfigured(r.data?.configured !== false);
+        setNotifySubs(r.data?.subscriptions || []);
+      } else message.error(r.error || '读取通知邮箱失败');
+    } catch (e: any) { message.error(e.message); }
+    finally { setNotifyLoading(false); }
+  };
+
+  const handleAddNotifyEmail = async () => {
+    const email = newEmail.trim();
+    if (!email) { message.warning('请输入邮箱'); return; }
+    setAddingEmail(true);
+    try {
+      const r = await api.tagAddNotifyEmail(email);
+      if (r.success) {
+        if (r.data?.alreadyExists) message.info('该邮箱已存在，未重复添加');
+        else message.success('已添加，请让收件人点击 AWS 确认邮件后才会生效');
+        setNewEmail('');
+        loadNotifyEmails();
+      } else message.error(r.error || '添加失败');
+    } catch (e: any) { message.error(e.message); }
+    finally { setAddingEmail(false); }
+  };
+
+  const handleRemoveNotifyEmail = async (subscriptionArn: string, endpoint: string) => {
+    try {
+      const r = await api.tagRemoveNotifyEmail(subscriptionArn, endpoint);
+      if (r.success) { message.success(`已移除 ${endpoint}`); loadNotifyEmails(); }
+      else message.error(r.error || '移除失败');
+    } catch (e: any) { message.error(e.message); }
+  };
   const [executions, setExecutions] = useState<any[]>([]);
   const [orgsText, setOrgsText] = useState('');
   const [orgsCount, setOrgsCount] = useState(0);
@@ -437,7 +479,7 @@ const TagCompliancePage: React.FC = () => {
     api.tagStatus().then(r => {
       const ok = !!r.data?.configured;
       setConfigured(ok);
-      if (ok) { loadReport(); loadExecutions(); loadConfig(); }
+      if (ok) { loadReport(); loadExecutions(); loadConfig(); loadNotifyEmails(); }
     }).catch(() => setConfigured(false));
   }, []);
 
@@ -594,6 +636,55 @@ const TagCompliancePage: React.FC = () => {
 
   const configTab = (
     <>
+      {/* 报告通知邮箱 */}
+      <Card size="small" style={{ marginBottom: 12 }} bodyStyle={{ padding: '12px 16px' }}
+        title={<span>报告通知邮箱（{notifySubs.length}）</span>}
+        extra={<Button size="small" icon={<ReloadOutlined />} loading={notifyLoading} onClick={loadNotifyEmails}>刷新</Button>}>
+        {!notifyConfigured ? (
+          <Alert type="warning" showIcon message="未配置 SNS 主题"
+            description="需要在 config.json 的 tagCompliance 里补充 topicArn 才能在此管理通知邮箱。" />
+        ) : (
+          <>
+            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 10 }}>
+              <Input size="small" style={{ width: 280 }} placeholder="输入要添加的邮箱"
+                value={newEmail} onChange={e => setNewEmail(e.target.value)}
+                onPressEnter={handleAddNotifyEmail} />
+              <Button size="small" type="primary" icon={<PlusOutlined />} loading={addingEmail}
+                onClick={handleAddNotifyEmail}>添加邮箱</Button>
+              <span style={{ fontSize: 12, color: 'rgba(0,0,0,0.45)' }}>
+                添加后 AWS 会发确认邮件，收件人点了链接才会开始收报告
+              </span>
+            </div>
+            <Table size="small" pagination={false} rowKey="subscriptionArn" dataSource={notifySubs}
+              loading={notifyLoading}
+              locale={{ emptyText: '暂无通知邮箱' }}
+              columns={[
+                { title: '邮箱', dataIndex: 'endpoint', render: (v: string) => <code style={{ fontSize: 12 }}>{v}</code> },
+                { title: '状态', width: 120, render: (_: any, r: any) => r.pendingConfirmation
+                  ? <Tag color="orange" style={{ margin: 0 }}>待确认</Tag>
+                  : <Tag color="green" style={{ margin: 0 }}>已生效</Tag> },
+                { title: '来源', width: 130, render: (_: any, r: any) => r.managedByStack
+                  ? <Tooltip title="由 SAM 参数 NotificationEmail 创建，删除会造成 CloudFormation 栈漂移，建议改 samconfig.toml 重新部署">
+                      <Tag color="blue" style={{ margin: 0 }}>栈管理</Tag>
+                    </Tooltip>
+                  : <Tag style={{ margin: 0 }}>平台添加</Tag> },
+                { title: '操作', width: 90, align: 'center' as const, render: (_: any, r: any) => r.pendingConfirmation
+                  ? <Tooltip title="待确认的订阅无法删除，收件人确认后或 3 天自动过期"><span style={{ color: 'rgba(0,0,0,0.25)', fontSize: 12 }}>—</span></Tooltip>
+                  : (
+                    <Popconfirm title="确认移除该邮箱？"
+                      description={r.managedByStack
+                        ? '这是 SAM 栈参数创建的订阅，删除会造成栈漂移，下次 sam deploy 可能又被加回来。确定继续？'
+                        : '移除后该邮箱不再收到合规报告。'}
+                      okText="移除" cancelText="取消"
+                      onConfirm={() => handleRemoveNotifyEmail(r.subscriptionArn, r.endpoint)}>
+                      <Button size="small" type="link" danger>移除</Button>
+                    </Popconfirm>
+                  ) },
+              ]} />
+          </>
+        )}
+      </Card>
+
       <Alert type="info" showIcon style={{ marginBottom: 12 }}
         message="组织配置 orgs.json"
         description="这是扫描器的组织清单（存于工具账户 S3）。每个组织需包含 org_id / search_role_arn / view_arn 等字段。保存后下次扫描即生效，无需重新部署。" />

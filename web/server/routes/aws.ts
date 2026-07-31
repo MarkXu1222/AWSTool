@@ -74,6 +74,42 @@ awsRouter.get('/tag-compliance/report', async (_req: Request, res: Response) => 
   } catch (e: any) { res.status(500).json({ error: e.message }); }
 });
 
+// 报告通知邮箱（SNS 订阅）：列出 / 添加 / 删除
+awsRouter.get('/tag-compliance/notify-emails', async (_req: Request, res: Response) => {
+  try {
+    if (!tagCompliance.isNotifyConfigured()) {
+      return res.json({ success: true, data: { configured: false, subscriptions: [] } });
+    }
+    const subscriptions = await tagCompliance.listNotifySubscriptions();
+    res.json({ success: true, data: { configured: true, subscriptions } });
+  } catch (e: any) { res.status(500).json({ error: e.message }); }
+});
+
+awsRouter.post('/tag-compliance/notify-emails', requireAdmin, async (req: Request, res: Response) => {
+  try {
+    const email = String(req.body?.email || '').trim();
+    const r = await tagCompliance.addNotifyEmail(email);
+    const user = (req as any).user;
+    if (!r.alreadyExists) {
+      db.addAuditLog(user?.userId, 'TAG_NOTIFY_EMAIL_ADD', `添加 MAP 标签合规报告通知邮箱 ${email}`, user?.username, req.ip);
+      (res.locals as any).audited = true;
+    }
+    res.json({ success: true, data: r });
+  } catch (e: any) { res.status(500).json({ error: e.message }); }
+});
+
+awsRouter.delete('/tag-compliance/notify-emails', requireAdmin, async (req: Request, res: Response) => {
+  try {
+    const subscriptionArn = String(req.body?.subscriptionArn || req.query.subscriptionArn || '').trim();
+    const endpoint = String(req.body?.endpoint || '').trim();
+    await tagCompliance.removeNotifySubscription(subscriptionArn);
+    const user = (req as any).user;
+    db.addAuditLog(user?.userId, 'TAG_NOTIFY_EMAIL_REMOVE', `移除 MAP 标签合规报告通知邮箱 ${endpoint || subscriptionArn}`, user?.username, req.ip);
+    (res.locals as any).audited = true;
+    res.json({ success: true });
+  } catch (e: any) { res.status(500).json({ error: e.message }); }
+});
+
 // 下发 Resource Explorer 索引 StackSet（替代控制台 Quick Setup，异步执行）
 awsRouter.post('/tag-compliance/re-indexes', requireAdmin, async (req: Request, res: Response) => {
   try {

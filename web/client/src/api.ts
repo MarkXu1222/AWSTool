@@ -168,6 +168,12 @@ export const api = {
   tagExecutions: () => request('/aws/tag-compliance/executions'),
   tagReport: () => request('/aws/tag-compliance/report'),
   tagPrecheck: (payer: string) => request(`/aws/tag-compliance/precheck?payer=${encodeURIComponent(payer)}`),
+  // 报告通知邮箱（SNS 订阅）
+  tagNotifyEmails: () => request('/aws/tag-compliance/notify-emails'),
+  tagAddNotifyEmail: (email: string) =>
+    request('/aws/tag-compliance/notify-emails', { method: 'POST', body: JSON.stringify({ email }) }),
+  tagRemoveNotifyEmail: (subscriptionArn: string, endpoint?: string) =>
+    request('/aws/tag-compliance/notify-emails', { method: 'DELETE', body: JSON.stringify({ subscriptionArn, endpoint }) }),
   // 一键接入：自动补齐该 payer 组织的前置资源
   tagProvision: (payerAccountId: string) =>
     request('/aws/tag-compliance/provision', { method: 'POST', body: JSON.stringify({ payerAccountId }) }),

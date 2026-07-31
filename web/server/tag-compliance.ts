@@ -13,6 +13,7 @@
 import { STSClient, AssumeRoleCommand } from '@aws-sdk/client-sts';
 import { SFNClient, StartExecutionCommand, ListExecutionsCommand } from '@aws-sdk/client-sfn';
 import { S3Client, GetObjectCommand, PutObjectCommand, ListObjectsV2Command } from '@aws-sdk/client-s3';
+import { SNSClient, ListSubscriptionsByTopicCommand, SubscribeCommand, UnsubscribeCommand } from '@aws-sdk/client-sns';
 import { IAMClient, GetRoleCommand, CreateRoleCommand, AttachRolePolicyCommand, ListAttachedRolePoliciesCommand } from '@aws-sdk/client-iam';
 import {
   ResourceExplorer2Client, ListViewsCommand, CreateViewCommand,
@@ -1020,4 +1021,100 @@ export async function getReIndexStatus(payerAccountId: string, region = 'us-east
     stackSets.push(entry);
   }
   return { payerAccountId, stackSets };
+}
+
+// ============================================================
+// 报告通知邮箱（SNS 订阅管理）
+// NotificationEmail 是 SAM 参数，只能有一个且改动需重新部署；
+// 但 SNS 主题支持多订阅，这里直接用 SNS API 增删，无需重新部署 SAM。
+// 注意：SAM 创建的那条订阅由 CloudFormation 管理，删它会造成栈漂移，
+// 因此下面会把它标记为 managedByStack，前端提示不建议删除。
+// ============================================================
+
+export interface NotifySubscription {
+  subscriptionArn: string;
+  endpoint: string;
+  protocol: string;
+  /** 邮箱订阅需收件人点确认链接后才生效 */
+  pendingConfirmation: boolean;
+  /** 是否疑似由 SAM/CloudFormation 创建（等于栈参数 NotificationEmail 的那个邮箱） */
+  managedByStack: boolean;
+}
+
+function topicArn(): string {
+  const arn = TC.topicArn;
+  if (!arn) {
+    throw new Error('未配置 tagCompliance.topicArn，无法管理通知邮箱；请在 config.json 中补充 SNS 主题 ARN');
+  }
+  return arn;
+}
+
+export function isNotifyConfigured(): boolean {
+  return !!(TC.roleArn && TC.topicArn);
+}
+
+/** 列出当前所有报告通知订阅 */
+export async function listNotifySubscriptions(): Promise<NotifySubscription[]> {
+  const creds = await getConsoleCreds();
+  const sns = new SNSClient({ region: TC.region || 'us-east-1', credentials: creds });
+  const arn = topicArn();
+  const out: NotifySubscription[] = [];
+  let nextToken: string | undefined;
+  do {
+    const resp = await sns.send(new ListSubscriptionsByTopicCommand({ TopicArn: arn, NextToken: nextToken }));
+    for (const s of resp.Subscriptions || []) {
+      const subArn = s.SubscriptionArn || '';
+      out.push({
+        subscriptionArn: subArn,
+        endpoint: s.Endpoint || '',
+        protocol: s.Protocol || '',
+        // 未确认的订阅 ARN 是字面量 "PendingConfirmation"
+        pendingConfirmation: subArn === 'PendingConfirmation' || !subArn.startsWith('arn:'),
+        managedByStack: false,
+      });
+    }
+    nextToken = resp.NextToken;
+  } while (nextToken);
+
+  // 标记 SAM 栈参数里的那个邮箱（不改动它，仅提示）
+  const stackEmail = (TC.notificationEmail || '').trim().toLowerCase();
+  if (stackEmail) {
+    for (const s of out) {
+      if (s.endpoint.trim().toLowerCase() === stackEmail) s.managedByStack = true;
+    }
+  }
+  return out;
+}
+
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
+
+/** 添加一个邮箱订阅；返回后需收件人点确认邮件才会真正生效 */
+export async function addNotifyEmail(email: string): Promise<{ endpoint: string; alreadyExists: boolean }> {
+  const target = String(email || '').trim();
+  if (!EMAIL_RE.test(target)) throw new Error(`邮箱格式不正确: ${email}`);
+  const existing = await listNotifySubscriptions();
+  if (existing.some(s => s.endpoint.trim().toLowerCase() === target.toLowerCase())) {
+    return { endpoint: target, alreadyExists: true };
+  }
+  const creds = await getConsoleCreds();
+  const sns = new SNSClient({ region: TC.region || 'us-east-1', credentials: creds });
+  await sns.send(new SubscribeCommand({
+    TopicArn: topicArn(),
+    Protocol: 'email',
+    Endpoint: target,
+    ReturnSubscriptionArn: true,
+  }));
+  return { endpoint: target, alreadyExists: false };
+}
+
+/** 删除一个订阅。必须传完整的订阅 ARN（未确认的订阅无法删除） */
+export async function removeNotifySubscription(subscriptionArn: string): Promise<void> {
+  const arn = String(subscriptionArn || '').trim();
+  const expectedPrefix = topicArn() + ':';
+  if (!arn.startsWith(expectedPrefix)) {
+    throw new Error('订阅 ARN 不属于当前报告通知主题，已拒绝操作');
+  }
+  const creds = await getConsoleCreds();
+  const sns = new SNSClient({ region: TC.region || 'us-east-1', credentials: creds });
+  await sns.send(new UnsubscribeCommand({ SubscriptionArn: arn }));
 }
