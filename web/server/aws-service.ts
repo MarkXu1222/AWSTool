@@ -32,6 +32,11 @@ const DEFAULT_REGION = config.region || process.env.AWS_DEFAULT_REGION || 'us-ea
 const CHILD_ROLE_NAME = config.childRoleName || process.env.CHILD_ROLE_NAME || 'OrganizationAccountAccessRole';
 // 一级跳专用: 每个账户里都建有并信任主账号的 role (方案 A: 优先用它，失败 fallback 到 payer 二级跳)
 const SUPPORT_ROLE_NAME = config.supportRoleName || process.env.SUPPORT_ROLE_NAME || 'support-quota';
+// 专用管理员角色（一级跳，AdministratorAccess，直接信任平台身份）。
+// 用于生成 Admin 临时凭证 / Admin 控制台：INVITED 账户没有 OrganizationAccountAccessRole，
+// 只能靠这个由组织级 StackSet 下发的角色进入。
+const ADMIN_ROLE_NAME = config.adminRoleName || process.env.ADMIN_ROLE_NAME || 'admin-console';
+
 // 哪些组织(按 payer 名称)在账户页控制台提供「只读(support-quota) / Admin」双选项。
 // 只读 = 一级跳 support-quota；Admin = 默认 OrganizationAccountAccessRole（成员二级跳，管理账户用 role/tool）。
 const CONSOLE_ADMIN_PAYERS: string[] = Array.isArray(config.consoleAdminPayers) ? config.consoleAdminPayers : [];
@@ -172,7 +177,21 @@ export async function getTempAdminCredentials(accountId: string) {
     return format(resp);
   }
 
-  // 情况 2：成员账户 —— 二级跳: payer admin creds → OrganizationAccountAccessRole
+  // 情况 2：成员账户 —— 优先一级跳专用 admin-console 角色。
+  // 原因：INVITED（邀请加入）的账户没有 OrganizationAccountAccessRole，payer 无法二级跳进去；
+  // admin-console 由组织级 StackSet 下发并直接信任平台身份，对 INVITED 账户同样有效。
+  try {
+    const sts = new STSClient({ region: DEFAULT_REGION, credentials: BASE_CREDENTIALS });
+    const resp = await sts.send(new AssumeRoleCommand({
+      RoleArn: `arn:aws:iam::${accountId}:role/${ADMIN_ROLE_NAME}`,
+      RoleSessionName: `admin-${accountId}`.slice(0, 64),
+      DurationSeconds: 3600,
+    }));
+    console.log(`[temp-cred] ${accountId} → ${ADMIN_ROLE_NAME} (一级跳)`);
+    return format(resp);
+  } catch { /* 未部署该角色则回退到二级跳 */ }
+
+  // 情况 3：回退 —— 二级跳: payer admin creds → OrganizationAccountAccessRole
   // 角色链式 AssumeRole 上限为 1 小时；用 forceFresh 取新鲜 payer 凭证，保证接近完整 1 小时。
   const roleArn = `arn:aws:iam::${accountId}:role/${CHILD_ROLE_NAME}`;
   const knownPayer = accountPayerMap.get(accountId);
@@ -974,6 +993,22 @@ async function assumeAdminViaOAAR(accountId: string) {
   if (selfPayer) {
     return await getAdminCredsForPayer(selfPayer.roleArn);
   }
+
+  // 优先一级跳专用 admin-console（INVITED 账户没有 OrganizationAccountAccessRole）
+  try {
+    const sts = new STSClient({ region: DEFAULT_REGION, credentials: BASE_CREDENTIALS });
+    const resp = await sts.send(new AssumeRoleCommand({
+      RoleArn: `arn:aws:iam::${accountId}:role/${ADMIN_ROLE_NAME}`,
+      RoleSessionName: `console-admin-${accountId}`.slice(0, 64),
+      DurationSeconds: 3600,
+    }));
+    return {
+      accessKeyId: resp.Credentials!.AccessKeyId!,
+      secretAccessKey: resp.Credentials!.SecretAccessKey!,
+      sessionToken: resp.Credentials!.SessionToken!,
+    };
+  } catch { /* 未部署则回退二级跳 */ }
+
   const known = accountPayerMap.get(accountId) || getPayerRoleArnForAccount(accountId);
   const payerArns = known
     ? [known, ...PAYERS.map(p => p.roleArn).filter(a => a !== known)]
