@@ -46,6 +46,8 @@ const PER_ACCOUNT_TIMEOUT = 210_000;
 const SETTLE_MS = Number(process.env.BILLING_EXPORT_SETTLE_MS || 8000);
 // 服务器内存有限（2C4G 且 node 常驻占用较大），并发上限压到 3
 const MAX_CONCURRENCY = Number(process.env.BILLING_EXPORT_MAX_CONCURRENCY || 3);
+// 账单语言。服务器需装对应字体，否则渲染成方框（已装 google-noto-sans-cjk-sc-fonts）
+const LOCALE = process.env.BILLING_EXPORT_LOCALE || 'zh-CN';
 
 function findChrome(): string {
   const candidates = [
@@ -200,11 +202,15 @@ async function captureOne(task: ExportTask, outDir: string): Promise<ExportResul
         '--no-default-browser-check',
         '--disable-popup-blocking',
         '--window-size=1440,900',
+        `--lang=${LOCALE}`,            // AWS 控制台按此语言渲染账单
       ],
       defaultViewport: null,
     });
 
     page = await browser.newPage();
+    // 光有 --lang 不够，AWS 控制台还看 Accept-Language。
+    // 注意服务器上必须装 CJK 字体，否则中文会渲染成方框（已装 Noto Sans CJK SC）。
+    await page.setExtraHTTPHeaders({ 'Accept-Language': `${LOCALE},zh;q=0.9,en;q=0.8` });
     inflight.set(page, 0);
     lastActivity.set(page, Date.now());
     page.on('request', () => {

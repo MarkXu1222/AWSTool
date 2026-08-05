@@ -62,6 +62,8 @@ const ACCESS = (opt('--access', 'auto') as 'auto' | 'support' | 'admin');
 const SETTLE_MS = Number(opt('--settle', '8')) * 1000;
 // 并发账户数。每个账户一个独立 Chrome 实例，调高会明显吃内存并更易触发 AWS 限流。
 const CONCURRENCY = Math.max(1, Math.min(6, Number(opt('--concurrency', '3'))));
+// 账单语言。在无桌面的服务器上需装对应字体，否则中文渲染成方框。
+const LOCALE = opt('--locale', 'zh-CN')!;
 const PER_TIMEOUT = Number(opt('--timeout', '180')) * 1000;
 
 const mm = String(MONTH).padStart(2, '0');
@@ -173,6 +175,8 @@ async function printOne(browser: Browser, accountId: string, tmpDir: string): Pr
     const signin = await getConsoleSigninUrl(accountId, dest, ACCESS);
 
     page = await browser.newPage();
+    // AWS 控制台按 Accept-Language 决定账单语言
+    await page.setExtraHTTPHeaders({ 'Accept-Language': `${LOCALE},zh;q=0.9,en;q=0.8` });
     // 跟踪在途请求数，用于判断"数据是否真的加载完"
     inflight.set(page, 0);
     lastActivity.set(page, Date.now());
@@ -489,6 +493,7 @@ async function withFreshBrowser<T>(accountId: string, fn: (b: Browser, tmpDir: s
       '--no-default-browser-check',
       '--disable-popup-blocking',
       '--window-size=1440,900',
+      `--lang=${LOCALE}`,
     ],
     defaultViewport: null,
   });
