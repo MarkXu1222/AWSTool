@@ -1,10 +1,11 @@
 import React, { useState, useEffect } from 'react';
-import { Card, Table, Tag, Button, Space, message, Input, Spin, Descriptions, Tabs, Statistic, Row, Col, Badge, Dropdown } from 'antd';
+import { Card, Table, Tag, Button, Space, message, Input, Spin, Descriptions, Tabs, Statistic, Row, Col, Badge, Dropdown, Switch, Tooltip } from 'antd';
 import { ReloadOutlined, SearchOutlined, DollarOutlined, SafetyOutlined, CheckCircleOutlined, CloseCircleOutlined, LeftOutlined, LoginOutlined, DownOutlined } from '@ant-design/icons';
 import { api } from '../api';
 import { exportToCSV } from '../utils/export';
 import RootCredentialsPanel from '../components/RootCredentialsPanel';
 import { hashColor, initials } from '../utils/color';
+import { openAwsConsole, isIsolatedEnabled, setIsolatedEnabled } from '../utils/console-launch';
 
 // 账户彩色首字母头像
 const AccountAvatar: React.FC<{ name: string; id: string }> = ({ name, id }) => {
@@ -39,6 +40,10 @@ const AccountsPage: React.FC = () => {
     return () => window.removeEventListener('resize', onResize);
   }, []);
   const [canRoot, setCanRoot] = useState(false);
+  // 独立会话功能仅 admin 可见可用
+  const [isAdmin, setIsAdmin] = useState(false);
+  // 独立会话开关：开启后每个账户用独立浏览器 profile 打开，可同时登录多个账户
+  const [isolated, setIsolated] = useState(isIsolatedEnabled());
 
   const fetchAccounts = async () => {
     setLoading(true);
@@ -52,8 +57,13 @@ const AccountsPage: React.FC = () => {
 
   useEffect(() => { fetchAccounts(); }, []);
 
-  // 拉取当前用户的根用户凭证权限，决定是否展示根用户 tab 的敏感功能
-  useEffect(() => { api.me().then(r => setCanRoot(!!r.rootAccess)).catch(() => {}); }, []);
+  // 拉取当前用户的根用户凭证权限，决定是否展示根用户 tab 的敏感功能；同时取角色用于独立会话门控
+  useEffect(() => {
+    api.me().then(r => {
+      setCanRoot(!!r.rootAccess);
+      setIsAdmin(r.role === 'admin');
+    }).catch(() => {});
+  }, []);
 
   // 免登录进入该账户的 AWS 控制台。
   // access 省略 → auto（原有回退链，普通账户用）；'support' → 只读；'admin' → 完整管理员(需 root 权限)
@@ -64,7 +74,19 @@ const AccountsPage: React.FC = () => {
       const res = await api.getConsoleUrl(accountId, access ? { access } : undefined);
       hide();
       if (res.success && res.url) {
-        window.open(res.url, '_blank');
+        const how = openAwsConsole(res.url, accountId, isAdmin);
+        if (how === 'isolated') {
+          // 本地助手未安装时点击不会有反应，给一个退路
+          message.info({
+            content: (
+              <span>
+                已用独立会话打开 {accountId}
+                <a style={{ marginLeft: 10 }} onClick={() => window.open(res.url, '_blank')}>没反应？用普通标签打开</a>
+              </span>
+            ),
+            duration: 6,
+          });
+        }
       } else {
         message.error(res.error || '生成链接失败');
       }
@@ -233,6 +255,16 @@ const AccountsPage: React.FC = () => {
             onChange={e => setSearchText(e.target.value)} allowClear size="small" />
           <Space size={8}>
             <span className="stat-chip">共 <strong>{filtered.length}</strong> 条</span>
+            {isAdmin && (
+              <Tooltip title="开启后，点「控制台」会用该账户专属的独立浏览器会话打开，多个账户可同时保持登录，不用先注销。需先在本机安装本地助手：bash tools/console-launcher/install.sh">
+                <span className="hide-mobile" style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 12, color: '#666' }}>
+                  <Switch size="small" checked={isolated}
+                    aria-label="独立会话打开控制台"
+                    onChange={v => { setIsolated(v); setIsolatedEnabled(v); }} />
+                  独立会话
+                </span>
+              </Tooltip>
+            )}
             <Button size="small" className="hide-mobile" onClick={() => exportToCSV(filtered.map(a => ({ ID: a.Id, 名称: a.Name, 邮箱: a.Email, 组织: a._payer, 状态: a.Status })), 'accounts')}>导出</Button>
             <Button size="small" aria-label="刷新账户列表" icon={<ReloadOutlined />} onClick={fetchAccounts} loading={loading} />
           </Space>

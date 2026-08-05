@@ -6,3 +6,13 @@ dist/
 config.json
 提额文档/
 data/db.json
+
+# 密钥与凭证备份：绝不入库
+config.json.bak*
+config.json.*.bak
+*.pem
+*.ppk
+server-access/
+
+# 运行时数据备份
+data/backups/

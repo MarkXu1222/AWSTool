@@ -138,7 +138,7 @@ const BulkQuotaPage: React.FC = () => {
           <span style={{ fontSize: 12, color: 'rgba(0,0,0,0.65)' }}>区域（可多选）</span>
           <Select size="small" mode="multiple" allowClear style={{ minWidth: 420, flex: 1 }}
             maxTagCount="responsive" placeholder="选择要提额的区域"
-            value={regions} onChange={v => { setRegions(v); if (presetIdx != null && v.length) resolve(presetIdx, payer, v[0]); }}
+            value={regions} onChange={v => setRegions(v)}
             options={REGION_OPTIONS} showSearch optionFilterProp="label" />
           <Button size="small" onClick={() => setRegions(['us-east-1'])}>仅 us-east-1</Button>
         </div>

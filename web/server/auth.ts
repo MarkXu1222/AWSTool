@@ -143,7 +143,10 @@ authRouter.get('/me', (req: Request, res: Response) => {
     const user = db.getUser(decoded.username);
     res.json({
       username: decoded.username,
-      role: decoded.role,
+      // 角色以数据库为准，不用 JWT 里可能已过期的值：
+      // 用户被降权后，其未过期 token 不应继续按旧角色渲染 UI。
+      // 与 requireRootAccess / requireAuditAccess 的取值方式保持一致。
+      role: user?.role ?? decoded.role,
       mfaEnabled: !!user?.mfa_enabled,
       allowedPages: resolveAllowedPages(user),
       rootAccess: resolveRootAccess(user),
