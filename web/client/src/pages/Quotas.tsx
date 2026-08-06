@@ -206,6 +206,8 @@ const QuotasPage: React.FC = () => {
   const [companyPickerOpen, setCompanyPickerOpen] = useState(false);
   const [pickerCompany, setPickerCompany] = useState<string | undefined>(undefined);
   const [pendingDocParams, setPendingDocParams] = useState<any>(null);
+  // 挑选弹窗自己的 loading —— 触发方可能是快速提额，也可能是记录表格里的文档按钮
+  const [pickerLoading, setPickerLoading] = useState(false);
 
   // Bedrock 配额相关状态
   const [bedrockRegions, setBedrockRegions] = useState<string[]>(['us-east-1']);
@@ -364,9 +366,9 @@ const QuotasPage: React.FC = () => {
   // 用户在公司列表里选定后，带 companyKey 重试生成
   const handlePickerConfirm = async () => {
     if (!pickerCompany) { message.warning('请选择公司'); return; }
-    setQuickDocLoading(true);
+    setPickerLoading(true);
     const ok = await runGenerateDoc({ ...(pendingDocParams || {}), companyKey: pickerCompany });
-    setQuickDocLoading(false);
+    setPickerLoading(false);
     if (ok) setCompanyPickerOpen(false);
   };
 
@@ -653,19 +655,17 @@ const QuotasPage: React.FC = () => {
                 onClick={async (e) => {
                   e.stopPropagation();
                   setDocLoadingId(record.id);
-                  try {
-                    await api.generateQuotaDoc({
-                      accountId: record.account_id,
-                      accountName: accounts.find(a => a.Id === record.account_id)?.Name,
-                      serviceCode: record.service_code,
-                      quotaName: record.quota_name,
-                      region: record.region || 'us-east-1',
-                      requestedValue: record.desired_value,
-                      currentValue: record.current_value,
-                    });
-                    message.success({ content: '文档已生成', key: 'quota-doc' });
-                  } catch (err: any) { message.error({ content: err.message || '生成失败', key: 'quota-doc' }); }
-                  finally { setDocLoadingId(null); }
+                  // 走 runGenerateDoc：账户映射不到公司时会弹出公司挑选并带 companyKey 重试
+                  await runGenerateDoc({
+                    accountId: record.account_id,
+                    accountName: accounts.find(a => a.Id === record.account_id)?.Name,
+                    serviceCode: record.service_code,
+                    quotaName: record.quota_name,
+                    region: record.region || 'us-east-1',
+                    requestedValue: record.desired_value,
+                    currentValue: record.current_value,
+                  });
+                  setDocLoadingId(null);
                 }} />
             </Tooltip>
             <Tooltip title="刷新此账户记录">
@@ -1018,12 +1018,21 @@ const QuotasPage: React.FC = () => {
         onCancel={() => setCompanyPickerOpen(false)}
         okText="用此公司生成文档"
         cancelText="取消"
-        confirmLoading={quickDocLoading}
+        confirmLoading={pickerLoading}
+        okButtonProps={{ disabled: !pickerCompany }}
         width={480}
       >
         <p style={{ color: 'rgba(0,0,0,0.55)', fontSize: 12, marginTop: 0 }}>
-          未能自动识别账户 <code>{pendingDocParams?.accountId || ''}</code> 所属公司，请手动选择一个公司用于生成申请文档。
+          未能自动识别账户
+          {pendingDocParams?.accountName ? <> <Tag color="blue" style={{ margin: '0 2px' }}>{pendingDocParams.accountName}</Tag></> : null}
+          <code style={{ margin: '0 2px' }}>{pendingDocParams?.accountId || ''}</code>
+          所属公司，请手动选择一个公司用于生成申请文档。
         </p>
+        {pendingDocParams?.quotaName ? (
+          <p style={{ color: 'rgba(0,0,0,0.45)', fontSize: 12, marginTop: -6 }}>
+            {pendingDocParams.quotaName} · {pendingDocParams.region} · 申请 {pendingDocParams.requestedValue}
+          </p>
+        ) : null}
         <Select
           style={{ width: '100%' }}
           placeholder="选择公司"
