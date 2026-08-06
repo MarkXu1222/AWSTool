@@ -303,10 +303,18 @@ export function companyFromPayer(payer: string): string | null {
   // 提取 yanhuangXX 前缀部分匹配
   const prefixMatch = payer.match(/^(yanhuang\d+)/i);
   if (prefixMatch && PAYER_TO_COMPANY[prefixMatch[1]]) return PAYER_TO_COMPANY[prefixMatch[1]];
-  // 尝试从 "yanhuangXX-公司" 提取公司部分匹配
+  // 尝试从 "yanhuangXX-公司" 提取公司部分匹配（兼容编号变化、公司名不变的情况）
+  //
+  // 这里必须做「公司部分完全相等」的比较，不能用 endsWith：
+  // endsWith 会让单字符后缀命中短名 key —— 例如 payer "webby-2" 的后缀 "2"
+  // 能 endsWith 上 key "yanhuang2"，"GDX-1" 的 "1" 能 endsWith 上 "yanhuang11"，
+  // 结果是**静默生成挂着别家公司资料的提额文档**，比识别失败危险得多。
+  // 宁可返回 null，让前端弹出公司挑选由人来定。
   const suffix = payer.split('-').slice(1).join('-').toLowerCase();
+  if (!suffix) return null;
   for (const [k, v] of Object.entries(PAYER_TO_COMPANY)) {
-    if (k.toLowerCase().endsWith(suffix) && suffix) return v;
+    const keySuffix = k.split('-').slice(1).join('-').toLowerCase();
+    if (keySuffix && keySuffix === suffix) return v;
   }
   return null;
 }
