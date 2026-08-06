@@ -163,6 +163,25 @@ const fmtQuotaNum = (v: any) => {
   return n.toLocaleString('en-US');
 };
 
+// 公司手选记忆：payer(或账户ID) → companyKey。
+// 大部分 payer 没有内置公司映射(doc-templates.ts)，手选是常态操作，记住上次的选择用于「预选」。
+// 刻意不做静默套用 —— 每次仍弹窗由人确认，避免悄悄用错公司生成提额文档。
+const DOC_COMPANY_MEMO_KEY = 'quotaDocCompanyMemo';
+
+function readDocCompanyMemo(): Record<string, string> {
+  try {
+    const raw = JSON.parse(localStorage.getItem(DOC_COMPANY_MEMO_KEY) || '{}');
+    return raw && typeof raw === 'object' ? raw : {};
+  } catch { return {}; }
+}
+
+function writeDocCompanyMemo(key: string, companyKey: string) {
+  if (!key || !companyKey) return;
+  try {
+    localStorage.setItem(DOC_COMPANY_MEMO_KEY, JSON.stringify({ ...readDocCompanyMemo(), [key]: companyKey }));
+  } catch { /* 隐私模式/配额满，记不住不影响主流程 */ }
+}
+
 const QuotasPage: React.FC = () => {
   const [accounts, setAccounts] = useState<any[]>([]);
   // 独立会话打开控制台仅 admin 可用
@@ -208,6 +227,8 @@ const QuotasPage: React.FC = () => {
   const [pendingDocParams, setPendingDocParams] = useState<any>(null);
   // 挑选弹窗自己的 loading —— 触发方可能是快速提额，也可能是记录表格里的文档按钮
   const [pickerLoading, setPickerLoading] = useState(false);
+  // 本次预选是否来自上次的记忆（用于弹窗里给出提示）
+  const [pickerFromMemo, setPickerFromMemo] = useState(false);
 
   // Bedrock 配额相关状态
   const [bedrockRegions, setBedrockRegions] = useState<string[]>(['us-east-1']);
@@ -324,6 +345,12 @@ const QuotasPage: React.FC = () => {
     finally { setQuickSubmitting(false); }
   };
 
+  // 记忆归属键：优先按 payer（同组织的子账户共用一次选择），账户缓存里查不到才退回账户 ID
+  const docMemoKey = (accountId?: string): string => {
+    if (!accountId) return '';
+    return accounts.find(a => a.Id === accountId)?._payer || accountId;
+  };
+
   // 生成文档；若账户无法识别公司，则弹出公司列表让用户挑选后用 companyKey 重试
   const runGenerateDoc = async (params: any): Promise<boolean> => {
     const hide = message.loading('正在生成文档...', 0);
@@ -334,9 +361,14 @@ const QuotasPage: React.FC = () => {
     } catch (e: any) {
       hide();
       const msg = e?.message || '';
-      if (/无法识别账户|所属公司|account cache/i.test(msg)) {
+      // 已经带了 companyKey 还失败，说明是模板/渲染类问题，不能再弹挑选（否则会覆盖用户刚选的值）
+      if (!params.companyKey && /无法识别账户|所属公司|account cache/i.test(msg)) {
         setPendingDocParams(params);
-        setPickerCompany(undefined);
+        // 预选上次为该 payer 选过的公司；公司模板可能已删除，校验后再用
+        const remembered = readDocCompanyMemo()[docMemoKey(params.accountId)] || '';
+        const valid = remembered && companies.some(c => c.key === remembered);
+        setPickerCompany(valid ? remembered : undefined);
+        setPickerFromMemo(!!valid);
         setCompanyPickerOpen(true);
       } else {
         message.error(msg || '生成失败');
@@ -369,7 +401,11 @@ const QuotasPage: React.FC = () => {
     setPickerLoading(true);
     const ok = await runGenerateDoc({ ...(pendingDocParams || {}), companyKey: pickerCompany });
     setPickerLoading(false);
-    if (ok) setCompanyPickerOpen(false);
+    if (ok) {
+      // 生成成功才记住，下次同 payer 直接预选（仍会弹窗让人确认）
+      writeDocCompanyMemo(docMemoKey(pendingDocParams?.accountId), pickerCompany);
+      setCompanyPickerOpen(false);
+    }
   };
 
   const fetchQuotas = async () => {
@@ -1037,10 +1073,21 @@ const QuotasPage: React.FC = () => {
           style={{ width: '100%' }}
           placeholder="选择公司"
           value={pickerCompany}
-          onChange={setPickerCompany}
+          onChange={(v) => { setPickerCompany(v); setPickerFromMemo(false); }}
           showSearch optionFilterProp="label"
           options={companies.map(c => ({ label: `${c.displayName} — ${c.industry}`, value: c.key }))}
         />
+        {pickerFromMemo ? (
+          <div style={{ marginTop: 8, background: '#f6ffed', border: '1px solid #b7eb8f', borderRadius: 6, padding: '6px 10px', fontSize: 12, color: '#389e0d' }}>
+            已预选上次为 <code>{docMemoKey(pendingDocParams?.accountId)}</code> 选择的公司，确认无误即可生成，也可改选其它公司。
+          </div>
+        ) : null}
+        {/* 手选是这条路径的唯一出路，公司列表拉不到就得能自救 */}
+        {companies.length === 0 ? (
+          <div style={{ marginTop: 8, background: '#fff7e6', border: '1px solid #ffd591', borderRadius: 6, padding: '6px 10px', fontSize: 12, color: '#d46b08' }}>
+            公司列表未加载成功，<a onClick={loadCompanies}>点此重新加载</a>。
+          </div>
+        ) : null}
       </Modal>
     </Card>
     </div>
