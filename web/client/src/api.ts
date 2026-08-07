@@ -56,6 +56,10 @@ export const api = {
   },
   refreshAccounts: () => request('/aws/accounts/refresh', { method: 'POST' }),
   getAccountDetail: (id: string) => request(`/aws/accounts/${id}/detail`),
+  // 账户角色自愈：状态查询 + 手动触发检测/补齐
+  getAccountRolesStatus: () => request('/aws/accounts/roles-status'),
+  checkAccountRoles: (params?: { full?: boolean; accountIds?: string[]; probeOnly?: boolean }) =>
+    request('/aws/accounts/roles-check', { method: 'POST', body: JSON.stringify(params || {}) }),
   getCostByAccount: (start: string, end: string) => request(`/aws/billing/by-account?start=${start}&end=${end}`),
   getCostByService: (accountId: string, start: string, end: string) => request(`/aws/billing/by-service/${accountId}?start=${start}&end=${end}`),
   // 账单分析：按服务 + 区域两个维度汇总（资源清理第一步）

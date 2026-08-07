@@ -5,6 +5,7 @@ import { generateQuotaDoc, getCompanyForAccount } from '../doc-generator';
 import { COMPANY_PROFILES } from '../doc-templates';
 import { exportBillingInvoices, cleanupWorkDir, ExportTask } from '../billing-exporter';
 import { auditLogsToCsv, enrichAuditLog } from '../audit-presentation';
+import { syncAccountRoles, getAccountRolesSummary } from '../account-roles';
 import * as tagCompliance from '../tag-compliance';
 import fs from 'fs';
 import path from 'path';
@@ -234,6 +235,42 @@ awsRouter.post('/accounts/refresh', async (_req: Request, res: Response) => {
     const accounts = await aws.listAccounts();
     db.setAccountsCache(accounts);
     res.json({ success: true, data: accounts });
+  } catch (e: any) { res.status(500).json({ error: e.message }); }
+});
+
+// 账户角色自愈 —— 状态查询（所有已认证用户可读，用于账户页标记）
+awsRouter.get('/accounts/roles-status', async (_req: Request, res: Response) => {
+  try {
+    res.json({ success: true, data: getAccountRolesSummary() });
+  } catch (e: any) { res.status(500).json({ error: e.message }); }
+});
+
+// 账户角色自愈 —— 手动触发检测/补齐
+// body: { full?: boolean, accountIds?: string[], probeOnly?: boolean }
+awsRouter.post('/accounts/roles-check', requireAdmin, async (req: Request, res: Response) => {
+  try {
+    const { full, accountIds, probeOnly } = req.body || {};
+    if (accountIds !== undefined && (!Array.isArray(accountIds) || accountIds.some((x: any) => typeof x !== 'string'))) {
+      return res.status(400).json({ error: 'accountIds 必须是字符串数组' });
+    }
+    const result = await syncAccountRoles({
+      full: !!full,
+      accountIds: Array.isArray(accountIds) && accountIds.length ? accountIds : undefined,
+      probeOnly: !!probeOnly,
+    });
+    // details 可能很长，只回汇总 + 有问题的明细
+    res.json({
+      success: true,
+      data: {
+        scanned: result.scanned,
+        ok: result.ok,
+        remediated: result.remediated,
+        pending: result.pending,
+        unreachable: result.unreachable,
+        skippedSuspended: result.skippedSuspended,
+        problems: result.details.filter(d => d.state !== 'ok'),
+      },
+    });
   } catch (e: any) { res.status(500).json({ error: e.message }); }
 });
 

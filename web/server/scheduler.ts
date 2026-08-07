@@ -10,20 +10,25 @@ import * as aws from './aws-service';
 import { db } from './db';
 import { notifyQuotaChanged } from './notify';
 import { refreshDashboardCache } from './routes/aws';
+import { syncAccountRoles } from './account-roles';
 
 let quotaSyncRunning = false;
 let regionSyncRunning = false;
+let roleSyncRunning = false;
 let lastQuotaSync = '';
 let lastAccountsSync = '';
 let lastRegionSync = '';
+let lastRoleSync = '';
 
 export function getSchedulerStatus() {
   return {
     quotaSyncRunning,
     regionSyncRunning,
+    roleSyncRunning,
     lastQuotaSync,
     lastAccountsSync,
     lastRegionSync,
+    lastRoleSync,
   };
 }
 
@@ -37,6 +42,31 @@ async function syncAccounts() {
     console.log(`[Scheduler] Accounts synced: ${accounts.length} accounts`);
   } catch (e: any) {
     console.error('[Scheduler] Accounts sync failed:', e.message);
+  }
+  // 账户列表刷新后紧跟一次角色自愈（增量：只看新账户和上轮待重试的）
+  await syncRoles(false);
+}
+
+/**
+ * 账户角色自愈。full=false 只处理新账户/待重试，成本很低；full=true 为每日全量复检。
+ */
+async function syncRoles(full: boolean) {
+  if (roleSyncRunning) {
+    console.log('[Scheduler] Role sync already running, skipping');
+    return;
+  }
+  roleSyncRunning = true;
+  try {
+    const r = await syncAccountRoles({ full });
+    if (r.scanned > 0) {
+      console.log(`[Scheduler] Role sync (${full ? 'full' : 'incremental'}): `
+        + `scanned=${r.scanned} ok=${r.ok} remediated=${r.remediated} pending=${r.pending} unreachable=${r.unreachable}`);
+    }
+    lastRoleSync = new Date().toISOString();
+  } catch (e: any) {
+    console.error('[Scheduler] Role sync failed:', e.message);
+  } finally {
+    roleSyncRunning = false;
   }
 }
 
@@ -274,5 +304,11 @@ export function startScheduler() {
 
   setInterval(() => {
     syncRegions();
+  }, 24 * 60 * 60 * 1000);
+
+  // 账户角色全量复检：每 24 小时一次，用于发现被人为删除的角色
+  // （增量检查跟在每次 syncAccounts 之后，这里只负责兜底复检）
+  setInterval(() => {
+    syncRoles(true);
   }, 24 * 60 * 60 * 1000);
 }

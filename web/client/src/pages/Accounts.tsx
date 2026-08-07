@@ -44,6 +44,10 @@ const AccountsPage: React.FC = () => {
   const [isAdmin, setIsAdmin] = useState(false);
   // 独立会话开关：开启后每个账户用独立浏览器 profile 打开，可同时登录多个账户
   const [isolated, setIsolated] = useState(isIsolatedEnabled());
+  // 账户角色自愈状态：accountId → 记录，用于在列表里标出平台无法访问的账户
+  const [roleMap, setRoleMap] = useState<Record<string, any>>({});
+  const [roleChecking, setRoleChecking] = useState(false);
+  const [onlyRoleIssues, setOnlyRoleIssues] = useState(false);
 
   const fetchAccounts = async () => {
     setLoading(true);
@@ -55,7 +59,44 @@ const AccountsPage: React.FC = () => {
     finally { setLoading(false); }
   };
 
-  useEffect(() => { fetchAccounts(); }, []);
+  useEffect(() => { fetchAccounts(); loadRoleStatus(); }, []);
+
+  // 只取有问题的账户（后端已过滤），正常的不需要标记
+  const loadRoleStatus = async () => {
+    try {
+      const res = await api.getAccountRolesStatus();
+      if (res.success) {
+        const m: Record<string, any> = {};
+        (res.data.problems || []).forEach((p: any) => { m[p.account_id] = p; });
+        setRoleMap(m);
+      }
+    } catch { /* 状态标记是增强信息，失败不影响账户列表 */ }
+  };
+
+  const runRoleCheck = async (full: boolean) => {
+    setRoleChecking(true);
+    const hide = message.loading(full ? '正在全量检测账户权限...' : '正在检测新账户权限...', 0);
+    try {
+      const res = await api.checkAccountRoles({ full });
+      hide();
+      if (res.success) {
+        const d = res.data;
+        if (d.scanned === 0) {
+          message.info('没有需要检测的账户（全部已检测过）');
+        } else {
+          message.success(`检测 ${d.scanned} 个：正常 ${d.ok}，已自动补齐 ${d.remediated}，待重试 ${d.pending}，需人工 ${d.unreachable}`);
+        }
+        await loadRoleStatus();
+      } else {
+        message.error(res.error || '检测失败');
+      }
+    } catch (e: any) {
+      hide();
+      message.error(e.message || '检测失败');
+    } finally {
+      setRoleChecking(false);
+    }
+  };
 
   // 拉取当前用户的根用户凭证权限，决定是否展示根用户 tab 的敏感功能；同时取角色用于独立会话门控
   useEffect(() => {
@@ -138,8 +179,11 @@ const AccountsPage: React.FC = () => {
     finally { setDetailLoading(false); }
   };
 
-  const filtered = accounts.filter(a => !searchText ||
-    a.Id?.includes(searchText) || a.Name?.toLowerCase().includes(searchText.toLowerCase()) || a.Email?.toLowerCase().includes(searchText.toLowerCase()));
+  const filtered = accounts.filter(a => {
+    if (onlyRoleIssues && !roleMap[a.Id]) return false;
+    return !searchText
+      || a.Id?.includes(searchText) || a.Name?.toLowerCase().includes(searchText.toLowerCase()) || a.Email?.toLowerCase().includes(searchText.toLowerCase());
+  });
 
   // Payer(组织管理账户)始终置顶，其余按名称排序。这样筛选某个组织时，该组织的 payer 一定显示在第一位。
   const sorted = [...filtered].sort((a, b) => {
@@ -198,6 +242,29 @@ const AccountsPage: React.FC = () => {
     );
   }
 
+  // 平台角色缺失标记 —— 只有异常账户才显示，正常账户不加噪音
+  const renderRoleFlag = (accountId: string) => {
+    const r = roleMap[accountId];
+    if (!r) return null;
+    const miss: string[] = [];
+    if (!r.support) miss.push('support-quota');
+    if (!r.admin) miss.push('admin-console');
+    const unreachable = r.state === 'unreachable';
+    const tip = unreachable
+      ? `平台无法访问该账户：缺 ${miss.join(' / ')}。已重试 ${r.attempts} 次仍失败，需人工处理（常见原因是账户未完成激活）。`
+      : `缺 ${miss.join(' / ')}，自动补齐进行中（已尝试 ${r.attempts} 次）。`;
+    return (
+      <Tooltip title={tip}>
+        <Tag
+          color={unreachable ? 'red' : 'orange'}
+          style={{ margin: 0, fontSize: 10, lineHeight: '16px', padding: '0 5px', flexShrink: 0 }}
+        >
+          {unreachable ? '权限缺失' : '补齐中'}
+        </Tag>
+      </Tooltip>
+    );
+  };
+
   // Desktop columns
   const columns = [
     { title: '账户', key: 'account', width: 300,
@@ -209,6 +276,7 @@ const AccountsPage: React.FC = () => {
             <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
               <span style={{ fontWeight: 600, color: '#1a2233', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{a.Name}</span>
               {a._isPayer && <Tag color="gold" style={{ margin: 0, fontSize: 10, lineHeight: '16px', padding: '0 5px', flexShrink: 0 }}>Payer</Tag>}
+              {renderRoleFlag(a.Id)}
             </div>
             <div style={{ fontSize: 12, color: '#8a94a6', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={a.Email}>{a.Email}</div>
           </div>
@@ -243,6 +311,17 @@ const AccountsPage: React.FC = () => {
             <span className="stat-chip">总账户 <strong>{accounts.length}</strong></span>
             <span className="stat-chip success">Active <strong>{accounts.filter(a => a.Status === 'ACTIVE').length}</strong></span>
             <span className="stat-chip">组织 <strong>{[...new Set(accounts.map(a => a._payer))].length}</strong></span>
+            {Object.keys(roleMap).length > 0 && (
+              <Tooltip title="平台缺少访问这些账户所需的角色。点击只看这些账户。">
+                <span
+                  className="stat-chip"
+                  style={{ cursor: 'pointer', color: '#cf1322', background: '#fff1f0', borderColor: '#ffa39e' }}
+                  onClick={() => setOnlyRoleIssues(v => !v)}
+                >
+                  {onlyRoleIssues ? '✓ ' : ''}权限异常 <strong>{Object.keys(roleMap).length}</strong>
+                </span>
+              </Tooltip>
+            )}
           </div>
         )}
       </div>
@@ -263,6 +342,18 @@ const AccountsPage: React.FC = () => {
                     onChange={v => { setIsolated(v); setIsolatedEnabled(v); }} />
                   独立会话
                 </span>
+              </Tooltip>
+            )}
+            {isAdmin && (
+              <Tooltip title="检测账户是否具备平台所需角色（support-quota / admin-console），缺失会自动通过 StackSet 补齐。默认只查新账户；按住 Shift 点击为全量复检。">
+                <Button
+                  size="small"
+                  className="hide-mobile"
+                  loading={roleChecking}
+                  onClick={(e) => runRoleCheck(e.shiftKey)}
+                >
+                  检测权限
+                </Button>
               </Tooltip>
             )}
             <Button size="small" className="hide-mobile" onClick={() => exportToCSV(filtered.map(a => ({ ID: a.Id, 名称: a.Name, 邮箱: a.Email, 组织: a._payer, 状态: a.Status })), 'accounts')}>导出</Button>

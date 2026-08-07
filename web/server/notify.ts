@@ -184,3 +184,57 @@ export async function notifyQuotaChanged(records: { accountId: string; accountNa
   const headerColor = (reachedCount === records.length && reachedCount > 0) ? 'green' : 'blue';
   await sendCard(`配额变动 · ${records.length} 项`, headerColor, elements);
 }
+
+/**
+ * 账户角色不可达告警 —— 自动补齐重试到上限仍失败的账户。
+ * 这类账户在 Organizations 里通常显示 ACTIVE、平台列表里也看得到，
+ * 但平台无法 AssumeRole 进去，属于需要人工介入的情况（常见于账户未完成激活）。
+ */
+export async function notifyAccountRoleIssues(
+  records: { accountId: string; accountName: string; payer: string; support: boolean; admin: boolean }[],
+) {
+  if (records.length === 0) return;
+
+  const elements: any[] = [];
+  elements.push({
+    tag: 'div',
+    text: {
+      tag: 'lark_md',
+      content: `检测到 **${records.length}** 个账户缺少平台所需角色，且自动补齐已重试到上限，需要人工处理。`,
+    },
+  });
+  elements.push({ tag: 'hr' });
+
+  const MAX_SHOW = 15;
+  for (const r of records.slice(0, MAX_SHOW)) {
+    const miss: string[] = [];
+    if (!r.support) miss.push('support-quota');
+    if (!r.admin) miss.push('admin-console');
+    const orgLabel = r.payer ? `<font color='blue'>[${r.payer}]</font> ` : '';
+    elements.push({
+      tag: 'column_set',
+      flex_mode: 'none',
+      columns: [
+        {
+          tag: 'column', width: 'weighted', weight: 5, vertical_align: 'center',
+          elements: [{ tag: 'div', text: { tag: 'lark_md', content: `${orgLabel}**${r.accountName}**\n<font color='grey'>${r.accountId}</font>` } }],
+        },
+        {
+          tag: 'column', width: 'weighted', weight: 3, vertical_align: 'center',
+          elements: [{ tag: 'div', text: { tag: 'lark_md', content: `<font color='red'>缺 ${miss.join(' / ')}</font>` } }],
+        },
+      ],
+    });
+  }
+
+  if (records.length > MAX_SHOW) {
+    elements.push({ tag: 'note', elements: [{ tag: 'plain_text', content: `还有 ${records.length - MAX_SHOW} 个未显示，请登录系统查看` }] });
+  }
+
+  elements.push({
+    tag: 'note',
+    elements: [{ tag: 'plain_text', content: `常见原因：账户未完成激活（CloudFormation 返回 OptInRequired）。AWS Toolbox · ${new Date().toLocaleString('zh-CN')}` }],
+  });
+
+  await sendCard(`账户角色缺失 · ${records.length} 个`, 'red', elements);
+}

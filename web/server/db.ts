@@ -264,6 +264,34 @@ export const db = {
     return data.region_data || [];
   },
 
+  // 账户角色自愈状态 —— 记录每个账户的 support-quota / admin-console 可用性
+  getAccountRoles(): any[] {
+    const data = readDB() as any;
+    return data.account_roles || [];
+  },
+
+  upsertAccountRole(record: any) {
+    db.upsertAccountRoles([record]);
+  },
+
+  // 批量写入 —— 单条写会让每个账户都 stringify 一遍整个 db，几千账户时无法接受
+  upsertAccountRoles(records: any[]) {
+    if (!records?.length) return;
+    const data = readDB() as any;
+    if (!data.account_roles) data.account_roles = [];
+    const idxMap = new Map<string, number>();
+    data.account_roles.forEach((r: any, i: number) => idxMap.set(r.account_id, i));
+    for (const rec of records) {
+      const i = idxMap.get(rec.account_id);
+      if (i !== undefined) data.account_roles[i] = { ...data.account_roles[i], ...rec };
+      else {
+        idxMap.set(rec.account_id, data.account_roles.length);
+        data.account_roles.push(rec);
+      }
+    }
+    writeDB(data);
+  },
+
   upsertRegionData(accountId: string, regions: { region: string; status: string }[]) {
     const data = readDB();
     if (!data.region_data) data.region_data = [];
