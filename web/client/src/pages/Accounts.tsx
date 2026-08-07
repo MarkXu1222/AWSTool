@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Card, Table, Tag, Button, Space, message, Input, Spin, Descriptions, Tabs, Statistic, Row, Col, Badge, Dropdown, Switch, Tooltip } from 'antd';
+import { Card, Table, Tag, Button, Space, message, Input, Spin, Descriptions, Tabs, Statistic, Row, Col, Badge, Dropdown, Switch, Tooltip, Modal } from 'antd';
 import { ReloadOutlined, SearchOutlined, DollarOutlined, SafetyOutlined, CheckCircleOutlined, CloseCircleOutlined, LeftOutlined, LoginOutlined, DownOutlined } from '@ant-design/icons';
 import { api } from '../api';
 import { exportToCSV } from '../utils/export';
@@ -48,6 +48,10 @@ const AccountsPage: React.FC = () => {
   const [roleMap, setRoleMap] = useState<Record<string, any>>({});
   const [roleChecking, setRoleChecking] = useState(false);
   const [onlyRoleIssues, setOnlyRoleIssues] = useState(false);
+  // 结果面板：自动检测和手动检测的结果都在这里看
+  const [roleModalOpen, setRoleModalOpen] = useState(false);
+  const [roleSummary, setRoleSummary] = useState<any>(null);
+  const [lastCheckResult, setLastCheckResult] = useState<any>(null);
 
   const fetchAccounts = async () => {
     setLoading(true);
@@ -69,29 +73,23 @@ const AccountsPage: React.FC = () => {
         const m: Record<string, any> = {};
         (res.data.problems || []).forEach((p: any) => { m[p.account_id] = p; });
         setRoleMap(m);
+        setRoleSummary(res.data);
       }
     } catch { /* 状态标记是增强信息，失败不影响账户列表 */ }
   };
 
   const runRoleCheck = async (full: boolean) => {
     setRoleChecking(true);
-    const hide = message.loading(full ? '正在全量检测账户权限...' : '正在检测新账户权限...', 0);
+    setRoleModalOpen(true);   // 结果直接落到面板里，不靠一闪而过的提示
     try {
       const res = await api.checkAccountRoles({ full });
-      hide();
       if (res.success) {
-        const d = res.data;
-        if (d.scanned === 0) {
-          message.info('没有需要检测的账户（全部已检测过）');
-        } else {
-          message.success(`检测 ${d.scanned} 个：正常 ${d.ok}，已自动补齐 ${d.remediated}，待重试 ${d.pending}，需人工 ${d.unreachable}`);
-        }
+        setLastCheckResult({ ...res.data, full, at: new Date().toISOString() });
         await loadRoleStatus();
       } else {
         message.error(res.error || '检测失败');
       }
     } catch (e: any) {
-      hide();
       message.error(e.message || '检测失败');
     } finally {
       setRoleChecking(false);
@@ -242,6 +240,152 @@ const AccountsPage: React.FC = () => {
     );
   }
 
+  // 权限检测结果面板 —— 自动检测与手动检测的结果都在这里看
+  const renderRoleModal = () => {
+    const problems: any[] = roleSummary?.problems || [];
+    const checked = roleSummary?.total || 0;
+    const activeTotal = accounts.filter(a => !a._isPayer && a.Status === 'ACTIVE').length;
+    const byState = roleSummary?.byState || {};
+    const r = lastCheckResult;
+
+    return (
+      <Modal
+        title="账户权限检测"
+        open={roleModalOpen}
+        onCancel={() => setRoleModalOpen(false)}
+        footer={null}
+        width={860}
+      >
+        <p style={{ color: 'rgba(0,0,0,0.55)', fontSize: 12, marginTop: 0 }}>
+          平台访问成员账户依赖两个角色：<code>support-quota</code>（只读）与 <code>admin-console</code>（管理员临时凭证 / 控制台）。
+          系统每 30 分钟自动检测新账户、每 24 小时全量复检，缺失会自动通过 StackSet 补齐；连续 3 次补不上才需要人工介入。
+        </p>
+
+        {/* 覆盖与状态统计 */}
+        <div className="stat-chips" style={{ margin: '0 0 12px' }}>
+          <span className="stat-chip">已检测 <strong>{checked}</strong> / {activeTotal}</span>
+          <span className="stat-chip success">正常 <strong>{byState.ok || 0}</strong></span>
+          {(byState.pending || byState.partial) ? (
+            <span className="stat-chip" style={{ color: '#d46b08', background: '#fff7e6', borderColor: '#ffd591' }}>
+              补齐中 <strong>{(byState.pending || 0) + (byState.partial || 0)}</strong>
+            </span>
+          ) : null}
+          {byState.unreachable ? (
+            <span className="stat-chip" style={{ color: '#cf1322', background: '#fff1f0', borderColor: '#ffa39e' }}>
+              需人工 <strong>{byState.unreachable}</strong>
+            </span>
+          ) : null}
+          {roleSummary?.lastCheckedAt && (
+            <span className="stat-chip">最近检测 <strong>{new Date(roleSummary.lastCheckedAt).toLocaleString('zh-CN')}</strong></span>
+          )}
+        </div>
+
+        {/* 本次手动检测的结果 */}
+        {roleChecking && (
+          <div style={{ background: '#f0f5ff', border: '1px solid #adc6ff', borderRadius: 6, padding: '8px 12px', marginBottom: 12, fontSize: 12 }}>
+            <Spin size="small" style={{ marginRight: 8 }} />
+            正在检测…缺失角色会自动补齐，补齐需等 CloudFormation 完成，可能要几分钟。
+          </div>
+        )}
+        {!roleChecking && r && (
+          <div style={{ background: '#f6ffed', border: '1px solid #b7eb8f', borderRadius: 6, padding: '8px 12px', marginBottom: 12, fontSize: 12 }}>
+            本次{r.full ? '全量复检' : '检测'}：扫描 <strong>{r.scanned}</strong> 个
+            ，正常 <strong>{r.ok}</strong>
+            ，已自动补齐 <strong style={{ color: '#389e0d' }}>{r.remediated}</strong>
+            ，待重试 <strong style={{ color: '#d46b08' }}>{r.pending}</strong>
+            ，需人工 <strong style={{ color: '#cf1322' }}>{r.unreachable}</strong>
+            {r.skippedSuspended ? `，跳过已暂停账户 ${r.skippedSuspended}` : ''}
+            {r.scanned === 0 && <span>（没有需要检测的账户，全部已检测过；用「全量复检」可重新检查全部）</span>}
+          </div>
+        )}
+
+        {/* 问题账户明细 */}
+        <Table
+          size="small"
+          rowKey="account_id"
+          dataSource={problems}
+          pagination={{ pageSize: 8, size: 'small', showTotal: t => `共 ${t} 个异常账户` }}
+          locale={{ emptyText: checked === 0 ? '尚无检测记录，点下方「立即检测」' : '所有已检测账户权限正常 ✅' }}
+          columns={[
+            {
+              title: '账户', key: 'acct', width: 220,
+              render: (_: any, x: any) => (
+                <div>
+                  <div style={{ fontWeight: 600, fontSize: 12 }}>{x.account_name || '-'}</div>
+                  <code style={{ fontSize: 11, color: '#8a94a6' }}>{x.account_id}</code>
+                </div>
+              ),
+            },
+            {
+              title: '组织', dataIndex: 'payer', width: 150,
+              render: (p: string) => p ? <Tag style={{ margin: 0, fontSize: 11 }}>{p}</Tag> : '-',
+            },
+            {
+              title: '缺失角色', key: 'miss', width: 190,
+              render: (_: any, x: any) => {
+                const miss: string[] = [];
+                if (!x.support) miss.push('support-quota');
+                if (!x.admin) miss.push('admin-console');
+                return <span style={{ fontSize: 11, color: '#cf1322' }}>{miss.join(' + ') || '-'}</span>;
+              },
+            },
+            {
+              title: '状态', dataIndex: 'state', width: 100, align: 'center' as const,
+              render: (s: string, x: any) => s === 'unreachable'
+                ? <Tag color="red" style={{ margin: 0, fontSize: 11 }}>需人工</Tag>
+                : <Tooltip title={`已尝试补齐 ${x.attempts} 次，达到 3 次仍失败才会转为「需人工」`}>
+                    <Tag color="orange" style={{ margin: 0, fontSize: 11 }}>补齐中 {x.attempts}/3</Tag>
+                  </Tooltip>,
+            },
+            {
+              title: '说明', key: 'why',
+              render: (_: any, x: any) => (
+                <span style={{ fontSize: 11, color: 'rgba(0,0,0,0.55)' }}>
+                  {x.state === 'unreachable'
+                    ? '自动补齐失败，常见原因是账户未完成激活（CloudFormation 返回 OptInRequired），需先处理账户本身'
+                    : '等待 StackSet 部署完成，下一轮会自动复验'}
+                </span>
+              ),
+            },
+          ]}
+        />
+
+        {/* 操作 */}
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 12, gap: 8, flexWrap: 'wrap' }}>
+          <Space size={8}>
+            {problems.length > 0 && (
+              <>
+                <Button size="small" onClick={() => { setOnlyRoleIssues(true); setRoleModalOpen(false); }}>
+                  在账户列表中只看这些
+                </Button>
+                <Button
+                  size="small"
+                  onClick={() => exportToCSV(problems.map(x => ({
+                    账户ID: x.account_id, 名称: x.account_name, 组织: x.payer,
+                    support_quota: x.support ? '有' : '缺', admin_console: x.admin ? '有' : '缺',
+                    状态: x.state, 尝试次数: x.attempts, 最近检测: x.checked_at,
+                  })), 'account-role-issues')}
+                >
+                  导出
+                </Button>
+              </>
+            )}
+          </Space>
+          {isAdmin && (
+            <Space size={8}>
+              <Tooltip title="只检测尚未检测过的账户和上轮待重试的，很快">
+                <Button size="small" loading={roleChecking} onClick={() => runRoleCheck(false)}>立即检测（增量）</Button>
+              </Tooltip>
+              <Tooltip title="重新检测全部账户，单轮最多 400 个，按最久未检查优先">
+                <Button size="small" type="primary" loading={roleChecking} onClick={() => runRoleCheck(true)}>全量复检</Button>
+              </Tooltip>
+            </Space>
+          )}
+        </div>
+      </Modal>
+    );
+  };
+
   // 平台角色缺失标记 —— 只有异常账户才显示，正常账户不加噪音
   const renderRoleFlag = (accountId: string) => {
     const r = roleMap[accountId];
@@ -312,15 +456,24 @@ const AccountsPage: React.FC = () => {
             <span className="stat-chip success">Active <strong>{accounts.filter(a => a.Status === 'ACTIVE').length}</strong></span>
             <span className="stat-chip">组织 <strong>{[...new Set(accounts.map(a => a._payer))].length}</strong></span>
             {Object.keys(roleMap).length > 0 && (
-              <Tooltip title="平台缺少访问这些账户所需的角色。点击只看这些账户。">
+              <Tooltip title="平台缺少访问这些账户所需的角色，点击查看明细">
                 <span
                   className="stat-chip"
                   style={{ cursor: 'pointer', color: '#cf1322', background: '#fff1f0', borderColor: '#ffa39e' }}
-                  onClick={() => setOnlyRoleIssues(v => !v)}
+                  onClick={() => setRoleModalOpen(true)}
                 >
-                  {onlyRoleIssues ? '✓ ' : ''}权限异常 <strong>{Object.keys(roleMap).length}</strong>
+                  权限异常 <strong>{Object.keys(roleMap).length}</strong>
                 </span>
               </Tooltip>
+            )}
+            {onlyRoleIssues && (
+              <span
+                className="stat-chip"
+                style={{ cursor: 'pointer' }}
+                onClick={() => setOnlyRoleIssues(false)}
+              >
+                ✓ 仅看异常 · 点此取消
+              </span>
             )}
           </div>
         )}
@@ -344,18 +497,11 @@ const AccountsPage: React.FC = () => {
                 </span>
               </Tooltip>
             )}
-            {isAdmin && (
-              <Tooltip title="检测账户是否具备平台所需角色（support-quota / admin-console），缺失会自动通过 StackSet 补齐。默认只查新账户；按住 Shift 点击为全量复检。">
-                <Button
-                  size="small"
-                  className="hide-mobile"
-                  loading={roleChecking}
-                  onClick={(e) => runRoleCheck(e.shiftKey)}
-                >
-                  检测权限
-                </Button>
-              </Tooltip>
-            )}
+            <Tooltip title="查看账户权限检测结果。系统每 30 分钟自动检测新账户、每 24 小时全量复检，缺失会自动补齐。">
+              <Button size="small" className="hide-mobile" onClick={() => setRoleModalOpen(true)}>
+                权限状态
+              </Button>
+            </Tooltip>
             <Button size="small" className="hide-mobile" onClick={() => exportToCSV(filtered.map(a => ({ ID: a.Id, 名称: a.Name, 邮箱: a.Email, 组织: a._payer, 状态: a.Status })), 'accounts')}>导出</Button>
             <Button size="small" aria-label="刷新账户列表" icon={<ReloadOutlined />} onClick={fetchAccounts} loading={loading} />
           </Space>
@@ -430,6 +576,8 @@ const AccountsPage: React.FC = () => {
           </div>
         )}
       </Card>
+
+      {renderRoleModal()}
     </div>
   );
 };
