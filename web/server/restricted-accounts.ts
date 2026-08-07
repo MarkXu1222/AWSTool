@@ -118,10 +118,17 @@ export function getExternalId(accountId: string): string | undefined {
   try { return decryptField(rec.external_id_enc); } catch { return undefined; }
 }
 
-/** 组织级 StackSet 下发时必须排除的账户 */
+/**
+ * 组织级 StackSet 下发时必须排除的账户。
+ *
+ * 注意这里刻意不按 state 过滤：只要账户被标记过（记录尚未删除），就一律排除。
+ * state=failed 表示收窄执行失败，但账户很可能已经从组织级 StackSet 摘除，
+ * 若因 failed 而漏掉排除，下一次全量下发就会把宽权限重新盖回客户账户，
+ * 直接违反对客户的承诺。取消标记走 unmarkRestricted()，会删除记录。
+ */
 export function getExcludedAccountIds(payerName?: string): string[] {
   return db.getRestrictedAccounts()
-    .filter((r: any) => r.state !== 'failed' && (!payerName || r.payer === payerName))
+    .filter((r: any) => !payerName || r.payer === payerName)
     .map((r: any) => r.account_id);
 }
 

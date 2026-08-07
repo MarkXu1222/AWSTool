@@ -54,8 +54,10 @@ function readRestrictedAccountIds(payerName: string): string[] {
     const dbPath = path.join(__dirname, '../../data/db.json');
     if (!fs.existsSync(dbPath)) return [];
     const data = JSON.parse(fs.readFileSync(dbPath, 'utf-8'));
+    // 不按 state 过滤：只要标记过就排除。failed 的账户往往已从组织级 StackSet
+    // 摘除，漏掉排除会让下一次全量下发把宽权限重新盖回客户账户。
     return (data.restricted_accounts || [])
-      .filter((r: any) => r.state !== 'failed' && r.payer === payerName)
+      .filter((r: any) => r.payer === payerName)
       .map((r: any) => r.account_id);
   } catch {
     return [];
