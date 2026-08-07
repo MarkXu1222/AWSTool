@@ -264,6 +264,29 @@ export const db = {
     return data.region_data || [];
   },
 
+  // 离场账户 —— 已不在任何被管理组织内的账户，保留轨迹用于追溯遗留数据
+  getDepartedAccounts(): any[] {
+    const data = readDB() as any;
+    return data.departed_accounts || [];
+  },
+
+  upsertDepartedAccounts(records: any[]) {
+    if (!records?.length) return;
+    const data = readDB() as any;
+    if (!data.departed_accounts) data.departed_accounts = [];
+    const idx = new Map<string, number>();
+    data.departed_accounts.forEach((r: any, i: number) => idx.set(r.account_id, i));
+    for (const rec of records) {
+      const i = idx.get(rec.account_id);
+      if (i !== undefined) data.departed_accounts[i] = { ...data.departed_accounts[i], ...rec };
+      else {
+        idx.set(rec.account_id, data.departed_accounts.length);
+        data.departed_accounts.push(rec);
+      }
+    }
+    writeDB(data);
+  },
+
   // 账户角色自愈状态 —— 记录每个账户的 support-quota / admin-console 可用性
   getAccountRoles(): any[] {
     const data = readDB() as any;

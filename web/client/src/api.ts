@@ -56,6 +56,9 @@ export const api = {
   },
   refreshAccounts: () => request('/aws/accounts/refresh', { method: 'POST' }),
   getAccountDetail: (id: string) => request(`/aws/accounts/${id}/detail`),
+  // 离场账户：已移出组织的账户记录
+  getDepartedAccounts: () => request('/aws/accounts/departed'),
+  backfillDepartedAccounts: () => request('/aws/accounts/departed/backfill', { method: 'POST' }),
   // 账户角色自愈：状态查询 + 手动触发检测/补齐
   getAccountRolesStatus: () => request('/aws/accounts/roles-status'),
   checkAccountRoles: (params?: { full?: boolean; accountIds?: string[]; probeOnly?: boolean }) =>

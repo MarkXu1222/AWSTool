@@ -44,14 +44,21 @@ const RegionsPage: React.FC = () => {
   // 按组织查看
   const [selectedPayer, setSelectedPayer] = useState<string | null>(null);
   const [payerOnlyGaps, setPayerOnlyGaps] = useState(true);
+  // 已移出组织的账户（它们的区域数据仍在库里，会聚成「未知组织」）
+  const [departed, setDeparted] = useState<any[]>([]);
 
   useEffect(() => { loadData(); }, []);
 
   const loadData = async () => {
     try {
-      const [regRes, acctRes] = await Promise.all([api.getRegionStatus(), api.listAccounts()]);
+      const [regRes, acctRes, depRes] = await Promise.all([
+        api.getRegionStatus(),
+        api.listAccounts(),
+        api.getDepartedAccounts().catch(() => ({ success: false })),
+      ]);
       if (regRes.success) setRegionData(regRes.data || []);
       if (acctRes.success) setAccounts(acctRes.data || []);
+      if (depRes.success) setDeparted((depRes.data?.records || []).filter((r: any) => !r.rejoined_at));
     } catch {}
   };
 
@@ -97,6 +104,8 @@ const RegionsPage: React.FC = () => {
     return m;
   }, [accounts]);
 
+  const departedIds = useMemo(() => new Set(departed.map(d => d.account_id)), [departed]);
+
   // 按组织聚合：每个 payer 下的账户数、区域开通计数、以及缺口明细
   const payerGroups = useMemo(() => {
     const map = new Map<string, {
@@ -107,6 +116,9 @@ const RegionsPage: React.FC = () => {
     }>();
 
     regionData.forEach(rd => {
+      // 已离场账户不参与组织统计 —— 它们已不在任何组织内，
+      // 混进来会让某个组织的开通率被历史残留数据拉低
+      if (departedIds.has(rd.account_id)) return;
       const acct = acctById.get(rd.account_id);
       // payer 自身（管理账户）也算在组织内，它同样需要开通区域
       const payer = acct?._payer || '(未知组织)';
@@ -149,7 +161,24 @@ const RegionsPage: React.FC = () => {
         };
       })
       .sort((a, b) => b.disabled - a.disabled || a.payer.localeCompare(b.payer));
-  }, [regionData, acctById]);
+  }, [regionData, acctById, departedIds]);
+
+  // 已离场账户里，遗留了区域数据的那些 —— 展示出来解释这批数据的来历
+  const departedWithRegions = useMemo(() => {
+    const rdById = new Map(regionData.map((r: any) => [r.account_id, r]));
+    return departed
+      .filter(d => rdById.has(d.account_id))
+      .map(d => {
+        const rd: any = rdById.get(d.account_id);
+        const optIn = (rd.regions || []).filter((r: any) => OPT_IN_REGIONS.includes(r.region));
+        return {
+          ...d,
+          regionCount: optIn.length,
+          enabledCount: optIn.filter((r: any) => r.status === 'ENABLED').length,
+          lastScan: rd.updated_at,
+        };
+      });
+  }, [departed, regionData]);
 
   const currentGroup = useMemo(
     () => payerGroups.find(g => g.payer === selectedPayer) || null,
@@ -565,6 +594,53 @@ const RegionsPage: React.FC = () => {
                   <p style={{ color: '#9CA3AF', padding: 16, textAlign: 'center', fontSize: 12 }}>
                     点击上方任一组织展开明细，可看到该组织下哪些账户缺哪些区域，并支持为整个组织批量启用
                   </p>
+                )}
+
+                {/* 已离场账户的遗留区域数据 —— 解释这批数据为何存在，并保留追溯线索 */}
+                {departedWithRegions.length > 0 && (
+                  <Card
+                    size="small"
+                    style={{ marginTop: 12 }}
+                    title={<span style={{ fontSize: 13 }}>已移出组织的账户遗留数据（{departedWithRegions.length}）</span>}
+                  >
+                    <p style={{ color: 'rgba(0,0,0,0.55)', fontSize: 12, marginTop: 0 }}>
+                      这些账户已不在任何被管理的组织内，不计入上方组织统计。区域数据是它们离开前扫描留下的，
+                      保留在此仅供追溯。账户离开时 StackSet 会按 <code>RetainStacksOnAccountRemoval=false</code> 自动删除平台角色，
+                      因此平台已无法再访问它们。
+                    </p>
+                    <Table
+                      size="small"
+                      dataSource={departedWithRegions}
+                      rowKey="account_id"
+                      pagination={false}
+                      columns={[
+                        { title: '账户 ID', dataIndex: 'account_id', width: 130, render: (id: string) => <code style={{ fontSize: 12 }}>{id}</code> },
+                        { title: '名称', dataIndex: 'name', width: 140, render: (n: string) => <span style={{ fontSize: 12 }}>{n || '-'}</span> },
+                        {
+                          title: '原属组织', dataIndex: 'payer', width: 170,
+                          render: (p: string) => p ? <Tag style={{ margin: 0, fontSize: 11 }}>{p}</Tag> : <span style={{ color: '#9CA3AF', fontSize: 12 }}>未知</span>,
+                        },
+                        {
+                          title: '移出时间', dataIndex: 'departed_at', width: 150,
+                          render: (t: string, r: any) => t
+                            ? <Tooltip title={r.actor ? `操作者：${r.actor}` : ''}><span style={{ fontSize: 12 }}>{new Date(t).toLocaleString('zh-CN')}</span></Tooltip>
+                            : <Tooltip title={r.note || '未查证到移出事件'}><span style={{ color: '#9CA3AF', fontSize: 12 }}>未查证</span></Tooltip>,
+                        },
+                        {
+                          title: '遗留区域记录', key: 'rd', width: 130,
+                          render: (_: any, r: any) => <span style={{ fontSize: 12 }}>{r.enabledCount}/{r.regionCount} 已开通</span>,
+                        },
+                        {
+                          title: '最后扫描', dataIndex: 'lastScan', width: 150,
+                          render: (t: string) => <span style={{ fontSize: 12, color: 'rgba(0,0,0,0.45)' }}>{t ? new Date(t).toLocaleString('zh-CN') : '-'}</span>,
+                        },
+                        {
+                          title: '备注', dataIndex: 'note',
+                          render: (n: string) => n ? <span style={{ fontSize: 11, color: 'rgba(0,0,0,0.45)' }}>{n}</span> : null,
+                        },
+                      ]}
+                    />
+                  </Card>
                 )}
               </>
             ),

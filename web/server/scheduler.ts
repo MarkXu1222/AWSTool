@@ -11,6 +11,7 @@ import { db } from './db';
 import { notifyQuotaChanged } from './notify';
 import { refreshDashboardCache } from './routes/aws';
 import { syncAccountRoles } from './account-roles';
+import { recordDepartures, backfillDepartures } from './account-lifecycle';
 
 let quotaSyncRunning = false;
 let regionSyncRunning = false;
@@ -36,7 +37,14 @@ export function getSchedulerStatus() {
 async function syncAccounts() {
   try {
     console.log('[Scheduler] Syncing accounts...');
+    // 必须在覆盖缓存之前取旧快照，否则无从判断哪些账户消失了
+    const { accounts: prev } = db.getAccountsCache();
     const accounts = await aws.listAccounts();
+    try {
+      recordDepartures(prev || [], accounts);
+    } catch (e: any) {
+      console.error('[Lifecycle] 离场检测失败:', e.message);
+    }
     db.setAccountsCache(accounts);
     lastAccountsSync = new Date().toISOString();
     console.log(`[Scheduler] Accounts synced: ${accounts.length} accounts`);
@@ -266,6 +274,14 @@ async function syncRegions() {
 // === Start scheduler ===
 export function startScheduler() {
   console.log('[Scheduler] Starting background sync scheduler');
+
+  // 补录历史离场账户（本模块上线前已离开的，不会再触发 diff 检测）。
+  // 只依赖现有缓存与遗留数据，不调 AWS，可以立即执行。
+  try {
+    backfillDepartures();
+  } catch (e: any) {
+    console.error('[Lifecycle] 补录失败:', e.message);
+  }
 
   // Initial sync after 10s delay (let server boot up)
   setTimeout(() => {

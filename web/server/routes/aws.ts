@@ -6,6 +6,7 @@ import { COMPANY_PROFILES } from '../doc-templates';
 import { exportBillingInvoices, cleanupWorkDir, ExportTask } from '../billing-exporter';
 import { auditLogsToCsv, enrichAuditLog } from '../audit-presentation';
 import { syncAccountRoles, getAccountRolesSummary } from '../account-roles';
+import { getDepartedSummary, backfillDepartures } from '../account-lifecycle';
 import * as tagCompliance from '../tag-compliance';
 import fs from 'fs';
 import path from 'path';
@@ -285,6 +286,21 @@ awsRouter.post('/accounts/roles-check', requireStrictAdmin, async (req: Request,
         problems: result.details.filter(d => d.state !== 'ok'),
       },
     });
+  } catch (e: any) { res.status(500).json({ error: e.message }); }
+});
+
+// 离场账户 —— 已移出组织的账户记录（用于追溯遗留数据的归属）
+awsRouter.get('/accounts/departed', async (_req: Request, res: Response) => {
+  try {
+    res.json({ success: true, data: getDepartedSummary() });
+  } catch (e: any) { res.status(500).json({ error: e.message }); }
+});
+
+// 离场账户 —— 手动触发补录（把有遗留数据但已不在缓存里的账户登记进来）
+awsRouter.post('/accounts/departed/backfill', requireStrictAdmin, async (_req: Request, res: Response) => {
+  try {
+    const r = backfillDepartures();
+    res.json({ success: true, data: { ...r, summary: getDepartedSummary() } });
   } catch (e: any) { res.status(500).json({ error: e.message }); }
 });
 
