@@ -3,14 +3,14 @@
 企业级 AWS 多账户（多 Organizations）管理平台。带强制 MFA 登录、页面级权限与全量操作审计。
 
 **线上**：https://markxu.co（EC2 Singapore，PM2 进程 `aws-toolbox`）
-**当前版本**：`0.4.7`（见 `web/client/src/version.ts`，左下角展示）
+**当前版本**：`0.5.4`（见 `web/client/src/version.ts`，左下角展示）
 
-**管理规模**（生产快照 2026-08-06）
+**管理规模**（生产快照 2026-08-07）
 
 | 指标 | 数量 |
 |------|------|
-| AWS Organizations（payer） | 36 |
-| 成员账户 | 2426 |
+| AWS Organizations（payer） | 37 |
+| 成员账户 | 2429 |
 | 已开通状态覆盖账户 | 2407 |
 | 提额记录 | 1641 |
 | 公司文档模板 | 12 |
@@ -111,6 +111,7 @@ AWS/
     │   ├── doc-templates.ts        # ★公司模板 + 账户→公司 / payer→公司 映射 + 区域显示名
     │   ├── notify.ts               # 飞书通知（配额变动/达成）
     │   ├── tag-compliance.ts       # MAP 标签合规（编排中央工具账户的 Step Functions + S3 报告）
+    │   ├── account-roles.ts        # ★账户角色自愈：探测 → 缺失则触发 StackSet 补齐 → 超限告警
     │   ├── billing-exporter.ts     # 批量导出 AWS 控制台账单 PDF → zip
     │   └── routes/
     │       ├── aws.ts              # ★awsRouter：主业务端点（50+），含权限守卫
@@ -124,6 +125,9 @@ AWS/
     │       ├── components/         # MainLayout / RootCredentialsPanel / DangerConfirm / EmptyState / ErrorBoundary
     │       ├── pages/              # 每个业务页面一个文件
     │       └── utils/              # cache(内存TTL) / color / console-launch / export
+    ├── scripts/
+    │   ├── setup-org-stacksets.ts  # ★加新 payer 时下发两个角色 StackSet（幂等，支持 --dry-run）
+    │   └── print-bills.mts
     ├── setup-nginx.sh              # Nginx + HTTPS 配置脚本
     └── Dockerfile / docker-compose.yml
 ```
@@ -144,7 +148,23 @@ AWS/
 | `OrganizationAccountAccessRole` | 各成员账户 | 二级跳兜底 | 各自 payer root |
 | `cur-collector` | 各 payer | CUR 账单采集接入 | `509399618054:user/winston` |
 
-成员账户角色通过组织级 `SERVICE_MANAGED` StackSet 下发到根 OU，自动覆盖未来新增账户。管理账户本身不在 SERVICE_MANAGED 覆盖内，靠 `role/tool` 兜底。
+成员账户角色通过组织级 `SERVICE_MANAGED` StackSet 下发到根 OU，`AutoDeployment` 自动覆盖未来新增账户（含 INVITED）。管理账户本身不在 SERVICE_MANAGED 覆盖内，靠 `role/tool` 兜底。
+
+**覆盖现状（2026-08 已统一）**：37 个组织的 `support-quota-role-orgwide` 与 `admin-console-role-orgwide` 均为 SERVICE_MANAGED + `AutoDeployment=true`，部署目标为各组织 Root OU。加新 payer 时必须跑 `scripts/setup-org-stacksets.ts`（见部署章节），否则该组织新账户拿不到任何角色。
+
+**新组织的两个前置开关**（缺任一都会让 SERVICE_MANAGED StackSet 创建失败，报 `You must enable organizations access to operate a service managed stack set`）：
+
+```bash
+# 1) Organizations 侧：允许 StackSets 作为受信任服务
+aws organizations enable-aws-service-access \
+  --service-principal member.org.stacksets.cloudformation.amazonaws.com --profile <payer>
+
+# 2) CloudFormation 侧：激活组织访问（与上一步是两件事，容易漏）
+aws cloudformation activate-organizations-access --profile <payer> --region us-east-1
+aws cloudformation describe-organizations-access --profile <payer> --region us-east-1   # 应为 ENABLED
+```
+
+新建角色的信任主体只有 `509399618054:user/mark`，不再包含历史身份 `134103550877`（早先建的角色仍带着它）。
 
 ### 只读链路 `assumeToAccount(accountId)`
 
@@ -178,6 +198,7 @@ AWS/
 | 分组 | 端点 |
 |------|------|
 | 账户 | `GET /accounts`、`POST /accounts/refresh`、`GET /accounts/:id/detail`、`GET /connection` |
+| 账户角色自愈 | `GET /accounts/roles-status`、`POST /accounts/roles-check`（均 `requireStrictAdmin`） |
 | 仪表盘 | `GET /dashboard/summary` |
 | 账单 | `GET /billing/by-account`、`GET /billing/by-service/:accountId`、`GET /billing/breakdown/:accountId`、`POST /billing/export-invoices` |
 | 配额 | `GET /quotas/:accountId/:serviceCode`、`POST /quotas/increase`(admin)、`GET /quotas/requests`、`GET /quotas/stats`、`GET /quotas/companies`、`GET /quotas/company/:accountId`、`POST /quotas/generate-doc`、`POST /quotas/sync`、`POST /quotas/sync-account/:accountId`、`GET /quotas/sync-status`、`GET /quotas/sync-stream`(SSE) |
@@ -199,7 +220,19 @@ AWS/
 
 `GET /api/scheduler/status`
 
-**权限守卫**（`routes/aws.ts`）：`requireAdmin`、`requireRootAccess`、`requireAuditAccess`、`requireBulkQuotaAccess`。
+**权限守卫**（`routes/aws.ts`）：
+
+| 守卫 | 实际放行范围 | 用途 |
+|------|--------------|------|
+| `requireAdmin` | **admin + partadmin**（只拦 viewer） | 提额、资源删除、MAP 标签写操作、删 access key |
+| `requireStrictAdmin` | 仅 admin | 账户权限检测 |
+| `requireRootAccess` | root_access 或 admin | 根用户敏感操作 |
+| `requireAuditAccess` | 审计页可见者 | 审计日志 |
+| `requireBulkQuotaAccess` | bulk_quota_access 或 admin | 批量提额 |
+
+`requireAdmin` 的名字容易误解 —— 它放行 partadmin，这是预期行为。需要严格 admin 的场景用 `requireStrictAdmin`。
+
+`authMiddleware` 直接把 JWT payload 挂到 `req.user`，所以 `req.user.role` 是签发时的角色。需要严格判断的守卫都改为从 `db.getUser()` 实时读，避免降权用户在 token 过期前继续按旧角色通过。
 
 ---
 
@@ -334,6 +367,22 @@ HTML 模板 + Puppeteer 渲染。公司背景库在 `doc-templates.ts`（12 家�
 
 审计动作：`TEMP_CREDENTIALS`、`ROOT_MFA_DELETE`、`ROOT_PASSWORD_RECOVER`。
 
+### 账户角色自愈
+
+新账户加入组织后，两个角色由该组织 StackSet 的 `AutoDeployment` 自动创建，平台不参与。但自动部署并非 100% 可靠：账户未完成激活时 CloudFormation 返回 `OptInRequired`、StackSet 操作可能排队超时、角色也可能被人为删除。这些失败此前只躺在 CloudFormation 里，平台完全不知道 —— 账户在列表里看着正常，点进去什么都读不了。
+
+`account-roles.ts` 补上这个缺口，流程是探测 → 补齐 → 复验 → 记录 → 告警：
+
+- **探测**：直接 AssumeRole 两个角色，看实际能不能进，不依赖配置声明
+- **补齐**：按 payer + 角色种类分组，一次 `CreateStackInstances` 打一批账户（`AccountFilterType=INTERSECTION` 限定范围），操作完成后复验
+- **重试**：失败累计 3 次标记 `unreachable`，发飞书卡片，然后停止重试，不刷 API
+- **增量**：跟在每次 `syncAccounts()` 之后，只查从未检测过的和上轮待重试的，按 `JoinedTimestamp` 降序（新账户优先）。单轮上限 60
+- **全量复检**：每 24 小时，按「最久未检查优先」排序轮转，单轮上限 400，用来发现被删除的角色
+
+结果在账户页「权限状态」面板（仅 admin），列出异常账户、缺哪个角色、尝试次数、原因说明，可导出 CSV。账户列表里异常账户名旁会有「权限缺失 / 补齐中」标记。
+
+**已知无解情形**：零账单 + `OptInRequired` 的账户，StackSet 进不去，自愈也补不上，必须先处理账户本身的激活问题。截至 2026-08 有 7 个这类账户（yanhuang5-global 5 个、yanhuang13 2 个）。
+
 ### 飞书通知
 
 飞书自定义机器人 Webhook 发交互式卡片。后台同步（每 4 小时）检测到配额**当前值实际变化**时才推送 —— 提交、状态变化都不通知，避免刷屏。内容按账户分组，显示所属组织、配额、区域、旧值→新值、达标标记。首次同步（空快照）不通知，用同步前快照对比避免误判。
@@ -350,6 +399,8 @@ HTML 模板 + Puppeteer 渲染。公司背景库在 `doc-templates.ts`（12 家�
 | 配额记录 + 当前值 | 4 小时 | 2 分钟 | 分批防限流 |
 | 区域状态 | 24 小时 | 5 分钟 | opt-in 区域扫描 |
 | 概览费用缓存 | 2 小时 | 30 秒 | Cost Explorer 结果缓存 |
+| 账户角色自愈（增量） | 跟随账户同步 | — | 只查新账户和待重试，单轮 ≤60 |
+| 账户角色自愈（全量） | 24 小时 | — | 最久未检查优先轮转，单轮 ≤400 |
 
 ---
 
@@ -398,7 +449,7 @@ Nginx 反代 + Let's Encrypt（`markxu.co`，自动续期），80 强制跳 443�
 |------|--------|
 | 新增业务接口 | `routes/aws.ts` 加路由（按需加守卫）→ `aws-service.ts` 加函数复用 `assumeToAccount()` → `api.ts` 加方法 → 页面调用 |
 | 新增页面 | `pages/Xxx.tsx` → `MainLayout.tsx` 的 `navItems`/`PAGE_META`/`renderPage()` switch 各加一项（同一 key）→ `auth.ts` 的 `ALL_PAGE_KEYS` 加同名 key；要移动端入口再加 `mobileNavItems` |
-| 加 payer | `config.json.payers[]` 加 `{name, roleArn}`（本地 + EC2 各一份，勿提交）→ 重启 → `POST /api/aws/accounts/refresh` |
+| 加 payer | ① 在该 payer 建 `role/tool` 信任平台身份 ② `config.json.payers[]` 加 `{name, roleArn}` 并把组织名加入 `consoleAdminPayers`（本地 + EC2 各一份，勿提交）→ 重启 → `POST /api/aws/accounts/refresh` ③ **跑两次 `npx tsx scripts/setup-org-stacksets.ts support\|admin <payerName>`**，否则该组织新账户拿不到角色 |
 | 新增公司模板 | `doc-templates.ts` 的 `COMPANY_PROFILES` 加资料 + `ACCOUNT_TO_COMPANY`/`PAYER_TO_COMPANY` 加映射 → 架构图放 `doc-templates/architectures/` |
 | 调同步频率 | `scheduler.ts` |
 
@@ -456,6 +507,10 @@ Nginx 反代 + Let's Encrypt（`markxu.co`，自动续期），80 强制跳 443�
 - 前端单 bundle 已 1.47MB（gzip 458KB），暂时为跨境网络稳定性接受不分包
 - EC2 上 Node v20，AWS SDK v3 在 2027 年 1 月后要求 Node ≥ 22
 - `doc-templates.ts` 的 `taiping` 有完整模板和架构图，但没有任何 payer / 账户映射指向它，只能靠手选或手动生成入口用到
+- 7 个账户零账单 + CloudFormation `OptInRequired`，StackSet 与自愈都进不去，需人工先处理账户激活
+- `config.consoleAdminPayers` 是静态白名单（现已含全部 36 个组织）。更合理的做法是直接用 `account_roles` 的真实探测结果决定 `_consoleDual`，等检测覆盖率上来后可以替换
+- 早先建的 `support-quota` / `admin-console` 角色信任主体里仍有历史身份 `134103550877`，新建的已去掉；是否统一清理待定
+- `account_roles` 覆盖率需要时间铺开（增量每轮 60 个）。想立刻建立基线可在账户页点一次「全量复检」
 
 ---
 

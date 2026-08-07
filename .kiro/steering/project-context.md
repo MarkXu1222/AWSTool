@@ -48,6 +48,7 @@ web/
 │   ├── doc-templates.ts        # ★公司模板 + 账户→公司 / payer→公司 映射 + 区域显示名
 │   ├── notify.ts               # 飞书通知（配额变动/达成）
 │   ├── tag-compliance.ts       # MAP 标签合规（Step Functions 扫描 + S3 报告）
+│   ├── account-roles.ts        # ★账户角色自愈：探测成员账户角色 → 缺失则触发 StackSet 补齐 → 超限告警
 │   ├── billing-exporter.ts     # 批量导出 AWS 控制台账单 PDF → zip
 │   └── routes/
 │       ├── aws.ts              # ★awsRouter：主业务端点（40+），含权限守卫
@@ -113,6 +114,7 @@ doc-templates/architectures/    # 公司架构图（静态资源，可提交）
 
 业务路由 `/api/aws`（awsRouter，经 `authMiddleware`+`auditMiddleware`）：
 - 账户：`GET /accounts`、`POST /accounts/refresh`、`GET /accounts/:id/detail`、`GET /connection`
+- 账户角色自愈：`GET /accounts/roles-status`、`POST /accounts/roles-check`（均 requireStrictAdmin）。注意这两条必须定义在 `/accounts/:id/detail` 之前，否则被通配吃掉
 - 仪表盘：`GET /dashboard/summary`
 - 账单：`GET /billing/by-account`、`GET /billing/by-service/:accountId`、`GET /billing/breakdown/:accountId`、`POST /billing/export-invoices`
 - 配额：`GET /quotas/:accountId/:serviceCode`、`POST /quotas/increase`(admin)、`GET /quotas/requests`、`GET /quotas/stats`、`GET /quotas/companies`、`GET /quotas/company/:accountId`、`POST /quotas/generate-doc`、`POST /quotas/sync`、`POST /quotas/sync-account/:accountId`、`GET /quotas/sync-status`、`GET /quotas/sync-stream`(SSE)
@@ -128,7 +130,17 @@ doc-templates/architectures/    # 公司架构图（静态资源，可提交）
 
 其它：`GET /api/scheduler/status`
 
-**权限守卫（routes/aws.ts）**：`requireAdmin`（仅 admin）、`requireRootAccess`（root_access 或 admin）、`requireAuditAccess`（审计页可见者）。
+**权限守卫（routes/aws.ts）**：
+
+| 守卫 | 实际放行范围 | 用途 |
+|------|--------------|------|
+| `requireAdmin` | **admin + partadmin**（只拦 viewer） | 提额、资源删除、MAP 标签写操作、删 access key。名字容易误解，但这是预期行为 —— partadmin 就该有这些能力 |
+| `requireStrictAdmin` | 仅 admin | 账户权限检测（`roles-status` / `roles-check`）。从数据库读当前角色，不信任 JWT |
+| `requireRootAccess` | root_access 或 admin | 根用户敏感操作 |
+| `requireAuditAccess` | 审计页可见者 | 审计日志查询/导出 |
+| `requireBulkQuotaAccess` | bulk_quota_access 或 admin | 批量提额 |
+
+注意 `authMiddleware` 是直接把 JWT payload 挂到 `req.user`，所以 `req.user.role` 是签发时的角色。需要严格判断的守卫（`requireStrictAdmin` / `requireRootAccess` / `requireAuditAccess`）都改为从 `db.getUser()` 实时读，避免降权用户在 token 过期前继续按旧角色通过。
 
 ---
 
@@ -174,6 +186,7 @@ web { port, adminPassword, jwtSecret, encryptionKey, feishuWebhook }
 - `region_data`：各账户区域 opt-in 状态
 - `accounts_cache` + `accounts_cache_time`：账户列表缓存（调度器每 30min 刷新）
 - `dashboard_cache`：成本概览缓存
+- `account_roles`：各账户的 support-quota / admin-console 可用性与自愈状态（`ok` / `partial` / `pending` / `unreachable` + 尝试次数）
 
 启动时：`migrateEncryptMFASecrets()` 迁移明文 MFA 密钥、`backupDB()` 备份到 `data/backups/db-YYYY-MM-DD.json`（保留 7 天）。
 
@@ -218,15 +231,37 @@ web { port, adminPassword, jwtSecret, encryptionKey, feishuWebhook }
 4. 需要移动端入口就再加到 `mobileNavItems`。
 
 ### 新增/接入一个 payer 或成员账户能力
-- 加 payer：`config.json.payers[]` 增加 `{name, roleArn: arn:...:role/tool}`（本地 + EC2 各一份，勿提交），重启后 `POST /api/aws/accounts/refresh`。
-- 成员账户 `support-quota`：由组织级 StackSet `support-quota-role-orgwide` 自动下发；被 SCP 封禁的账户需先放开再单独补建。
-- 角色/StackSet 的批量操作历史脚本思路见 `deployment.md` 与会话记录（用 `role/tool` 假设进 payer 后用 SDK 操作）。
+加 payer 必须做完这三步，少一步该组织的账户在平台里就只能看到名字：
+1. 在该 payer 管理账户创建 `role/tool`，信任 `509399618054:user/mark`。
+2. `config.json.payers[]` 增加 `{name, roleArn: arn:...:role/tool}`（本地 + EC2 各一份，勿提交），并把组织名加入 `consoleAdminPayers`；重启后 `POST /api/aws/accounts/refresh`。
+3. **先开两个组织级开关**（缺任一都会让 StackSet 创建失败，报 `You must enable organizations access to operate a service managed stack set`。这两个是不同的东西，容易只做前一个）：
+   ```
+   aws organizations enable-aws-service-access \
+     --service-principal member.org.stacksets.cloudformation.amazonaws.com --profile <payer>
+   aws cloudformation activate-organizations-access --profile <payer> --region us-east-1
+   aws cloudformation describe-organizations-access --profile <payer> --region us-east-1   # 应 ENABLED
+   ```
+4. **跑两次 StackSet 下发脚本**，否则该组织的新账户拿不到任何角色：
+   ```
+   cd web
+   npx tsx scripts/setup-org-stacksets.ts support <payerName>
+   npx tsx scripts/setup-org-stacksets.ts admin   <payerName>
+   npx tsx scripts/setup-org-stacksets.ts admin   <payerName> --dry-run   # 只看状态
+   ```
+   脚本幂等，会把 StackSet 建成「整 Root OU + AutoDeployment」，此后该组织新加入的账户由 CloudFormation 自动建角色。
+5. EC2 `pm2 restart aws-toolbox`（config 是模块加载时读的，不重启不生效），等约 10 秒的账户同步，再确认新组织的账户已进入缓存。
+
+成员账户角色现状（2026-08 已统一）：37 个组织的 `support-quota-role-orgwide` 与 `admin-console-role-orgwide` 均为 SERVICE_MANAGED + AutoDeployment=true，部署目标为各组织 Root OU。
+
+`admin-console` 为什么必须有：INVITED（邀请加入）的账户不自带 `OrganizationAccountAccessRole`，payer 二级跳进不去，只有直接信任平台身份的 `admin-console` 能拿到 admin 临时凭证。
+
+补不上的账户：账户未完成激活时 CloudFormation 返回 `OptInRequired`(403)，StackSet 无论如何都进不去，`account-roles.ts` 会重试 3 次后标记 `unreachable` 并飞书告警，需人工先处理账户本身（这类账户通常零账单）。
 
 ### 新增一个公司（提额文档模板）
 - `web/server/doc-templates.ts`：`COMPANY_PROFILES` 加公司资料；`ACCOUNT_TO_COMPANY` / `PAYER_TO_COMPANY` 加映射；架构图放 `doc-templates/architectures/`。
 
 ### 调整定时同步频率
-- `web/server/scheduler.ts`：账户 30min、配额 4h、区域 24h、仪表盘 2h。
+- `web/server/scheduler.ts`：账户 30min、配额 4h、区域 24h、仪表盘 2h、账户角色自愈（增量跟在账户同步之后，全量复检 24h）。
 
 ### 发布新版本
 - 改 `web/client/src/version.ts` 的 `APP_VERSION`（小改递增 patch，大改递增 minor）。左下角展示，也用于确认部署是否生效。
