@@ -52,6 +52,9 @@ const AccountsPage: React.FC = () => {
   const [roleModalOpen, setRoleModalOpen] = useState(false);
   const [roleSummary, setRoleSummary] = useState<any>(null);
   const [lastCheckResult, setLastCheckResult] = useState<any>(null);
+  // 已移出组织的账户
+  const [departed, setDeparted] = useState<any[]>([]);
+  const [departedOpen, setDepartedOpen] = useState(false);
 
   const fetchAccounts = async () => {
     setLoading(true);
@@ -63,7 +66,15 @@ const AccountsPage: React.FC = () => {
     finally { setLoading(false); }
   };
 
-  useEffect(() => { fetchAccounts(); }, []);
+  useEffect(() => { fetchAccounts(); loadDeparted(); }, []);
+
+  // 已移出组织的账户 —— 与在职账户字段不同（有移出时间/原属组织），单独一份数据
+  const loadDeparted = async () => {
+    try {
+      const res = await api.getDepartedAccounts();
+      if (res.success) setDeparted(res.data?.records || []);
+    } catch { /* 附加信息，失败不影响账户列表 */ }
+  };
 
   // 权限检测仅 admin 可见（含结果）。isAdmin 是异步拿到的，
   // 所以等它确定后再拉，避免非 admin 触发一次注定被拒的请求。
@@ -243,6 +254,129 @@ const AccountsPage: React.FC = () => {
       </div>
     );
   }
+
+  // 已移出组织的账户面板
+  const renderDepartedModal = () => {
+    const active = departed.filter(d => !d.rejoined_at);
+    const rejoined = departed.filter(d => d.rejoined_at);
+
+    return (
+      <Modal
+        title="已移出组织的账户"
+        open={departedOpen}
+        onCancel={() => setDepartedOpen(false)}
+        footer={null}
+        width={900}
+      >
+        <p style={{ color: 'rgba(0,0,0,0.55)', fontSize: 12, marginTop: 0 }}>
+          这些账户已不在任何被管理的组织内，因此不出现在上方账户列表中。
+          账户离开组织时，StackSet 会按 <code>RetainStacksOnAccountRemoval=false</code> 自动删除平台角色
+          （<code>support-quota</code> / <code>admin-console</code>），所以平台已无法访问它们 —— 这是预期行为。
+          账户本身是否仍存续，需在原组织的账单或 AWS 侧确认。
+        </p>
+
+        <div className="stat-chips" style={{ margin: '0 0 12px' }}>
+          <span className="stat-chip">已离开 <strong>{active.length}</strong></span>
+          {rejoined.length > 0 && <span className="stat-chip success">曾离开又加回 <strong>{rejoined.length}</strong></span>}
+          {Object.entries(
+            active.reduce((acc: Record<string, number>, d) => {
+              const k = d.payer || '未知';
+              acc[k] = (acc[k] || 0) + 1;
+              return acc;
+            }, {}),
+          ).sort((a, b) => b[1] - a[1]).map(([p, n]) => (
+            <span key={p} className="stat-chip">{p} <strong>{n}</strong></span>
+          ))}
+        </div>
+
+        <Table
+          size="small"
+          rowKey="account_id"
+          dataSource={departed}
+          pagination={departed.length > 10 ? { pageSize: 10, size: 'small', showTotal: t => `共 ${t} 条` } : false}
+          locale={{ emptyText: '暂无已移出组织的账户记录' }}
+          columns={[
+            {
+              title: '账户', key: 'acct', width: 200,
+              render: (_: any, x: any) => (
+                <div>
+                  <div style={{ fontWeight: 600, fontSize: 12 }}>
+                    {x.name || <span style={{ color: '#9CA3AF', fontWeight: 400 }}>（名称未留存）</span>}
+                  </div>
+                  <code style={{ fontSize: 11, color: '#8a94a6' }}>{x.account_id}</code>
+                </div>
+              ),
+            },
+            {
+              title: '原属组织', dataIndex: 'payer', width: 160,
+              filters: [...new Set(departed.map(d => d.payer).filter(Boolean))].map(p => ({ text: p, value: p })),
+              onFilter: (v: any, r: any) => r.payer === v,
+              render: (p: string) => p
+                ? <Tag style={{ margin: 0, fontSize: 11 }}>{p}</Tag>
+                : <span style={{ color: '#9CA3AF', fontSize: 12 }}>未知</span>,
+            },
+            {
+              title: '移出时间', dataIndex: 'departed_at', width: 155,
+              sorter: (a: any, b: any) => String(a.departed_at || a.detected_at).localeCompare(String(b.departed_at || b.detected_at)),
+              defaultSortOrder: 'descend' as const,
+              render: (t: string, r: any) => t
+                ? (
+                  <Tooltip title={r.actor ? `操作者：${r.actor}` : '来自 CloudTrail 查证'}>
+                    <span style={{ fontSize: 12 }}>{new Date(t).toLocaleString('zh-CN')}</span>
+                  </Tooltip>
+                )
+                : (
+                  <Tooltip title={r.note || '未查证到移出事件'}>
+                    <span style={{ color: '#9CA3AF', fontSize: 12 }}>未查证</span>
+                  </Tooltip>
+                ),
+            },
+            {
+              title: '平台发现于', dataIndex: 'detected_at', width: 155,
+              render: (t: string) => <span style={{ fontSize: 12, color: 'rgba(0,0,0,0.45)' }}>{t ? new Date(t).toLocaleString('zh-CN') : '-'}</span>,
+            },
+            {
+              title: '状态', key: 'st', width: 110, align: 'center' as const,
+              render: (_: any, r: any) => r.rejoined_at
+                ? <Tooltip title={`于 ${new Date(r.rejoined_at).toLocaleString('zh-CN')} 重新加入`}><Tag color="green" style={{ margin: 0, fontSize: 11 }}>已加回</Tag></Tooltip>
+                : <Tag style={{ margin: 0, fontSize: 11 }}>已离开</Tag>,
+            },
+            {
+              title: '遗留数据', dataIndex: 'had_region_data', width: 90, align: 'center' as const,
+              render: (v: boolean) => v
+                ? <Tooltip title="库中仍存有该账户的区域扫描数据，可在区域管理页「按组织查看」底部看到"><Tag color="orange" style={{ margin: 0, fontSize: 11 }}>有</Tag></Tooltip>
+                : <span style={{ color: '#D1D5DB' }}>-</span>,
+            },
+            {
+              title: '备注', dataIndex: 'note',
+              render: (n: string) => n
+                ? <span style={{ fontSize: 11, color: 'rgba(0,0,0,0.45)' }}>{n}</span>
+                : null,
+            },
+          ]}
+        />
+
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 12, gap: 8, flexWrap: 'wrap' }}>
+          <span style={{ fontSize: 11, color: 'rgba(0,0,0,0.45)' }}>
+            账户同步时自动比对前后快照登记；某组织账户整体消失会判为同步失败而跳过，不会误记
+          </span>
+          {departed.length > 0 && (
+            <Button
+              size="small"
+              onClick={() => exportToCSV(departed.map(d => ({
+                账户ID: d.account_id, 名称: d.name || '', 邮箱: d.email || '', 原属组织: d.payer || '',
+                移出时间: d.departed_at || '', 操作者: d.actor || '', 平台发现于: d.detected_at || '',
+                最后状态: d.last_status || '', 是否加回: d.rejoined_at ? d.rejoined_at : '否',
+                遗留区域数据: d.had_region_data ? '有' : '无', 备注: d.note || '',
+              })), 'departed-accounts')}
+            >
+              导出
+            </Button>
+          )}
+        </div>
+      </Modal>
+    );
+  };
 
   // 权限检测结果面板 —— 自动检测与手动检测的结果都在这里看
   const renderRoleModal = () => {
@@ -460,6 +594,17 @@ const AccountsPage: React.FC = () => {
             <span className="stat-chip">总账户 <strong>{accounts.length}</strong></span>
             <span className="stat-chip success">Active <strong>{accounts.filter(a => a.Status === 'ACTIVE').length}</strong></span>
             <span className="stat-chip">组织 <strong>{[...new Set(accounts.map(a => a._payer))].length}</strong></span>
+            {departed.filter(d => !d.rejoined_at).length > 0 && (
+              <Tooltip title="已移出组织、不在上方列表中的账户，点击查看">
+                <span
+                  className="stat-chip"
+                  style={{ cursor: 'pointer' }}
+                  onClick={() => setDepartedOpen(true)}
+                >
+                  已离开 <strong>{departed.filter(d => !d.rejoined_at).length}</strong>
+                </span>
+              </Tooltip>
+            )}
             {isAdmin && Object.keys(roleMap).length > 0 && (
               <Tooltip title="平台缺少访问这些账户所需的角色，点击查看明细">
                 <span
@@ -585,6 +730,7 @@ const AccountsPage: React.FC = () => {
       </Card>
 
       {renderRoleModal()}
+      {renderDepartedModal()}
     </div>
   );
 };
