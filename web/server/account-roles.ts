@@ -49,7 +49,8 @@ const STACKSET_FOR: Record<'support' | 'admin', string> = {
 
 const MAX_ATTEMPTS = 3;          // 补齐尝试上限，超过标记 unreachable
 const PROBE_CONCURRENCY = 6;     // 探测并发，避免 STS 限流
-const MAX_NEW_PER_RUN = 60;      // 单轮最多处理的新账户数，防止首次运行时打满 API
+const MAX_NEW_PER_RUN = 60;      // 增量单轮上限：新账户通常很少，够用且不打满 API
+const MAX_FULL_PER_RUN = 400;    // 全量单轮上限：配合「最久未检查优先」轮转，数日内覆盖全部账户
 
 export type RoleKind = 'support' | 'admin';
 
@@ -211,14 +212,27 @@ export async function syncAccountRoles(opts: SyncOptions = {}): Promise<SyncResu
       const rec = knownMap.get(a.Id);
       return !rec || rec.state === 'pending';
     });
+    // 最近加入组织的优先 —— 这才是本功能要盯的对象。
+    // 首次上线时全部账户都算「未检测」，若按缓存顺序取，真正的新账户可能排到很后面。
+    targets = [...targets].sort((a: any, b: any) =>
+      String(b.JoinedTimestamp || '').localeCompare(String(a.JoinedTimestamp || '')));
+  } else {
+    // 全量复检：最久未检查的优先，配合单轮上限实现轮转覆盖。
+    // 否则每轮都从列表头部取同一批，后面的账户永远轮不到。
+    targets = [...targets].sort((a: any, b: any) => {
+      const ta = knownMap.get(a.Id)?.checked_at || '';
+      const tb = knownMap.get(b.Id)?.checked_at || '';
+      return ta.localeCompare(tb);
+    });
   }
 
   const skippedSuspended = targets.filter((a: any) => a.Status !== 'ACTIVE').length;
   targets = targets.filter((a: any) => a.Status === 'ACTIVE');
 
-  // 首次运行或全量时限流，避免一次打满 STS
-  if (!opts.accountIds && targets.length > MAX_NEW_PER_RUN) {
-    targets = targets.slice(0, MAX_NEW_PER_RUN);
+  // 限流，避免一次打满 STS。指定账户时不限（人工触发，数量可控）。
+  if (!opts.accountIds) {
+    const cap = opts.full ? MAX_FULL_PER_RUN : MAX_NEW_PER_RUN;
+    if (targets.length > cap) targets = targets.slice(0, cap);
   }
 
   if (targets.length === 0) {
