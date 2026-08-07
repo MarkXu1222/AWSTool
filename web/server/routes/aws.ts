@@ -20,6 +20,20 @@ const requireAdmin = (req: Request, res: Response, next: any) => {
   next();
 };
 
+// 严格 admin —— 只放 role === 'admin'。
+// 注意上面的 requireAdmin 名不符实：它只拦 viewer，partadmin 是放行的。
+// 那个行为被提额、资源删除等端点依赖，不宜更改，所以这里单独提供严格版本。
+// 与 requireRootAccess 一致，从数据库读当前角色，不信任 JWT 里可能已过期的角色
+// （authMiddleware 直接把 JWT payload 挂到 req.user，降级用户在 token 过期前仍持旧角色）。
+const requireStrictAdmin = (req: Request, res: Response, next: any) => {
+  const tokenUser = (req as any).user;
+  const currentUser = tokenUser?.username ? db.getUser(tokenUser.username) : null;
+  if (!currentUser || currentUser.role !== 'admin') {
+    return res.status(403).json({ error: '仅管理员可访问' });
+  }
+  next();
+};
+
 // ===== MAP 标签合规（编排中央工具账户的 tag-compliance 系统）=====
 
 // 是否已配置（前端据此显示未配置提示）
@@ -239,7 +253,7 @@ awsRouter.post('/accounts/refresh', async (_req: Request, res: Response) => {
 });
 
 // 账户角色自愈 —— 状态查询（仅 admin：检测结果暴露了哪些账户平台进不去，属运维信息）
-awsRouter.get('/accounts/roles-status', requireAdmin, async (_req: Request, res: Response) => {
+awsRouter.get('/accounts/roles-status', requireStrictAdmin, async (_req: Request, res: Response) => {
   try {
     res.json({ success: true, data: getAccountRolesSummary() });
   } catch (e: any) { res.status(500).json({ error: e.message }); }
@@ -247,7 +261,7 @@ awsRouter.get('/accounts/roles-status', requireAdmin, async (_req: Request, res:
 
 // 账户角色自愈 —— 手动触发检测/补齐
 // body: { full?: boolean, accountIds?: string[], probeOnly?: boolean }
-awsRouter.post('/accounts/roles-check', requireAdmin, async (req: Request, res: Response) => {
+awsRouter.post('/accounts/roles-check', requireStrictAdmin, async (req: Request, res: Response) => {
   try {
     const { full, accountIds, probeOnly } = req.body || {};
     if (accountIds !== undefined && (!Array.isArray(accountIds) || accountIds.some((x: any) => typeof x !== 'string'))) {
