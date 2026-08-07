@@ -63,7 +63,11 @@ const AccountsPage: React.FC = () => {
     finally { setLoading(false); }
   };
 
-  useEffect(() => { fetchAccounts(); loadRoleStatus(); }, []);
+  useEffect(() => { fetchAccounts(); }, []);
+
+  // 权限检测仅 admin 可见（含结果）。isAdmin 是异步拿到的，
+  // 所以等它确定后再拉，避免非 admin 触发一次注定被拒的请求。
+  useEffect(() => { if (isAdmin) loadRoleStatus(); }, [isAdmin]);
 
   // 只取有问题的账户（后端已过滤），正常的不需要标记
   const loadRoleStatus = async () => {
@@ -178,7 +182,7 @@ const AccountsPage: React.FC = () => {
   };
 
   const filtered = accounts.filter(a => {
-    if (onlyRoleIssues && !roleMap[a.Id]) return false;
+    if (isAdmin && onlyRoleIssues && !roleMap[a.Id]) return false;
     return !searchText
       || a.Id?.includes(searchText) || a.Name?.toLowerCase().includes(searchText.toLowerCase()) || a.Email?.toLowerCase().includes(searchText.toLowerCase());
   });
@@ -386,8 +390,9 @@ const AccountsPage: React.FC = () => {
     );
   };
 
-  // 平台角色缺失标记 —— 只有异常账户才显示，正常账户不加噪音
+  // 平台角色缺失标记 —— 仅 admin 可见，且只有异常账户才显示
   const renderRoleFlag = (accountId: string) => {
+    if (!isAdmin) return null;
     const r = roleMap[accountId];
     if (!r) return null;
     const miss: string[] = [];
@@ -455,7 +460,7 @@ const AccountsPage: React.FC = () => {
             <span className="stat-chip">总账户 <strong>{accounts.length}</strong></span>
             <span className="stat-chip success">Active <strong>{accounts.filter(a => a.Status === 'ACTIVE').length}</strong></span>
             <span className="stat-chip">组织 <strong>{[...new Set(accounts.map(a => a._payer))].length}</strong></span>
-            {Object.keys(roleMap).length > 0 && (
+            {isAdmin && Object.keys(roleMap).length > 0 && (
               <Tooltip title="平台缺少访问这些账户所需的角色，点击查看明细">
                 <span
                   className="stat-chip"
@@ -466,7 +471,7 @@ const AccountsPage: React.FC = () => {
                 </span>
               </Tooltip>
             )}
-            {onlyRoleIssues && (
+            {isAdmin && onlyRoleIssues && (
               <span
                 className="stat-chip"
                 style={{ cursor: 'pointer' }}
@@ -497,11 +502,13 @@ const AccountsPage: React.FC = () => {
                 </span>
               </Tooltip>
             )}
-            <Tooltip title="查看账户权限检测结果。系统每 30 分钟自动检测新账户、每 24 小时全量复检，缺失会自动补齐。">
-              <Button size="small" className="hide-mobile" onClick={() => setRoleModalOpen(true)}>
-                权限状态
-              </Button>
-            </Tooltip>
+            {isAdmin && (
+              <Tooltip title="查看账户权限检测结果。系统每 30 分钟自动检测新账户、每 24 小时全量复检，缺失会自动补齐。">
+                <Button size="small" className="hide-mobile" onClick={() => setRoleModalOpen(true)}>
+                  权限状态
+                </Button>
+              </Tooltip>
+            )}
             <Button size="small" className="hide-mobile" onClick={() => exportToCSV(filtered.map(a => ({ ID: a.Id, 名称: a.Name, 邮箱: a.Email, 组织: a._payer, 状态: a.Status })), 'accounts')}>导出</Button>
             <Button size="small" aria-label="刷新账户列表" icon={<ReloadOutlined />} onClick={fetchAccounts} loading={loading} />
           </Space>

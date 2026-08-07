@@ -238,8 +238,8 @@ awsRouter.post('/accounts/refresh', async (_req: Request, res: Response) => {
   } catch (e: any) { res.status(500).json({ error: e.message }); }
 });
 
-// 账户角色自愈 —— 状态查询（所有已认证用户可读，用于账户页标记）
-awsRouter.get('/accounts/roles-status', async (_req: Request, res: Response) => {
+// 账户角色自愈 —— 状态查询（仅 admin：检测结果暴露了哪些账户平台进不去，属运维信息）
+awsRouter.get('/accounts/roles-status', requireAdmin, async (_req: Request, res: Response) => {
   try {
     res.json({ success: true, data: getAccountRolesSummary() });
   } catch (e: any) { res.status(500).json({ error: e.message }); }
