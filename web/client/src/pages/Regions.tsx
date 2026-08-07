@@ -1,7 +1,8 @@
-import React, { useState, useEffect } from 'react';
-import { Card, Table, Tag, Button, Space, message, Checkbox, Popconfirm, Progress, Input, Alert, Tabs } from 'antd';
+import React, { useState, useEffect, useMemo } from 'react';
+import { Card, Table, Tag, Button, Space, message, Checkbox, Popconfirm, Progress, Input, Alert, Tabs, Select, Tooltip } from 'antd';
 import { GlobalOutlined, ReloadOutlined, SearchOutlined } from '@ant-design/icons';
 import { api } from '../api';
+import { exportToCSV } from '../utils/export';
 
 const OPT_IN_REGIONS = [
   'af-south-1', 'ap-east-1', 'ap-east-2', 'ap-south-2', 'ap-southeast-3',
@@ -40,6 +41,9 @@ const RegionsPage: React.FC = () => {
   const [searchText, setSearchText] = useState('');
   const [viewMode, setViewMode] = useState<'regions' | 'account'>('regions');
   const [selectedAccountRegions, setSelectedAccountRegions] = useState<string[]>([]);
+  // 按组织查看
+  const [selectedPayer, setSelectedPayer] = useState<string | null>(null);
+  const [payerOnlyGaps, setPayerOnlyGaps] = useState(true);
 
   useEffect(() => { loadData(); }, []);
 
@@ -83,6 +87,111 @@ const RegionsPage: React.FC = () => {
       if (res.success) { message.success(`${region} 启用中`); loadData(); }
       else message.error(res.error);
     } catch (e: any) { message.error(e.message); }
+  };
+
+  // 账户按 ID 索引 —— 账户和区域数据都是几千条量级，
+  // 在循环里用 accounts.find() 会退化成百万级遍历，必须用 Map。
+  const acctById = useMemo(() => {
+    const m = new Map<string, any>();
+    accounts.forEach(a => m.set(a.Id, a));
+    return m;
+  }, [accounts]);
+
+  // 按组织聚合：每个 payer 下的账户数、区域开通计数、以及缺口明细
+  const payerGroups = useMemo(() => {
+    const map = new Map<string, {
+      payer: string;
+      accounts: { accountId: string; name: string; enabled: string[]; disabled: string[]; enabling: string[] }[];
+      enabled: number; disabled: number; enabling: number;
+      regionGaps: Map<string, string[]>;   // region -> 未开通该区域的 accountId[]
+    }>();
+
+    regionData.forEach(rd => {
+      const acct = acctById.get(rd.account_id);
+      // payer 自身（管理账户）也算在组织内，它同样需要开通区域
+      const payer = acct?._payer || '(未知组织)';
+      if (!map.has(payer)) {
+        map.set(payer, { payer, accounts: [], enabled: 0, disabled: 0, enabling: 0, regionGaps: new Map() });
+      }
+      const g = map.get(payer)!;
+
+      const enabled: string[] = [], disabled: string[] = [], enabling: string[] = [];
+      (rd.regions || []).forEach((r: any) => {
+        // 只统计 opt-in 区域，默认区域不需要开通
+        if (!OPT_IN_REGIONS.includes(r.region)) return;
+        if (r.status === 'ENABLED') enabled.push(r.region);
+        else if (r.status === 'ENABLING') enabling.push(r.region);
+        else if (r.status === 'DISABLED') {
+          disabled.push(r.region);
+          g.regionGaps.set(r.region, [...(g.regionGaps.get(r.region) || []), rd.account_id]);
+        }
+      });
+
+      g.enabled += enabled.length;
+      g.enabling += enabling.length;
+      g.disabled += disabled.length;
+      g.accounts.push({
+        accountId: rd.account_id,
+        name: acct?.Name || rd.account_id,
+        enabled, disabled, enabling,
+      });
+    });
+
+    return [...map.values()]
+      .map(g => {
+        const slots = g.enabled + g.disabled + g.enabling;
+        return {
+          ...g,
+          accountCount: g.accounts.length,
+          gapAccounts: g.accounts.filter(a => a.disabled.length > 0).length,
+          slots,
+          rate: slots > 0 ? Math.round((g.enabled / slots) * 100) : 0,
+        };
+      })
+      .sort((a, b) => b.disabled - a.disabled || a.payer.localeCompare(b.payer));
+  }, [regionData, acctById]);
+
+  const currentGroup = useMemo(
+    () => payerGroups.find(g => g.payer === selectedPayer) || null,
+    [payerGroups, selectedPayer],
+  );
+
+  // 选中组织的区域维度：每个区域在该组织内的开通情况
+  const currentGroupRegions = useMemo(() => {
+    if (!currentGroup) return [];
+    return OPT_IN_REGIONS.map(region => {
+      let enabled = 0, disabled = 0, enabling = 0;
+      currentGroup.accounts.forEach(a => {
+        if (a.enabled.includes(region)) enabled++;
+        else if (a.enabling.includes(region)) enabling++;
+        else if (a.disabled.includes(region)) disabled++;
+      });
+      return {
+        region, enabled, disabled, enabling,
+        total: enabled + disabled + enabling,
+        gapAccountIds: currentGroup.regionGaps.get(region) || [],
+      };
+    }).filter(r => !payerOnlyGaps || r.disabled > 0);
+  }, [currentGroup, payerOnlyGaps]);
+
+  // 为整个组织启用某区域（只对该组织内未开通的账户下发）
+  const handleEnableForPayer = async (region: string, accountIds: string[]) => {
+    if (accountIds.length === 0) return;
+    setEnabling(true);
+    try {
+      const res = await api.enableRegionBatch(accountIds, region);
+      if (res.success) {
+        const ok = res.data.filter((r: any) => r.success).length;
+        const failed = res.data.filter((r: any) => !r.success);
+        if (failed.length > 0) {
+          message.warning(`${ok}/${accountIds.length} 个账户已提交启用 ${region}，${failed.length} 个失败：${failed[0].error?.slice(0, 60) || ''}`);
+        } else {
+          message.success(`${ok} 个账户已提交启用 ${region}`);
+        }
+        loadData();
+      } else message.error(res.error);
+    } catch (e: any) { message.error(e.message); }
+    finally { setEnabling(false); }
   };
 
   // Build summary: for each opt-in region, count enabled/disabled
@@ -270,6 +379,193 @@ const RegionsPage: React.FC = () => {
 
                 {searchText && searchedAccounts.length === 0 && <p style={{ color: '#9CA3AF', padding: 20, textAlign: 'center' }}>未找到匹配的账户</p>}
                 {!searchText && <p style={{ color: '#9CA3AF', padding: 20, textAlign: 'center' }}>输入账户 ID 或名称搜索</p>}
+              </>
+            ),
+          },
+          {
+            key: 'payer', label: `按组织查看 (${payerGroups.length})`,
+            children: (
+              <>
+                {/* 组织汇总 —— 缺口多的排前面 */}
+                <Card size="small" bodyStyle={{ padding: 0 }}>
+                  <Table
+                    size="small"
+                    dataSource={payerGroups}
+                    rowKey="payer"
+                    pagination={{ pageSize: 12, size: 'small', showTotal: t => `共 ${t} 个组织` }}
+                    rowClassName={(r: any) => r.payer === selectedPayer ? 'ant-table-row-selected' : ''}
+                    onRow={(r: any) => ({
+                      onClick: () => setSelectedPayer(r.payer === selectedPayer ? null : r.payer),
+                      style: { cursor: 'pointer' },
+                    })}
+                    columns={[
+                      {
+                        title: '组织', dataIndex: 'payer', width: 190,
+                        sorter: (a: any, b: any) => a.payer.localeCompare(b.payer),
+                        render: (p: string) => <Tag style={{ margin: 0 }}>{p}</Tag>,
+                      },
+                      {
+                        title: '账户数', dataIndex: 'accountCount', width: 80, align: 'center' as const,
+                        sorter: (a: any, b: any) => a.accountCount - b.accountCount,
+                        render: (n: number) => <span style={{ fontSize: 12 }}>{n}</span>,
+                      },
+                      {
+                        title: '有缺口账户', dataIndex: 'gapAccounts', width: 100, align: 'center' as const,
+                        sorter: (a: any, b: any) => a.gapAccounts - b.gapAccounts,
+                        render: (n: number, r: any) => n > 0
+                          ? <Tooltip title={`${n} / ${r.accountCount} 个账户至少缺一个 opt-in 区域`}><Tag color="orange" style={{ margin: 0 }}>{n}</Tag></Tooltip>
+                          : <Tag color="green" style={{ margin: 0 }}>0</Tag>,
+                      },
+                      {
+                        title: '已开通', dataIndex: 'enabled', width: 80, align: 'center' as const,
+                        sorter: (a: any, b: any) => a.enabled - b.enabled,
+                        render: (n: number) => <span style={{ fontSize: 12, color: '#389e0d' }}>{n}</span>,
+                      },
+                      {
+                        title: '启用中', dataIndex: 'enabling', width: 80, align: 'center' as const,
+                        render: (n: number) => n > 0 ? <Tag color="blue" style={{ margin: 0 }}>{n}</Tag> : <span style={{ color: '#D1D5DB' }}>0</span>,
+                      },
+                      {
+                        title: '未开通', dataIndex: 'disabled', width: 80, align: 'center' as const,
+                        defaultSortOrder: 'descend' as const,
+                        sorter: (a: any, b: any) => a.disabled - b.disabled,
+                        render: (n: number) => n > 0 ? <Tag color="red" style={{ margin: 0 }}>{n}</Tag> : <span style={{ color: '#D1D5DB' }}>0</span>,
+                      },
+                      {
+                        title: '开通率', key: 'rate', width: 130,
+                        sorter: (a: any, b: any) => a.rate - b.rate,
+                        render: (_: any, r: any) => r.slots > 0
+                          ? <Progress percent={r.rate} size="small" strokeColor={r.rate === 100 ? '#52c41a' : '#faad14'} />
+                          : '-',
+                      },
+                      {
+                        title: '操作', key: 'act', width: 80,
+                        render: (_: any, r: any) => (
+                          <Button type="link" size="small" onClick={(e) => { e.stopPropagation(); setSelectedPayer(r.payer === selectedPayer ? null : r.payer); }}>
+                            {r.payer === selectedPayer ? '收起' : '展开'}
+                          </Button>
+                        ),
+                      },
+                    ]}
+                  />
+                </Card>
+
+                {/* 选中组织的明细：区域维度 + 账户维度 */}
+                {currentGroup && (
+                  <Card
+                    size="small"
+                    style={{ marginTop: 12 }}
+                    title={<span><Tag color="blue" style={{ margin: 0 }}>{currentGroup.payer}</Tag> {currentGroup.accountCount} 个账户 · 未开通 {currentGroup.disabled} 项</span>}
+                    extra={
+                      <Space size={8}>
+                        <Checkbox checked={payerOnlyGaps} onChange={e => setPayerOnlyGaps(e.target.checked)}>
+                          <span style={{ fontSize: 12 }}>只看有缺口的区域</span>
+                        </Checkbox>
+                        <Button
+                          size="small"
+                          onClick={() => exportToCSV(
+                            currentGroup.accounts.flatMap(a =>
+                              a.disabled.map(region => ({
+                                组织: currentGroup.payer, 账户ID: a.accountId, 账户名: a.name,
+                                未开通区域: region, 区域名称: REGION_CN[region] || '',
+                              }))),
+                            `regions-gaps-${currentGroup.payer}`,
+                          )}
+                        >
+                          导出缺口
+                        </Button>
+                      </Space>
+                    }
+                  >
+                    <Tabs
+                      size="small"
+                      items={[
+                        {
+                          key: 'byRegion', label: '按区域',
+                          children: (
+                            <Table
+                              size="small"
+                              dataSource={currentGroupRegions}
+                              rowKey="region"
+                              pagination={false}
+                              locale={{ emptyText: payerOnlyGaps ? '该组织所有 opt-in 区域已全部开通 ✓' : '无数据' }}
+                              columns={[
+                                { title: '区域', dataIndex: 'region', width: 150, render: (r: string) => <code style={{ fontSize: 12 }}>{r}</code> },
+                                { title: '名称', dataIndex: 'region', key: 'cn', width: 160, render: (r: string) => <span style={{ fontSize: 12 }}>{REGION_CN[r] || '-'}</span> },
+                                { title: '已开通', dataIndex: 'enabled', width: 80, align: 'center' as const, render: (n: number) => <span style={{ color: '#389e0d' }}>{n}</span> },
+                                { title: '启用中', dataIndex: 'enabling', width: 80, align: 'center' as const, render: (n: number) => n > 0 ? <Tag color="blue" style={{ margin: 0 }}>{n}</Tag> : <span style={{ color: '#D1D5DB' }}>0</span> },
+                                { title: '未开通', dataIndex: 'disabled', width: 80, align: 'center' as const, render: (n: number) => n > 0 ? <Tag color="red" style={{ margin: 0 }}>{n}</Tag> : <span style={{ color: '#D1D5DB' }}>0</span> },
+                                {
+                                  title: '操作', key: 'act', width: 170,
+                                  render: (_: any, r: any) => r.disabled > 0 ? (
+                                    <Popconfirm
+                                      title={`为 ${currentGroup.payer} 下 ${r.disabled} 个账户启用 ${r.region}？`}
+                                      description="逐个账户串行下发，账户多时需要一些时间"
+                                      onConfirm={() => handleEnableForPayer(r.region, r.gapAccountIds)}
+                                      okText="启用" cancelText="取消"
+                                    >
+                                      <Button size="small" type="link" loading={enabling}>为整组织启用 ({r.disabled})</Button>
+                                    </Popconfirm>
+                                  ) : <span style={{ color: '#D1D5DB', fontSize: 12 }}>全部开通</span>,
+                                },
+                              ]}
+                            />
+                          ),
+                        },
+                        {
+                          key: 'byAccount', label: '按账户',
+                          children: (
+                            <Table
+                              size="small"
+                              dataSource={payerOnlyGaps ? currentGroup.accounts.filter(a => a.disabled.length > 0) : currentGroup.accounts}
+                              rowKey="accountId"
+                              pagination={{ pageSize: 15, size: 'small', showTotal: t => `共 ${t} 个账户` }}
+                              locale={{ emptyText: payerOnlyGaps ? '该组织所有账户的 opt-in 区域已全部开通 ✓' : '无数据' }}
+                              columns={[
+                                { title: '账户 ID', dataIndex: 'accountId', width: 130, render: (id: string) => <code style={{ fontSize: 12 }}>{id}</code> },
+                                { title: '名称', dataIndex: 'name', width: 170, ellipsis: true, render: (n: string) => <span style={{ fontSize: 12 }}>{n}</span> },
+                                {
+                                  title: '已开通', dataIndex: 'enabled', width: 80, align: 'center' as const,
+                                  sorter: (a: any, b: any) => a.enabled.length - b.enabled.length,
+                                  render: (v: string[]) => <span style={{ fontSize: 12, color: '#389e0d' }}>{v.length}</span>,
+                                },
+                                {
+                                  title: '未开通区域', dataIndex: 'disabled',
+                                  sorter: (a: any, b: any) => a.disabled.length - b.disabled.length,
+                                  defaultSortOrder: 'descend' as const,
+                                  render: (regions: string[], row: any) => regions.length === 0
+                                    ? <span style={{ color: '#52c41a', fontSize: 12 }}>全部开通 ✓</span>
+                                    : (
+                                      <Space size={[4, 4]} wrap>
+                                        {regions.map(r => (
+                                          <Popconfirm
+                                            key={r}
+                                            title={`为 ${row.accountId} 启用 ${r}？`}
+                                            onConfirm={() => handleSingleEnable(row.accountId, r)}
+                                            okText="启用" cancelText="取消"
+                                          >
+                                            <Tooltip title={`${REGION_CN[r] || r} — 点击启用`}>
+                                              <Tag color="red" style={{ margin: 0, cursor: 'pointer', fontSize: 11 }}>{r}</Tag>
+                                            </Tooltip>
+                                          </Popconfirm>
+                                        ))}
+                                      </Space>
+                                    ),
+                                },
+                              ]}
+                            />
+                          ),
+                        },
+                      ]}
+                    />
+                  </Card>
+                )}
+
+                {!currentGroup && (
+                  <p style={{ color: '#9CA3AF', padding: 16, textAlign: 'center', fontSize: 12 }}>
+                    点击上方任一组织展开明细，可看到该组织下哪些账户缺哪些区域，并支持为整个组织批量启用
+                  </p>
+                )}
               </>
             ),
           },
