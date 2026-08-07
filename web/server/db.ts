@@ -264,6 +264,36 @@ export const db = {
     return data.region_data || [];
   },
 
+  // 敏感权限客户账户 —— 已收窄平台权限并启用 ExternalId 的账户
+  getRestrictedAccounts(): any[] {
+    const data = readDB() as any;
+    return data.restricted_accounts || [];
+  },
+
+  upsertRestrictedAccounts(records: any[]) {
+    if (!records?.length) return;
+    const data = readDB() as any;
+    if (!data.restricted_accounts) data.restricted_accounts = [];
+    const idx = new Map<string, number>();
+    data.restricted_accounts.forEach((r: any, i: number) => idx.set(r.account_id, i));
+    for (const rec of records) {
+      const i = idx.get(rec.account_id);
+      if (i !== undefined) data.restricted_accounts[i] = { ...data.restricted_accounts[i], ...rec };
+      else {
+        idx.set(rec.account_id, data.restricted_accounts.length);
+        data.restricted_accounts.push(rec);
+      }
+    }
+    writeDB(data);
+  },
+
+  deleteRestrictedAccount(accountId: string) {
+    const data = readDB() as any;
+    if (!data.restricted_accounts) return;
+    data.restricted_accounts = data.restricted_accounts.filter((r: any) => r.account_id !== accountId);
+    writeDB(data);
+  },
+
   // 离场账户 —— 已不在任何被管理组织内的账户，保留轨迹用于追溯遗留数据
   getDepartedAccounts(): any[] {
     const data = readDB() as any;

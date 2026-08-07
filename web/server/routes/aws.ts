@@ -7,6 +7,10 @@ import { exportBillingInvoices, cleanupWorkDir, ExportTask } from '../billing-ex
 import { auditLogsToCsv, enrichAuditLog } from '../audit-presentation';
 import { syncAccountRoles, getAccountRolesSummary } from '../account-roles';
 import { getDepartedSummary, backfillDepartures } from '../account-lifecycle';
+import {
+  getRestrictedAccounts, markRestricted, unmarkRestricted,
+  getExternalId, RESTRICTED_UNAVAILABLE,
+} from '../restricted-accounts';
 import * as tagCompliance from '../tag-compliance';
 import fs from 'fs';
 import path from 'path';
@@ -301,6 +305,70 @@ awsRouter.post('/accounts/departed/backfill', requireStrictAdmin, async (_req: R
   try {
     const r = backfillDepartures();
     res.json({ success: true, data: { ...r, summary: getDepartedSummary() } });
+  } catch (e: any) { res.status(500).json({ error: e.message }); }
+});
+
+// 敏感权限客户账户 —— 列表（不返回 ExternalId 明文）
+awsRouter.get('/accounts/restricted', async (_req: Request, res: Response) => {
+  try {
+    const list = getRestrictedAccounts().map((r: any) => ({
+      account_id: r.account_id,
+      account_name: r.account_name,
+      payer: r.payer,
+      state: r.state,
+      marked_by: r.marked_by,
+      marked_at: r.marked_at,
+      applied_at: r.applied_at,
+      note: r.note,
+      last_error: r.last_error,
+      has_external_id: Boolean(r.external_id_enc),
+    }));
+    res.json({ success: true, data: { records: list, unavailable: RESTRICTED_UNAVAILABLE } });
+  } catch (e: any) { res.status(500).json({ error: e.message }); }
+});
+
+// 标记为敏感权限客户并执行收窄。耗时较长（逐账户等 CloudFormation）
+awsRouter.post('/accounts/restricted', requireStrictAdmin, async (req: Request, res: Response) => {
+  try {
+    const { accountIds, note } = req.body || {};
+    if (!Array.isArray(accountIds) || accountIds.length === 0
+      || accountIds.some((x: any) => typeof x !== 'string' || !/^\d{12}$/.test(x))) {
+      return res.status(400).json({ error: 'accountIds 必须是 12 位账户 ID 的数组' });
+    }
+    const user = (req as any).user;
+    const r = await markRestricted(accountIds, { markedBy: user?.username, note });
+    db.addAuditLog(user?.userId, 'ACCOUNT_RESTRICT',
+      `标记敏感权限客户账户: ${accountIds.join(', ')}`, user?.username, req.ip);
+    (res.locals as any).audited = true;
+    res.json({ success: true, data: r });
+  } catch (e: any) { res.status(500).json({ error: e.message }); }
+});
+
+// 取消标记，恢复默认权限
+awsRouter.delete('/accounts/restricted/:accountId', requireStrictAdmin, async (req: Request, res: Response) => {
+  try {
+    const accountId = String(req.params.accountId);
+    const r = await unmarkRestricted(accountId);
+    if (!r.ok) return res.status(400).json({ error: r.error });
+    const user = (req as any).user;
+    db.addAuditLog(user?.userId, 'ACCOUNT_UNRESTRICT',
+      `取消敏感权限标记并恢复默认权限: ${accountId}`, user?.username, req.ip);
+    (res.locals as any).audited = true;
+    res.json({ success: true });
+  } catch (e: any) { res.status(500).json({ error: e.message }); }
+});
+
+// 取某账户的 ExternalId 明文 —— 需交付给客户，仅严格 admin 且单独审计
+awsRouter.get('/accounts/restricted/:accountId/external-id', requireStrictAdmin, async (req: Request, res: Response) => {
+  try {
+    const accountId = String(req.params.accountId);
+    const v = getExternalId(accountId);
+    if (!v) return res.status(404).json({ error: '该账户未标记或无 ExternalId' });
+    const user = (req as any).user;
+    db.addAuditLog(user?.userId, 'ACCOUNT_EXTERNALID_VIEW',
+      `查看账户 ${accountId} 的 ExternalId`, user?.username, req.ip);
+    (res.locals as any).audited = true;
+    res.json({ success: true, data: { accountId, externalId: v } });
   } catch (e: any) { res.status(500).json({ error: e.message }); }
 });
 

@@ -12,6 +12,7 @@ import { LambdaClient, ListFunctionsCommand, DeleteFunctionCommand } from '@aws-
 import path from 'path';
 import fs from 'fs';
 import { db } from './db';
+import { getExternalId } from './restricted-accounts';
 
 // Load shared config
 const CONFIG_PATH = path.join(__dirname, '../../config.json');
@@ -64,10 +65,13 @@ async function tryAssumeSupportRole(accountId: string) {
   try {
     const roleArn = `arn:aws:iam::${accountId}:role/${SUPPORT_ROLE_NAME}`;
     const sts = new STSClient({ region: DEFAULT_REGION, credentials: BASE_CREDENTIALS });
+    // 敏感权限客户的账户，其角色信任策略要求 sts:ExternalId，不带会被拒
+    const externalId = getExternalId(accountId);
     const resp = await sts.send(new AssumeRoleCommand({
       RoleArn: roleArn,
       RoleSessionName: `web-${accountId}`,
       DurationSeconds: 3600,
+      ...(externalId ? { ExternalId: externalId } : {}),
     }));
     return {
       accessKeyId: resp.Credentials!.AccessKeyId!,
@@ -967,10 +971,13 @@ export async function deleteResources(
 async function assumeRoleStrict(accountId: string, roleName: string, sessionPrefix: string) {
   const roleArn = `arn:aws:iam::${accountId}:role/${roleName}`;
   const sts = new STSClient({ region: DEFAULT_REGION, credentials: BASE_CREDENTIALS });
+  // 受限账户的 support-quota 要求 ExternalId；admin 类角色不受此约束，带上也无害
+  const externalId = roleName === SUPPORT_ROLE_NAME ? getExternalId(accountId) : undefined;
   const resp = await sts.send(new AssumeRoleCommand({
     RoleArn: roleArn,
     RoleSessionName: `${sessionPrefix}-${accountId}`.slice(0, 64),
     DurationSeconds: 3600,
+    ...(externalId ? { ExternalId: externalId } : {}),
   }));
   return {
     accessKeyId: resp.Credentials!.AccessKeyId!,

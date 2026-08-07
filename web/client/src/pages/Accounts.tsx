@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Card, Table, Tag, Button, Space, message, Input, Spin, Descriptions, Tabs, Statistic, Row, Col, Badge, Dropdown, Switch, Tooltip, Modal } from 'antd';
+import { Card, Table, Tag, Button, Space, message, Input, Spin, Descriptions, Tabs, Statistic, Row, Col, Badge, Dropdown, Switch, Tooltip, Modal, Select, Popconfirm } from 'antd';
 import { ReloadOutlined, SearchOutlined, DollarOutlined, SafetyOutlined, CheckCircleOutlined, CloseCircleOutlined, LeftOutlined, LoginOutlined, DownOutlined } from '@ant-design/icons';
 import { api } from '../api';
 import { exportToCSV } from '../utils/export';
@@ -55,6 +55,13 @@ const AccountsPage: React.FC = () => {
   // 已移出组织的账户
   const [departed, setDeparted] = useState<any[]>([]);
   const [departedOpen, setDepartedOpen] = useState(false);
+  // 敏感权限客户账户（已收窄平台权限）
+  const [restricted, setRestricted] = useState<any[]>([]);
+  const [restrictedUnavailable, setRestrictedUnavailable] = useState<string[]>([]);
+  const [restrictOpen, setRestrictOpen] = useState(false);
+  const [restrictSubmitting, setRestrictSubmitting] = useState(false);
+  const [restrictTargets, setRestrictTargets] = useState<string[]>([]);
+  const [restrictNote, setRestrictNote] = useState('');
 
   const fetchAccounts = async () => {
     setLoading(true);
@@ -66,7 +73,68 @@ const AccountsPage: React.FC = () => {
     finally { setLoading(false); }
   };
 
-  useEffect(() => { fetchAccounts(); loadDeparted(); }, []);
+  useEffect(() => { fetchAccounts(); loadDeparted(); loadRestricted(); }, []);
+
+  const loadRestricted = async () => {
+    try {
+      const res = await api.getRestrictedAccounts();
+      if (res.success) {
+        setRestricted(res.data?.records || []);
+        setRestrictedUnavailable(res.data?.unavailable || []);
+      }
+    } catch { /* 附加信息，失败不影响账户列表 */ }
+  };
+
+  const restrictedMap = React.useMemo(() => {
+    const m: Record<string, any> = {};
+    restricted.forEach(r => { m[r.account_id] = r; });
+    return m;
+  }, [restricted]);
+
+  const submitRestrict = async () => {
+    if (restrictTargets.length === 0) { message.warning('请填写至少一个账户 ID'); return; }
+    setRestrictSubmitting(true);
+    const hide = message.loading('正在收窄权限并部署受限角色，需等 CloudFormation 完成…', 0);
+    try {
+      const res = await api.markRestrictedAccounts(restrictTargets, restrictNote || undefined);
+      hide();
+      if (res.success) {
+        const r = res.data.results || [];
+        const ok = r.filter((x: any) => x.ok).length;
+        const bad = r.filter((x: any) => !x.ok);
+        if (bad.length === 0) message.success(`${ok} 个账户已完成收窄`);
+        else message.warning(`${ok} 成功，${bad.length} 失败：${bad[0].error || ''}`);
+        setRestrictTargets([]);
+        setRestrictNote('');
+        await loadRestricted();
+      } else message.error(res.error || '操作失败');
+    } catch (e: any) {
+      hide();
+      message.error(e.message || '操作失败');
+    } finally { setRestrictSubmitting(false); }
+  };
+
+  const showExternalId = async (accountId: string) => {
+    try {
+      const res = await api.getAccountExternalId(accountId);
+      if (res.success) {
+        Modal.info({
+          title: `ExternalId — ${accountId}`,
+          width: 560,
+          content: (
+            <div>
+              <p style={{ fontSize: 12, color: 'rgba(0,0,0,0.55)' }}>
+                需通过带外渠道交付客户，不要写入文档或邮件正文。查看此值已记入审计日志。
+              </p>
+              <code style={{ fontSize: 13, wordBreak: 'break-all', display: 'block', background: '#f5f5f5', padding: 8, borderRadius: 4 }}>
+                {res.data.externalId}
+              </code>
+            </div>
+          ),
+        });
+      } else message.error(res.error || '获取失败');
+    } catch (e: any) { message.error(e.message); }
+  };
 
   // 已移出组织的账户 —— 与在职账户字段不同（有移出时间/原属组织），单独一份数据
   const loadDeparted = async () => {
@@ -254,6 +322,121 @@ const AccountsPage: React.FC = () => {
       </div>
     );
   }
+
+  // 敏感权限客户账户面板
+  const renderRestrictModal = () => (
+    <Modal
+      title="敏感权限客户账户"
+      open={restrictOpen}
+      onCancel={() => setRestrictOpen(false)}
+      footer={null}
+      width={880}
+    >
+      <p style={{ color: 'rgba(0,0,0,0.55)', fontSize: 12, marginTop: 0 }}>
+        勾选后对该账户执行三件事：把它从组织级 StackSet 摘除（保留原角色，过程不断连）、
+        部署仅含 <code>servicequotas</code> / <code>account:GetRegionOptStatus</code> / <code>sts:GetCallerIdentity</code> 的受限角色、
+        信任策略加 <code>sts:ExternalId</code> 条件。**只影响该账户**，同组织其他账户不变。
+      </p>
+      <div style={{ background: '#fff7e6', border: '1px solid #ffd591', borderRadius: 6, padding: '8px 12px', marginBottom: 12, fontSize: 12, color: '#d46b08' }}>
+        收窄后该账户以下功能将不可用：{restrictedUnavailable.join('；') || '—'}。
+        配额查询与提额、区域管理不受影响。
+      </div>
+
+      {isAdmin && (
+        <div style={{ marginBottom: 12 }}>
+          <div style={{ fontSize: 12, color: 'rgba(0,0,0,0.65)', marginBottom: 4 }}>要标记的账户 ID（可多选，12 位数字）</div>
+          <Select
+            mode="tags"
+            style={{ width: '100%' }}
+            placeholder="粘贴或输入账户 ID，回车确认"
+            value={restrictTargets}
+            onChange={(v: string[]) => setRestrictTargets(v.filter(x => /^\d{12}$/.test(x)))}
+            tokenSeparators={[',', ' ', '\n']}
+            options={accounts
+              .filter(a => !a._isPayer && !restrictedMap[a.Id])
+              .slice(0, 300)
+              .map(a => ({ label: `${a.Id} — ${a.Name} (${a._payer})`, value: a.Id }))}
+          />
+          <Input
+            style={{ marginTop: 8 }}
+            size="small"
+            placeholder="备注：客户要求出处，例如「客户安全审计要求，2026-08」"
+            value={restrictNote}
+            onChange={e => setRestrictNote(e.target.value)}
+          />
+          <div style={{ marginTop: 8, display: 'flex', justifyContent: 'flex-end' }}>
+            <Popconfirm
+              title={`确定对 ${restrictTargets.length} 个账户收窄权限？`}
+              description="会实际修改客户账户内的 IAM 角色，请确认已与客户对齐"
+              onConfirm={submitRestrict}
+              okText="执行" cancelText="取消"
+              disabled={restrictTargets.length === 0}
+            >
+              <Button type="primary" size="small" loading={restrictSubmitting} disabled={restrictTargets.length === 0}>
+                收窄这 {restrictTargets.length} 个账户
+              </Button>
+            </Popconfirm>
+          </div>
+        </div>
+      )}
+
+      <Table
+        size="small"
+        rowKey="account_id"
+        dataSource={restricted}
+        pagination={restricted.length > 10 ? { pageSize: 10, size: 'small' } : false}
+        locale={{ emptyText: '暂无敏感权限客户账户' }}
+        columns={[
+          {
+            title: '账户', key: 'a', width: 200,
+            render: (_: any, x: any) => (
+              <div>
+                <div style={{ fontWeight: 600, fontSize: 12 }}>{x.account_name || '-'}</div>
+                <code style={{ fontSize: 11, color: '#8a94a6' }}>{x.account_id}</code>
+              </div>
+            ),
+          },
+          { title: '组织', dataIndex: 'payer', width: 160, render: (p: string) => p ? <Tag style={{ margin: 0, fontSize: 11 }}>{p}</Tag> : '-' },
+          {
+            title: '状态', dataIndex: 'state', width: 100, align: 'center' as const,
+            render: (s: string, x: any) => s === 'applied'
+              ? <Tag color="green" style={{ margin: 0, fontSize: 11 }}>已收窄</Tag>
+              : s === 'pending'
+                ? <Tag color="blue" style={{ margin: 0, fontSize: 11 }}>处理中</Tag>
+                : <Tooltip title={x.last_error || ''}><Tag color="red" style={{ margin: 0, fontSize: 11 }}>失败</Tag></Tooltip>,
+          },
+          {
+            title: '生效时间', dataIndex: 'applied_at', width: 150,
+            render: (t: string) => <span style={{ fontSize: 12 }}>{t ? new Date(t).toLocaleString('zh-CN') : '-'}</span>,
+          },
+          { title: '标记人', dataIndex: 'marked_by', width: 90, render: (v: string) => <span style={{ fontSize: 12 }}>{v || '-'}</span> },
+          { title: '备注', dataIndex: 'note', render: (v: string) => <span style={{ fontSize: 11, color: 'rgba(0,0,0,0.45)' }}>{v || '-'}</span> },
+          {
+            title: '操作', key: 'act', width: 150,
+            render: (_: any, x: any) => isAdmin ? (
+              <Space size={4}>
+                <Button type="link" size="small" onClick={() => showExternalId(x.account_id)}>ExternalId</Button>
+                <Popconfirm
+                  title="恢复默认权限？"
+                  description="会先装回默认角色再删受限角色，客户侧权限将回到收窄前"
+                  onConfirm={async () => {
+                    const hide = message.loading('正在恢复…', 0);
+                    const r = await api.unmarkRestrictedAccount(x.account_id).catch((e: any) => ({ success: false, error: e.message }));
+                    hide();
+                    if (r.success) { message.success('已恢复默认权限'); loadRestricted(); }
+                    else message.error(r.error || '恢复失败');
+                  }}
+                  okText="恢复" cancelText="取消"
+                >
+                  <Button type="link" size="small" danger>取消标记</Button>
+                </Popconfirm>
+              </Space>
+            ) : null,
+          },
+        ]}
+      />
+    </Modal>
+  );
 
   // 已移出组织的账户面板
   const renderDepartedModal = () => {
@@ -559,6 +742,11 @@ const AccountsPage: React.FC = () => {
             <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
               <span style={{ fontWeight: 600, color: '#1a2233', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{a.Name}</span>
               {a._isPayer && <Tag color="gold" style={{ margin: 0, fontSize: 10, lineHeight: '16px', padding: '0 5px', flexShrink: 0 }}>Payer</Tag>}
+              {restrictedMap[a.Id] && (
+                <Tooltip title={`敏感权限客户账户：平台权限已收窄并启用 ExternalId。不可用功能：${restrictedUnavailable.join('；')}`}>
+                  <Tag color="purple" style={{ margin: 0, fontSize: 10, lineHeight: '16px', padding: '0 5px', flexShrink: 0 }}>已收窄</Tag>
+                </Tooltip>
+              )}
               {renderRoleFlag(a.Id)}
             </div>
             <div style={{ fontSize: 12, color: '#8a94a6', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={a.Email}>{a.Email}</div>
@@ -594,6 +782,15 @@ const AccountsPage: React.FC = () => {
             <span className="stat-chip">总账户 <strong>{accounts.length}</strong></span>
             <span className="stat-chip success">Active <strong>{accounts.filter(a => a.Status === 'ACTIVE').length}</strong></span>
             <span className="stat-chip">组织 <strong>{[...new Set(accounts.map(a => a._payer))].length}</strong></span>
+            <Tooltip title="按客户安全要求收窄了平台权限的账户，点击管理">
+              <span
+                className="stat-chip"
+                style={{ cursor: 'pointer', ...(restricted.length ? { color: '#531dab', background: '#f9f0ff', borderColor: '#d3adf7' } : {}) }}
+                onClick={() => setRestrictOpen(true)}
+              >
+                已收窄 <strong>{restricted.length}</strong>
+              </span>
+            </Tooltip>
             {departed.filter(d => !d.rejoined_at).length > 0 && (
               <Tooltip title="已移出组织、不在上方列表中的账户，点击查看">
                 <span
@@ -731,6 +928,7 @@ const AccountsPage: React.FC = () => {
 
       {renderRoleModal()}
       {renderDepartedModal()}
+      {renderRestrictModal()}
     </div>
   );
 };

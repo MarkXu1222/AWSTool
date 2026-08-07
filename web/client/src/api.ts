@@ -56,6 +56,13 @@ export const api = {
   },
   refreshAccounts: () => request('/aws/accounts/refresh', { method: 'POST' }),
   getAccountDetail: (id: string) => request(`/aws/accounts/${id}/detail`),
+  // 敏感权限客户账户：收窄平台权限 + ExternalId
+  getRestrictedAccounts: () => request('/aws/accounts/restricted'),
+  markRestrictedAccounts: (accountIds: string[], note?: string) =>
+    request('/aws/accounts/restricted', { method: 'POST', body: JSON.stringify({ accountIds, note }) }),
+  unmarkRestrictedAccount: (accountId: string) =>
+    request(`/aws/accounts/restricted/${accountId}`, { method: 'DELETE' }),
+  getAccountExternalId: (accountId: string) => request(`/aws/accounts/restricted/${accountId}/external-id`),
   // 离场账户：已移出组织的账户记录
   getDepartedAccounts: () => request('/aws/accounts/departed'),
   backfillDepartedAccounts: () => request('/aws/accounts/departed/backfill', { method: 'POST' }),

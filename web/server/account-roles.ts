@@ -23,6 +23,7 @@ import {
 } from '@aws-sdk/client-cloudformation';
 import { db } from './db';
 import { notifyAccountRoleIssues } from './notify';
+import { isRestricted } from './restricted-accounts';
 
 // ===== 配置 =====
 let CONFIG: any = {};
@@ -258,6 +259,9 @@ export async function syncAccountRoles(opts: SyncOptions = {}): Promise<SyncResu
     for (const p of needFix) {
       const payer = p.acct._payer;
       if (!payer) continue;
+      // 敏感权限客户账户的角色由独立受限 StackSet 管理，
+      // 走组织级 StackSet 补齐会把宽权限盖回去，直接跳过
+      if (isRestricted(p.acct.Id)) continue;
       const rec = knownMap.get(p.acct.Id);
       // 超过尝试上限的不再补（全量复检会重置机会）
       if (!opts.full && (rec?.attempts || 0) >= MAX_ATTEMPTS) continue;

@@ -45,6 +45,23 @@ const PAYERS: { name: string; roleArn: string }[] = CONFIG.payers || [];
 const cv = (c: any) => ({ accessKeyId: c.AccessKeyId, secretAccessKey: c.SecretAccessKey, sessionToken: c.SessionToken });
 const log = (...a: any[]) => console.log(`[${new Date().toISOString().slice(11, 19)}]`, ...a);
 
+/**
+ * 读取敏感权限客户账户名单（直接读 db.json，避免脚本依赖服务端模块）。
+ * 这些账户已按客户要求收窄权限并启用 ExternalId，绝不能被组织级模板覆盖。
+ */
+function readRestrictedAccountIds(payerName: string): string[] {
+  try {
+    const dbPath = path.join(__dirname, '../../data/db.json');
+    if (!fs.existsSync(dbPath)) return [];
+    const data = JSON.parse(fs.readFileSync(dbPath, 'utf-8'));
+    return (data.restricted_accounts || [])
+      .filter((r: any) => r.state !== 'failed' && r.payer === payerName)
+      .map((r: any) => r.account_id);
+  } catch {
+    return [];
+  }
+}
+
 // 信任主体只保留当前平台身份。历史身份 134103550877 不再写入新建的角色。
 const TRUST_PRINCIPAL = 'arn:aws:iam::509399618054:user/mark';
 
@@ -212,11 +229,20 @@ async function handle(payer: { name: string; roleArn: string }, kind: string, dr
       action = `AUTO-ENABLED(${await waitOp(cf, tpl.stackSetName, up.OperationId!)})`;
     }
 
+    // 敏感权限客户账户必须排除：它们的角色由独立受限 StackSet 管理，
+    // 用 DIFFERENCE 过滤，否则整 OU 下发会把宽权限盖回去，直接违反对客户的承诺。
+    const excluded = readRestrictedAccountIds(payer.name);
+    if (excluded.length) {
+      log(`${payer.name}: 排除 ${excluded.length} 个受限账户 → ${excluded.join(', ')}`);
+    }
+
     let deploy = 'SKIP';
     try {
       const op = await cf.send(new CreateStackInstancesCommand({
         StackSetName: tpl.stackSetName,
-        DeploymentTargets: { OrganizationalUnitIds: [rootId] },
+        DeploymentTargets: excluded.length
+          ? { OrganizationalUnitIds: [rootId], Accounts: excluded, AccountFilterType: 'DIFFERENCE' }
+          : { OrganizationalUnitIds: [rootId] },
         Regions: [REGION],
         OperationPreferences: { FailureTolerancePercentage: 25, MaxConcurrentPercentage: 50, RegionConcurrencyType: 'PARALLEL' },
         CallAs: 'SELF',
