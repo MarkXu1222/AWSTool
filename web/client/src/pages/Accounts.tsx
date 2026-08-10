@@ -225,9 +225,35 @@ const AccountsPage: React.FC = () => {
     onClick: ({ key }: { key: string }) => openConsole(accountId, key as 'support' | 'admin'),
   });
 
-  // 仅 SK1/SK2 等配置了 consoleAdminPayers 的组织(account._consoleDual)显示双选项下拉；
-  // 其余账户保持单个「控制台」按钮，走 auto 回退链。
+  // payer 管理账户的菜单：它上面没有 support-quota（StackSet 不覆盖管理账户），
+  // 入口统一走 role/tool。有根用户权限者默认进 Admin；
+  // 无权限者进只读会话（后端用 STS session policy 把 role/tool 压到 ReadOnlyAccess）。
+  const payerConsoleMenu = (accountId: string) => ({
+    items: [
+      ...(canRoot ? [{ key: 'admin', icon: <LoginOutlined />, label: 'Admin 控制台（完整权限）', danger: true }] : []),
+      { key: 'support', icon: <SafetyOutlined />, label: '只读控制台（会话限制为 ReadOnly）' },
+    ],
+    onClick: ({ key }: { key: string }) => openConsole(accountId, key as 'support' | 'admin'),
+  });
+
+  // payer 管理账户：默认进 Admin（有权限时），因为它不存在 support-quota 角色
+  // 成员账户：_consoleDual 的组织给双选项，其余走 auto 回退链
   const ConsoleButton: React.FC<{ account: any; style?: React.CSSProperties }> = ({ account, style }) => {
+    if (account?._isPayer) {
+      return (
+        <Dropdown.Button
+          type="primary"
+          size="small"
+          loading={consoleLoading}
+          style={style}
+          icon={<DownOutlined style={{ fontSize: 10 }} />}
+          menu={payerConsoleMenu(account.Id)}
+          onClick={() => openConsole(account.Id, canRoot ? 'admin' : 'support')}
+        >
+          <LoginOutlined /> {canRoot ? 'Admin 控制台' : '只读控制台'}
+        </Dropdown.Button>
+      );
+    }
     if (!account?._consoleDual) {
       return (
         <Button type="primary" size="small" icon={<LoginOutlined />} loading={consoleLoading} style={style}

@@ -1045,6 +1045,32 @@ async function assumeAdminViaOAAR(accountId: string) {
 }
 
 /**
+ * 取 payer 管理账户的控制台凭证。
+ *
+ * payer 上没有 support-quota（StackSet 不覆盖管理账户，也不单独为其创建），
+ * 所以只能用 role/tool。但 role/tool 是 AdministratorAccess，直接拿来当「只读」入口
+ * 名不副实，因此 mode='readonly' 时附加 ReadOnlyAccess 作为 session policy：
+ * 最终会话权限 = 角色权限 ∩ session policy = 只读。
+ * 这是 STS 层面的硬限制，不是界面层的约束，非特权用户拿到的会话确实无法写。
+ */
+async function assumePayerForConsole(payerRoleArn: string, mode: 'admin' | 'readonly') {
+  const sts = new STSClient({ region: DEFAULT_REGION, credentials: BASE_CREDENTIALS });
+  const resp = await sts.send(new AssumeRoleCommand({
+    RoleArn: payerRoleArn,
+    RoleSessionName: mode === 'admin' ? 'console-payer-admin' : 'console-payer-readonly',
+    DurationSeconds: 3600,
+    ...(mode === 'readonly'
+      ? { PolicyArns: [{ arn: 'arn:aws:iam::aws:policy/ReadOnlyAccess' }] }
+      : {}),
+  }));
+  return {
+    accessKeyId: resp.Credentials!.AccessKeyId!,
+    secretAccessKey: resp.Credentials!.SecretAccessKey!,
+    sessionToken: resp.Credentials!.SessionToken!,
+  };
+}
+
+/**
  * Generate a federated AWS Console sign-in URL for a child account.
  * Lets the user open the account's console (e.g. a Support case) without manual login.
  * Uses STS federation — free, no Business plan required.
@@ -1060,9 +1086,19 @@ export async function getConsoleSigninUrl(
   destinationUrl: string,
   access: 'auto' | 'support' | 'admin' = 'auto',
 ) {
+  // payer 管理账户上不存在 support-quota：SERVICE_MANAGED StackSet 不覆盖管理账户，
+  // 我们也不为 payer 单独创建该角色。它的入口统一走 role/tool，
+  // 只读需求用 STS session policy 把会话权限压到 ReadOnlyAccess（硬限制，非仅界面约束）。
+  const selfPayer = PAYERS.find(p => {
+    const m = /arn:aws:iam::(\d+):role\//.exec(p.roleArn);
+    return m && m[1] === accountId;
+  });
+
   // Get temporary credentials for the target account
   let creds;
-  if (access === 'admin') {
+  if (selfPayer) {
+    creds = await assumePayerForConsole(selfPayer.roleArn, access === 'admin' ? 'admin' : 'readonly');
+  } else if (access === 'admin') {
     // Admin：默认 OrganizationAccountAccessRole
     creds = await assumeAdminViaOAAR(accountId);
   } else if (access === 'support') {
