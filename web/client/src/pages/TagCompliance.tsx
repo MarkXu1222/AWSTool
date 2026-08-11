@@ -219,7 +219,7 @@ const AddOrgModal: React.FC<{
     };
     if (tagValue.trim()) entry.tag_value = tagValue.trim();
     const excl = excludeAccounts.split(',').map(s => s.trim()).filter(Boolean);
-    if (excl.length) entry.exclude_accounts = excl;
+    if (excl.length) entry.exclude_accounts = excl.join(',');
     onAdd(entry);
     handleClose();
   };

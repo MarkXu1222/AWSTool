@@ -107,21 +107,37 @@ export async function getOrgsConfig(): Promise<any[]> {
 
 export async function putOrgsConfig(orgs: any[]): Promise<{ count: number }> {
   if (!Array.isArray(orgs)) throw new Error('orgs 配置必须是一个数组');
-  // 基础字段校验，避免写入一份会让扫描器崩掉的配置
-  for (const [i, o] of orgs.entries()) {
-    if (!o || typeof o !== 'object') throw new Error(`第 ${i + 1} 项不是对象`);
-    for (const f of ['org_id', 'search_role_arn', 'view_arn']) {
-      if (!o[f]) throw new Error(`第 ${i + 1} 项缺少必填字段 ${f}`);
+
+  const normalized = orgs.map((org, index) => {
+    if (!org || typeof org !== 'object') throw new Error(`第 ${index + 1} 项不是对象`);
+    for (const field of ['org_id', 'search_role_arn', 'view_arn']) {
+      if (!org[field]) throw new Error(`第 ${index + 1} 项缺少必填字段 ${field}`);
     }
-  }
+
+    // 中央 search Lambda 的配置契约是逗号分隔字符串。兼容页面旧版本
+    // 已产生的数组输入，但落盘前必须统一为字符串，否则扫描器调用 split() 会失败。
+    const rawExclude = org.exclude_accounts;
+    if (rawExclude === undefined || rawExclude === null || rawExclude === '') return { ...org };
+    if (!Array.isArray(rawExclude) && typeof rawExclude !== 'string') {
+      throw new Error(`第 ${index + 1} 项 exclude_accounts 必须是字符串或账户 ID 数组`);
+    }
+    const accountIds = (Array.isArray(rawExclude) ? rawExclude : rawExclude.split(','))
+      .map((value: any) => String(value).trim())
+      .filter(Boolean);
+    const invalid = accountIds.find((accountId: string) => !/^\d{12}$/.test(accountId));
+    if (invalid) throw new Error(`第 ${index + 1} 项包含不合法的排除账户 ID: ${invalid}`);
+
+    return { ...org, exclude_accounts: [...new Set(accountIds)].join(',') };
+  });
+
   const client = await s3Client();
   await client.send(new PutObjectCommand({
     Bucket: TC.reportsBucket,
     Key: ORG_CONFIG_KEY,
-    Body: JSON.stringify(orgs, null, 2),
+    Body: JSON.stringify(normalized, null, 2),
     ContentType: 'application/json',
   }));
-  return { count: orgs.length };
+  return { count: normalized.length };
 }
 
 // ---- 触发扫描 / 执行状态 ----
