@@ -211,13 +211,14 @@ const AddOrgModal: React.FC<{
   const handleAdd = () => {
     if (!orgId.trim()) { message.warning('缺少 org_id'); return; }
     if (existingOrgIds.includes(orgId.trim())) { message.warning('该 org_id 已存在于配置中'); return; }
+    if (!tagValue.trim()) { message.warning('tag_value 为必填项，请填写该组织的 map-migrated 标签值'); return; }
     if (!searchRoleArn.trim() || !viewArn.trim()) { message.warning('缺少 search_role_arn / view_arn，请完成前置条件后重新检测或手动填写'); return; }
     const entry: any = {
       org_id: orgId.trim(),
       search_role_arn: searchRoleArn.trim(),
       view_arn: viewArn.trim(),
+      tag_value: tagValue.trim(),
     };
-    if (tagValue.trim()) entry.tag_value = tagValue.trim();
     const excl = excludeAccounts.split(',').map(s => s.trim()).filter(Boolean);
     if (excl.length) entry.exclude_accounts = excl.join(',');
     onAdd(entry);
@@ -393,7 +394,7 @@ const AddOrgModal: React.FC<{
       <Form layout="vertical" size="small">
         <Row gutter={12}>
           <Col span={12}><Form.Item label="org_id" required><Input value={orgId} onChange={e => setOrgId(e.target.value)} placeholder="o-xxxxxxxxxx" /></Form.Item></Col>
-          <Col span={12}><Form.Item label="tag_value（该组织的 map-migrated 值）"><Input value={tagValue} onChange={e => setTagValue(e.target.value)} placeholder="如 migXXXXXX，留空则用扫描器默认" /></Form.Item></Col>
+          <Col span={12}><Form.Item label="tag_value（该组织的 map-migrated 值）" required><Input value={tagValue} onChange={e => setTagValue(e.target.value)} placeholder="必填，如 migXXXXXX" /></Form.Item></Col>
         </Row>
         <Form.Item label="search_role_arn" required><Input value={searchRoleArn} onChange={e => setSearchRoleArn(e.target.value)} placeholder={`arn:aws:iam::${payer || '<payer>'}:role/resource-explorer-search-role`} /></Form.Item>
         <Form.Item label="view_arn" required><Input value={viewArn} onChange={e => setViewArn(e.target.value)} placeholder="arn:aws:resource-explorer-2:us-east-1:<payer>:view/OrgView/..." /></Form.Item>
