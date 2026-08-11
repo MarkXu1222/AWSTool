@@ -3,7 +3,7 @@
  */
 import fs from 'fs';
 import path from 'path';
-import { createCipheriv, createDecipheriv, randomBytes, createHash } from 'crypto';
+import { createCipheriv, createDecipheriv, randomBytes, createHash, randomUUID } from 'crypto';
 
 const DB_PATH = process.env.DB_PATH || path.join(__dirname, '../../data/db.json');
 
@@ -38,6 +38,52 @@ export function decryptField(data: string): string {
   }
 }
 
+export type TagOnboardingStatus = 'queued' | 'running' | 'waiting_retry' | 'completed' | 'failed';
+export type TagOnboardingPhase =
+  | 'provision_org'
+  | 'wait_management_index'
+  | 'deploy_re_indexes'
+  | 'wait_stacksets'
+  | 'upsert_org_config'
+  | 'verify'
+  | 'done';
+export type TagOnboardingStepStatus = 'pending' | 'running' | 'waiting' | 'completed' | 'failed';
+
+export interface TagOnboardingStep {
+  key: TagOnboardingPhase;
+  label: string;
+  status: TagOnboardingStepStatus;
+  detail?: string;
+  updatedAt?: string;
+}
+
+export interface TagOnboardingJob {
+  id: string;
+  payerAccountId: string;
+  tagValue: string;
+  status: TagOnboardingStatus;
+  phase: TagOnboardingPhase;
+  progress: number;
+  steps: TagOnboardingStep[];
+  artifacts: {
+    orgId?: string;
+    rootOuId?: string;
+    searchRoleArn?: string;
+    viewArn?: string;
+    aggregatorRegion?: string;
+    localRegions?: string[];
+    memberEnabledRegions?: Record<string, string[]>;
+  };
+  attempts: Partial<Record<TagOnboardingPhase, number>>;
+  phaseStartedAt: string;
+  nextRunAt?: string;
+  lastError?: string;
+  requestedBy?: string;
+  createdAt: string;
+  updatedAt: string;
+  completedAt?: string;
+}
+
 interface DBSchema {
   users: any[];
   quota_requests: any[];
@@ -45,7 +91,13 @@ interface DBSchema {
   region_data: any[];
   accounts_cache: any[];
   accounts_cache_time: string;
+  tag_onboarding_jobs: TagOnboardingJob[];
+  [key: string]: any;
 }
+
+const ARRAY_FIELDS = [
+  'users', 'quota_requests', 'audit_log', 'region_data', 'accounts_cache', 'tag_onboarding_jobs',
+] as const;
 
 // In-memory cache to avoid reading file on every request
 let cache: DBSchema | null = null;
@@ -56,34 +108,195 @@ function ensureDir() {
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 }
 
+function emptyDB(): DBSchema {
+  return {
+    users: [], quota_requests: [], audit_log: [], region_data: [], accounts_cache: [],
+    accounts_cache_time: '', tag_onboarding_jobs: [],
+  };
+}
+
+function normalizeDB(parsed: unknown): DBSchema {
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error('数据库根节点必须是 JSON 对象');
+  }
+  const data = parsed as DBSchema;
+  for (const field of ARRAY_FIELDS) {
+    if (data[field] === undefined) data[field] = [];
+    if (!Array.isArray(data[field])) throw new Error(`数据库字段 ${field} 必须是数组`);
+  }
+  if (data.accounts_cache_time === undefined) data.accounts_cache_time = '';
+  if (typeof data.accounts_cache_time !== 'string') throw new Error('数据库字段 accounts_cache_time 必须是字符串');
+  return data;
+}
+
 function readDB(): DBSchema {
   // Return cache if written within last 5 seconds (same process)
   if (cache && Date.now() - cacheTime < 5000) return cache;
 
   ensureDir();
   if (!fs.existsSync(DB_PATH)) {
-    cache = { users: [], quota_requests: [], audit_log: [], region_data: [], accounts_cache: [], accounts_cache_time: '' };
+    if (process.env.ALLOW_DB_INITIALIZATION !== 'true') {
+      throw new Error(`数据库文件不存在，已拒绝自动创建空库: ${DB_PATH}；首次安装请显式设置 ALLOW_DB_INITIALIZATION=true`);
+    }
+    cache = emptyDB();
     cacheTime = Date.now();
     return cache;
   }
   try {
-    cache = JSON.parse(fs.readFileSync(DB_PATH, 'utf-8'));
-    if (!cache!.accounts_cache) cache!.accounts_cache = [];
-    if (!cache!.accounts_cache_time) cache!.accounts_cache_time = '';
-    cacheTime = Date.now();
-    return cache!;
-  } catch {
-    cache = { users: [], quota_requests: [], audit_log: [], region_data: [], accounts_cache: [], accounts_cache_time: '' };
+    cache = normalizeDB(JSON.parse(fs.readFileSync(DB_PATH, 'utf-8')));
     cacheTime = Date.now();
     return cache;
+  } catch (error: any) {
+    cache = null;
+    cacheTime = 0;
+    const message = error instanceof SyntaxError ? `JSON 解析失败: ${error.message}` : error.message;
+    console.error(`[DB] ${DB_PATH} 无法读取，已停止写入以保护现有数据: ${message}`);
+    throw new Error(`数据库文件损坏或格式异常，已拒绝继续操作: ${message}`);
   }
 }
 
 function writeDB(data: DBSchema) {
   ensureDir();
-  cache = data;
-  cacheTime = Date.now();
-  fs.writeFileSync(DB_PATH, JSON.stringify(data, null, 2), 'utf-8');
+  const serialized = JSON.stringify(data, null, 2);
+  const tempPath = `${DB_PATH}.${process.pid}.${Date.now()}.${randomBytes(4).toString('hex')}.tmp`;
+  let fd: number | null = null;
+  try {
+    fd = fs.openSync(tempPath, 'wx', 0o600);
+    fs.writeFileSync(fd, serialized, 'utf-8');
+    fs.fsyncSync(fd);
+    fs.closeSync(fd);
+    fd = null;
+    fs.renameSync(tempPath, DB_PATH);
+    // rename 的原子性只保证不会出现半截 JSON；目录 fsync 进一步保证断电后目录项落盘。
+    try {
+      const dirFd = fs.openSync(path.dirname(DB_PATH), 'r');
+      try { fs.fsyncSync(dirFd); } finally { fs.closeSync(dirFd); }
+    } catch (error: any) {
+      console.warn(`[DB] 目录 fsync 不可用，已降级为原子 rename: ${error.message}`);
+    }
+    cache = data;
+    cacheTime = Date.now();
+  } catch (error) {
+    try { if (fd !== null) fs.closeSync(fd); } catch { /* 保留原始错误 */ }
+    try { if (fs.existsSync(tempPath)) fs.unlinkSync(tempPath); } catch { /* 保留原始错误 */ }
+    throw error;
+  }
+}
+
+function cloneJob(job: TagOnboardingJob): TagOnboardingJob {
+  return JSON.parse(JSON.stringify(job));
+}
+
+export class TagOnboardingConflictError extends Error {
+  code = 'TAG_ONBOARDING_CONFLICT';
+  constructor(public readonly activeJob: TagOnboardingJob) {
+    super(`payer ${activeJob.payerAccountId} 已有使用其它 tag_value 的接入任务`);
+  }
+}
+
+export function createOrReuseTagOnboardingJob(input: {
+  payerAccountId: string;
+  tagValue: string;
+  steps: TagOnboardingStep[];
+  requestedBy?: string;
+}): { job: TagOnboardingJob; reused: boolean } {
+  const data = readDB();
+  const active = data.tag_onboarding_jobs.find(job =>
+    job.payerAccountId === input.payerAccountId
+    && ['queued', 'running', 'waiting_retry'].includes(job.status));
+  if (active) {
+    if (active.tagValue !== input.tagValue) throw new TagOnboardingConflictError(cloneJob(active));
+    return { job: cloneJob(active), reused: true };
+  }
+
+  // 只复用仍在执行的任务。已完成记录仅用于审计；再次提交会新建任务并重新验证环境漂移。
+  const now = new Date().toISOString();
+  const job: TagOnboardingJob = {
+    id: randomUUID(),
+    payerAccountId: input.payerAccountId,
+    tagValue: input.tagValue,
+    status: 'queued',
+    phase: 'provision_org',
+    progress: 0,
+    steps: input.steps,
+    artifacts: {},
+    attempts: {},
+    phaseStartedAt: now,
+    nextRunAt: now,
+    requestedBy: input.requestedBy,
+    createdAt: now,
+    updatedAt: now,
+  };
+  data.tag_onboarding_jobs.push(job);
+  // 避免任务历史无限增长；每个 payer 保留的最近记录已足够审计与排障。
+  if (data.tag_onboarding_jobs.length > 500) {
+    data.tag_onboarding_jobs = data.tag_onboarding_jobs
+      .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
+      .slice(-500);
+  }
+  writeDB(data);
+  return { job: cloneJob(job), reused: false };
+}
+
+export function getTagOnboardingJob(jobId: string): TagOnboardingJob | null {
+  const job = readDB().tag_onboarding_jobs.find(item => item.id === jobId);
+  return job ? cloneJob(job) : null;
+}
+
+export function getLatestTagOnboardingJob(payerAccountId: string): TagOnboardingJob | null {
+  const job = [...readDB().tag_onboarding_jobs]
+    .filter(item => item.payerAccountId === payerAccountId)
+    .sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0];
+  return job ? cloneJob(job) : null;
+}
+
+export function listActiveTagOnboardingJobs(): TagOnboardingJob[] {
+  return readDB().tag_onboarding_jobs
+    .filter(job => ['queued', 'running', 'waiting_retry'].includes(job.status))
+    .map(cloneJob);
+}
+
+export function updateTagOnboardingJob(jobId: string, updates: Partial<TagOnboardingJob>): TagOnboardingJob {
+  const data = readDB();
+  const job = data.tag_onboarding_jobs.find(item => item.id === jobId);
+  if (!job) throw new Error(`MAP 接入任务不存在: ${jobId}`);
+  const artifacts = updates.artifacts ? { ...job.artifacts, ...updates.artifacts } : job.artifacts;
+  Object.assign(job, updates, { artifacts, id: job.id, payerAccountId: job.payerAccountId, updatedAt: new Date().toISOString() });
+  writeDB(data);
+  return cloneJob(job);
+}
+
+export function retryTagOnboardingJob(jobId: string): TagOnboardingJob {
+  const current = getTagOnboardingJob(jobId);
+  if (!current) throw new Error('MAP 接入任务不存在');
+  if (current.status !== 'failed') throw new Error('只有失败的 MAP 接入任务可以重试');
+  const now = new Date().toISOString();
+  const steps = current.steps.map(step => step.key === current.phase
+    ? { ...step, status: 'pending' as const, detail: '已请求重试', updatedAt: now }
+    : step);
+  return updateTagOnboardingJob(jobId, {
+    status: 'queued', steps, lastError: undefined, nextRunAt: now,
+    phaseStartedAt: now,
+    attempts: { ...current.attempts, [current.phase]: 0 },
+  });
+}
+
+export function recoverTagOnboardingJobs(): number {
+  const data = readDB();
+  let recovered = 0;
+  const now = new Date().toISOString();
+  for (const job of data.tag_onboarding_jobs) {
+    if (job.status !== 'running') continue;
+    job.status = 'queued';
+    job.nextRunAt = now;
+    job.updatedAt = now;
+    job.steps = job.steps.map(step => step.key === job.phase && step.status === 'running'
+      ? { ...step, status: 'pending', detail: '服务重启后自动恢复', updatedAt: now }
+      : step);
+    recovered++;
+  }
+  if (recovered > 0) writeDB(data);
+  return recovered;
 }
 
 // === Auto-backup: keep a daily rotating copy of the DB ===

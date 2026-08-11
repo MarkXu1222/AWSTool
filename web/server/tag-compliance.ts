@@ -11,6 +11,7 @@
  * 打标本身仍由中央系统用最小权限的 auto-tagger-role 执行，安全模型不变。
  */
 import { STSClient, AssumeRoleCommand } from '@aws-sdk/client-sts';
+import { EC2Client, DescribeRegionsCommand } from '@aws-sdk/client-ec2';
 import { SFNClient, StartExecutionCommand, ListExecutionsCommand } from '@aws-sdk/client-sfn';
 import { S3Client, GetObjectCommand, PutObjectCommand, ListObjectsV2Command } from '@aws-sdk/client-s3';
 import { SNSClient, ListSubscriptionsByTopicCommand, SubscribeCommand, UnsubscribeCommand } from '@aws-sdk/client-sns';
@@ -21,7 +22,8 @@ import {
 } from '@aws-sdk/client-resource-explorer-2';
 import {
   CloudFormationClient, DescribeStackSetCommand, CreateStackSetCommand,
-  CreateStackInstancesCommand, ListStackInstancesCommand, ListStackSetOperationsCommand,
+  CreateStackInstancesCommand, UpdateStackInstancesCommand, ListStackInstancesCommand, ListStackSetOperationsCommand,
+  ListStackSetAutoDeploymentTargetsCommand,
 } from '@aws-sdk/client-cloudformation';
 import {
   OrganizationsClient, DescribeOrganizationCommand, ListRootsCommand, ListAccountsCommand,
@@ -30,6 +32,7 @@ import {
 import path from 'path';
 import fs from 'fs';
 import { db } from './db';
+import { assumeToAccount } from './aws-service';
 
 const CONFIG_PATH = path.join(__dirname, '../../config.json');
 let config: any = {};
@@ -92,23 +95,18 @@ async function bodyToString(body: any): Promise<string> {
 }
 
 // ---- 组织配置 orgs.json ----
-export async function getOrgsConfig(): Promise<any[]> {
-  const client = await s3Client();
-  try {
-    const resp = await client.send(new GetObjectCommand({ Bucket: TC.reportsBucket, Key: ORG_CONFIG_KEY }));
-    const text = await bodyToString(resp.Body);
-    const parsed = JSON.parse(text);
-    return Array.isArray(parsed) ? parsed : [];
-  } catch (e: any) {
-    if (e.name === 'NoSuchKey' || e.Code === 'NoSuchKey') return [];
-    throw e;
-  }
+let orgConfigWriteQueue: Promise<void> = Promise.resolve();
+
+function withOrgConfigWriteLock<T>(work: () => Promise<T>): Promise<T> {
+  const operation = orgConfigWriteQueue.then(work, work);
+  orgConfigWriteQueue = operation.then(() => undefined, () => undefined);
+  return operation;
 }
 
-export async function putOrgsConfig(orgs: any[]): Promise<{ count: number }> {
+function normalizeOrgsConfig(orgs: any[]): any[] {
   if (!Array.isArray(orgs)) throw new Error('orgs 配置必须是一个数组');
 
-  const normalized = orgs.map((org, index) => {
+  return orgs.map((org, index) => {
     if (!org || typeof org !== 'object') throw new Error(`第 ${index + 1} 项不是对象`);
     for (const field of ['org_id', 'search_role_arn', 'view_arn']) {
       if (!org[field]) throw new Error(`第 ${index + 1} 项缺少必填字段 ${field}`);
@@ -132,15 +130,135 @@ export async function putOrgsConfig(orgs: any[]): Promise<{ count: number }> {
 
     return { ...normalizedOrg, exclude_accounts: [...new Set(accountIds)].join(',') };
   });
+}
 
+export interface OrgsConfigSnapshot {
+  orgs: any[];
+  etag: string | null;
+  versionId?: string;
+  exists: boolean;
+}
+
+export class OrgConfigConflictError extends Error {
+  code = 'ORG_CONFIG_CONFLICT';
+  constructor(message = '组织配置已被其他任务更新，请重新加载后再保存') { super(message); }
+}
+
+function isS3PreconditionFailed(error: any): boolean {
+  return error?.name === 'PreconditionFailed'
+    || error?.Code === 'PreconditionFailed'
+    || error?.$metadata?.httpStatusCode === 412;
+}
+
+async function writeOrgsConfig(
+  orgs: any[],
+  condition: { etag: string | null },
+): Promise<{ count: number; etag: string | null; versionId?: string }> {
   const client = await s3Client();
-  await client.send(new PutObjectCommand({
-    Bucket: TC.reportsBucket,
-    Key: ORG_CONFIG_KEY,
-    Body: JSON.stringify(normalized, null, 2),
-    ContentType: 'application/json',
-  }));
-  return { count: normalized.length };
+  try {
+    const response = await client.send(new PutObjectCommand({
+      Bucket: TC.reportsBucket,
+      Key: ORG_CONFIG_KEY,
+      Body: JSON.stringify(orgs, null, 2),
+      ContentType: 'application/json',
+      ...(condition.etag ? { IfMatch: condition.etag } : { IfNoneMatch: '*' }),
+    }));
+    return { count: orgs.length, etag: response.ETag || null, versionId: response.VersionId };
+  } catch (error: any) {
+    if (isS3PreconditionFailed(error)) throw new OrgConfigConflictError();
+    throw error;
+  }
+}
+
+export async function getOrgsConfigSnapshot(): Promise<OrgsConfigSnapshot> {
+  const client = await s3Client();
+  try {
+    const response = await client.send(new GetObjectCommand({ Bucket: TC.reportsBucket, Key: ORG_CONFIG_KEY }));
+    const text = await bodyToString(response.Body);
+    const parsed = JSON.parse(text);
+    if (!Array.isArray(parsed)) {
+      throw new Error('S3 组织配置格式损坏：config/orgs.json 根节点必须是数组，已拒绝覆盖');
+    }
+    return { orgs: parsed, etag: response.ETag || null, versionId: response.VersionId, exists: true };
+  } catch (error: any) {
+    if (error.name === 'NoSuchKey' || error.Code === 'NoSuchKey') {
+      return { orgs: [], etag: null, exists: false };
+    }
+    throw error;
+  }
+}
+
+export async function getOrgsConfig(): Promise<any[]> {
+  return (await getOrgsConfigSnapshot()).orgs;
+}
+
+export async function putOrgsConfig(
+  orgs: any[],
+  expectedEtag: string | null,
+): Promise<{ count: number; etag: string | null; versionId?: string }> {
+  return withOrgConfigWriteLock(async () => writeOrgsConfig(normalizeOrgsConfig(orgs), { etag: expectedEtag }));
+}
+
+export interface OrgConfigUpsertInput {
+  payerAccountId: string;
+  orgId: string;
+  searchRoleArn: string;
+  viewArn: string;
+  tagValue: string;
+}
+
+/**
+ * 按组织 ID（或 payer ARN）原子地更新单个组织配置，避免后台任务与页面全量保存互相覆盖。
+ * 新组织默认排除 payer 管理账户；更新已有组织时保留其现有排除列表。
+ */
+export async function upsertOrgConfig(input: OrgConfigUpsertInput): Promise<{ count: number; created: boolean; org: any; etag: string | null }> {
+  if (!/^\d{12}$/.test(input.payerAccountId)) throw new Error('payerAccountId 必须是 12 位账户 ID');
+  if (!/^o-[a-z0-9]{10,32}$/.test(input.orgId)) throw new Error(`组织 ID 不合法: ${input.orgId}`);
+  const tagValue = String(input.tagValue || '').trim();
+  if (!tagValue) throw new Error('tag_value 必填');
+
+  return withOrgConfigWriteLock(async () => {
+    for (let attempt = 1; attempt <= 5; attempt++) {
+      const snapshot = await getOrgsConfigSnapshot();
+      const current = snapshot.orgs;
+      const payerArnPattern = new RegExp(`^arn:aws:iam::${input.payerAccountId}:role/`);
+      const index = current.findIndex(org =>
+        org?.org_id === input.orgId || payerArnPattern.test(String(org?.search_role_arn || '')));
+      const created = index < 0;
+      const existing = created ? {} : current[index];
+      const candidate: any = {
+        ...existing,
+        org_id: input.orgId,
+        search_role_arn: input.searchRoleArn,
+        view_arn: input.viewArn,
+        tag_value: tagValue,
+      };
+      if (created && !candidate.exclude_accounts) candidate.exclude_accounts = input.payerAccountId;
+
+      const next = [...current];
+      if (created) next.push(candidate);
+      else next[index] = candidate;
+      const normalized = normalizeOrgsConfig(next);
+      try {
+        await writeOrgsConfig(normalized, { etag: snapshot.etag });
+      } catch (error) {
+        if (error instanceof OrgConfigConflictError && attempt < 5) continue;
+        throw error;
+      }
+
+      // S3 PUT 成功后回读并核对关键字段，任务只有在最终配置可见时才算完成。
+      const verifiedSnapshot = await getOrgsConfigSnapshot();
+      const verified = verifiedSnapshot.orgs.find(org => org?.org_id === input.orgId);
+      if (!verified
+        || verified.search_role_arn !== input.searchRoleArn
+        || verified.view_arn !== input.viewArn
+        || verified.tag_value !== tagValue) {
+        throw new Error('S3 组织配置写入后回读校验失败');
+      }
+      return { count: normalized.length, created, org: verified, etag: verifiedSnapshot.etag };
+    }
+    throw new OrgConfigConflictError('组织配置持续发生并发更新，后台合并重试已达上限');
+  });
 }
 
 // ---- 触发扫描 / 执行状态 ----
@@ -861,9 +979,11 @@ export async function deployReIndexes(
   payerAccountId: string,
   aggregatorRegion = 'us-east-1',
   localRegions: string[] = [],
+  payerLocalRegions: string[] = localRegions,
 ): Promise<ReIndexDeployResult> {
   if (!REGION_RE.test(aggregatorRegion)) throw new Error(`聚合区域不合法: ${aggregatorRegion}`);
   const locals = [...new Set(localRegions.filter(r => REGION_RE.test(r) && r !== aggregatorRegion))];
+  const managementLocals = [...new Set(payerLocalRegions.filter(r => REGION_RE.test(r) && r !== aggregatorRegion))];
 
   const creds = await assumePayer(payerAccountId);
   if (!creds) throw new Error('该 payer 不在平台配置（config.payers）中，无法自动部署索引');
@@ -968,8 +1088,9 @@ export async function deployReIndexes(
   }
 
   // ---- payer 管理账户自身的本地索引（SERVICE_MANAGED 不覆盖管理账户）----
-  if (locals.length > 0) {
-    const results = await Promise.allSettled(locals.map(async (region) => {
+  // 只在 payer 自身已启用的区域创建；成员独有的 opt-in 区域仅由 StackSet 覆盖。
+  if (managementLocals.length > 0) {
+    const results = await Promise.allSettled(managementLocals.map(async (region) => {
       const re = new ResourceExplorer2Client({ region, credentials: creds });
       try {
         await re.send(new GetIndexCommand({}));
@@ -1136,4 +1257,347 @@ export async function removeNotifySubscription(subscriptionArn: string): Promise
   const creds = await getConsoleCreds();
   const sns = new SNSClient({ region: TC.region || 'us-east-1', credentials: creds });
   await sns.send(new UnsubscribeCommand({ SubscriptionArn: arn }));
+}
+
+// ============================================================
+// 全自动接入 runner 使用的区域发现与精确 StackSet 覆盖检查
+// ============================================================
+
+/** 只返回 payer 管理账户已启用或无需 opt-in 的商业区域。 */
+export async function getEnabledRegions(payerAccountId: string): Promise<string[]> {
+  const creds = await assumePayer(payerAccountId);
+  if (!creds) throw new Error('该 payer 不在平台配置（config.payers）中，无法查询可用区域');
+  const ec2 = new EC2Client({ region: 'us-east-1', credentials: creds });
+  const response = await ec2.send(new DescribeRegionsCommand({ AllRegions: true }));
+  return (response.Regions || [])
+    .filter(item => item.RegionName && (item.OptInStatus === 'opt-in-not-required' || item.OptInStatus === 'opted-in'))
+    .map(item => item.RegionName!)
+    .sort();
+}
+
+/**
+ * 查询每个 ACTIVE 成员账户自己的区域启用状态。可选区域是账户级设置，不能用 payer 的状态代替成员。
+ * 结果会持久化进 onboarding job，后续轮询不重复扫描全部成员。
+ */
+export async function getMemberEnabledRegions(payerAccountId: string): Promise<Record<string, string[]>> {
+  const payerCreds = await assumePayer(payerAccountId);
+  if (!payerCreds) throw new Error('该 payer 不在平台配置（config.payers）中，无法查询成员区域');
+  const org = new OrganizationsClient({ region: 'us-east-1', credentials: payerCreds });
+  const memberAccountIds: string[] = [];
+  let token: string | undefined;
+  do {
+    const page = await org.send(new ListAccountsCommand({ NextToken: token }));
+    for (const account of page.Accounts || []) {
+      const active = account.State ? account.State === 'ACTIVE' : account.Status === 'ACTIVE';
+      if (active && account.Id && account.Id !== payerAccountId) memberAccountIds.push(account.Id);
+    }
+    token = page.NextToken;
+  } while (token);
+
+  const result: Record<string, string[]> = {};
+  const batchSize = 5;
+  for (let index = 0; index < memberAccountIds.length; index += batchSize) {
+    const batch = memberAccountIds.slice(index, index + batchSize);
+    const resolved = await Promise.all(batch.map(async accountId => {
+      const credentials = await assumeToAccount(accountId);
+      const ec2 = new EC2Client({ region: 'us-east-1', credentials });
+      const response = await ec2.send(new DescribeRegionsCommand({ AllRegions: true }));
+      const regions = (response.Regions || [])
+        .filter(item => item.RegionName && (item.OptInStatus === 'opt-in-not-required' || item.OptInStatus === 'opted-in'))
+        .map(item => item.RegionName!)
+        .sort();
+      return { accountId, regions };
+    }));
+    for (const item of resolved) result[item.accountId] = item.regions;
+  }
+  return result;
+}
+
+export interface StackSetTargetStatus {
+  accountId: string;
+  region: string;
+  status?: string;
+}
+
+export interface OnboardingStackSetStatus extends ReIndexStackSetStatus {
+  requiredRegions: string[];
+  expectedInstanceCount: number;
+  missingInstanceCount: number;
+  pendingInstanceCount: number;
+  failedInstanceCount: number;
+  missingTargets: StackSetTargetStatus[];
+  failedTargets: StackSetTargetStatus[];
+  permissionModel?: string;
+  autoDeploymentEnabled: boolean;
+  rootTargeted: boolean;
+  configurationValid: boolean;
+  complete: boolean;
+}
+
+export interface OnboardingStackSetsStatus {
+  payerAccountId: string;
+  memberAccountCount: number;
+  complete: boolean;
+  failed: boolean;
+  stackSets: OnboardingStackSetStatus[];
+}
+
+/**
+ * 对照组织内 ACTIVE 成员账户 × 目标区域逐项检查三个 StackSet。
+ * 范围外的历史账户/旧区域只保留在 statusCounts 诊断信息里，不参与完成判定。
+ */
+export async function getOnboardingStackSetStatus(
+  payerAccountId: string,
+  aggregatorRegion: string,
+  localRegions: string[],
+  memberEnabledRegions: Record<string, string[]>,
+): Promise<OnboardingStackSetsStatus> {
+  const creds = await assumePayer(payerAccountId);
+  if (!creds) throw new Error('该 payer 不在平台配置（config.payers）中');
+  const cfn = new CloudFormationClient({ region: aggregatorRegion, credentials: creds });
+  const org = new OrganizationsClient({ region: aggregatorRegion, credentials: creds });
+
+  const roots = await org.send(new ListRootsCommand({}));
+  const rootOuId = roots.Roots?.[0]?.Id;
+  if (!rootOuId) throw new Error('未取到组织根 OU');
+
+  const memberAccounts: string[] = [];
+  let accountToken: string | undefined;
+  do {
+    const page = await org.send(new ListAccountsCommand({ NextToken: accountToken }));
+    for (const account of page.Accounts || []) {
+      const active = account.State ? account.State === 'ACTIVE' : account.Status === 'ACTIVE';
+      if (active && account.Id && account.Id !== payerAccountId) memberAccounts.push(account.Id);
+    }
+    accountToken = page.NextToken;
+  } while (accountToken);
+
+  const definitions = [
+    { name: AUTO_TAGGER_STACKSET_NAME, requiredRegions: ['us-east-1'] },
+    { name: RE_AGGREGATOR_STACKSET, requiredRegions: [aggregatorRegion] },
+    { name: RE_LOCAL_STACKSET, requiredRegions: [...new Set(localRegions)].sort() },
+  ];
+  const stackSets: OnboardingStackSetStatus[] = [];
+
+  for (const definition of definitions) {
+    const expectedKeys = new Set<string>();
+    for (const accountId of memberAccounts) {
+      const enabledForAccount = memberEnabledRegions[accountId];
+      if (!Array.isArray(enabledForAccount)) {
+        throw new Error(`缺少成员账户 ${accountId} 的区域启用状态，无法安全判断 StackSet 覆盖`);
+      }
+      const enabled = new Set(enabledForAccount);
+      for (const region of definition.requiredRegions) {
+        if (enabled.has(region)) expectedKeys.add(`${accountId}:${region}`);
+      }
+    }
+    const entry: OnboardingStackSetStatus = {
+      name: definition.name,
+      exists: false,
+      instanceCount: 0,
+      regions: [],
+      statusCounts: {},
+      requiredRegions: definition.requiredRegions,
+      expectedInstanceCount: expectedKeys.size,
+      missingInstanceCount: expectedKeys.size,
+      pendingInstanceCount: 0,
+      failedInstanceCount: 0,
+      missingTargets: [],
+      failedTargets: [],
+      autoDeploymentEnabled: false,
+      rootTargeted: false,
+      configurationValid: false,
+      complete: definition.requiredRegions.length === 0,
+    };
+
+    try {
+      const described = await cfn.send(new DescribeStackSetCommand({ StackSetName: definition.name, CallAs: 'SELF' }));
+      entry.exists = true;
+      entry.permissionModel = described.StackSet?.PermissionModel;
+      entry.autoDeploymentEnabled = described.StackSet?.AutoDeployment?.Enabled === true;
+    } catch (error: any) {
+      if (error.name === 'StackSetNotFoundException') {
+        stackSets.push(entry);
+        continue;
+      }
+      throw error;
+    }
+
+    const autoTargets: Array<{ ou?: string; regions: string[] }> = [];
+    let targetToken: string | undefined;
+    do {
+      const page = await cfn.send(new ListStackSetAutoDeploymentTargetsCommand({
+        StackSetName: definition.name,
+        CallAs: 'SELF',
+        NextToken: targetToken,
+      }));
+      for (const summary of page.Summaries || []) {
+        autoTargets.push({ ou: summary.OrganizationalUnitId, regions: summary.Regions || [] });
+      }
+      targetToken = page.NextToken;
+    } while (targetToken);
+    entry.rootTargeted = definition.requiredRegions.length === 0 || definition.requiredRegions.every(region =>
+      autoTargets.some(target => target.ou === rootOuId && target.regions.includes(region)));
+    entry.configurationValid = entry.permissionModel === 'SERVICE_MANAGED'
+      && entry.autoDeploymentEnabled
+      && entry.rootTargeted;
+
+    const targetStatuses = new Map<string, string>();
+    const regions = new Set<string>();
+    let instanceToken: string | undefined;
+    do {
+      const page = await cfn.send(new ListStackInstancesCommand({
+        StackSetName: definition.name,
+        CallAs: 'SELF',
+        NextToken: instanceToken,
+      }));
+      for (const summary of page.Summaries || []) {
+        entry.instanceCount++;
+        if (summary.Region) regions.add(summary.Region);
+        const status = summary.StackInstanceStatus?.DetailedStatus || summary.Status || 'UNKNOWN';
+        entry.statusCounts[status] = (entry.statusCounts[status] || 0) + 1;
+        if (summary.Account && summary.Region) targetStatuses.set(`${summary.Account}:${summary.Region}`, status);
+      }
+      instanceToken = page.NextToken;
+    } while (instanceToken);
+    entry.regions = [...regions].sort();
+
+    for (const key of expectedKeys) {
+      const separator = key.indexOf(':');
+      const accountId = key.slice(0, separator);
+      const region = key.slice(separator + 1);
+      const status = targetStatuses.get(key);
+      if (!status) {
+        entry.missingTargets.push({ accountId, region });
+      } else if (['CURRENT', 'SUCCEEDED'].includes(status)) {
+        // 仅真正完成的 ACTIVE 目标计为成功。
+      } else if (['FAILED', 'CANCELLED', 'INOPERABLE', 'SKIPPED_SUSPENDED_ACCOUNT'].includes(status)) {
+        entry.failedTargets.push({ accountId, region, status });
+      } else {
+        entry.pendingInstanceCount++;
+      }
+    }
+    entry.missingInstanceCount = entry.missingTargets.length;
+    entry.failedInstanceCount = entry.failedTargets.length;
+
+    try {
+      const operations = await cfn.send(new ListStackSetOperationsCommand({
+        StackSetName: definition.name,
+        CallAs: 'SELF',
+        MaxResults: 1,
+      }));
+      const operation = operations.Summaries?.[0];
+      if (operation) {
+        entry.latestOperation = {
+          operationId: operation.OperationId,
+          action: operation.Action,
+          status: operation.Status,
+          timestamp: operation.CreationTimestamp,
+        };
+      }
+    } catch { /* 操作列表不可用时仍以实例覆盖为准 */ }
+
+    const operationStatus = entry.latestOperation?.status || '';
+    const operationActive = ['RUNNING', 'QUEUED', 'STOPPING'].includes(operationStatus);
+    entry.complete = definition.requiredRegions.length === 0 || (
+      entry.exists
+      && entry.configurationValid
+      && entry.missingInstanceCount === 0
+      && entry.pendingInstanceCount === 0
+      && entry.failedInstanceCount === 0
+      && !operationActive
+    );
+    stackSets.push(entry);
+  }
+
+  return {
+    payerAccountId,
+    memberAccountCount: memberAccounts.length,
+    complete: stackSets.every(item => item.complete),
+    failed: stackSets.some(item => item.requiredRegions.length > 0 && (
+      !item.exists
+      || (item.exists && (!item.autoDeploymentEnabled || item.permissionModel !== 'SERVICE_MANAGED'))
+    )),
+    stackSets,
+  };
+}
+
+export interface StackSetRepairResult {
+  submitted: boolean;
+  stackSetName?: string;
+  operationId?: string;
+  detail: string;
+}
+
+/** 每次最多提交一个修复操作，后续轮询会继续处理剩余区域/账户，避免同一 StackSet 操作冲突。 */
+export async function repairOnboardingStackSetCoverage(
+  payerAccountId: string,
+  aggregatorRegion: string,
+  localRegions: string[],
+  memberEnabledRegions: Record<string, string[]>,
+  inspected?: OnboardingStackSetsStatus,
+): Promise<StackSetRepairResult> {
+  const status = inspected || await getOnboardingStackSetStatus(
+    payerAccountId, aggregatorRegion, localRegions, memberEnabledRegions,
+  );
+  if (status.complete) return { submitted: false, detail: 'StackSet 覆盖已完整' };
+  const creds = await assumePayer(payerAccountId);
+  if (!creds) throw new Error('该 payer 不在平台配置（config.payers）中');
+  const cfn = new CloudFormationClient({ region: aggregatorRegion, credentials: creds });
+  const org = new OrganizationsClient({ region: aggregatorRegion, credentials: creds });
+  const roots = await org.send(new ListRootsCommand({}));
+  const rootOuId = roots.Roots?.[0]?.Id;
+  if (!rootOuId) throw new Error('未取到组织根 OU');
+
+  for (const stackSet of status.stackSets) {
+    if (stackSet.complete || stackSet.requiredRegions.length === 0) continue;
+    if (!stackSet.exists) throw new Error(`StackSet ${stackSet.name} 不存在，需返回部署阶段重建`);
+    if (stackSet.permissionModel !== 'SERVICE_MANAGED' || !stackSet.autoDeploymentEnabled) {
+      throw new Error(`StackSet ${stackSet.name} 未启用 SERVICE_MANAGED AutoDeployment`);
+    }
+    if (['RUNNING', 'QUEUED', 'STOPPING'].includes(stackSet.latestOperation?.status || '')) continue;
+
+    if (!stackSet.rootTargeted) {
+      const response = await cfn.send(new CreateStackInstancesCommand({
+        StackSetName: stackSet.name,
+        DeploymentTargets: { OrganizationalUnitIds: [rootOuId], AccountFilterType: 'NONE' },
+        Regions: stackSet.requiredRegions,
+        OperationPreferences: { FailureTolerancePercentage: 100, MaxConcurrentPercentage: 100 },
+        CallAs: 'SELF',
+      }));
+      return {
+        submitted: true,
+        stackSetName: stackSet.name,
+        operationId: response.OperationId,
+        detail: `${stackSet.name} 已重新绑定根 OU 和 ${stackSet.requiredRegions.length} 个目标区域`,
+      };
+    }
+
+    const repairTargets = stackSet.failedTargets.length > 0 ? stackSet.failedTargets : stackSet.missingTargets;
+    if (repairTargets.length === 0) continue;
+    const region = repairTargets[0].region;
+    const accounts = repairTargets.filter(target => target.region === region).slice(0, 50).map(target => target.accountId);
+    const deploymentTargets = {
+      OrganizationalUnitIds: [rootOuId],
+      Accounts: accounts,
+      AccountFilterType: 'INTERSECTION' as const,
+    };
+    const common = {
+      StackSetName: stackSet.name,
+      DeploymentTargets: deploymentTargets,
+      Regions: [region],
+      OperationPreferences: { FailureTolerancePercentage: 100, MaxConcurrentPercentage: 100 },
+      CallAs: 'SELF' as const,
+    };
+    const response = stackSet.failedTargets.length > 0
+      ? await cfn.send(new UpdateStackInstancesCommand(common))
+      : await cfn.send(new CreateStackInstancesCommand(common));
+    return {
+      submitted: true,
+      stackSetName: stackSet.name,
+      operationId: response.OperationId,
+      detail: `${stackSet.name} 已提交 ${accounts.length} 个账户在 ${region} 的${stackSet.failedTargets.length > 0 ? '失败重试' : '缺口补建'}`,
+    };
+  }
+  return { submitted: false, detail: '已有 StackSet 操作进行中，等待下一轮检查' };
 }

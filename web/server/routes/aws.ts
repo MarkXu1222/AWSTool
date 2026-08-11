@@ -1,6 +1,6 @@
 import { Router, Request, Response } from 'express';
 import * as aws from '../aws-service';
-import { db } from '../db';
+import { db, TagOnboardingConflictError } from '../db';
 import { generateQuotaDoc, getCompanyForAccount } from '../doc-generator';
 import { COMPANY_PROFILES } from '../doc-templates';
 import { exportBillingInvoices, cleanupWorkDir, ExportTask } from '../billing-exporter';
@@ -12,6 +12,7 @@ import {
   getExternalId, RESTRICTED_UNAVAILABLE,
 } from '../restricted-accounts';
 import * as tagCompliance from '../tag-compliance';
+import * as tagOnboarding from '../tag-onboarding';
 import fs from 'fs';
 import path from 'path';
 
@@ -46,23 +47,100 @@ awsRouter.get('/tag-compliance/status', async (_req: Request, res: Response) => 
   res.json({ success: true, data: { configured: tagCompliance.isConfigured() } });
 });
 
-// 读取组织配置 orgs.json
-awsRouter.get('/tag-compliance/config', async (_req: Request, res: Response) => {
+// 全自动接入：提交后由持久化 runner 完成资源、索引、S3 配置和最终校验。
+awsRouter.post('/tag-compliance/onboarding', requireAdmin, async (req: Request, res: Response) => {
   try {
-    res.json({ success: true, data: await tagCompliance.getOrgsConfig() });
+    const user = (req as any).user;
+    const result = tagOnboarding.submitTagOnboarding({
+      payerAccountId: req.body?.payerAccountId,
+      tagValue: req.body?.tagValue,
+      requestedBy: user?.username,
+    });
+    try {
+      db.addAuditLog(
+        user?.userId,
+        'TAG_ONBOARDING_SUBMIT',
+        `${result.reused ? '复用' : '创建'} MAP 一键接入任务 ${result.job.id}，payer ${result.job.payerAccountId}`,
+        user?.username,
+        req.ip,
+      );
+      (res.locals as any).audited = true;
+    } catch (auditError: any) {
+      // 任务已经持久化并可能开始执行，审计失败不能把已接受的任务伪装成 400。
+      console.error(`[MAP Onboarding] 任务 ${result.job.id} 审计写入失败:`, auditError.message);
+    }
+    res.status(result.reused ? 200 : 202).json({ success: true, data: result });
+  } catch (e: any) {
+    if (e instanceof TagOnboardingConflictError || e?.code === 'TAG_ONBOARDING_CONFLICT') {
+      return res.status(409).json({ error: e.message, data: { activeJob: e.activeJob } });
+    }
+    const badRequest = /12 位|tag_value|不能超过/.test(String(e.message));
+    res.status(badRequest ? 400 : 500).json({ error: e.message });
+  }
+});
+
+// 查询某 payer 最近一次任务，供刷新页面或重开弹窗时恢复进度。
+awsRouter.get('/tag-compliance/onboarding', async (req: Request, res: Response) => {
+  try {
+    const payer = String(req.query.payer || '').trim();
+    if (!/^\d{12}$/.test(payer)) return res.status(400).json({ error: '请提供 12 位 payer 账户 ID' });
+    res.json({ success: true, data: tagOnboarding.getLatestTagOnboardingJob(payer) });
   } catch (e: any) { res.status(500).json({ error: e.message }); }
 });
 
-// 写入组织配置 orgs.json（viewer 拦截 + 校验 + 审计）
+awsRouter.get('/tag-compliance/onboarding/:jobId', async (req: Request, res: Response) => {
+  try {
+    const job = tagOnboarding.getTagOnboardingJob(String(req.params.jobId || ''));
+    if (!job) return res.status(404).json({ error: 'MAP 接入任务不存在' });
+    res.json({ success: true, data: job });
+  } catch (e: any) { res.status(500).json({ error: e.message }); }
+});
+
+awsRouter.post('/tag-compliance/onboarding/:jobId/retry', requireAdmin, async (req: Request, res: Response) => {
+  try {
+    const job = tagOnboarding.retryOnboarding(String(req.params.jobId || ''));
+    const user = (req as any).user;
+    try {
+      db.addAuditLog(user?.userId, 'TAG_ONBOARDING_RETRY', `重试 MAP 一键接入任务 ${job.id}，payer ${job.payerAccountId}`, user?.username, req.ip);
+      (res.locals as any).audited = true;
+    } catch (auditError: any) {
+      console.error(`[MAP Onboarding] 重试任务 ${job.id} 审计写入失败:`, auditError.message);
+    }
+    res.status(202).json({ success: true, data: job });
+  } catch (e: any) {
+    if (String(e.message).includes('不存在')) return res.status(404).json({ error: e.message });
+    if (String(e.message).includes('只有失败')) return res.status(409).json({ error: e.message });
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// 读取组织配置 orgs.json（同时返回 ETag，手工保存必须做条件写）
+awsRouter.get('/tag-compliance/config', async (_req: Request, res: Response) => {
+  try {
+    const snapshot = await tagCompliance.getOrgsConfigSnapshot();
+    res.json({ success: true, data: snapshot.orgs, meta: { etag: snapshot.etag, versionId: snapshot.versionId } });
+  } catch (e: any) { res.status(500).json({ error: e.message }); }
+});
+
+// 写入组织配置 orgs.json（viewer 拦截 + ETag 防陈旧覆盖 + 校验 + 审计）
 awsRouter.put('/tag-compliance/config', requireAdmin, async (req: Request, res: Response) => {
   try {
-    const orgs = Array.isArray(req.body) ? req.body : req.body?.orgs;
-    const r = await tagCompliance.putOrgsConfig(orgs);
+    if (!req.body || Array.isArray(req.body) || !Object.prototype.hasOwnProperty.call(req.body, 'etag')) {
+      return res.status(400).json({ error: '保存组织配置必须携带最近读取到的 ETag，请先重新加载' });
+    }
+    const orgs = req.body.orgs;
+    const expectedEtag = typeof req.body.etag === 'string' ? req.body.etag : null;
+    const r = await tagCompliance.putOrgsConfig(orgs, expectedEtag);
     const user = (req as any).user;
     db.addAuditLog(user?.userId, 'TAG_CONFIG_UPDATE', `更新 MAP 组织配置 (${r.count} 个组织)`, user?.username, req.ip);
     (res.locals as any).audited = true;
     res.json({ success: true, data: r });
-  } catch (e: any) { res.status(400).json({ error: e.message }); }
+  } catch (e: any) {
+    if (e instanceof tagCompliance.OrgConfigConflictError || e?.code === 'ORG_CONFIG_CONFLICT') {
+      return res.status(409).json({ error: e.message });
+    }
+    res.status(400).json({ error: e.message });
+  }
 });
 
 // 触发扫描（viewer 拦截 + 审计）

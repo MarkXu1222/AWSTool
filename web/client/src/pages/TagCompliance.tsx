@@ -1,5 +1,5 @@
-import React, { useState, useEffect } from 'react';
-import { Card, Table, Tag, Button, Space, message, Tabs, Alert, Statistic, Row, Col, Popconfirm, Input, Tooltip, Spin, Modal, Form, Collapse, Typography, Descriptions, Select } from 'antd';
+import React, { useState, useEffect, useRef } from 'react';
+import { Card, Table, Tag, Button, Space, message, Tabs, Alert, Statistic, Row, Col, Popconfirm, Input, Tooltip, Spin, Modal, Form, Collapse, Typography, Descriptions, Select, Progress } from 'antd';
 import { ReloadOutlined, PlayCircleOutlined, SaveOutlined, TagsOutlined, PlusOutlined, CheckCircleFilled, CloseCircleFilled, QuestionCircleFilled, SearchOutlined, ThunderboltOutlined } from '@ant-design/icons';
 import { api } from '../api';
 
@@ -232,7 +232,7 @@ const AddOrgModal: React.FC<{
   ];
 
   return (
-    <Modal open={open} onCancel={handleClose} title="添加组织到标签合规" width={720}
+    <Modal open={open} onCancel={handleClose} title="高级手工接入（故障恢复）" width={720}
       footer={[
         <Button key="cancel" onClick={handleClose}>取消</Button>,
         <Popconfirm key="prov" title="自动补齐前置资源？"
@@ -404,6 +404,328 @@ const AddOrgModal: React.FC<{
   );
 };
 
+type OnboardingJobStatus = 'queued' | 'running' | 'waiting_retry' | 'completed' | 'failed';
+type OnboardingStepStatus = 'pending' | 'running' | 'waiting' | 'completed' | 'failed';
+interface OnboardingJob {
+  id: string;
+  payerAccountId: string;
+  tagValue: string;
+  status: OnboardingJobStatus;
+  progress: number;
+  phase: string;
+  steps: Array<{ key: string; label: string; status: OnboardingStepStatus; detail?: string; updatedAt?: string }>;
+  lastError?: string;
+  nextRunAt?: string;
+  updatedAt: string;
+  completedAt?: string;
+}
+
+const ONBOARDING_STATUS_META: Record<OnboardingJobStatus, { color: string; text: string }> = {
+  queued: { color: 'blue', text: '排队中' },
+  running: { color: 'processing', text: '后台处理中' },
+  waiting_retry: { color: 'orange', text: '等待 AWS / 自动重试' },
+  completed: { color: 'green', text: '接入完成' },
+  failed: { color: 'red', text: '接入失败' },
+};
+const ONBOARDING_STEP_META: Record<OnboardingStepStatus, { color: string; text: string }> = {
+  pending: { color: 'default', text: '等待' },
+  running: { color: 'processing', text: '处理中' },
+  waiting: { color: 'orange', text: '等待 AWS' },
+  completed: { color: 'green', text: '完成' },
+  failed: { color: 'red', text: '失败' },
+};
+const LAST_ONBOARDING_PAYER_KEY = 'map-tag-last-onboarding-payer';
+
+/** 默认接入入口：用户只需 payer ID + tag_value，其余工作由持久化后台任务完成。 */
+const AutomatedAddOrgModal: React.FC<{
+  open: boolean;
+  onClose: () => void;
+  onCompleted: () => void;
+}> = ({ open, onClose, onCompleted }) => {
+  const [payer, setPayer] = useState('');
+  const [tagValue, setTagValue] = useState('');
+  const [job, setJob] = useState<OnboardingJob | null>(null);
+  const [starting, setStarting] = useState(false);
+  const [restoring, setRestoring] = useState(false);
+  const [retrying, setRetrying] = useState(false);
+  const [diagnosticLoading, setDiagnosticLoading] = useState(false);
+  const [manualProvisioning, setManualProvisioning] = useState(false);
+  const [diagnostic, setDiagnostic] = useState<Precheck | null>(null);
+  const [indexStatus, setIndexStatus] = useState<any[] | null>(null);
+  const completedNotifiedRef = useRef('');
+  const onCompletedRef = useRef(onCompleted);
+  useEffect(() => { onCompletedRef.current = onCompleted; }, [onCompleted]);
+
+  const active = !!job && ['queued', 'running', 'waiting_retry'].includes(job.status);
+
+  useEffect(() => {
+    if (!open || payer) return;
+    const remembered = localStorage.getItem(LAST_ONBOARDING_PAYER_KEY) || '';
+    if (/^\d{12}$/.test(remembered)) setPayer(remembered);
+  }, [open, payer]);
+
+  // 输入 payer 或刷新后重开弹窗时，从服务端恢复该 payer 最近任务。
+  useEffect(() => {
+    if (!open || !/^\d{12}$/.test(payer) || job?.payerAccountId === payer) return;
+    let cancelled = false;
+    const timer = window.setTimeout(async () => {
+      setRestoring(true);
+      try {
+        const response = await api.tagLatestOnboarding(payer);
+        if (cancelled) return;
+        if (response.success && response.data) {
+          setJob(response.data);
+          setTagValue(response.data.tagValue || '');
+        } else if (!response.success) {
+          message.error(response.error || '恢复接入任务失败');
+        } else {
+          setJob(null);
+        }
+      } catch (error: any) {
+        if (!cancelled) message.error(error.message || '恢复接入任务失败');
+      } finally {
+        if (!cancelled) setRestoring(false);
+      }
+    }, 350);
+    return () => { cancelled = true; window.clearTimeout(timer); };
+  }, [open, payer, job?.payerAccountId]);
+
+  // 任务在后端独立运行；组件始终挂载，弹窗关闭后仍轻量轮询，完成时自动刷新页面配置。
+  useEffect(() => {
+    if (!job || !['queued', 'running', 'waiting_retry'].includes(job.status)) return;
+    let cancelled = false;
+    const refresh = async () => {
+      try {
+        const response = await api.tagOnboardingJob(job.id);
+        if (!cancelled && response.success) setJob(response.data);
+      } catch { /* 短暂断线不改变任务状态，下一轮继续 */ }
+    };
+    void refresh();
+    const timer = window.setInterval(refresh, 4_000);
+    return () => { cancelled = true; window.clearInterval(timer); };
+  }, [job?.id, job?.status]);
+
+  useEffect(() => {
+    if (job?.status !== 'completed' || completedNotifiedRef.current === job.id) return;
+    completedNotifiedRef.current = job.id;
+    message.success(`payer ${job.payerAccountId} 已完成 MAP Tag 接入并写入 S3`);
+    onCompletedRef.current();
+  }, [job?.id, job?.status]);
+
+  const handleStart = async () => {
+    const accountId = payer.trim();
+    const value = tagValue.trim();
+    if (!/^\d{12}$/.test(accountId)) { message.warning('请输入 12 位 payer 账户 ID'); return; }
+    if (!value) { message.warning('tag_value 为必填项'); return; }
+    setStarting(true);
+    completedNotifiedRef.current = '';
+    try {
+      const response = await api.tagStartOnboarding(accountId, value);
+      const nextJob = response.data?.job as OnboardingJob | undefined;
+      if (response.success && nextJob) {
+        setJob(nextJob);
+        localStorage.setItem(LAST_ONBOARDING_PAYER_KEY, accountId);
+        if (response.data?.reused) message.info('已恢复该 payer 的现有接入任务');
+        else message.success('后台接入任务已启动，可关闭弹窗，任务会继续运行');
+      } else if (response.data?.activeJob) {
+        setJob(response.data.activeJob);
+        setTagValue(response.data.activeJob.tagValue || value);
+        localStorage.setItem(LAST_ONBOARDING_PAYER_KEY, accountId);
+        message.warning(response.error || '该 payer 已有接入任务');
+      } else {
+        message.error(response.error || '启动接入任务失败');
+      }
+    } catch (error: any) {
+      message.error(error.message || '启动接入任务失败');
+    } finally {
+      setStarting(false);
+    }
+  };
+
+  const handleRetry = async () => {
+    if (!job) return;
+    setRetrying(true);
+    try {
+      const response = await api.tagRetryOnboarding(job.id);
+      if (response.success) {
+        completedNotifiedRef.current = '';
+        setJob(response.data);
+        message.success('已请求后台从失败阶段继续重试');
+      } else message.error(response.error || '重试失败');
+    } catch (error: any) { message.error(error.message || '重试失败'); }
+    finally { setRetrying(false); }
+  };
+
+  const loadDiagnostics = async () => {
+    if (!/^\d{12}$/.test(payer.trim())) { message.warning('请输入 12 位 payer 账户 ID'); return; }
+    setDiagnosticLoading(true);
+    try {
+      const [precheckResponse, indexResponse] = await Promise.all([
+        api.tagPrecheck(payer.trim()),
+        api.tagReIndexStatus(payer.trim()),
+      ]);
+      if (precheckResponse.success) setDiagnostic(precheckResponse.data);
+      else message.error(precheckResponse.error || '前置条件检测失败');
+      if (indexResponse.success) setIndexStatus(indexResponse.data?.stackSets || []);
+      else message.error(indexResponse.error || '索引状态查询失败');
+    } catch (error: any) { message.error(error.message || '诊断失败'); }
+    finally { setDiagnosticLoading(false); }
+  };
+
+  const handleManualProvision = async () => {
+    if (!/^\d{12}$/.test(payer.trim())) { message.warning('请输入 12 位 payer 账户 ID'); return; }
+    setManualProvisioning(true);
+    try {
+      const response = await api.tagProvision(payer.trim());
+      if (response.success) {
+        message.success('基础资源补建调用完成，请刷新诊断；完整接入仍建议使用上方后台任务');
+        await loadDiagnostics();
+      } else message.error(response.error || '基础资源补建失败');
+    } catch (error: any) { message.error(error.message || '基础资源补建失败'); }
+    finally { setManualProvisioning(false); }
+  };
+
+  const startAnother = () => {
+    setPayer('');
+    setTagValue('');
+    setJob(null);
+    setDiagnostic(null);
+    setIndexStatus(null);
+    completedNotifiedRef.current = '';
+    localStorage.removeItem(LAST_ONBOARDING_PAYER_KEY);
+  };
+
+  const diagnosticRows: Array<{ key: 'searchRole' | 'orgView' | 'stackSet'; label: string }> = [
+    { key: 'searchRole', label: 'Resource Explorer 搜索角色' },
+    { key: 'orgView', label: 'Resource Explorer OrgView' },
+    { key: 'stackSet', label: 'AutoTaggerRole StackSet' },
+  ];
+
+  return (
+    <Modal open={open} onCancel={onClose} title="MAP Tag 一键接入组织" width={760}
+      footer={[
+        job?.status === 'completed' && <Button key="another" onClick={startAnother}>接入另一个组织</Button>,
+        <Button key="close" onClick={onClose}>{active ? '关闭（后台继续）' : '关闭'}</Button>,
+      ].filter(Boolean)}>
+      <Alert type="info" showIcon style={{ marginBottom: 16 }}
+        message="只需填写 payer ID 和必填 tag_value，然后点击一次"
+        description="后台会自动创建前置资源、等待 Resource Explorer 聚合索引、按已启用区域下发索引、等待 StackSet 完成，并将组织配置写入 S3。关闭弹窗或刷新页面不会中断。" />
+
+      <Form layout="vertical">
+        <Row gutter={12}>
+          <Col span={12}>
+            <Form.Item label="Payer 账户 ID" required>
+              <Input value={payer} maxLength={12} disabled={active}
+                onChange={event => {
+                  const value = event.target.value.replace(/\D/g, '');
+                  setPayer(value);
+                  if (job?.payerAccountId !== value) setJob(null);
+                }}
+                placeholder="12 位管理账户 ID" />
+            </Form.Item>
+          </Col>
+          <Col span={12}>
+            <Form.Item label="tag_value（map-migrated 标签值）" required>
+              <Input value={tagValue} disabled={active}
+                onChange={event => setTagValue(event.target.value)}
+                onPressEnter={() => { if (!active) void handleStart(); }}
+                placeholder="必填，如 migXXXXXX" />
+            </Form.Item>
+          </Col>
+        </Row>
+        {!job && (
+          <Button type="primary" block size="large" icon={<ThunderboltOutlined />}
+            loading={starting || restoring} disabled={!/^\d{12}$/.test(payer) || !tagValue.trim()}
+            onClick={handleStart}>开始一键接入</Button>
+        )}
+      </Form>
+
+      {restoring && !job && <div style={{ textAlign: 'center', padding: 16 }}><Spin size="small" /> 正在恢复最近任务...</div>}
+
+      {job && (
+        <Card size="small" style={{ marginTop: 4 }}
+          title={<Space><span>接入进度</span><Tag color={ONBOARDING_STATUS_META[job.status].color}>{ONBOARDING_STATUS_META[job.status].text}</Tag></Space>}
+          extra={<span style={{ fontSize: 11, color: 'rgba(0,0,0,0.45)' }}>任务 {job.id.slice(0, 8)}</span>}>
+          <Progress percent={job.progress} status={job.status === 'failed' ? 'exception' : job.status === 'completed' ? 'success' : 'active'} />
+          <div style={{ marginTop: 10 }}>
+            {job.steps.map(step => {
+              const meta = ONBOARDING_STEP_META[step.status];
+              return (
+                <div key={step.key} style={{ display: 'flex', alignItems: 'flex-start', gap: 8, padding: '5px 0', borderBottom: '1px solid #f5f5f5' }}>
+                  <Tag color={meta.color} style={{ margin: 0, minWidth: 68, textAlign: 'center' }}>{meta.text}</Tag>
+                  <div style={{ minWidth: 0, flex: 1 }}>
+                    <div style={{ fontSize: 13, fontWeight: step.status === 'running' ? 600 : 400 }}>{step.label}</div>
+                    {step.detail && <div style={{ color: 'rgba(0,0,0,0.55)', fontSize: 11, wordBreak: 'break-word', whiteSpace: 'pre-wrap' }}>{step.detail}</div>}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+          {job.status === 'waiting_retry' && (
+            <Alert type="warning" showIcon style={{ marginTop: 12 }} message="后台正在等待 AWS 完成或准备自动重试"
+              description={job.nextRunAt ? `下次检查：${fmtTime(job.nextRunAt)}` : undefined} />
+          )}
+          {job.status === 'failed' && (
+            <Alert type="error" showIcon style={{ marginTop: 12 }} message="接入任务失败"
+              description={<><div style={{ marginBottom: 8 }}>{job.lastError || '请查看失败步骤明细'}</div><Button danger size="small" loading={retrying} onClick={handleRetry}>从失败阶段重试</Button></>} />
+          )}
+          {job.status === 'completed' && (
+            <Alert type="success" showIcon style={{ marginTop: 12 }} message="接入完成，无需再手工保存"
+              description={`组织配置已自动写入 S3 并回读验证，完成时间：${fmtTime(job.completedAt)}`} />
+          )}
+          <div style={{ marginTop: 8, color: 'rgba(0,0,0,0.45)', fontSize: 11 }}>最近更新：{fmtTime(job.updatedAt)}</div>
+        </Card>
+      )}
+
+      <Collapse size="small" style={{ marginTop: 14 }} items={[{
+        key: 'diagnostics',
+        label: '高级诊断与故障恢复（通常不需要操作）',
+        children: (
+          <>
+            <Alert type="warning" showIcon style={{ marginBottom: 10 }}
+              message="仅在后台任务失败、需要人工排障时使用"
+              description="诊断不会替代上方完整任务；“补建基础资源”只调用旧的幂等 provision，不会写入 S3。" />
+            <Space wrap style={{ marginBottom: 10 }}>
+              <Button size="small" icon={<SearchOutlined />} loading={diagnosticLoading} onClick={loadDiagnostics}>刷新前置条件与索引状态</Button>
+              <Popconfirm title="仅补建基础资源？" description="此操作用于故障恢复，不会完成多区域索引等待或 S3 配置写入。" onConfirm={handleManualProvision}>
+                <Button size="small" loading={manualProvisioning}>仅补建基础资源</Button>
+              </Popconfirm>
+            </Space>
+            {diagnostic && (
+              <>
+                <Descriptions size="small" bordered column={3} style={{ marginBottom: 10 }}>
+                  <Descriptions.Item label="组织 ID">{diagnostic.orgId || '-'}</Descriptions.Item>
+                  <Descriptions.Item label="根 OU">{diagnostic.rootOuId || '-'}</Descriptions.Item>
+                  <Descriptions.Item label="账户数">{diagnostic.accountCount ?? '-'}</Descriptions.Item>
+                </Descriptions>
+                {diagnosticRows.map(row => {
+                  const check = diagnostic.checks[row.key];
+                  return <div key={row.key} style={{ display: 'flex', gap: 8, padding: '4px 0' }}>
+                    <CheckIcon status={check?.status} /><span>{row.label}</span>
+                    <Tag color={check?.status === 'ok' ? 'green' : check?.status === 'missing' ? 'red' : 'orange'} style={{ marginLeft: 'auto' }}>
+                      {check?.status ? STATUS_TEXT[check.status] : '-'}
+                    </Tag>
+                  </div>;
+                })}
+              </>
+            )}
+            {indexStatus && (
+              <Table size="small" pagination={false} rowKey="name" dataSource={indexStatus} style={{ marginTop: 10 }}
+                columns={[
+                  { title: 'StackSet', dataIndex: 'name', render: (value: string) => <code style={{ fontSize: 11 }}>{value}</code> },
+                  { title: '实例数', dataIndex: 'instanceCount', width: 80, align: 'right' as const },
+                  { title: '覆盖区域', dataIndex: 'regions', render: (regions: string[]) => <span style={{ fontSize: 11 }}>{(regions || []).join(', ') || '-'}</span> },
+                  { title: '最近操作', dataIndex: 'latestOperation', width: 150,
+                    render: (operation: any) => operation ? <Tag color={STATUS_COLOR[operation.status] || 'default'}>{operation.status}</Tag> : '-' },
+                ]} />
+            )}
+          </>
+        ),
+      }]} />
+    </Modal>
+  );
+};
+
 const TagCompliancePage: React.FC = () => {
   const [configured, setConfigured] = useState<boolean | null>(null);
   const [loading, setLoading] = useState(false);
@@ -457,9 +779,12 @@ const TagCompliancePage: React.FC = () => {
   const [executions, setExecutions] = useState<any[]>([]);
   const [orgsText, setOrgsText] = useState('');
   const [orgsCount, setOrgsCount] = useState(0);
+  // undefined 表示尚未加载；null 表示 S3 对象尚不存在（保存时使用 If-None-Match）。
+  const [configEtag, setConfigEtag] = useState<string | null | undefined>(undefined);
   const [savingCfg, setSavingCfg] = useState(false);
   const [cfgLoading, setCfgLoading] = useState(false);
   const [addOpen, setAddOpen] = useState(false);
+  const [advancedAddOpen, setAdvancedAddOpen] = useState(false);
 
   // 从当前 orgs.json 文本里解析出已有 org_id，供去重
   const existingOrgIds = (() => {
@@ -512,6 +837,7 @@ const TagCompliancePage: React.FC = () => {
         const arr = r.data || [];
         setOrgsText(JSON.stringify(arr, null, 2));
         setOrgsCount(Array.isArray(arr) ? arr.length : 0);
+        setConfigEtag(r.meta?.etag ?? null);
       } else message.error(r.error || '读取配置失败');
     } catch (e: any) { message.error(e.message); }
     finally { setCfgLoading(false); }
@@ -534,11 +860,17 @@ const TagCompliancePage: React.FC = () => {
     try { parsed = JSON.parse(orgsText); }
     catch (e: any) { message.error('JSON 格式错误：' + e.message); return; }
     if (!Array.isArray(parsed)) { message.error('配置必须是一个数组'); return; }
+    if (configEtag === undefined) { message.error('尚未取得配置版本，请先点“重新加载”'); return; }
     setSavingCfg(true);
     try {
-      const r = await api.tagPutConfig(parsed);
-      if (r.success) { message.success(`已保存 ${r.data?.count ?? parsed.length} 个组织配置`); setOrgsCount(parsed.length); }
-      else message.error(r.error || '保存失败');
+      const r = await api.tagPutConfig(parsed, configEtag);
+      if (r.success) {
+        message.success(`已保存 ${r.data?.count ?? parsed.length} 个组织配置`);
+        setOrgsCount(parsed.length);
+        setConfigEtag(r.data?.etag ?? null);
+      } else {
+        message.error(r.error || '保存失败；如果配置已被后台更新，请先重新加载再合并修改');
+      }
     } catch (e: any) { message.error(e.message); }
     finally { setSavingCfg(false); }
   };
@@ -690,14 +1022,16 @@ const TagCompliancePage: React.FC = () => {
         message="组织配置 orgs.json"
         description="这是扫描器的组织清单（存于工具账户 S3）。每个组织需包含 org_id / search_role_arn / view_arn 等字段。保存后下次扫描即生效，无需重新部署。" />
       <Space style={{ marginBottom: 8 }} wrap>
-        <Button size="small" type="primary" icon={<PlusOutlined />} onClick={() => setAddOpen(true)}>添加组织</Button>
+        <Button size="small" type="primary" icon={<PlusOutlined />} onClick={() => setAddOpen(true)}>一键接入组织</Button>
+        <Button size="small" onClick={() => setAdvancedAddOpen(true)}>高级手工工具</Button>
         <Button size="small" icon={<ReloadOutlined />} onClick={loadConfig} loading={cfgLoading}>重新加载</Button>
         <Popconfirm title="确认保存组织配置？" description="将覆盖工具账户 S3 里的 orgs.json，请确认 JSON 无误。" okText="保存" cancelText="取消" onConfirm={handleSaveConfig}>
           <Button size="small" icon={<SaveOutlined />} loading={savingCfg}>保存到 S3</Button>
         </Popconfirm>
         <span style={{ color: 'rgba(0,0,0,0.45)', fontSize: 12 }}>当前 {orgsCount} 个组织</span>
       </Space>
-      <AddOrgModal open={addOpen} existingOrgIds={existingOrgIds} onClose={() => setAddOpen(false)} onAdd={handleAddOrg} />
+      <AutomatedAddOrgModal open={addOpen} onClose={() => setAddOpen(false)} onCompleted={() => { void loadConfig(); }} />
+      <AddOrgModal open={advancedAddOpen} existingOrgIds={existingOrgIds} onClose={() => setAdvancedAddOpen(false)} onAdd={handleAddOrg} />
       <Input.TextArea value={orgsText} onChange={e => setOrgsText(e.target.value)}
         spellCheck={false}
         style={{ fontFamily: 'monospace', fontSize: 12 }} autoSize={{ minRows: 16, maxRows: 40 }} />

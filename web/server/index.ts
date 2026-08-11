@@ -10,6 +10,7 @@ import { awsRouter } from './routes/aws';
 import { regionsRouter } from './routes/regions';
 import { migrateEncryptMFASecrets, backupDB } from './db';
 import { startScheduler, getSchedulerStatus } from './scheduler';
+import { startTagOnboardingRunner } from './tag-onboarding';
 
 const app = express();
 app.set('trust proxy', 1);
@@ -122,6 +123,7 @@ app.get('*', (_req, res) => {
 app.listen(Number(PORT), '127.0.0.1', () => {
   console.log(`🚀 AWS Toolbox Web running on http://127.0.0.1:${PORT}`);
   console.log(`   Environment: ${process.env.NODE_ENV || 'development'}`);
-  // Start background data sync
+  // Start background data sync and recover durable MAP onboarding jobs.
   startScheduler();
+  startTagOnboardingRunner();
 });

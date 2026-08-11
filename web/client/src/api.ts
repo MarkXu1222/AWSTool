@@ -176,8 +176,18 @@ export const api = {
   getAuditLog: (limit = 5000) => request(`/aws/audit?limit=${Math.max(1, Math.min(5000, Math.floor(limit)))}`),
   // MAP 标签合规
   tagStatus: () => request('/aws/tag-compliance/status'),
+  // 全自动组织接入：提交持久化任务、查询进度、按 payer 恢复、失败重试
+  tagStartOnboarding: (payerAccountId: string, tagValue: string) =>
+    request('/aws/tag-compliance/onboarding', { method: 'POST', body: JSON.stringify({ payerAccountId, tagValue }) }),
+  tagOnboardingJob: (jobId: string) =>
+    request(`/aws/tag-compliance/onboarding/${encodeURIComponent(jobId)}`),
+  tagLatestOnboarding: (payerAccountId: string) =>
+    request(`/aws/tag-compliance/onboarding?payer=${encodeURIComponent(payerAccountId)}`),
+  tagRetryOnboarding: (jobId: string) =>
+    request(`/aws/tag-compliance/onboarding/${encodeURIComponent(jobId)}/retry`, { method: 'POST' }),
   tagGetConfig: () => request('/aws/tag-compliance/config'),
-  tagPutConfig: (orgs: any[]) => request('/aws/tag-compliance/config', { method: 'PUT', body: JSON.stringify(orgs) }),
+  tagPutConfig: (orgs: any[], etag: string | null) =>
+    request('/aws/tag-compliance/config', { method: 'PUT', body: JSON.stringify({ orgs, etag }) }),
   tagScan: () => request('/aws/tag-compliance/scan', { method: 'POST' }),
   tagExecutions: () => request('/aws/tag-compliance/executions'),
   tagReport: () => request('/aws/tag-compliance/report'),
