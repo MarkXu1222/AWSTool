@@ -96,72 +96,102 @@ const RegionsPage: React.FC = () => {
     } catch (e: any) { message.error(e.message); }
   };
 
-  // 账户按 ID 索引 —— 账户和区域数据都是几千条量级，
-  // 在循环里用 accounts.find() 会退化成百万级遍历，必须用 Map。
-  const acctById = useMemo(() => {
-    const m = new Map<string, any>();
-    accounts.forEach(a => m.set(a.Id, a));
-    return m;
-  }, [accounts]);
-
   const departedIds = useMemo(() => new Set(departed.map(d => d.account_id)), [departed]);
+  const scannedAccountIds = useMemo(
+    () => new Set(regionData.map(rd => rd.account_id)),
+    [regionData],
+  );
+  const unscannedAccountCount = useMemo(
+    () => accounts.filter(account => account.Id && !departedIds.has(account.Id) && !scannedAccountIds.has(account.Id)).length,
+    [accounts, departedIds, scannedAccountIds],
+  );
 
-  // 按组织聚合：每个 payer 下的账户数、区域开通计数、以及缺口明细
+  // 组织与账户以 accounts_cache 为准，region_data 只补充扫描结果。
+  // 这样新组织在首次区域扫描前也能立即显示，且未扫描不会被误算为未开通。
   const payerGroups = useMemo(() => {
-    const map = new Map<string, {
+    type GroupAccount = {
+      accountId: string;
+      name: string;
+      scanned: boolean;
+      enabled: string[];
+      disabled: string[];
+      enabling: string[];
+    };
+    type Group = {
       payer: string;
-      accounts: { accountId: string; name: string; enabled: string[]; disabled: string[]; enabling: string[] }[];
-      enabled: number; disabled: number; enabling: number;
-      regionGaps: Map<string, string[]>;   // region -> 未开通该区域的 accountId[]
-    }>();
+      accounts: GroupAccount[];
+      enabled: number;
+      disabled: number;
+      enabling: number;
+      regionGaps: Map<string, string[]>;
+    };
+
+    const groups = new Map<string, Group>();
+    const groupAccountById = new Map<string, { group: Group; account: GroupAccount }>();
+
+    accounts.forEach(acct => {
+      const accountId = String(acct.Id || '');
+      if (!accountId || departedIds.has(accountId) || groupAccountById.has(accountId)) return;
+
+      const payer = acct._payer || '(未知组织)';
+      let group = groups.get(payer);
+      if (!group) {
+        group = { payer, accounts: [], enabled: 0, disabled: 0, enabling: 0, regionGaps: new Map() };
+        groups.set(payer, group);
+      }
+
+      const account: GroupAccount = {
+        accountId,
+        name: acct.Name || accountId,
+        scanned: false,
+        enabled: [],
+        disabled: [],
+        enabling: [],
+      };
+      group.accounts.push(account);
+      groupAccountById.set(accountId, { group, account });
+    });
 
     regionData.forEach(rd => {
-      // 已离场账户不参与组织统计 —— 它们已不在任何组织内，
-      // 混进来会让某个组织的开通率被历史残留数据拉低
       if (departedIds.has(rd.account_id)) return;
-      const acct = acctById.get(rd.account_id);
-      // payer 自身（管理账户）也算在组织内，它同样需要开通区域
-      const payer = acct?._payer || '(未知组织)';
-      if (!map.has(payer)) {
-        map.set(payer, { payer, accounts: [], enabled: 0, disabled: 0, enabling: 0, regionGaps: new Map() });
-      }
-      const g = map.get(payer)!;
+      const joined = groupAccountById.get(rd.account_id);
+      // 只合并当前账户；离场或无法归属的历史区域数据不污染活跃组织统计。
+      if (!joined) return;
 
-      const enabled: string[] = [], disabled: string[] = [], enabling: string[] = [];
+      const { group, account } = joined;
+      account.scanned = true;
       (rd.regions || []).forEach((r: any) => {
-        // 只统计 opt-in 区域，默认区域不需要开通
         if (!OPT_IN_REGIONS.includes(r.region)) return;
-        if (r.status === 'ENABLED') enabled.push(r.region);
-        else if (r.status === 'ENABLING') enabling.push(r.region);
-        else if (r.status === 'DISABLED') {
-          disabled.push(r.region);
-          g.regionGaps.set(r.region, [...(g.regionGaps.get(r.region) || []), rd.account_id]);
+        if (r.status === 'ENABLED') {
+          account.enabled.push(r.region);
+          group.enabled++;
+        } else if (r.status === 'ENABLING') {
+          account.enabling.push(r.region);
+          group.enabling++;
+        } else if (r.status === 'DISABLED') {
+          account.disabled.push(r.region);
+          group.disabled++;
+          group.regionGaps.set(r.region, [...(group.regionGaps.get(r.region) || []), rd.account_id]);
         }
-      });
-
-      g.enabled += enabled.length;
-      g.enabling += enabling.length;
-      g.disabled += disabled.length;
-      g.accounts.push({
-        accountId: rd.account_id,
-        name: acct?.Name || rd.account_id,
-        enabled, disabled, enabling,
       });
     });
 
-    return [...map.values()]
-      .map(g => {
-        const slots = g.enabled + g.disabled + g.enabling;
+    return [...groups.values()]
+      .map(group => {
+        const scannedAccounts = group.accounts.filter(account => account.scanned).length;
+        const slots = group.enabled + group.disabled + group.enabling;
         return {
-          ...g,
-          accountCount: g.accounts.length,
-          gapAccounts: g.accounts.filter(a => a.disabled.length > 0).length,
+          ...group,
+          accountCount: group.accounts.length,
+          scannedAccounts,
+          unscannedAccounts: group.accounts.length - scannedAccounts,
+          gapAccounts: group.accounts.filter(account => account.scanned && account.disabled.length > 0).length,
           slots,
-          rate: slots > 0 ? Math.round((g.enabled / slots) * 100) : 0,
+          rate: slots > 0 ? Math.round((group.enabled / slots) * 100) : 0,
         };
       })
-      .sort((a, b) => b.disabled - a.disabled || a.payer.localeCompare(b.payer));
-  }, [regionData, acctById, departedIds]);
+      .sort((a, b) => b.disabled - a.disabled || b.unscannedAccounts - a.unscannedAccounts || a.payer.localeCompare(b.payer));
+  }, [accounts, regionData, departedIds]);
 
   // 已离场账户里，遗留了区域数据的那些 —— 展示出来解释这批数据的来历
   const departedWithRegions = useMemo(() => {
@@ -287,7 +317,7 @@ const RegionsPage: React.FC = () => {
 
       <Alert message="仅显示需手动开通的 opt-in 区域，默认区域（us-east-1, ap-southeast-1 等）已自动启用" type="info" style={{ marginBottom: 12 }} />
 
-      {regionData.length === 0 ? (
+      {accounts.length === 0 && regionData.length === 0 ? (
         <Card size="small">
           <div style={{ textAlign: 'center', padding: 40, color: '#9CA3AF' }}>
             <GlobalOutlined style={{ fontSize: 32, marginBottom: 8 }} />
@@ -313,7 +343,9 @@ const RegionsPage: React.FC = () => {
                   <Button size="small" type="link" onClick={() => setExpandedRegion(expandedRegion === r.region ? null : r.region)}>
                     {expandedRegion === r.region ? '收起' : `查看 (${r.disabled})`}
                   </Button>
-                ) : <span style={{ color: '#D1D5DB' }}>全部开通</span> },
+                ) : unscannedAccountCount > 0
+                  ? <Tooltip title={`还有 ${unscannedAccountCount} 个账户尚未扫描`}><span style={{ color: '#d46b08' }}>等待扫描</span></Tooltip>
+                  : <span style={{ color: '#D1D5DB' }}>全部开通</span> },
               ]}
             />
           </Card>
@@ -362,6 +394,7 @@ const RegionsPage: React.FC = () => {
 
                 {searchText && searchedAccounts.length > 0 && searchedAccounts.slice(0, 5).map(acct => {
                   const acctRegions = getAccountRegionStatus(acct.Id);
+                  const scanned = scannedAccountIds.has(acct.Id);
                   const disabled = acctRegions.filter((r: any) => r.status === 'DISABLED');
                   const enabled = acctRegions.filter((r: any) => r.status === 'ENABLED' || r.status === 'ENABLING');
 
@@ -369,16 +402,20 @@ const RegionsPage: React.FC = () => {
                     <Card key={acct.Id} size="small" style={{ marginBottom: 8 }}
                       title={<span><code>{acct.Id}</code> — <strong>{acct.Name}</strong> <Tag>{acct._payer}</Tag></span>}
                       extra={
-                        selectedAccountRegions.length > 0 ? (
+                        scanned && selectedAccountRegions.length > 0 ? (
                           <Popconfirm title={`启用 ${selectedAccountRegions.length} 个区域？`}
                             onConfirm={() => handleEnableRegionsForAccount(acct.Id, selectedAccountRegions)}>
                             <Button size="small" type="primary" loading={enabling}>批量启用 ({selectedAccountRegions.length})</Button>
                           </Popconfirm>
                         ) : null
                       }>
-                      <p style={{ marginBottom: 8, color: '#6B7280', fontSize: 12 }}>
-                        已开通: <Tag color="green">{enabled.length}</Tag> 未开通: <Tag color="red">{disabled.length}</Tag>
-                      </p>
+                      {scanned ? (
+                        <p style={{ marginBottom: 8, color: '#6B7280', fontSize: 12 }}>
+                          已开通: <Tag color="green">{enabled.length}</Tag> 未开通: <Tag color="red">{disabled.length}</Tag>
+                        </p>
+                      ) : (
+                        <Alert type="warning" showIcon message="该账户尚未扫描，区域状态未知" style={{ marginBottom: 8 }} />
+                      )}
                       {disabled.length > 0 && (
                         <>
                           <Space style={{ marginBottom: 6 }}>
@@ -401,7 +438,7 @@ const RegionsPage: React.FC = () => {
                             ]} />
                         </>
                       )}
-                      {disabled.length === 0 && <p style={{ color: '#52c41a' }}>所有 opt-in 区域已开通 ✓</p>}
+                      {scanned && disabled.length === 0 && <p style={{ color: '#52c41a' }}>所有 opt-in 区域已开通 ✓</p>}
                     </Card>
                   );
                 })}
@@ -439,11 +476,20 @@ const RegionsPage: React.FC = () => {
                         render: (n: number) => <span style={{ fontSize: 12 }}>{n}</span>,
                       },
                       {
+                        title: '扫描覆盖', key: 'scanCoverage', width: 150, align: 'center' as const,
+                        sorter: (a: any, b: any) => a.scannedAccounts - b.scannedAccounts,
+                        render: (_: any, r: any) => r.unscannedAccounts > 0
+                          ? <Space size={4}><span style={{ fontSize: 12 }}>{r.scannedAccounts}/{r.accountCount}</span><Tag color="orange" style={{ margin: 0 }}>未扫 {r.unscannedAccounts}</Tag></Space>
+                          : <Tag color="green" style={{ margin: 0 }}>已全扫</Tag>,
+                      },
+                      {
                         title: '有缺口账户', dataIndex: 'gapAccounts', width: 100, align: 'center' as const,
                         sorter: (a: any, b: any) => a.gapAccounts - b.gapAccounts,
-                        render: (n: number, r: any) => n > 0
-                          ? <Tooltip title={`${n} / ${r.accountCount} 个账户至少缺一个 opt-in 区域`}><Tag color="orange" style={{ margin: 0 }}>{n}</Tag></Tooltip>
-                          : <Tag color="green" style={{ margin: 0 }}>0</Tag>,
+                        render: (n: number, r: any) => r.scannedAccounts === 0
+                          ? <Tooltip title="尚无区域扫描结果"><Tag style={{ margin: 0 }}>未知</Tag></Tooltip>
+                          : n > 0
+                            ? <Tooltip title={`${n} / ${r.scannedAccounts} 个已扫描账户至少缺一个 opt-in 区域`}><Tag color="orange" style={{ margin: 0 }}>{n}</Tag></Tooltip>
+                            : <Tag color="green" style={{ margin: 0 }}>0</Tag>,
                       },
                       {
                         title: '已开通', dataIndex: 'enabled', width: 80, align: 'center' as const,
@@ -484,11 +530,18 @@ const RegionsPage: React.FC = () => {
                   <Card
                     size="small"
                     style={{ marginTop: 12 }}
-                    title={<span><Tag color="blue" style={{ margin: 0 }}>{currentGroup.payer}</Tag> {currentGroup.accountCount} 个账户 · 未开通 {currentGroup.disabled} 项</span>}
+                    title={(
+                      <span>
+                        <Tag color="blue" style={{ margin: 0 }}>{currentGroup.payer}</Tag>
+                        {' '}{currentGroup.accountCount} 个账户 · 已扫描 {currentGroup.scannedAccounts}
+                        {currentGroup.unscannedAccounts > 0 && <> · <span style={{ color: '#d46b08' }}>未扫描 {currentGroup.unscannedAccounts}</span></>}
+                        {' '}· 未开通 {currentGroup.disabled} 项
+                      </span>
+                    )}
                     extra={
                       <Space size={8}>
                         <Checkbox checked={payerOnlyGaps} onChange={e => setPayerOnlyGaps(e.target.checked)}>
-                          <span style={{ fontSize: 12 }}>只看有缺口的区域</span>
+                          <span style={{ fontSize: 12 }}>只看有缺口/未扫描</span>
                         </Checkbox>
                         <Button
                           size="small"
@@ -506,6 +559,14 @@ const RegionsPage: React.FC = () => {
                       </Space>
                     }
                   >
+                    {currentGroup.unscannedAccounts > 0 && (
+                      <Alert
+                        type="warning"
+                        showIcon
+                        message={`该组织有 ${currentGroup.unscannedAccounts} 个账户尚未扫描，区域统计仅覆盖 ${currentGroup.scannedAccounts} 个账户`}
+                        style={{ marginBottom: 12 }}
+                      />
+                    )}
                     <Tabs
                       size="small"
                       items={[
@@ -517,7 +578,13 @@ const RegionsPage: React.FC = () => {
                               dataSource={currentGroupRegions}
                               rowKey="region"
                               pagination={false}
-                              locale={{ emptyText: payerOnlyGaps ? '该组织所有 opt-in 区域已全部开通 ✓' : '无数据' }}
+                              locale={{
+                                emptyText: payerOnlyGaps
+                                  ? currentGroup.unscannedAccounts > 0
+                                    ? '该组织尚有未扫描账户，区域统计不完整'
+                                    : '该组织所有 opt-in 区域已全部开通 ✓'
+                                  : '无数据',
+                              }}
                               columns={[
                                 { title: '区域', dataIndex: 'region', width: 150, render: (r: string) => <code style={{ fontSize: 12 }}>{r}</code> },
                                 { title: '名称', dataIndex: 'region', key: 'cn', width: 160, render: (r: string) => <span style={{ fontSize: 12 }}>{REGION_CN[r] || '-'}</span> },
@@ -535,7 +602,9 @@ const RegionsPage: React.FC = () => {
                                     >
                                       <Button size="small" type="link" loading={enabling}>为整组织启用 ({r.disabled})</Button>
                                     </Popconfirm>
-                                  ) : <span style={{ color: '#D1D5DB', fontSize: 12 }}>全部开通</span>,
+                                  ) : currentGroup.unscannedAccounts > 0
+                                    ? <span style={{ color: '#d46b08', fontSize: 12 }}>统计不完整</span>
+                                    : <span style={{ color: '#D1D5DB', fontSize: 12 }}>全部开通</span>,
                                 },
                               ]}
                             />
@@ -546,13 +615,20 @@ const RegionsPage: React.FC = () => {
                           children: (
                             <Table
                               size="small"
-                              dataSource={payerOnlyGaps ? currentGroup.accounts.filter(a => a.disabled.length > 0) : currentGroup.accounts}
+                              dataSource={payerOnlyGaps ? currentGroup.accounts.filter(a => !a.scanned || a.disabled.length > 0) : currentGroup.accounts}
                               rowKey="accountId"
                               pagination={{ pageSize: 15, size: 'small', showTotal: t => `共 ${t} 个账户` }}
-                              locale={{ emptyText: payerOnlyGaps ? '该组织所有账户的 opt-in 区域已全部开通 ✓' : '无数据' }}
+                              locale={{ emptyText: payerOnlyGaps ? '该组织所有已扫描账户均无区域缺口' : '无数据' }}
                               columns={[
                                 { title: '账户 ID', dataIndex: 'accountId', width: 130, render: (id: string) => <code style={{ fontSize: 12 }}>{id}</code> },
                                 { title: '名称', dataIndex: 'name', width: 170, ellipsis: true, render: (n: string) => <span style={{ fontSize: 12 }}>{n}</span> },
+                                {
+                                  title: '扫描状态', dataIndex: 'scanned', width: 90, align: 'center' as const,
+                                  sorter: (a: any, b: any) => Number(a.scanned) - Number(b.scanned),
+                                  render: (scanned: boolean) => scanned
+                                    ? <Tag color="green" style={{ margin: 0 }}>已扫描</Tag>
+                                    : <Tag color="orange" style={{ margin: 0 }}>未扫描</Tag>,
+                                },
                                 {
                                   title: '已开通', dataIndex: 'enabled', width: 80, align: 'center' as const,
                                   sorter: (a: any, b: any) => a.enabled.length - b.enabled.length,
@@ -562,9 +638,11 @@ const RegionsPage: React.FC = () => {
                                   title: '未开通区域', dataIndex: 'disabled',
                                   sorter: (a: any, b: any) => a.disabled.length - b.disabled.length,
                                   defaultSortOrder: 'descend' as const,
-                                  render: (regions: string[], row: any) => regions.length === 0
-                                    ? <span style={{ color: '#52c41a', fontSize: 12 }}>全部开通 ✓</span>
-                                    : (
+                                  render: (regions: string[], row: any) => !row.scanned
+                                    ? <span style={{ color: '#d46b08', fontSize: 12 }}>等待扫描后确认</span>
+                                    : regions.length === 0
+                                      ? <span style={{ color: '#52c41a', fontSize: 12 }}>全部开通 ✓</span>
+                                      : (
                                       <Space size={[4, 4]} wrap>
                                         {regions.map(r => (
                                           <Popconfirm
