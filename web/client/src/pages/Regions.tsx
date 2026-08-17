@@ -35,6 +35,7 @@ const RegionsPage: React.FC = () => {
   const [regionData, setRegionData] = useState<any[]>([]);
   const [accounts, setAccounts] = useState<any[]>([]);
   const [scanning, setScanning] = useState(false);
+  const [scanningPayer, setScanningPayer] = useState<string | null>(null);
   const [selectedAccounts, setSelectedAccounts] = useState<string[]>([]);
   const [enabling, setEnabling] = useState(false);
   const [expandedRegion, setExpandedRegion] = useState<string | null>(null);
@@ -71,6 +72,33 @@ const RegionsPage: React.FC = () => {
       else message.error(res.error);
     } catch (e: any) { message.error(e.message); }
     finally { setScanning(false); }
+  };
+
+  const handleScanForPayer = async (group: { payer: string; accounts: { accountId: string }[] }) => {
+    const accountIds = [...new Set(group.accounts.map(account => account.accountId).filter(Boolean))];
+    if (accountIds.length === 0) {
+      message.warning('该组织没有可扫描的账户');
+      return;
+    }
+
+    setScanningPayer(group.payer);
+    message.info(`正在扫描 ${group.payer} 的 ${accountIds.length} 个账户...`);
+    try {
+      const res = await api.scanRegions(accountIds);
+      if (!res.success) {
+        message.error(res.error || '组织扫描失败');
+        return;
+      }
+
+      setRegionData(res.data || []);
+      const scanned = Number(res.scanned ?? 0);
+      if (scanned < accountIds.length) {
+        message.warning(`${group.payer} 扫描完成：成功 ${scanned}/${accountIds.length} 个账户`);
+      } else {
+        message.success(`${group.payer} 扫描完成：${scanned} 个账户`);
+      }
+    } catch (e: any) { message.error(e.message); }
+    finally { setScanningPayer(null); }
   };
 
   const handleBatchEnable = async (region: string) => {
@@ -310,7 +338,7 @@ const RegionsPage: React.FC = () => {
           <h2 className="page-header-title">区域管理</h2>
           <p className="page-header-subtitle">管理 opt-in 区域开通状态（默认区域 us-east-1/us-west-2/eu-west-1/ap-southeast-1 等已自动开通）</p>
         </div>
-        <Button icon={<ReloadOutlined />} onClick={handleScan} loading={scanning} size="small">
+        <Button icon={<ReloadOutlined />} onClick={handleScan} loading={scanning} disabled={scanningPayer !== null} size="small">
           {scanning ? '扫描中...' : '扫描所有账户'}
         </Button>
       </div>
@@ -514,11 +542,22 @@ const RegionsPage: React.FC = () => {
                           : '-',
                       },
                       {
-                        title: '操作', key: 'act', width: 80,
+                        title: '操作', key: 'act', width: 140,
                         render: (_: any, r: any) => (
-                          <Button type="link" size="small" onClick={(e) => { e.stopPropagation(); setSelectedPayer(r.payer === selectedPayer ? null : r.payer); }}>
-                            {r.payer === selectedPayer ? '收起' : '展开'}
-                          </Button>
+                          <Space size={0}>
+                            <Button
+                              type="link"
+                              size="small"
+                              loading={scanningPayer === r.payer}
+                              disabled={scanning || (scanningPayer !== null && scanningPayer !== r.payer)}
+                              onClick={(e) => { e.stopPropagation(); handleScanForPayer(r); }}
+                            >
+                              扫描
+                            </Button>
+                            <Button type="link" size="small" onClick={(e) => { e.stopPropagation(); setSelectedPayer(r.payer === selectedPayer ? null : r.payer); }}>
+                              {r.payer === selectedPayer ? '收起' : '展开'}
+                            </Button>
+                          </Space>
                         ),
                       },
                     ]}
