@@ -134,13 +134,17 @@ export const REGIONS = [
   { label: 'mx-central-1 (墨西哥)', value: 'mx-central-1' },
 ];
 
-// Bedrock 可用区域（按需推理常用区域）；配额按区域独立，可多选一次性查询
+// Bedrock 配额查询区域；未开通或暂不支持 Bedrock 的区域会作为部分失败返回
 const BEDROCK_REGIONS = [
-  'us-east-1', 'us-east-2', 'us-west-2',
-  'eu-west-1', 'eu-west-2', 'eu-west-3', 'eu-central-1', 'eu-north-1',
-  'ap-northeast-1', 'ap-northeast-2', 'ap-northeast-3',
-  'ap-south-1', 'ap-southeast-1', 'ap-southeast-2',
-  'ca-central-1', 'sa-east-1',
+  'us-east-1', 'us-east-2', 'us-west-1', 'us-west-2',
+  'ca-central-1', 'ca-west-1',
+  'eu-central-1', 'eu-central-2', 'eu-north-1', 'eu-south-1', 'eu-south-2',
+  'eu-west-1', 'eu-west-2', 'eu-west-3',
+  'ap-east-2', 'ap-northeast-1', 'ap-northeast-2', 'ap-northeast-3',
+  'ap-south-1', 'ap-south-2',
+  'ap-southeast-1', 'ap-southeast-2', 'ap-southeast-3', 'ap-southeast-4',
+  'ap-southeast-5', 'ap-southeast-6', 'ap-southeast-7',
+  'af-south-1', 'sa-east-1', 'mx-central-1',
 ];
 // scope = 推理范围（与后端 BEDROCK_QUOTA_SCOPES 保持一致）
 const BEDROCK_SCOPES = ['Global Cross-Region', 'Cross-Region', 'On-Demand', 'Latency-Optimized', 'Other'];
