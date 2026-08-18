@@ -58,43 +58,111 @@ const accountPayerMap: Map<string, string> = new Map();
 // 记录哪些账号的 support-quota role AssumeRole 失败过 (避免每次都重试消耗 STS 调用)
 const supportRoleUnavailable: Set<string> = new Set();
 
+const QUOTA_REGION_CONCURRENCY = 6;
+const AWS_REQUEST_TIMEOUT_MS = 30_000;
+const BEDROCK_REGION_TIMEOUT_MS = 15_000;
+
+/** AWS SDK v3 的 Client 持有 keep-alive socket；每次临时创建后必须主动释放。 */
+async function withAwsClient<TClient extends { destroy(): void }, TResult>(
+  client: TClient,
+  operation: (client: TClient) => Promise<TResult>,
+): Promise<TResult> {
+  try {
+    return await operation(client);
+  } finally {
+    client.destroy();
+  }
+}
+
+/** 给整段 AWS 操作设置总 deadline，并确保 timer 不会遗留。 */
+async function withAbortTimeout<TResult>(
+  timeoutMs: number,
+  operation: (signal: AbortSignal) => Promise<TResult>,
+): Promise<TResult> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await operation(controller.signal);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** 受限并发映射，防止“账户批次 × 区域数”放大为数百条同时连接。 */
+async function mapWithConcurrency<T, TResult>(
+  items: readonly T[],
+  concurrency: number,
+  worker: (item: T, index: number) => Promise<TResult>,
+): Promise<TResult[]> {
+  const results = new Array<TResult>(items.length);
+  let nextIndex = 0;
+  const workerCount = Math.min(items.length, Math.max(1, Math.floor(concurrency)));
+
+  const workers = Array.from({ length: workerCount }, async () => {
+    while (true) {
+      const index = nextIndex++;
+      if (index >= items.length) return;
+      results[index] = await worker(items[index], index);
+    }
+  });
+  const settled = await Promise.allSettled(workers);
+  const rejected = settled.find((result): result is PromiseRejectedResult => result.status === 'rejected');
+  if (rejected) throw rejected.reason;
+
+  return results;
+}
+
 // 尝试一级跳: 直接 AssumeRole 到目标账户的 support-quota role
+function isPermanentSupportRoleFailure(error: unknown): boolean {
+  if (!error || typeof error !== 'object' || !('name' in error)) return false;
+  const errorName = String((error as { name?: unknown }).name ?? '');
+  return errorName === 'AccessDenied' || errorName === 'AccessDeniedException';
+}
+
 async function tryAssumeSupportRole(accountId: string) {
   if (!SUPPORT_ROLE_NAME) return null;
   if (supportRoleUnavailable.has(accountId)) return null;
   try {
     const roleArn = `arn:aws:iam::${accountId}:role/${SUPPORT_ROLE_NAME}`;
-    const sts = new STSClient({ region: DEFAULT_REGION, credentials: BASE_CREDENTIALS });
     // 敏感权限客户的账户，其角色信任策略要求 sts:ExternalId，不带会被拒
     const externalId = getExternalId(accountId);
-    const resp = await sts.send(new AssumeRoleCommand({
-      RoleArn: roleArn,
-      RoleSessionName: `web-${accountId}`,
-      DurationSeconds: 3600,
-      ...(externalId ? { ExternalId: externalId } : {}),
-    }));
+    const resp = await withAwsClient(
+      new STSClient({ region: DEFAULT_REGION, credentials: BASE_CREDENTIALS }),
+      sts => withAbortTimeout(AWS_REQUEST_TIMEOUT_MS, signal => sts.send(new AssumeRoleCommand({
+        RoleArn: roleArn,
+        RoleSessionName: `web-${accountId}`,
+        DurationSeconds: 3600,
+        ...(externalId ? { ExternalId: externalId } : {}),
+      }), { abortSignal: signal })),
+    );
     return {
       accessKeyId: resp.Credentials!.AccessKeyId!,
       secretAccessKey: resp.Credentials!.SecretAccessKey!,
       sessionToken: resp.Credentials!.SessionToken!,
     };
   } catch (e) {
-    // 该账户没有 support-quota role 或者信任关系没建立好，记住，下次不重试
-    supportRoleUnavailable.add(accountId);
+    // 仅缓存明确的角色/信任拒绝；超时、限流和网络错误必须允许后续重试。
+    if (isPermanentSupportRoleFailure(e)) supportRoleUnavailable.add(accountId);
     return null;
   }
 }
 
-async function getAdminCredsForPayer(payerRoleArn: string, forceFresh = false) {
+async function getAdminCredsForPayer(
+  payerRoleArn: string,
+  forceFresh = false,
+  timeoutMs = AWS_REQUEST_TIMEOUT_MS,
+) {
   const cached = adminCredsCache.get(payerRoleArn);
   if (!forceFresh && cached && Date.now() < cached.expiry) return cached.creds;
 
-  const sts = new STSClient({ region: DEFAULT_REGION, credentials: BASE_CREDENTIALS });
-  const resp = await sts.send(new AssumeRoleCommand({
-    RoleArn: payerRoleArn,
-    RoleSessionName: 'aws-toolbox-web',
-    DurationSeconds: 3600,
-  }));
+  const resp = await withAwsClient(
+    new STSClient({ region: DEFAULT_REGION, credentials: BASE_CREDENTIALS }),
+    sts => withAbortTimeout(timeoutMs, signal => sts.send(new AssumeRoleCommand({
+      RoleArn: payerRoleArn,
+      RoleSessionName: 'aws-toolbox-web',
+      DurationSeconds: 3600,
+    }), { abortSignal: signal })),
+  );
 
   const creds = {
     accessKeyId: resp.Credentials!.AccessKeyId!,
@@ -129,8 +197,16 @@ async function assumeToAccount(accountId: string) {
   const knownPayer = accountPayerMap.get(accountId);
   if (knownPayer) {
     const admin = await getAdminCredsForPayer(knownPayer);
-    const sts = new STSClient({ region: DEFAULT_REGION, credentials: admin });
-    const resp = await sts.send(new AssumeRoleCommand({ RoleArn: roleArn, RoleSessionName: `web-${accountId}`, DurationSeconds: 3600 }));
+    const resp = await withAwsClient(
+      new STSClient({ region: DEFAULT_REGION, credentials: admin }),
+      sts => withAbortTimeout(
+        AWS_REQUEST_TIMEOUT_MS,
+        signal => sts.send(
+          new AssumeRoleCommand({ RoleArn: roleArn, RoleSessionName: `web-${accountId}`, DurationSeconds: 3600 }),
+          { abortSignal: signal },
+        ),
+      ),
+    );
     console.log(`[assume] ${accountId} → OrganizationAccountAccessRole (二级跳, 已知 payer)`);
     return { accessKeyId: resp.Credentials!.AccessKeyId!, secretAccessKey: resp.Credentials!.SecretAccessKey!, sessionToken: resp.Credentials!.SessionToken! };
   }
@@ -139,8 +215,16 @@ async function assumeToAccount(accountId: string) {
   for (const payer of PAYERS) {
     try {
       const admin = await getAdminCredsForPayer(payer.roleArn);
-      const sts = new STSClient({ region: DEFAULT_REGION, credentials: admin });
-      const resp = await sts.send(new AssumeRoleCommand({ RoleArn: roleArn, RoleSessionName: `web-${accountId}`, DurationSeconds: 3600 }));
+      const resp = await withAwsClient(
+        new STSClient({ region: DEFAULT_REGION, credentials: admin }),
+        sts => withAbortTimeout(
+        AWS_REQUEST_TIMEOUT_MS,
+        signal => sts.send(
+          new AssumeRoleCommand({ RoleArn: roleArn, RoleSessionName: `web-${accountId}`, DurationSeconds: 3600 }),
+          { abortSignal: signal },
+        ),
+      ),
+      );
       accountPayerMap.set(accountId, payer.roleArn);
       console.log(`[assume] ${accountId} → OrganizationAccountAccessRole (二级跳, 探测到 ${payer.name})`);
       return { accessKeyId: resp.Credentials!.AccessKeyId!, secretAccessKey: resp.Credentials!.SecretAccessKey!, sessionToken: resp.Credentials!.SessionToken! };
@@ -171,12 +255,14 @@ export async function getTempAdminCredentials(accountId: string) {
     return m && m[1] === accountId;
   });
   if (selfPayer) {
-    const sts = new STSClient({ region: DEFAULT_REGION, credentials: BASE_CREDENTIALS });
-    const resp = await sts.send(new AssumeRoleCommand({
-      RoleArn: selfPayer.roleArn,
-      RoleSessionName: `admin-${accountId}`,
-      DurationSeconds: 3600,
-    }));
+    const resp = await withAwsClient(
+      new STSClient({ region: DEFAULT_REGION, credentials: BASE_CREDENTIALS }),
+      sts => withAbortTimeout(AWS_REQUEST_TIMEOUT_MS, signal => sts.send(new AssumeRoleCommand({
+        RoleArn: selfPayer.roleArn,
+        RoleSessionName: `admin-${accountId}`,
+        DurationSeconds: 3600,
+      }), { abortSignal: signal })),
+    );
     console.log(`[temp-cred] ${accountId} → payer admin (selfPayer)`);
     return format(resp);
   }
@@ -185,12 +271,14 @@ export async function getTempAdminCredentials(accountId: string) {
   // 原因：INVITED（邀请加入）的账户没有 OrganizationAccountAccessRole，payer 无法二级跳进去；
   // admin-console 由组织级 StackSet 下发并直接信任平台身份，对 INVITED 账户同样有效。
   try {
-    const sts = new STSClient({ region: DEFAULT_REGION, credentials: BASE_CREDENTIALS });
-    const resp = await sts.send(new AssumeRoleCommand({
-      RoleArn: `arn:aws:iam::${accountId}:role/${ADMIN_ROLE_NAME}`,
-      RoleSessionName: `admin-${accountId}`.slice(0, 64),
-      DurationSeconds: 3600,
-    }));
+    const resp = await withAwsClient(
+      new STSClient({ region: DEFAULT_REGION, credentials: BASE_CREDENTIALS }),
+      sts => withAbortTimeout(AWS_REQUEST_TIMEOUT_MS, signal => sts.send(new AssumeRoleCommand({
+        RoleArn: `arn:aws:iam::${accountId}:role/${ADMIN_ROLE_NAME}`,
+        RoleSessionName: `admin-${accountId}`.slice(0, 64),
+        DurationSeconds: 3600,
+      }), { abortSignal: signal })),
+    );
     console.log(`[temp-cred] ${accountId} → ${ADMIN_ROLE_NAME} (一级跳)`);
     return format(resp);
   } catch { /* 未部署该角色则回退到二级跳 */ }
@@ -207,12 +295,14 @@ export async function getTempAdminCredentials(accountId: string) {
   for (const payerArn of payerArns) {
     try {
       const admin = await getAdminCredsForPayer(payerArn, true);
-      const sts = new STSClient({ region: DEFAULT_REGION, credentials: admin });
-      const resp = await sts.send(new AssumeRoleCommand({
-        RoleArn: roleArn,
-        RoleSessionName: `admin-${accountId}`,
-        DurationSeconds: 3600,
-      }));
+      const resp = await withAwsClient(
+        new STSClient({ region: DEFAULT_REGION, credentials: admin }),
+        sts => withAbortTimeout(AWS_REQUEST_TIMEOUT_MS, signal => sts.send(new AssumeRoleCommand({
+          RoleArn: roleArn,
+          RoleSessionName: `admin-${accountId}`,
+          DurationSeconds: 3600,
+        }), { abortSignal: signal })),
+      );
       accountPayerMap.set(accountId, payerArn);
       console.log(`[temp-cred] ${accountId} → OrganizationAccountAccessRole (二级跳)`);
       return format(resp);
@@ -254,12 +344,14 @@ function getPayerRoleArnForAccount(accountId: string): string | null {
 async function assumeRoot(accountId: string, taskPolicyArn: string) {
   const doAssume = async (payerRoleArn: string) => {
     const mgmtCreds = await getAdminCredsForPayer(payerRoleArn); // 管理账户凭证
-    const sts = new STSClient({ region: DEFAULT_REGION, credentials: mgmtCreds });
-    const resp = await sts.send(new AssumeRootCommand({
-      TargetPrincipal: accountId,
-      TaskPolicyArn: { arn: taskPolicyArn },
-      DurationSeconds: 900,
-    }));
+    const resp = await withAwsClient(
+      new STSClient({ region: DEFAULT_REGION, credentials: mgmtCreds }),
+      sts => withAbortTimeout(AWS_REQUEST_TIMEOUT_MS, signal => sts.send(new AssumeRootCommand({
+        TargetPrincipal: accountId,
+        TaskPolicyArn: { arn: taskPolicyArn },
+        DurationSeconds: 900,
+      }), { abortSignal: signal })),
+    );
     accountPayerMap.set(accountId, payerRoleArn);
     return {
       accessKeyId: resp.Credentials!.AccessKeyId!,
@@ -404,17 +496,25 @@ export async function deleteRootAccessKey(accountId: string, accessKeyId: string
 // ===== Exported service functions =====
 
 export async function testConnection() {
-  const withTimeout = <T>(p: Promise<T>, ms: number): Promise<T> =>
-    Promise.race([p, new Promise<T>((_, rej) => setTimeout(() => rej(new Error('连接超时')), ms))]);
-  // 各 payer 并行检测，单个账号最多等 8s，避免串行累加与个别账号挂起拖慢整体
-  return Promise.all(PAYERS.map((payer) =>
-    withTimeout((async () => {
-      const creds = await getAdminCredsForPayer(payer.roleArn);
-      const sts = new STSClient({ region: DEFAULT_REGION, credentials: creds });
-      const identity = await sts.send(new GetCallerIdentityCommand({}));
+  const timeoutMs = 8000;
+  // 各 payer 并行检测，共享单个 8s 时间预算，避免个别账号拖慢整体。
+  return Promise.all(PAYERS.map(async (payer) => {
+    const startedAt = Date.now();
+    try {
+      const creds = await getAdminCredsForPayer(payer.roleArn, false, timeoutMs);
+      const remainingMs = Math.max(1, timeoutMs - (Date.now() - startedAt));
+      const identity = await withAwsClient(
+        new STSClient({ region: DEFAULT_REGION, credentials: creds }),
+        sts => withAbortTimeout(remainingMs, signal => sts.send(
+          new GetCallerIdentityCommand({}),
+          { abortSignal: signal },
+        )),
+      );
       return { name: payer.name, account: identity.Account, ok: true };
-    })(), 8000).catch((e: any) => ({ name: payer.name, error: e.message, ok: false }))
-  ));
+    } catch (e: any) {
+      return { name: payer.name, error: e.message, ok: false };
+    }
+  }));
 }
 
 export async function listAccounts() {
@@ -557,15 +657,22 @@ export async function listOrgAccountsForPayer(payerAccountId: string) {
 
 export async function listServiceQuotas(accountId: string, serviceCode: string, region?: string) {
   const creds = await assumeToAccount(accountId);
-  const client = new ServiceQuotasClient({ region: region || DEFAULT_REGION, credentials: creds });
-  const quotas: any[] = [];
-  let nextToken: string | undefined;
-  do {
-    const resp = await client.send(new ListServiceQuotasCommand({ ServiceCode: serviceCode, NextToken: nextToken }));
-    if (resp.Quotas) quotas.push(...resp.Quotas);
-    nextToken = resp.NextToken;
-  } while (nextToken);
-  return quotas;
+  return withAwsClient(
+    new ServiceQuotasClient({ region: region || DEFAULT_REGION, credentials: creds, maxAttempts: 2 }),
+    client => withAbortTimeout(AWS_REQUEST_TIMEOUT_MS, async signal => {
+      const quotas: any[] = [];
+      let nextToken: string | undefined;
+      do {
+        const resp = await client.send(
+          new ListServiceQuotasCommand({ ServiceCode: serviceCode, NextToken: nextToken }),
+          { abortSignal: signal },
+        );
+        if (resp.Quotas) quotas.push(...resp.Quotas);
+        nextToken = resp.NextToken;
+      } while (nextToken);
+      return quotas;
+    }),
+  );
 }
 
 // ============================================================
@@ -661,16 +768,24 @@ function classifyBedrockQuota(quotaName: string): { metric: 'TPM' | 'RPM' | 'TPD
  */
 export async function listBedrockQuotas(accountId: string, regions?: string[]) {
   const creds = await assumeToAccount(accountId);
-  const targetRegions = (regions && regions.length ? regions : ['us-east-1']);
+  const requestedRegions = regions && regions.length ? regions : ['us-east-1'];
+  const targetRegions = [...new Set(requestedRegions)];
+  if (targetRegions.length > 30) throw new Error('一次最多查询 30 个 Bedrock 区域');
+
   const errors: Array<{ region: string; message: string }> = [];
   const rowMap = new Map<string, any>();
 
-  await Promise.all(targetRegions.map(async (region) => {
+  await mapWithConcurrency(targetRegions, QUOTA_REGION_CONCURRENCY, async region => {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), BEDROCK_REGION_TIMEOUT_MS);
+    const client = new ServiceQuotasClient({ region, credentials: creds, maxAttempts: 2 });
     try {
-      const client = new ServiceQuotasClient({ region, credentials: creds });
       let nextToken: string | undefined;
       do {
-        const resp = await client.send(new ListServiceQuotasCommand({ ServiceCode: 'bedrock', MaxResults: 100, NextToken: nextToken }));
+        const resp = await client.send(
+          new ListServiceQuotasCommand({ ServiceCode: 'bedrock', MaxResults: 100, NextToken: nextToken }),
+          { abortSignal: controller.signal },
+        );
         for (const q of resp.Quotas || []) {
           const name = q.QuotaName || '';
           const nl = name.toLowerCase();
@@ -704,9 +819,15 @@ export async function listBedrockQuotas(accountId: string, regions?: string[]) {
         nextToken = resp.NextToken;
       } while (nextToken);
     } catch (e: any) {
-      errors.push({ region, message: e?.message || String(e) });
+      const message = e?.name === 'AbortError'
+        ? `查询超时（${BEDROCK_REGION_TIMEOUT_MS / 1000} 秒）`
+        : (e?.message || String(e));
+      errors.push({ region, message });
+    } finally {
+      clearTimeout(timer);
+      client.destroy();
     }
-  }));
+  });
 
   const scopeOrder = new Map(BEDROCK_QUOTA_SCOPES.map((s, i) => [s, i] as [string, number]));
   const rows = [...rowMap.values()].sort((a, b) =>
@@ -726,7 +847,13 @@ export async function getServiceQuotaValue(accountId: string, serviceCode: strin
   const creds = await assumeToAccount(accountId);
   const client = new ServiceQuotasClient({ region: region || DEFAULT_REGION, credentials: creds });
   try {
-    const resp = await client.send(new GetServiceQuotaCommand({ ServiceCode: serviceCode, QuotaCode: quotaCode }));
+    const resp = await withAbortTimeout(
+      AWS_REQUEST_TIMEOUT_MS,
+      signal => client.send(
+        new GetServiceQuotaCommand({ ServiceCode: serviceCode, QuotaCode: quotaCode }),
+        { abortSignal: signal },
+      ),
+    );
     const q = resp.Quota;
     if (!q) return null;
     return { value: Number(q.Value ?? 0), adjustable: !!q.Adjustable, unit: q.Unit || '', quotaName: q.QuotaName || '' };
@@ -739,6 +866,8 @@ export async function getServiceQuotaValue(accountId: string, serviceCode: strin
       return { value: -1, adjustable: false, unit: '', quotaName: '', regionNotEnabled: true } as any;
     }
     throw e;
+  } finally {
+    client.destroy();
   }
 }
 
@@ -754,17 +883,27 @@ export async function resolveQuotaCodeByName(accountId: string, serviceCode: str
 
 export async function requestQuotaIncrease(accountId: string, serviceCode: string, quotaCode: string, desiredValue: number, region?: string) {
   const creds = await assumeToAccount(accountId);
-  const client = new ServiceQuotasClient({ region: region || DEFAULT_REGION, credentials: creds });
-  const resp = await client.send(new RequestServiceQuotaIncreaseCommand({ ServiceCode: serviceCode, QuotaCode: quotaCode, DesiredValue: desiredValue }));
-  return resp.RequestedQuota;
+  return withAwsClient(
+    new ServiceQuotasClient({ region: region || DEFAULT_REGION, credentials: creds, maxAttempts: 2 }),
+    async client => {
+      const resp = await withAbortTimeout(
+        AWS_REQUEST_TIMEOUT_MS,
+        signal => client.send(new RequestServiceQuotaIncreaseCommand({
+          ServiceCode: serviceCode,
+          QuotaCode: quotaCode,
+          DesiredValue: desiredValue,
+        }), { abortSignal: signal }),
+      );
+      return resp.RequestedQuota;
+    },
+  );
 }
 
 export async function listQuotaRequests(accountId: string) {
   const creds = await assumeToAccount(accountId);
   const allRequests: any[] = [];
-  
-  // Only query regions likely to have data — default regions + commonly used opt-in
-  // Use a fast approach: query all in parallel, timeout quickly for unavailable regions
+
+  // 查询所有支持区域，但限制单账户并发，避免 scheduler 的“账户批次 × 区域数”连接爆炸。
   const regions = [
     'us-east-1', 'us-east-2', 'us-west-1', 'us-west-2',
     'eu-west-1', 'eu-west-2', 'eu-west-3', 'eu-north-1', 'eu-central-1',
@@ -776,27 +915,32 @@ export async function listQuotaRequests(accountId: string) {
     'eu-south-1', 'eu-south-2', 'eu-central-2',
     'il-central-1', 'ap-southeast-6', 'ap-southeast-7', 'mx-central-1',
   ];
-  
-  // Query all regions in parallel — each with a 8s timeout to skip unavailable regions fast
+
   const timeoutMs = 8000;
-  const results = await Promise.allSettled(regions.map(async (region) => {
+  const results = await mapWithConcurrency(regions, QUOTA_REGION_CONCURRENCY, async region => {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
+    const client = new ServiceQuotasClient({ region, credentials: creds, maxAttempts: 2 });
     try {
-      const client = new ServiceQuotasClient({ region, credentials: creds });
-      const resp = await client.send(new ListRequestedServiceQuotaChangeHistoryCommand({}), { abortSignal: controller.signal });
-      clearTimeout(timer);
-      return (resp.RequestedQuotas || []).map(r => ({ ...r, _accountId: accountId, _region: region, _currentValue: null }));
+      const resp = await client.send(
+        new ListRequestedServiceQuotaChangeHistoryCommand({}),
+        { abortSignal: controller.signal },
+      );
+      return (resp.RequestedQuotas || []).map(r => ({
+        ...r,
+        _accountId: accountId,
+        _region: region,
+        _currentValue: null,
+      }));
     } catch {
-      clearTimeout(timer);
       return [];
+    } finally {
+      clearTimeout(timer);
+      client.destroy();
     }
-  }));
+  });
 
-  for (const result of results) {
-    if (result.status === 'fulfilled') allRequests.push(...result.value);
-  }
-
+  for (const requests of results) allRequests.push(...requests);
   return allRequests;
 }
 
@@ -810,6 +954,12 @@ export async function listQuotaRequestsFast(accountId: string) {
 export async function enrichCurrentValues(accountId: string, requests: any[]) {
   if (requests.length === 0) return requests;
   const creds = await assumeToAccount(accountId);
+  const previousCurrentValues = new Map<string, number>();
+  for (const record of db.getQuotaRequests()) {
+    if (record.account_id === accountId && record.id && record.current_value != null) {
+      previousCurrentValues.set(String(record.id), record.current_value);
+    }
+  }
   
   const byRegion: Record<string, any[]> = {};
   for (const r of requests) {
@@ -818,27 +968,42 @@ export async function enrichCurrentValues(accountId: string, requests: any[]) {
     byRegion[region].push(r);
   }
 
-  await Promise.allSettled(Object.entries(byRegion).map(async ([region, reqs]) => {
-    const client = new ServiceQuotasClient({ region, credentials: creds });
-    const seen = new Set<string>();
-    const valueMap: Record<string, number | null> = {};
-    for (const r of reqs) {
-      const sc = r.ServiceCode || r.service_code;
-      const qc = r.QuotaCode || r.quota_code;
-      if (!sc || !qc) continue;
-      const key = `${sc}|${qc}`;
-      if (seen.has(key)) continue;
-      seen.add(key);
-      try {
-        const resp = await client.send(new GetServiceQuotaCommand({ ServiceCode: sc, QuotaCode: qc }));
-        valueMap[key] = resp.Quota?.Value ?? null;
-      } catch { valueMap[key] = null; }
+  const entries = Object.entries(byRegion);
+  await mapWithConcurrency(entries, QUOTA_REGION_CONCURRENCY, async ([region, reqs]) => {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), BEDROCK_REGION_TIMEOUT_MS);
+    const client = new ServiceQuotasClient({ region, credentials: creds, maxAttempts: 2 });
+    try {
+      const seen = new Set<string>();
+      const valueMap: Record<string, number | null> = {};
+      for (const r of reqs) {
+        const sc = r.ServiceCode || r.service_code;
+        const qc = r.QuotaCode || r.quota_code;
+        if (!sc || !qc) continue;
+        const key = `${sc}|${qc}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        try {
+          const resp = await client.send(
+            new GetServiceQuotaCommand({ ServiceCode: sc, QuotaCode: qc }),
+            { abortSignal: controller.signal },
+          );
+          valueMap[key] = resp.Quota?.Value ?? null;
+        } catch { valueMap[key] = null; }
+      }
+      for (const r of reqs) {
+        const key = `${r.ServiceCode || r.service_code}|${r.QuotaCode || r.quota_code}`;
+        const requestId = r.Id || r.id;
+        const previousCurrentValue = requestId
+          ? previousCurrentValues.get(String(requestId))
+          : undefined;
+        r._currentValue = valueMap[key] ?? r._currentValue ?? previousCurrentValue ?? null;
+      }
+    } finally {
+      clearTimeout(timer);
+      client.destroy();
     }
-    for (const r of reqs) {
-      const key = `${r.ServiceCode || r.service_code}|${r.QuotaCode || r.quota_code}`;
-      r._currentValue = valueMap[key] ?? r._currentValue ?? null;
-    }
-  }));
+  });
 
   return requests;
 }
@@ -970,15 +1135,17 @@ export async function deleteResources(
  */
 async function assumeRoleStrict(accountId: string, roleName: string, sessionPrefix: string) {
   const roleArn = `arn:aws:iam::${accountId}:role/${roleName}`;
-  const sts = new STSClient({ region: DEFAULT_REGION, credentials: BASE_CREDENTIALS });
   // 受限账户的 support-quota 要求 ExternalId；admin 类角色不受此约束，带上也无害
   const externalId = roleName === SUPPORT_ROLE_NAME ? getExternalId(accountId) : undefined;
-  const resp = await sts.send(new AssumeRoleCommand({
-    RoleArn: roleArn,
-    RoleSessionName: `${sessionPrefix}-${accountId}`.slice(0, 64),
-    DurationSeconds: 3600,
-    ...(externalId ? { ExternalId: externalId } : {}),
-  }));
+  const resp = await withAwsClient(
+    new STSClient({ region: DEFAULT_REGION, credentials: BASE_CREDENTIALS }),
+    sts => withAbortTimeout(AWS_REQUEST_TIMEOUT_MS, signal => sts.send(new AssumeRoleCommand({
+      RoleArn: roleArn,
+      RoleSessionName: `${sessionPrefix}-${accountId}`.slice(0, 64),
+      DurationSeconds: 3600,
+      ...(externalId ? { ExternalId: externalId } : {}),
+    }), { abortSignal: signal })),
+  );
   return {
     accessKeyId: resp.Credentials!.AccessKeyId!,
     secretAccessKey: resp.Credentials!.SecretAccessKey!,
@@ -1003,12 +1170,14 @@ async function assumeAdminViaOAAR(accountId: string) {
 
   // 优先一级跳专用 admin-console（INVITED 账户没有 OrganizationAccountAccessRole）
   try {
-    const sts = new STSClient({ region: DEFAULT_REGION, credentials: BASE_CREDENTIALS });
-    const resp = await sts.send(new AssumeRoleCommand({
-      RoleArn: `arn:aws:iam::${accountId}:role/${ADMIN_ROLE_NAME}`,
-      RoleSessionName: `console-admin-${accountId}`.slice(0, 64),
-      DurationSeconds: 3600,
-    }));
+    const resp = await withAwsClient(
+      new STSClient({ region: DEFAULT_REGION, credentials: BASE_CREDENTIALS }),
+      sts => withAbortTimeout(AWS_REQUEST_TIMEOUT_MS, signal => sts.send(new AssumeRoleCommand({
+        RoleArn: `arn:aws:iam::${accountId}:role/${ADMIN_ROLE_NAME}`,
+        RoleSessionName: `console-admin-${accountId}`.slice(0, 64),
+        DurationSeconds: 3600,
+      }), { abortSignal: signal })),
+    );
     return {
       accessKeyId: resp.Credentials!.AccessKeyId!,
       secretAccessKey: resp.Credentials!.SecretAccessKey!,
@@ -1024,12 +1193,14 @@ async function assumeAdminViaOAAR(accountId: string) {
   for (const payerArn of payerArns) {
     try {
       const admin = await getAdminCredsForPayer(payerArn);
-      const sts = new STSClient({ region: DEFAULT_REGION, credentials: admin });
-      const resp = await sts.send(new AssumeRoleCommand({
-        RoleArn: `arn:aws:iam::${accountId}:role/${ADMIN_CHILD_ROLE}`,
-        RoleSessionName: `console-admin-${accountId}`.slice(0, 64),
-        DurationSeconds: 3600,
-      }));
+      const resp = await withAwsClient(
+        new STSClient({ region: DEFAULT_REGION, credentials: admin }),
+        sts => withAbortTimeout(AWS_REQUEST_TIMEOUT_MS, signal => sts.send(new AssumeRoleCommand({
+          RoleArn: `arn:aws:iam::${accountId}:role/${ADMIN_CHILD_ROLE}`,
+          RoleSessionName: `console-admin-${accountId}`.slice(0, 64),
+          DurationSeconds: 3600,
+        }), { abortSignal: signal })),
+      );
       accountPayerMap.set(accountId, payerArn);
       return {
         accessKeyId: resp.Credentials!.AccessKeyId!,
@@ -1054,15 +1225,17 @@ async function assumeAdminViaOAAR(accountId: string) {
  * 这是 STS 层面的硬限制，不是界面层的约束，非特权用户拿到的会话确实无法写。
  */
 async function assumePayerForConsole(payerRoleArn: string, mode: 'admin' | 'readonly') {
-  const sts = new STSClient({ region: DEFAULT_REGION, credentials: BASE_CREDENTIALS });
-  const resp = await sts.send(new AssumeRoleCommand({
-    RoleArn: payerRoleArn,
-    RoleSessionName: mode === 'admin' ? 'console-payer-admin' : 'console-payer-readonly',
-    DurationSeconds: 3600,
-    ...(mode === 'readonly'
-      ? { PolicyArns: [{ arn: 'arn:aws:iam::aws:policy/ReadOnlyAccess' }] }
-      : {}),
-  }));
+  const resp = await withAwsClient(
+    new STSClient({ region: DEFAULT_REGION, credentials: BASE_CREDENTIALS }),
+    sts => withAbortTimeout(AWS_REQUEST_TIMEOUT_MS, signal => sts.send(new AssumeRoleCommand({
+      RoleArn: payerRoleArn,
+      RoleSessionName: mode === 'admin' ? 'console-payer-admin' : 'console-payer-readonly',
+      DurationSeconds: 3600,
+      ...(mode === 'readonly'
+        ? { PolicyArns: [{ arn: 'arn:aws:iam::aws:policy/ReadOnlyAccess' }] }
+        : {}),
+    }), { abortSignal: signal })),
+  );
   return {
     accessKeyId: resp.Credentials!.AccessKeyId!,
     secretAccessKey: resp.Credentials!.SecretAccessKey!,

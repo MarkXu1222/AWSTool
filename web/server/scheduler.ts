@@ -20,6 +20,7 @@ let lastQuotaSync = '';
 let lastAccountsSync = '';
 let lastRegionSync = '';
 let lastRoleSync = '';
+const REGION_SYNC_ACCOUNT_TIMEOUT_MS = 30_000;
 
 export function getSchedulerStatus() {
   return {
@@ -131,7 +132,7 @@ async function syncQuotaRequests() {
           // Snapshot existing records to detect changes (use upfront snapshot, not live DB)
           for (const r of requests) {
             const prev = snapshot.get(r.Id);
-            const newCurrent = r._currentValue;
+            const newCurrent = r._currentValue ?? prev?.current_value ?? null;
             const newStatus = r.Status?.Value || r.Status;
             const region = r.QuotaArn ? r.QuotaArn.split(':')[3] : (r._region || 'us-east-1');
 
@@ -156,7 +157,7 @@ async function syncQuotaRequests() {
               quota_code: r.QuotaCode,
               quota_name: r.QuotaName,
               desired_value: r.DesiredValue,
-              current_value: r._currentValue,
+              current_value: newCurrent,
               status: r.Status,
               case_id: r.CaseId || null,
               region,
@@ -243,18 +244,28 @@ async function syncRegions() {
       await Promise.allSettled(batch.map(async (accountId: string) => {
         try {
           const creds = await aws.assumeToAccount(accountId);
+          const controller = new AbortController();
+          const timer = setTimeout(() => controller.abort(), REGION_SYNC_ACCOUNT_TIMEOUT_MS);
           const client = new AccountClient({ region: 'us-east-1', credentials: creds });
-          const regions: { region: string; status: string }[] = [];
-          const results = await Promise.allSettled(OPT_IN_REGIONS.map(async (region) => {
-            try {
-              const resp = await client.send(new GetRegionOptStatusCommand({ RegionName: region }));
-              return { region, status: resp.RegionOptStatus || 'UNKNOWN' };
-            } catch { return { region, status: 'ERROR' }; }
-          }));
-          for (const r of results) {
-            if (r.status === 'fulfilled') regions.push(r.value);
+          try {
+            const regions: { region: string; status: string }[] = [];
+            const results = await Promise.allSettled(OPT_IN_REGIONS.map(async (region) => {
+              try {
+                const resp = await client.send(
+                  new GetRegionOptStatusCommand({ RegionName: region }),
+                  { abortSignal: controller.signal },
+                );
+                return { region, status: resp.RegionOptStatus || 'UNKNOWN' };
+              } catch { return { region, status: 'ERROR' }; }
+            }));
+            for (const r of results) {
+              if (r.status === 'fulfilled') regions.push(r.value);
+            }
+            if (regions.length > 0) db.upsertRegionData(accountId, regions);
+          } finally {
+            clearTimeout(timer);
+            client.destroy();
           }
-          if (regions.length > 0) db.upsertRegionData(accountId, regions);
         } catch {}
       }));
       done += batch.length;
