@@ -244,26 +244,29 @@ async function syncRegions() {
       await Promise.allSettled(batch.map(async (accountId: string) => {
         try {
           const creds = await aws.assumeToAccount(accountId);
-          const controller = new AbortController();
-          const timer = setTimeout(() => controller.abort(), REGION_SYNC_ACCOUNT_TIMEOUT_MS);
           const client = new AccountClient({ region: 'us-east-1', credentials: creds });
           try {
             const regions: { region: string; status: string }[] = [];
             const results = await Promise.allSettled(OPT_IN_REGIONS.map(async (region) => {
+              const controller = new AbortController();
+              const timer = setTimeout(() => controller.abort(), REGION_SYNC_ACCOUNT_TIMEOUT_MS);
               try {
                 const resp = await client.send(
                   new GetRegionOptStatusCommand({ RegionName: region }),
                   { abortSignal: controller.signal },
                 );
                 return { region, status: resp.RegionOptStatus || 'UNKNOWN' };
-              } catch { return { region, status: 'ERROR' }; }
+              } catch {
+                return { region, status: 'ERROR' };
+              } finally {
+                clearTimeout(timer);
+              }
             }));
             for (const r of results) {
               if (r.status === 'fulfilled') regions.push(r.value);
             }
             if (regions.length > 0) db.upsertRegionData(accountId, regions);
           } finally {
-            clearTimeout(timer);
             client.destroy();
           }
         } catch {}
