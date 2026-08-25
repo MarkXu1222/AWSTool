@@ -32,7 +32,7 @@ import {
 import path from 'path';
 import fs from 'fs';
 import { db } from './db';
-import { assumeToAccount } from './aws-service';
+import { assumeSupportRoleStrict, assumeToAccount } from './aws-service';
 
 const CONFIG_PATH = path.join(__dirname, '../../config.json');
 let config: any = {};
@@ -1458,7 +1458,7 @@ export async function getOnboardingStackSetStatus(
       && entry.autoDeploymentEnabled
       && entry.rootTargeted;
 
-    const targetStatuses = new Map<string, string>();
+    const targetStatuses = new Map<string, { status: string; reason?: string }>();
     const regions = new Set<string>();
     let instanceToken: string | undefined;
     do {
@@ -1472,25 +1472,82 @@ export async function getOnboardingStackSetStatus(
         if (summary.Region) regions.add(summary.Region);
         const status = summary.StackInstanceStatus?.DetailedStatus || summary.Status || 'UNKNOWN';
         entry.statusCounts[status] = (entry.statusCounts[status] || 0) + 1;
-        if (summary.Account && summary.Region) targetStatuses.set(`${summary.Account}:${summary.Region}`, status);
+        if (summary.Account && summary.Region) {
+          targetStatuses.set(`${summary.Account}:${summary.Region}`, { status, reason: summary.StatusReason });
+        }
       }
       instanceToken = page.NextToken;
     } while (instanceToken);
     entry.regions = [...regions].sort();
 
+    const supportCredentialsByAccount = new Map<string, ReturnType<typeof assumeSupportRoleStrict>>();
+    function strictSupportCredentials(accountId: string) {
+      let credentials = supportCredentialsByAccount.get(accountId);
+      if (!credentials) {
+        credentials = assumeSupportRoleStrict(accountId);
+        supportCredentialsByAccount.set(accountId, credentials);
+      }
+      return credentials;
+    }
+
+    async function hasActiveExistingLocalIndex(accountId: string, region: string): Promise<boolean> {
+      let client: ResourceExplorer2Client | undefined;
+      let timeout: NodeJS.Timeout | undefined;
+      try {
+        const credentials = await strictSupportCredentials(accountId);
+        client = new ResourceExplorer2Client({ region, credentials, maxAttempts: 2 });
+        const controller = new AbortController();
+        timeout = setTimeout(() => controller.abort(), 15_000);
+        const index = await client.send(new GetIndexCommand({}), { abortSignal: controller.signal });
+        return index.State === 'ACTIVE'
+          && index.Type === 'LOCAL'
+          && (index.ReplicatingTo || []).includes(aggregatorRegion);
+      } catch (error) {
+        console.warn(`[MAP Onboarding] 已有索引校验失败 ${accountId}/${region}: ${awsErrorDetail(error)}`);
+        return false;
+      } finally {
+        if (timeout) clearTimeout(timeout);
+        client?.destroy();
+      }
+    }
+
+    const existingIndexCandidates: StackSetTargetStatus[] = [];
     for (const key of expectedKeys) {
       const separator = key.indexOf(':');
       const accountId = key.slice(0, separator);
       const region = key.slice(separator + 1);
-      const status = targetStatuses.get(key);
+      const target = targetStatuses.get(key);
+      const status = target?.status;
       if (!status) {
         entry.missingTargets.push({ accountId, region });
       } else if (['CURRENT', 'SUCCEEDED'].includes(status)) {
         // 仅真正完成的 ACTIVE 目标计为成功。
       } else if (['FAILED', 'CANCELLED', 'INOPERABLE', 'SKIPPED_SUSPENDED_ACCOUNT'].includes(status)) {
-        entry.failedTargets.push({ accountId, region, status });
+        const indexAlreadyExists = definition.name === RE_LOCAL_STACKSET
+          && status === 'FAILED'
+          && /AlreadyExists|index already exists/i.test(target?.reason || '');
+        if (indexAlreadyExists) existingIndexCandidates.push({ accountId, region, status });
+        else entry.failedTargets.push({ accountId, region, status });
       } else {
         entry.pendingInstanceCount++;
+      }
+    }
+
+    const verificationConcurrency = 5;
+    for (let index = 0; index < existingIndexCandidates.length; index += verificationConcurrency) {
+      const batch = existingIndexCandidates.slice(index, index + verificationConcurrency);
+      const verified = await Promise.all(batch.map(async target => ({
+        target,
+        active: await hasActiveExistingLocalIndex(target.accountId, target.region),
+      })));
+      for (const result of verified) {
+        if (result.active) {
+          const status = result.target.status || 'FAILED';
+          entry.statusCounts[status] = Math.max(0, (entry.statusCounts[status] || 0) - 1);
+          entry.statusCounts.ACTIVE_EXISTING_INDEX = (entry.statusCounts.ACTIVE_EXISTING_INDEX || 0) + 1;
+        } else {
+          entry.failedTargets.push(result.target);
+        }
       }
     }
     entry.missingInstanceCount = entry.missingTargets.length;

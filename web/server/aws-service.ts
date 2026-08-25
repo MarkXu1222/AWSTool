@@ -1154,6 +1154,15 @@ async function assumeRoleStrict(accountId: string, roleName: string, sessionPref
 }
 
 /**
+ * 严格使用成员账户的最小权限 support-quota 角色，不回退到 payer 管理员链路。
+ * 供仅需只读校验的后台流程使用；角色不可用时由调用方按失败处理。
+ */
+export async function assumeSupportRoleStrict(accountId: string) {
+  if (!/^\d{12}$/.test(accountId)) throw new Error('账户 ID 必须是 12 位数字');
+  return assumeRoleStrict(accountId, SUPPORT_ROLE_NAME, 'support-readonly');
+}
+
+/**
  * Admin 控制台凭证：使用默认 OrganizationAccountAccessRole。
  * - accountId 是某 payer 的管理账户：管理账户没有 OAAR，用该 payer 的 role/tool（管理员一级跳）。
  * - 否则(成员账户)：payer admin 凭证 → 二级跳 OrganizationAccountAccessRole。
