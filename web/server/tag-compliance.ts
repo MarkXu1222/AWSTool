@@ -59,6 +59,15 @@ function ensureConfigured() {
   }
 }
 
+function awsErrorDetail(error: unknown): string {
+  if (!error || typeof error !== 'object') return String(error);
+  const value = error as { name?: string; message?: string; $metadata?: { requestId?: string } };
+  const name = value.name || 'AwsError';
+  const message = value.message && value.message !== name ? value.message : '';
+  const requestId = value.$metadata?.requestId;
+  return `[${name}]${message ? ` ${message}` : ''}${requestId ? ` (requestId: ${requestId})` : ''}`;
+}
+
 // assume 控制台角色，缓存凭证（50 分钟）
 let credCache: { creds: any; expiry: number } | null = null;
 async function getConsoleCreds() {
@@ -393,7 +402,7 @@ export async function precheckOrg(payerAccountId: string): Promise<PrecheckResul
     } while (token);
     result.accountCount = count;
   } catch (e: any) {
-    result.orgError = e.name || e.message;
+    result.orgError = awsErrorDetail(e);
   }
 
   // search-role：Resource Explorer 搜索角色
@@ -703,7 +712,7 @@ export async function provisionOrg(payerAccountId: string): Promise<ProvisionRes
     const roots = await org.send(new ListRootsCommand({}));
     out.rootOuId = roots.Roots?.[0]?.Id;
   } catch (e: any) {
-    steps.push({ key: 'org', label: '读取组织信息', status: 'failed', detail: e.name || e.message });
+    steps.push({ key: 'org', label: '读取组织信息', status: 'failed', detail: awsErrorDetail(e) });
     out.needsRetry = true;
     return out;
   }
@@ -724,7 +733,7 @@ export async function provisionOrg(payerAccountId: string): Promise<ProvisionRes
       steps.push({ key: 'serviceAccess', label: '开启 Resource Explorer 跨账户访问', status: 'created' });
     }
   } catch (e: any) {
-    steps.push({ key: 'serviceAccess', label: '开启 Resource Explorer 跨账户访问', status: 'failed', detail: e.name || e.message });
+    steps.push({ key: 'serviceAccess', label: '开启 Resource Explorer 跨账户访问', status: 'failed', detail: awsErrorDetail(e) });
     out.needsRetry = true;
   }
 
@@ -766,7 +775,7 @@ export async function provisionOrg(payerAccountId: string): Promise<ProvisionRes
       }
     }
   } catch (e: any) {
-    steps.push({ key: 'reIndex', label: 'payer 聚合索引 (Resource Explorer)', status: 'failed', detail: e.name || e.message });
+    steps.push({ key: 'reIndex', label: 'payer 聚合索引 (Resource Explorer)', status: 'failed', detail: awsErrorDetail(e) });
     out.needsRetry = true;
   }
 
@@ -790,7 +799,7 @@ export async function provisionOrg(payerAccountId: string): Promise<ProvisionRes
       steps.push({ key: 'orgView', label: '组织级 OrgView', status: 'created', detail: out.viewArn });
     }
   } catch (e: any) {
-    steps.push({ key: 'orgView', label: '组织级 OrgView', status: 'failed', detail: e.name || e.message });
+    steps.push({ key: 'orgView', label: '组织级 OrgView', status: 'failed', detail: awsErrorDetail(e) });
     out.needsRetry = true;
   }
 
@@ -837,7 +846,7 @@ export async function provisionOrg(payerAccountId: string): Promise<ProvisionRes
       detail: out.searchRoleArn,
     });
   } catch (e: any) {
-    steps.push({ key: 'searchRole', label: 'Resource Explorer 搜索角色', status: 'failed', detail: e.name || e.message });
+    steps.push({ key: 'searchRole', label: 'Resource Explorer 搜索角色', status: 'failed', detail: awsErrorDetail(e) });
     out.needsRetry = true;
   }
 
@@ -889,7 +898,7 @@ export async function provisionOrg(payerAccountId: string): Promise<ProvisionRes
       });
     }
   } catch (e: any) {
-    steps.push({ key: 'stackSet', label: '打标角色 StackSet (AutoTaggerRole)', status: 'failed', detail: e.name || e.message });
+    steps.push({ key: 'stackSet', label: '打标角色 StackSet (AutoTaggerRole)', status: 'failed', detail: awsErrorDetail(e) });
     out.needsRetry = true;
   }
 
@@ -999,7 +1008,7 @@ export async function deployReIndexes(
     out.rootOuId = roots.Roots?.[0]?.Id;
     if (!out.rootOuId) throw new Error('未取到根 OU');
   } catch (e: any) {
-    steps.push({ key: 'root', label: '读取根 OU', status: 'failed', detail: e.name || e.message });
+    steps.push({ key: 'root', label: '读取根 OU', status: 'failed', detail: awsErrorDetail(e) });
     return out;
   }
 
@@ -1056,7 +1065,7 @@ export async function deployReIndexes(
       });
     }
   } catch (e: any) {
-    steps.push({ key: 'aggStackSet', label: `聚合索引 StackSet (${aggregatorRegion})`, status: 'failed', detail: e.name || e.message });
+    steps.push({ key: 'aggStackSet', label: `聚合索引 StackSet (${aggregatorRegion})`, status: 'failed', detail: awsErrorDetail(e) });
   }
 
   // ---- 本地索引 StackSet ----
@@ -1083,7 +1092,7 @@ export async function deployReIndexes(
         });
       }
     } catch (e: any) {
-      steps.push({ key: 'localStackSet', label: '本地索引 StackSet', status: 'failed', detail: e.name || e.message });
+      steps.push({ key: 'localStackSet', label: '本地索引 StackSet', status: 'failed', detail: awsErrorDetail(e) });
     }
   }
 
@@ -1093,22 +1102,29 @@ export async function deployReIndexes(
     const results = await Promise.allSettled(managementLocals.map(async (region) => {
       const re = new ResourceExplorer2Client({ region, credentials: creds });
       try {
-        await re.send(new GetIndexCommand({}));
-        return 'exists';
-      } catch (e: any) {
-        if (e.name !== 'ResourceNotFoundException') throw e;
+        try {
+          await re.send(new GetIndexCommand({}));
+          return 'exists';
+        } catch (e: any) {
+          if (e.name !== 'ResourceNotFoundException') throw e;
+        }
+        await re.send(new CreateIndexCommand({}));
+        return 'created';
+      } finally {
+        re.destroy();
       }
-      await re.send(new CreateIndexCommand({}));
-      return 'created';
     }));
     const created = results.filter(r => r.status === 'fulfilled' && r.value === 'created').length;
     const exists = results.filter(r => r.status === 'fulfilled' && r.value === 'exists').length;
-    const failed = results.filter(r => r.status === 'rejected').length;
+    const failureDetails = results.flatMap((result, index) => result.status === 'rejected'
+      ? [`${managementLocals[index]}: ${awsErrorDetail(result.reason)}`]
+      : []);
+    const failed = failureDetails.length;
     steps.push({
       key: 'payerLocalIndexes',
       label: 'payer 管理账户本地索引',
       status: failed > 0 ? (created + exists > 0 ? 'pending' : 'failed') : (created > 0 ? 'created' : 'skipped'),
-      detail: `新建 ${created} / 已存在 ${exists} / 失败 ${failed}（管理账户不在 StackSet 覆盖范围，单独创建）`,
+      detail: `新建 ${created} / 已存在 ${exists} / 失败 ${failed}（管理账户不在 StackSet 覆盖范围，单独创建）${failureDetails.length ? `；失败明细：${failureDetails.join('；')}` : ''}`,
     });
   }
 

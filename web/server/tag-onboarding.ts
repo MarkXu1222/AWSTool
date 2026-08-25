@@ -5,6 +5,7 @@ import {
   listActiveTagOnboardingJobs,
   recoverTagOnboardingJobs,
   retryTagOnboardingJob,
+  TagOnboardingFailure,
   TagOnboardingJob,
   TagOnboardingPhase,
   TagOnboardingStep,
@@ -42,7 +43,21 @@ const STEP_DEFINITIONS: Array<{ key: TagOnboardingPhase; label: string }> = [
   { key: 'done', label: '接入完成' },
 ];
 
-class PermanentOnboardingError extends Error {}
+type OnboardingFailureDetails = Omit<TagOnboardingFailure, 'phase'>;
+
+class PermanentOnboardingError extends Error {
+  constructor(message: string, readonly failure?: OnboardingFailureDetails) {
+    super(message);
+    this.name = 'PermanentOnboardingError';
+  }
+}
+
+function formatFailureMessage(failure: TagOnboardingFailure): string {
+  const resolution = failure.resolutionSteps.length > 0
+    ? `\n解决方案：\n${failure.resolutionSteps.map((step, index) => `${index + 1}. ${step}`).join('\n')}`
+    : '';
+  return `${failure.reason}${resolution}`;
+}
 
 function nowIso(): string {
   return new Date().toISOString();
@@ -112,6 +127,7 @@ function advance(
     phaseStartedAt: now,
     nextRunAt: now,
     lastError: undefined,
+    failure: undefined,
   });
 }
 
@@ -125,6 +141,7 @@ function waitForRetry(
     steps: updateStep(job.steps, job.phase, 'waiting', detail),
     nextRunAt: new Date(Date.now() + delayMs).toISOString(),
     lastError: undefined,
+    failure: undefined,
   });
 }
 
@@ -139,6 +156,7 @@ function completeJob(job: TagOnboardingJob, detail: string): TagOnboardingJob {
     steps,
     nextRunAt: undefined,
     lastError: undefined,
+    failure: undefined,
     completedAt: now,
   });
 }
@@ -147,17 +165,37 @@ function handleRunError(jobId: string, error: unknown): void {
   const current = getTagOnboardingJob(jobId);
   if (!current || current.status === 'completed') return;
   const message = error instanceof Error ? error.message : String(error);
+  const phaseLabel = current.steps.find(step => step.key === current.phase)?.label || current.phase;
   const attempts = (current.attempts[current.phase] || 0) + 1;
   const permanent = error instanceof PermanentOnboardingError;
+  const willRetryAutomatically = !permanent && attempts <= MAX_ERROR_ATTEMPTS;
+  const failure: TagOnboardingFailure = permanent && error.failure
+    ? { phase: current.phase, ...error.failure }
+    : {
+        code: permanent ? 'PERMANENT_ONBOARDING_ERROR' : 'AWS_API_ERROR',
+        phase: current.phase,
+        reason: permanent
+          ? message
+          : `${phaseLabel}调用 AWS 服务失败，请查看下方 AWS 原始错误。`,
+        resolutionSteps: [
+          '查看当前失败步骤和 AWS 原始错误，确认缺失权限、区域状态或资源状态。',
+          '修复 AWS 侧问题后，返回本页面点击“从失败阶段重试”。',
+        ],
+        automaticRetry: willRetryAutomatically,
+        manualRetryAllowed: true,
+        awsMessage: permanent ? undefined : message,
+      };
+  const displayMessage = formatFailureMessage(failure);
 
-  if (!permanent && attempts <= MAX_ERROR_ATTEMPTS) {
+  if (willRetryAutomatically) {
     const delayMs = Math.min(5 * 60_000, AWS_POLL_INTERVAL_MS * (2 ** (attempts - 1)));
     updateTagOnboardingJob(jobId, {
       status: 'waiting_retry',
       attempts: { ...current.attempts, [current.phase]: attempts },
-      steps: updateStep(current.steps, current.phase, 'waiting', `第 ${attempts}/${MAX_ERROR_ATTEMPTS} 次失败，后台将自动重试：${message}`),
+      steps: updateStep(current.steps, current.phase, 'waiting', `第 ${attempts}/${MAX_ERROR_ATTEMPTS} 次失败，后台将自动重试。具体原因：${message}`),
       nextRunAt: new Date(Date.now() + delayMs).toISOString(),
-      lastError: message,
+      lastError: displayMessage,
+      failure,
     });
     return;
   }
@@ -165,9 +203,10 @@ function handleRunError(jobId: string, error: unknown): void {
   updateTagOnboardingJob(jobId, {
     status: 'failed',
     attempts: { ...current.attempts, [current.phase]: attempts },
-    steps: updateStep(current.steps, current.phase, 'failed', message),
+    steps: updateStep(current.steps, current.phase, 'failed', displayMessage),
     nextRunAt: undefined,
-    lastError: message,
+    lastError: displayMessage,
+    failure: { ...failure, automaticRetry: false },
   });
 }
 
@@ -209,8 +248,49 @@ async function runDeployReIndexes(job: TagOnboardingJob): Promise<void> {
   ]);
   const aggregatorRegion = 'us-east-1';
   if (!payerEnabledRegions.includes(aggregatorRegion)) {
-    throw new PermanentOnboardingError(`payer 未启用聚合区域 ${aggregatorRegion}`);
+    const reason = `payer 管理账户 ${job.payerAccountId} 未启用聚合区域 ${aggregatorRegion}，无法创建 Resource Explorer 聚合索引。`;
+    throw new PermanentOnboardingError(reason, {
+      code: 'AGGREGATOR_REGION_NOT_ENABLED',
+      reason,
+      resolutionSteps: [
+        `在 payer 管理账户中启用 ${aggregatorRegion}。`,
+        '等待区域状态变为 ENABLED 后，返回本页面点击“从失败阶段重试”。',
+      ],
+      automaticRetry: false,
+      manualRetryAllowed: true,
+      affectedRegions: [aggregatorRegion],
+    });
   }
+
+  const payerRegionSet = new Set(payerEnabledRegions);
+  const affectedAccountsByRegion: Record<string, string[]> = {};
+  for (const [accountId, regions] of Object.entries(memberEnabledRegions)) {
+    for (const region of regions) {
+      if (payerRegionSet.has(region)) continue;
+      (affectedAccountsByRegion[region] ||= []).push(accountId);
+    }
+  }
+  const memberOnlyRegions = Object.keys(affectedAccountsByRegion).sort();
+  if (memberOnlyRegions.length > 0) {
+    for (const accounts of Object.values(affectedAccountsByRegion)) accounts.sort();
+    const affectedAccountCount = new Set(Object.values(affectedAccountsByRegion).flat()).size;
+    const regionList = memberOnlyRegions.join(', ');
+    const reason = `检测到 ${memberOnlyRegions.length} 个成员区域尚未在 payer 管理账户启用（涉及 ${affectedAccountCount} 个成员账户）：${regionList}。CloudFormation StackSets 要求管理账户先启用所有目标区域，因此无法下发 Resource Explorer 索引。`;
+    throw new PermanentOnboardingError(reason, {
+      code: 'PAYER_REGIONS_NOT_ENABLED',
+      reason,
+      resolutionSteps: [
+        `在 payer 管理账户 ${job.payerAccountId} 的 AWS Account > Regions 中启用：${regionList}。`,
+        '等待所有区域状态从 ENABLING 变为 ENABLED；区域尚在启用中时不要重试。',
+        '返回本页面点击“从失败阶段重试”，系统会重新扫描区域并继续补齐 StackSet。',
+      ],
+      automaticRetry: false,
+      manualRetryAllowed: true,
+      affectedRegions: memberOnlyRegions,
+      affectedAccountsByRegion,
+    });
+  }
+
   const allEnabledRegions = new Set(payerEnabledRegions);
   for (const regions of Object.values(memberEnabledRegions)) {
     for (const region of regions) allEnabledRegions.add(region);
@@ -319,6 +399,8 @@ async function runJob(jobId: string): Promise<void> {
     progress: PHASE_PROGRESS[job.phase],
     steps: updateStep(job.steps, job.phase, 'running', '后台处理中'),
     nextRunAt: undefined,
+    lastError: undefined,
+    failure: undefined,
   });
 
   try {

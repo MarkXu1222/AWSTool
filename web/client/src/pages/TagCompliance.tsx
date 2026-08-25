@@ -406,6 +406,17 @@ const AddOrgModal: React.FC<{
 
 type OnboardingJobStatus = 'queued' | 'running' | 'waiting_retry' | 'completed' | 'failed';
 type OnboardingStepStatus = 'pending' | 'running' | 'waiting' | 'completed' | 'failed';
+interface OnboardingFailure {
+  code: string;
+  phase: string;
+  reason: string;
+  resolutionSteps: string[];
+  automaticRetry: boolean;
+  manualRetryAllowed: boolean;
+  awsMessage?: string;
+  affectedRegions?: string[];
+  affectedAccountsByRegion?: Record<string, string[]>;
+}
 interface OnboardingJob {
   id: string;
   payerAccountId: string;
@@ -415,6 +426,7 @@ interface OnboardingJob {
   phase: string;
   steps: Array<{ key: string; label: string; status: OnboardingStepStatus; detail?: string; updatedAt?: string }>;
   lastError?: string;
+  failure?: OnboardingFailure;
   nextRunAt?: string;
   updatedAt: string;
   completedAt?: string;
@@ -667,7 +679,50 @@ const AutomatedAddOrgModal: React.FC<{
           )}
           {job.status === 'failed' && (
             <Alert type="error" showIcon style={{ marginTop: 12 }} message="接入任务失败"
-              description={<><div style={{ marginBottom: 8 }}>{job.lastError || '请查看失败步骤明细'}</div><Button danger size="small" loading={retrying} onClick={handleRetry}>从失败阶段重试</Button></>} />
+              description={(
+                <div style={{ whiteSpace: 'normal' }}>
+                  <Typography.Text strong>具体原因</Typography.Text>
+                  <div style={{ marginTop: 4, marginBottom: 10, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
+                    {job.failure?.reason || job.lastError || '请查看失败步骤明细'}
+                  </div>
+
+                  {!!job.failure?.affectedRegions?.length && (
+                    <div style={{ marginBottom: 10 }}>
+                      <Typography.Text strong>受影响区域</Typography.Text>
+                      <div style={{ marginTop: 5 }}>
+                        <Space size={[4, 4]} wrap>
+                          {job.failure.affectedRegions.map(region => <Tag key={region} color="red">{region}</Tag>)}
+                        </Space>
+                      </div>
+                    </div>
+                  )}
+
+                  {!!job.failure?.resolutionSteps?.length && (
+                    <div style={{ marginBottom: 10 }}>
+                      <Typography.Text strong>解决方案</Typography.Text>
+                      <ol style={{ margin: '5px 0 0', paddingLeft: 20 }}>
+                        {job.failure.resolutionSteps.map((step, index) => <li key={`${index}-${step}`}>{step}</li>)}
+                      </ol>
+                    </div>
+                  )}
+
+                  {job.failure?.awsMessage && (
+                    <div style={{ marginBottom: 10 }}>
+                      <Typography.Text strong>AWS 原始错误</Typography.Text>
+                      <Typography.Paragraph copyable={{ text: job.failure.awsMessage }}
+                        style={{ margin: '5px 0 0', padding: 8, background: '#fff2f0', borderRadius: 4, whiteSpace: 'pre-wrap', wordBreak: 'break-word', fontFamily: 'monospace', fontSize: 12 }}>
+                        {job.failure.awsMessage}
+                      </Typography.Paragraph>
+                    </div>
+                  )}
+
+                  {job.failure?.manualRetryAllowed !== false && (
+                    <Button danger size="small" loading={retrying} onClick={handleRetry}>
+                      {job.failure?.code === 'PAYER_REGIONS_NOT_ENABLED' ? '区域启用后从失败阶段重试' : '从失败阶段重试'}
+                    </Button>
+                  )}
+                </div>
+              )} />
           )}
           {job.status === 'completed' && (
             <Alert type="success" showIcon style={{ marginTop: 12 }} message="接入完成，无需再手工保存"

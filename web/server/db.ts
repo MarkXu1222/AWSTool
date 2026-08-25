@@ -57,6 +57,18 @@ export interface TagOnboardingStep {
   updatedAt?: string;
 }
 
+export interface TagOnboardingFailure {
+  code: string;
+  phase: TagOnboardingPhase;
+  reason: string;
+  resolutionSteps: string[];
+  automaticRetry: boolean;
+  manualRetryAllowed: boolean;
+  awsMessage?: string;
+  affectedRegions?: string[];
+  affectedAccountsByRegion?: Record<string, string[]>;
+}
+
 export interface TagOnboardingJob {
   id: string;
   payerAccountId: string;
@@ -78,6 +90,7 @@ export interface TagOnboardingJob {
   phaseStartedAt: string;
   nextRunAt?: string;
   lastError?: string;
+  failure?: TagOnboardingFailure;
   requestedBy?: string;
   createdAt: string;
   updatedAt: string;
@@ -275,7 +288,7 @@ export function retryTagOnboardingJob(jobId: string): TagOnboardingJob {
     ? { ...step, status: 'pending' as const, detail: '已请求重试', updatedAt: now }
     : step);
   return updateTagOnboardingJob(jobId, {
-    status: 'queued', steps, lastError: undefined, nextRunAt: now,
+    status: 'queued', steps, lastError: undefined, failure: undefined, nextRunAt: now,
     phaseStartedAt: now,
     attempts: { ...current.attempts, [current.phase]: 0 },
   });
