@@ -263,8 +263,15 @@ awsRouter.get('/tag-compliance/precheck', async (req: Request, res: Response) =>
 const requireRootAccess = (req: Request, res: Response, next: any) => {
   const tokenUser = (req as any).user;
   const currentUser = tokenUser?.username ? db.getUser(tokenUser.username) : null;
-  if (!currentUser) return res.status(401).json({ error: '用户不存在或登录已失效' });
-  if (currentUser.role === 'admin' || (currentUser as any).root_access === true) return next();
+  if (!currentUser
+    || String(currentUser.id) !== String(tokenUser?.userId)
+    || currentUser.username !== tokenUser?.username) {
+    return res.status(401).json({ error: '用户身份已变更，请重新登录' });
+  }
+  if (currentUser.role === 'admin' || (currentUser as any).root_access === true) {
+    (res.locals as any).rootAccessUser = currentUser;
+    return next();
+  }
   return res.status(403).json({ error: '无根用户凭证操作权限，请联系管理员分配' });
 };
 
@@ -1175,26 +1182,42 @@ awsRouter.post('/root-credentials/:accountId/delete-key', requireAdmin, async (r
   res.status(400).json({ error: '删除根用户 Access Key 需要使用根用户登录 AWS Console 操作，无法通过 IAM Role 完成。请登录对应账户的 AWS Console 手动删除。' });
 });
 
-// Generate temporary ADMIN credentials for an account (valid ~1 hour) — for copy into AWS CLI / SDK.
-// Highly privileged (AdministratorAccess): restricted to full-admin role and always audited.
+// Generate temporary ADMIN credentials for an account (1–12 hours) — for copy into AWS CLI / SDK.
+// Any root_access user may request 1 hour; only the stable, current database admin identity may request a longer session.
 awsRouter.get('/temp-credentials/:accountId', requireRootAccess, async (req: Request, res: Response) => {
+  res.set({
+    'Cache-Control': 'private, no-store, max-age=0',
+    Pragma: 'no-cache',
+  });
   try {
     const accountId = String(req.params.accountId);
     if (!/^\d{12}$/.test(accountId)) {
       return res.status(400).json({ error: '无效的账户 ID' });
     }
-    const creds = await aws.getTempAdminCredentials(accountId);
-    const user = (req as any).user;
+    const rawDuration = req.query.durationHours;
+    const durationHours = rawDuration == null ? 1 : Number(rawDuration);
+    if (!Number.isInteger(durationHours) || durationHours < 1 || durationHours > 12) {
+      return res.status(400).json({ error: '有效期必须是 1–12 的整数小时' });
+    }
+    const currentUser = (res.locals as any).rootAccessUser;
+    if (durationHours > 1 && currentUser.role !== 'admin') {
+      return res.status(403).json({ error: '只有管理员可生成超过 1 小时的 Admin 临时凭证' });
+    }
+
+    const creds = await aws.getTempAdminCredentials(accountId, durationHours);
     db.addAuditLog(
-      user?.userId,
+      currentUser.id,
       'TEMP_CREDENTIALS',
-      `AWS 账户 ${accountId} · 生成 Admin 临时凭证 (有效期 1 小时)`,
-      user?.username,
+      `AWS 账户 ${accountId} · 生成 Admin 临时凭证（有效期 ${creds.durationHours} 小时，到期 ${new Date(creds.expiration).toISOString()}）`,
+      currentUser.username,
       req.ip,
     );
     (res.locals as any).audited = true;
     res.json({ success: true, data: creds });
-  } catch (e: any) { res.status(500).json({ error: e.message }); }
+  } catch (e: any) {
+    const statusCode = [400, 409, 503].includes(e?.statusCode) ? e.statusCode : 500;
+    res.status(statusCode).json({ error: e.message });
+  }
 });
 
 // Delete member account root user MFA via centralized root access (sts:AssumeRoot).

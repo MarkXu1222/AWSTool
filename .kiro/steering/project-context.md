@@ -11,7 +11,7 @@ AWS 多账户管理平台。用于跨组织管理成员账户：配额提升、�
 
 | 应用 | 位置 | 包名 / 版本 | 状态 | 说明 |
 |------|------|-------------|------|------|
-| **Web 版（生产）** | `web/` | `aws-toolbox-web` / `APP_VERSION 0.2.4` | ✅ **在维护** | 部署在 EC2（https://markxu.co）。日常改动几乎都在这里。 |
+| **Web 版（生产）** | `web/` | `aws-toolbox-web` / `APP_VERSION 0.11.0` | ✅ **在维护** | 部署在 EC2（https://markxu.co）。日常改动几乎都在这里。 |
 | 桌面版（旧） | 根 `src/` + `electron/` | `aws-toolbox` / `0.1.0` | ⚠️ 旧版/基本冻结 | 早期 Electron macOS 版，`main: dist/main/index.js`。除非专门维护桌面版，否则**不要动**。 |
 
 **结论：接到"平台/网站"相关的需求，一律在 `web/` 下操作。**
@@ -119,7 +119,7 @@ doc-templates/architectures/    # 公司架构图（静态资源，可提交）
 - 账单：`GET /billing/by-account`、`GET /billing/by-service/:accountId`、`GET /billing/breakdown/:accountId`、`POST /billing/export-invoices`
 - 配额：`GET /quotas/:accountId/:serviceCode`、`POST /quotas/increase`(admin)、`GET /quotas/requests`、`GET /quotas/stats`、`GET /quotas/companies`、`GET /quotas/company/:accountId`、`POST /quotas/generate-doc`、`POST /quotas/sync`、`POST /quotas/sync-account/:accountId`、`GET /quotas/sync-status`、`GET /quotas/sync-stream`(SSE)
 - Bedrock 配额：`GET /bedrock/quotas/:accountId?regions=a,b`（TPM/RPM/TPD，多区域并发；路径特意不放在 `/quotas/` 下，避免被 `/quotas/:accountId/:serviceCode` 通配吃掉）
-- 根凭证：`GET /root-credentials/:accountId`、`GET /temp-credentials/:accountId`(rootAccess)、`POST /root-credentials/:accountId/delete-mfa`(rootAccess)、`.../recover-password`(rootAccess)、`.../delete-access-key`(rootAccess)
+- 根凭证：`GET /root-credentials/:accountId`、`GET /temp-credentials/:accountId?durationHours=1`（rootAccess；仅 admin 可请求 2–12 小时）、`POST /root-credentials/:accountId/delete-mfa`(rootAccess)、`.../recover-password`(rootAccess)、`.../delete-access-key`(rootAccess)
 - 资源清理：`GET /resources/:accountId/:region`、`POST /resources/:accountId/delete`(admin)
 - 审计：`GET /audit`、`GET /audit/export`（均 requireAuditAccess）
 - 控制台：`GET /console-url/:accountId`
@@ -193,7 +193,7 @@ web { port, adminPassword, jwtSecret, encryptionKey, feishuWebhook }
 **权限模型（auth.ts）**：角色 `admin` / `partadmin` / `viewer`；`allowed_pages` 控制可见页面（admin=全部）；`authMiddleware` 强制未绑 MFA 用户不能访问业务接口。
 
 两个**独立权限开关**（admin 恒有，其他角色必须显式授予，且都不受 `allowed_pages` 影响）：
-- `root_access` → 账户页「根用户」敏感操作（Admin 临时凭证 / 删 Root MFA / 恢复根密码）、Admin 控制台登录
+- `root_access` → 账户页「根用户」敏感操作（Admin 临时凭证 / 删 Root MFA / 恢复根密码）、Admin 控制台登录；非 admin 即使有此权限也只能签发 1 小时凭证，2–12 小时仅限数据库当前角色为 admin
 - `bulk_quota_access` → 「批量提额」页；未授予时该菜单完全不可见，后端 `requireBulkQuotaAccess` 也会拒绝
 
 新增独立权限的改动点：`auth.ts`（resolve 函数 + me + create/update）、`db.ts`（getAllUsers 暴露字段）、`routes/aws.ts`（中间件）、`MainLayout.tsx`（导航 gating）、`Settings.tsx`（授予勾选 + 列表列）、`api.ts`（createUser/updateUser 参数）。
@@ -251,9 +251,9 @@ web { port, adminPassword, jwtSecret, encryptionKey, feishuWebhook }
    脚本幂等，会把 StackSet 建成「整 Root OU + AutoDeployment」，此后该组织新加入的账户由 CloudFormation 自动建角色。
 5. EC2 `pm2 restart aws-toolbox`（config 是模块加载时读的，不重启不生效），等约 10 秒的账户同步，再确认新组织的账户已进入缓存。
 
-成员账户角色现状（2026-08 已统一）：37 个组织的 `support-quota-role-orgwide` 与 `admin-console-role-orgwide` 均为 SERVICE_MANAGED + AutoDeployment=true，部署目标为各组织 Root OU。
+成员账户角色快照（2026-08-27）：生产配置共 44 个 payer，`consoleAdminPayers` 已验收并开放 43 个组织；该数量仅表示配置/前端开放口径，不等同于每个 StackSet 实例都成功，迁移后仍须回读操作状态与失败实例。
 
-`admin-console` 为什么必须有：INVITED（邀请加入）的账户不自带 `OrganizationAccountAccessRole`，payer 二级跳进不去，只有直接信任平台身份的 `admin-console` 能拿到 admin 临时凭证。
+`admin-console` 为什么必须有：INVITED（邀请加入）的账户不自带 `OrganizationAccountAccessRole`，payer 二级跳进不去，只有直接信任平台身份的 `admin-console` 能拿到 admin 临时凭证。模板 `MaxSessionDuration=43200`；平台默认签发 1 小时，仅数据库当前角色为 admin 的用户可选 2–12 小时。超过 1 小时只走平台长期身份到成员 `admin-console` 的直接一级跳；payer 管理账户和 OAAR 二级链仍限 1 小时。已有模板只通过显式 `--refresh-template` 按单 payer 迁移。
 
 补不上的账户：账户未完成激活时 CloudFormation 返回 `OptInRequired`(403)，StackSet 无论如何都进不去，`account-roles.ts` 会重试 3 次后标记 `unreachable` 并飞书告警，需人工先处理账户本身（这类账户通常零账单）。
 

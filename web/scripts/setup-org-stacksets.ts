@@ -14,11 +14,13 @@
  *   npx tsx scripts/setup-org-stacksets.ts support              # 所有组织
  *   npx tsx scripts/setup-org-stacksets.ts admin  yanhuang31    # 指定组织
  *   npx tsx scripts/setup-org-stacksets.ts admin  --dry-run     # 只看当前状态，不改
+ *   npx tsx scripts/setup-org-stacksets.ts admin  upup --refresh-template # 显式更新模板并部署到已有实例
  *
  * 行为（幂等，可重复执行）:
  *   StackSet 不存在        → 按整 Root OU + AutoDeployment 创建，然后部署
  *   存在但 AutoDeployment 关 → UpdateStackSet 开启（沿用原模板，不动现有角色定义）
  *   已正确配置             → 只补齐尚未覆盖的账户实例
+ *   --refresh-template     → 使用脚本内当前模板更新 StackSet，并 UpdateStackInstances 到已有账户
  *
  * 已知失败情形（属正常，不影响新账户自动化）:
  *   - "already exists in stack ..." 该账户的角色由另一个（可能已删除的）stack 管理，
@@ -32,7 +34,7 @@ import { STSClient, AssumeRoleCommand } from '@aws-sdk/client-sts';
 import { OrganizationsClient, ListRootsCommand } from '@aws-sdk/client-organizations';
 import {
   CloudFormationClient, CreateStackSetCommand, UpdateStackSetCommand, DescribeStackSetCommand,
-  CreateStackInstancesCommand, ListStackInstancesCommand, DescribeStackSetOperationCommand,
+  CreateStackInstancesCommand, UpdateStackInstancesCommand, ListStackInstancesCommand, DescribeStackSetOperationCommand,
 } from '@aws-sdk/client-cloudformation';
 
 const CONFIG = JSON.parse(fs.readFileSync(path.join(__dirname, '../../config.json'), 'utf-8'));
@@ -50,17 +52,34 @@ const log = (...a: any[]) => console.log(`[${new Date().toISOString().slice(11, 
  * 这些账户已按客户要求收窄权限并启用 ExternalId，绝不能被组织级模板覆盖。
  */
 function readRestrictedAccountIds(payerName: string): string[] {
+  const dbPath = path.join(__dirname, '../../data/db.json');
+  if (!fs.existsSync(dbPath)) {
+    throw new Error(`受限账户数据不存在，拒绝部署: ${dbPath}`);
+  }
   try {
-    const dbPath = path.join(__dirname, '../../data/db.json');
-    if (!fs.existsSync(dbPath)) return [];
     const data = JSON.parse(fs.readFileSync(dbPath, 'utf-8'));
+    const records = data.restricted_accounts;
+    if (records != null && !Array.isArray(records)) {
+      throw new Error('restricted_accounts 不是数组');
+    }
+    const knownPayers = new Set(PAYERS.map(p => p.name));
+    (records || []).forEach((record: any, index: number) => {
+      const accountId = String(record?.account_id || '');
+      const recordPayer = String(record?.payer || '');
+      if (!/^\d{12}$/.test(accountId)) {
+        throw new Error(`restricted_accounts[${index}].account_id 无效`);
+      }
+      if (!recordPayer || !knownPayers.has(recordPayer)) {
+        throw new Error(`restricted_accounts[${index}].payer 无效或未配置`);
+      }
+    });
     // 不按 state 过滤：只要标记过就排除。failed 的账户往往已从组织级 StackSet
     // 摘除，漏掉排除会让下一次全量下发把宽权限重新盖回客户账户。
-    return (data.restricted_accounts || [])
+    return (records || [])
       .filter((r: any) => r.payer === payerName)
-      .map((r: any) => r.account_id);
-  } catch {
-    return [];
+      .map((r: any) => String(r.account_id));
+  } catch (error: any) {
+    throw new Error(`无法读取受限账户数据，拒绝部署: ${dbPath} (${error?.message || 'unknown error'})`);
   }
 }
 
@@ -133,7 +152,7 @@ Resources:
     Type: AWS::IAM::Role
     Properties:
       RoleName: ${CONFIG.adminRoleName || 'admin-console'}
-      MaxSessionDuration: 3600
+      MaxSessionDuration: 43200
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
         Statement:
@@ -183,7 +202,12 @@ async function countInstances(cf: CloudFormationClient, name: string) {
   };
 }
 
-async function handle(payer: { name: string; roleArn: string }, kind: string, dryRun: boolean) {
+async function handle(
+  payer: { name: string; roleArn: string },
+  kind: string,
+  dryRun: boolean,
+  refreshTemplate: boolean,
+): Promise<boolean> {
   const tpl = TEMPLATES[kind];
   try {
     const sts = new STSClient({ region: REGION, credentials: BASE });
@@ -202,8 +226,17 @@ async function handle(payer: { name: string; roleArn: string }, kind: string, dr
 
     if (dryRun) {
       const c = existing ? await countInstances(cf, tpl.stackSetName) : null;
-      log(`${payer.name}: ${existing ? `存在 auto=${!!existing.AutoDeployment?.Enabled} 实例 ${c!.total}(ok${c!.ok}/susp${c!.susp}/fail${c!.fail})` : '不存在'}`);
-      return;
+      const maxSession = existing?.TemplateBody?.match(/MaxSessionDuration:\s*(\d+)/)?.[1];
+      log(`${payer.name}: ${existing
+        ? `存在 auto=${!!existing.AutoDeployment?.Enabled}${maxSession ? ` maxSession=${maxSession}s` : ''} 实例 ${c!.total}(ok${c!.ok}/susp${c!.susp}/fail${c!.fail})`
+        : '不存在'}`);
+      return true;
+    }
+
+    // 在任何写操作前读取权威排除名单；读取失败必须 fail-closed，避免先改模板再发现无法安全定向。
+    const excluded = readRestrictedAccountIds(payer.name);
+    if (excluded.length) {
+      log(`${payer.name}: 排除 ${excluded.length} 个受限账户 → ${excluded.join(', ')}`);
     }
 
     let action = 'ALREADY-AUTO';
@@ -219,6 +252,25 @@ async function handle(payer: { name: string; roleArn: string }, kind: string, dr
         CallAs: 'SELF',
       }));
       action = 'CREATED';
+    } else if (refreshTemplate) {
+      const templateChanged = String(existing.TemplateBody || '').trim() !== tpl.body.trim();
+      if (templateChanged || !existing.AutoDeployment?.Enabled) {
+        const up = await cf.send(new UpdateStackSetCommand({
+          StackSetName: tpl.stackSetName,
+          Description: tpl.description,
+          TemplateBody: tpl.body,
+          Capabilities: ['CAPABILITY_NAMED_IAM'],
+          PermissionModel: 'SERVICE_MANAGED',
+          AutoDeployment: { Enabled: true, RetainStacksOnAccountRemoval: false },
+          ManagedExecution: { Active: true },
+          CallAs: 'SELF',
+        }));
+        const status = await waitOp(cf, tpl.stackSetName, up.OperationId!);
+        if (status !== 'SUCCEEDED') throw new Error(`StackSet 模板更新未成功: ${status}`);
+        action = 'TEMPLATE-UPDATED';
+      } else {
+        action = 'TEMPLATE-CURRENT';
+      }
     } else if (!existing.AutoDeployment?.Enabled) {
       const up = await cf.send(new UpdateStackSetCommand({
         StackSetName: tpl.stackSetName,
@@ -231,33 +283,53 @@ async function handle(payer: { name: string; roleArn: string }, kind: string, dr
       action = `AUTO-ENABLED(${await waitOp(cf, tpl.stackSetName, up.OperationId!)})`;
     }
 
-    // 敏感权限客户账户必须排除：它们的角色由独立受限 StackSet 管理，
-    // 用 DIFFERENCE 过滤，否则整 OU 下发会把宽权限盖回去，直接违反对客户的承诺。
-    const excluded = readRestrictedAccountIds(payer.name);
-    if (excluded.length) {
-      log(`${payer.name}: 排除 ${excluded.length} 个受限账户 → ${excluded.join(', ')}`);
-    }
+    // 敏感权限客户账户由独立受限 StackSet 管理，组织级下发必须使用 DIFFERENCE 排除。
+    const deploymentTargets = excluded.length
+      ? { OrganizationalUnitIds: [rootId], Accounts: excluded, AccountFilterType: 'DIFFERENCE' as const }
+      : { OrganizationalUnitIds: [rootId] };
+    const operationPreferences = {
+      FailureTolerancePercentage: 25,
+      MaxConcurrentPercentage: 50,
+      RegionConcurrencyType: 'PARALLEL' as const,
+    };
 
     let deploy = 'SKIP';
     try {
-      const op = await cf.send(new CreateStackInstancesCommand({
-        StackSetName: tpl.stackSetName,
-        DeploymentTargets: excluded.length
-          ? { OrganizationalUnitIds: [rootId], Accounts: excluded, AccountFilterType: 'DIFFERENCE' }
-          : { OrganizationalUnitIds: [rootId] },
-        Regions: [REGION],
-        OperationPreferences: { FailureTolerancePercentage: 25, MaxConcurrentPercentage: 50, RegionConcurrencyType: 'PARALLEL' },
-        CallAs: 'SELF',
-      }));
+      const op = existing && refreshTemplate
+        ? await cf.send(new UpdateStackInstancesCommand({
+            StackSetName: tpl.stackSetName,
+            DeploymentTargets: deploymentTargets,
+            Regions: [REGION],
+            OperationPreferences: operationPreferences,
+            CallAs: 'SELF',
+          }))
+        : await cf.send(new CreateStackInstancesCommand({
+            StackSetName: tpl.stackSetName,
+            DeploymentTargets: deploymentTargets,
+            Regions: [REGION],
+            OperationPreferences: operationPreferences,
+            CallAs: 'SELF',
+          }));
       deploy = await waitOp(cf, tpl.stackSetName, op.OperationId!);
     } catch (e: any) {
+      if (refreshTemplate) {
+        throw new Error(`StackSet 实例刷新请求失败: ${e?.name || 'UnknownError'} ${e?.message || ''}`);
+      }
       deploy = `NO-OP(${e?.name})`;
     }
 
     const c = await countInstances(cf, tpl.stackSetName);
-    log(`${payer.name}: ${action} | 部署=${deploy} | 实例 ${c.total} ok${c.ok}/susp${c.susp}/fail${c.fail}`);
+    log(`${payer.name}: ${action} | ${existing && refreshTemplate ? '更新' : '部署'}=${deploy} | 实例 ${c.total} ok${c.ok}/susp${c.susp}/fail${c.fail}`);
+    if (refreshTemplate && deploy !== 'SUCCEEDED') {
+      throw new Error(`StackSet 实例刷新未成功: ${deploy}`);
+    }
+    if (refreshTemplate && c.fail > 0) {
+      throw new Error(`StackSet 实例刷新后仍有 ${c.fail} 个失败或未完成实例`);
+    }
+    return true;
   } catch (e: any) {
-    log(`${payer.name}: ❌ ${e?.name} ${String(e?.message || '').slice(0, 110)}`);
+    log(`${payer.name}: ❌ ${e?.name} ${String(e?.message || '').slice(0, 180)}`);
+    return false;
   }
 }
 
@@ -265,10 +337,19 @@ async function main() {
   const args = process.argv.slice(2);
   const kind = args[0];
   const dryRun = args.includes('--dry-run');
+  const refreshTemplate = args.includes('--refresh-template');
   const only = args.find(a => a !== kind && !a.startsWith('--'));
 
   if (!TEMPLATES[kind]) {
-    console.error('用法: npx tsx scripts/setup-org-stacksets.ts <support|admin> [payerName] [--dry-run]');
+    console.error('用法: npx tsx scripts/setup-org-stacksets.ts <support|admin> [payerName] [--dry-run] [--refresh-template]');
+    process.exit(1);
+  }
+  if (dryRun && refreshTemplate) {
+    console.error('--dry-run 与 --refresh-template 不能同时使用');
+    process.exit(1);
+  }
+  if (refreshTemplate && !only) {
+    console.error('--refresh-template 必须显式指定单个 payerName，禁止默认刷新全部组织');
     process.exit(1);
   }
 
@@ -278,14 +359,23 @@ async function main() {
     process.exit(1);
   }
 
-  log(`${dryRun ? '[dry-run] ' : ''}${TEMPLATES[kind].stackSetName} → ${targets.length} 个组织`);
+  log(`${dryRun ? '[dry-run] ' : ''}${refreshTemplate ? '[refresh-template] ' : ''}${TEMPLATES[kind].stackSetName} → ${targets.length} 个组织`);
 
   // 跨组织并发，单组织内串行
   const q = [...targets];
+  let failed = 0;
   await Promise.all(Array.from({ length: Math.min(5, q.length) }, async () => {
-    while (q.length) await handle(q.shift()!, kind, dryRun);
+    while (q.length) {
+      const ok = await handle(q.shift()!, kind, dryRun, refreshTemplate);
+      if (!ok) failed += 1;
+    }
   }));
 
+  if (failed > 0) {
+    log(`失败：${failed}/${targets.length} 个组织未完成`);
+    process.exitCode = 1;
+    return;
+  }
   log('完成');
 }
 

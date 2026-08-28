@@ -234,12 +234,29 @@ async function assumeToAccount(accountId: string) {
   throw new Error(`无法 AssumeRole 到 ${accountId}`);
 }
 
+/** 临时管理员凭证签发的可安全暴露错误，路由据此返回准确 HTTP 状态。 */
+export class TempCredentialError extends Error {
+  constructor(message: string, public readonly statusCode: 400 | 409 | 503) {
+    super(message);
+    this.name = 'TempCredentialError';
+  }
+}
+
+function isRetryableStsError(error: any): boolean {
+  const name = String(error?.name || '');
+  return error?.$retryable != null
+    || ['AbortError', 'TimeoutError', 'Throttling', 'ThrottlingException', 'TooManyRequestsException', 'ServiceUnavailableException', 'InternalFailure'].includes(name);
+}
+
 /**
- * 生成账户的 Admin 权限临时凭证（有效期 1 小时）。
- * 与 assumeToAccount 不同：这里明确走管理员角色（OrganizationAccountAccessRole / payer role），
- * 不使用受限的 support-quota role，供操作者复制到 AWS CLI / SDK 临时使用。
+ * 生成账户的 Admin 权限临时凭证（1–12 个整数小时）。
+ * payer 管理账户固定最多 1 小时；成员账户超过 1 小时只允许长期平台身份直接 AssumeRole 到 admin-console。
  */
-export async function getTempAdminCredentials(accountId: string) {
+export async function getTempAdminCredentials(accountId: string, durationHours = 1) {
+  if (!Number.isInteger(durationHours) || durationHours < 1 || durationHours > 12) {
+    throw new TempCredentialError('Admin 临时凭证有效期必须是 1–12 的整数小时', 400);
+  }
+  const durationSeconds = durationHours * 60 * 60;
   const format = (resp: any) => ({
     accountId,
     accessKeyId: resp.Credentials!.AccessKeyId!,
@@ -247,44 +264,67 @@ export async function getTempAdminCredentials(accountId: string) {
     sessionToken: resp.Credentials!.SessionToken!,
     expiration: resp.Credentials!.Expiration, // Date → ISO string after JSON 序列化
     region: DEFAULT_REGION,
+    durationHours,
   });
 
-  // 情况 1：账户本身就是 payer —— 用长期密钥直接 AssumeRole 到 payer role（可拿完整 1 小时）
+  // 情况 1：账户本身就是 payer。role/tool 默认只允许 1 小时；长时凭证仅支持成员账户的一级跳角色。
   const selfPayer = PAYERS.find(p => {
     const m = /arn:aws:iam::(\d+):role\//.exec(p.roleArn);
     return m && m[1] === accountId;
   });
   if (selfPayer) {
-    const resp = await withAwsClient(
-      new STSClient({ region: DEFAULT_REGION, credentials: BASE_CREDENTIALS }),
-      sts => withAbortTimeout(AWS_REQUEST_TIMEOUT_MS, signal => sts.send(new AssumeRoleCommand({
-        RoleArn: selfPayer.roleArn,
-        RoleSessionName: `admin-${accountId}`,
-        DurationSeconds: 3600,
-      }), { abortSignal: signal })),
-    );
-    console.log(`[temp-cred] ${accountId} → payer admin (selfPayer)`);
-    return format(resp);
+    if (durationHours > 1) {
+      throw new TempCredentialError('payer 管理账户的 Admin 临时凭证最多 1 小时；长时凭证仅支持已部署 admin-console 的成员账户', 400);
+    }
+    try {
+      const resp = await withAwsClient(
+        new STSClient({ region: DEFAULT_REGION, credentials: BASE_CREDENTIALS }),
+        sts => withAbortTimeout(AWS_REQUEST_TIMEOUT_MS, signal => sts.send(new AssumeRoleCommand({
+          RoleArn: selfPayer.roleArn,
+          RoleSessionName: `admin-${accountId}`,
+          DurationSeconds: durationSeconds,
+        }), { abortSignal: signal })),
+      );
+      console.log(`[temp-cred] ${accountId} → payer admin (selfPayer, ${durationHours}h)`);
+      return format(resp);
+    } catch (e: any) {
+      if (isRetryableStsError(e)) {
+        throw new TempCredentialError('AWS STS 暂时不可用或请求超时，请稍后重试', 503);
+      }
+      throw new TempCredentialError(`无法通过 payer 管理角色生成临时凭证（${e?.name || 'AssumeRoleFailed'}）`, 409);
+    }
   }
 
-  // 情况 2：成员账户 —— 优先一级跳专用 admin-console 角色。
-  // 原因：INVITED（邀请加入）的账户没有 OrganizationAccountAccessRole，payer 无法二级跳进去；
-  // admin-console 由组织级 StackSet 下发并直接信任平台身份，对 INVITED 账户同样有效。
+  let retryableFailure: any;
+
+  // 情况 2：成员账户优先一级跳专用 admin-console。只有这条从长期 IAM 用户发起的直接链路支持 >1 小时。
+  // INVITED 账户没有 OrganizationAccountAccessRole，也依赖这个由组织级 StackSet 下发的角色进入。
   try {
     const resp = await withAwsClient(
       new STSClient({ region: DEFAULT_REGION, credentials: BASE_CREDENTIALS }),
       sts => withAbortTimeout(AWS_REQUEST_TIMEOUT_MS, signal => sts.send(new AssumeRoleCommand({
         RoleArn: `arn:aws:iam::${accountId}:role/${ADMIN_ROLE_NAME}`,
         RoleSessionName: `admin-${accountId}`.slice(0, 64),
-        DurationSeconds: 3600,
+        DurationSeconds: durationSeconds,
       }), { abortSignal: signal })),
     );
-    console.log(`[temp-cred] ${accountId} → ${ADMIN_ROLE_NAME} (一级跳)`);
+    console.log(`[temp-cred] ${accountId} → ${ADMIN_ROLE_NAME} (一级跳, ${durationHours}h)`);
     return format(resp);
-  } catch { /* 未部署该角色则回退到二级跳 */ }
+  } catch (e: any) {
+    if (durationHours > 1) {
+      if (isRetryableStsError(e)) {
+        throw new TempCredentialError('AWS STS 暂时不可用或请求超时，请稍后重试', 503);
+      }
+      throw new TempCredentialError(
+        `无法生成 ${durationHours} 小时凭证：请确认目标账户的 ${ADMIN_ROLE_NAME} 直接信任平台身份，且 MaxSessionDuration 不低于 ${durationHours} 小时（${e?.name || 'AssumeRoleFailed'}）`,
+        409,
+      );
+    }
+    if (isRetryableStsError(e)) retryableFailure = e;
+  }
 
-  // 情况 3：回退 —— 二级跳: payer admin creds → OrganizationAccountAccessRole
-  // 角色链式 AssumeRole 上限为 1 小时；用 forceFresh 取新鲜 payer 凭证，保证接近完整 1 小时。
+  // 情况 3：1 小时请求可回退到 payer admin → OrganizationAccountAccessRole。
+  // 角色链式 AssumeRole 的 AWS 硬上限为 1 小时，长时请求绝不能进入此分支。
   const roleArn = `arn:aws:iam::${accountId}:role/${CHILD_ROLE_NAME}`;
   const knownPayer = accountPayerMap.get(accountId);
   const payerArns = knownPayer
@@ -300,15 +340,25 @@ export async function getTempAdminCredentials(accountId: string) {
         sts => withAbortTimeout(AWS_REQUEST_TIMEOUT_MS, signal => sts.send(new AssumeRoleCommand({
           RoleArn: roleArn,
           RoleSessionName: `admin-${accountId}`,
-          DurationSeconds: 3600,
+          DurationSeconds: durationSeconds,
         }), { abortSignal: signal })),
       );
       accountPayerMap.set(accountId, payerArn);
-      console.log(`[temp-cred] ${accountId} → OrganizationAccountAccessRole (二级跳)`);
+      console.log(`[temp-cred] ${accountId} → OrganizationAccountAccessRole (二级跳, 1h)`);
       return format(resp);
-    } catch (e) { lastErr = e; continue; }
+    } catch (e) {
+      lastErr = e;
+      if (isRetryableStsError(e)) retryableFailure = e;
+      continue;
+    }
   }
-  throw new Error(`无法为账户 ${accountId} 生成管理员临时凭证：${lastErr?.message || '所有 payer 均尝试失败'}`);
+  if (retryableFailure) {
+    throw new TempCredentialError('AWS STS 暂时不可用或请求超时，请稍后重试', 503);
+  }
+  throw new TempCredentialError(
+    `无法为账户 ${accountId} 生成管理员临时凭证：${lastErr?.message || '可用管理员角色均尝试失败'}`,
+    409,
+  );
 }
 
 // ===== 集中式根访问 (sts:AssumeRoot) =====

@@ -3,18 +3,17 @@
 企业级 AWS 多账户（多 Organizations）管理平台。带强制 MFA 登录、页面级权限与全量操作审计。
 
 **线上**：https://markxu.co（EC2 Singapore，PM2 进程 `aws-toolbox`）
-**当前版本**：`0.5.4`（见 `web/client/src/version.ts`，左下角展示）
+**当前版本**：`0.11.0`（见 `web/client/src/version.ts`，左下角展示）
 
-**管理规模**（生产快照 2026-08-07）
+**生产接入规模**（配置快照 2026-08-27；账户数快照 2026-08-13）
 
 | 指标 | 数量 |
 |------|------|
-| AWS Organizations（payer） | 37 |
-| 成员账户 | 2429 |
-| 已开通状态覆盖账户 | 2407 |
-| 提额记录 | 1641 |
-| 公司文档模板 | 12 |
-| 平台用户 | 6 |
+| 已配置 AWS Organizations（payer） | 44 |
+| 已验收并开放 `consoleAdminPayers` | 43 |
+| 全部账户（2026-08-13） | 2532 |
+| 其中成员账户（2026-08-13） | 2492 |
+| 已有区域状态记录的账户（2026-08-13） | 2519 |
 
 覆盖账户管理、配额提升（单个 / 批量 / Bedrock）、区域开通、账单分析与官方账单 PDF 导出、资源清理、提额文档自动生成、MAP 标签合规、根用户凭证操作、审计与飞书通知。
 
@@ -150,7 +149,9 @@ AWS/
 
 成员账户角色通过组织级 `SERVICE_MANAGED` StackSet 下发到根 OU，`AutoDeployment` 自动覆盖未来新增账户（含 INVITED）。管理账户本身不在 SERVICE_MANAGED 覆盖内，靠 `role/tool` 兜底。
 
-**覆盖现状（2026-08 已统一）**：37 个组织的 `support-quota-role-orgwide` 与 `admin-console-role-orgwide` 均为 SERVICE_MANAGED + `AutoDeployment=true`，部署目标为各组织 Root OU。加新 payer 时必须跑 `scripts/setup-org-stacksets.ts`（见部署章节），否则该组织新账户拿不到任何角色。
+**配置现状（生产核验快照 2026-08-27）**：平台已配置 44 个 payer，`consoleAdminPayers` 包含 43 个组织。该白名单只控制前端是否显示「只读 / 管理员」双入口，不能替代 StackSet 实例回读。
+
+已有 StackSet 默认不会自动改写模板。只有明确审查模板差异后，才可执行 `npx tsx scripts/setup-org-stacksets.ts admin <payerName> --refresh-template`；该模式强制指定单个 payer，操作异常、非 `SUCCEEDED` 或残留失败实例都会返回非零。
 
 **新组织的两个前置开关**（缺任一都会让 SERVICE_MANAGED StackSet 创建失败，报 `You must enable organizations access to operate a service managed stack set`）：
 
@@ -180,6 +181,8 @@ aws cloudformation describe-organizations-access --profile <payer> --region us-e
 
 第 2 步不只是性能优化：**INVITED（邀请加入）的账户没有 `OrganizationAccountAccessRole`**，payer 二级跳根本进不去，而 `admin-console` 由 StackSet 下发并直接信任平台身份，对这类账户同样有效。
 
+Admin 临时凭证默认 1 小时。数据库当前角色为 `admin` 的平台用户可选择 1–12 个整数小时；其他仅有 `root_access` 的用户固定为 1 小时。超过 1 小时只走平台长期身份 → 成员账户 `admin-console` 的直接一级跳，并要求角色 `MaxSessionDuration=43200`；payer 管理账户与 OAAR 二级链仍最多 1 小时。完整 AK/SK/SessionToken 仅保留在 React 内存中，响应禁止缓存，不写入 `sessionStorage`。
+
 `config.consoleAdminPayers` 列出已部署 `support-quota` + `admin-console` 的组织，账户列表据此带上 `_consoleDual` 标记，前端才给出「只读 / 管理员」双选项。
 
 根用户特权操作走 `sts:AssumeRoot`（集中式根访问），见下文。
@@ -204,7 +207,7 @@ aws cloudformation describe-organizations-access --profile <payer> --region us-e
 | 配额 | `GET /quotas/:accountId/:serviceCode`、`POST /quotas/increase`(admin)、`GET /quotas/requests`、`GET /quotas/stats`、`GET /quotas/companies`、`GET /quotas/company/:accountId`、`POST /quotas/generate-doc`、`POST /quotas/sync`、`POST /quotas/sync-account/:accountId`、`GET /quotas/sync-status`、`GET /quotas/sync-stream`(SSE) |
 | Bedrock 配额 | `GET /bedrock/quotas/:accountId?regions=a,b` |
 | 批量提额 | `GET /bulk-quota/payers`、`GET /bulk-quota/accounts/:payerAccountId`、`POST /bulk-quota/submit`、`GET /bulk-quota/job/:jobId`（全部 `requireBulkQuotaAccess`） |
-| 根凭证 | `GET /root-credentials/:accountId`、`GET /temp-credentials/:accountId`(rootAccess)、`POST /root-credentials/:accountId/delete-mfa`(rootAccess)、`.../recover-password`(rootAccess)、`.../delete-access-key`(rootAccess)、`.../delete-key`(admin) |
+| 根凭证 | `GET /root-credentials/:accountId`、`GET /temp-credentials/:accountId?durationHours=1`（rootAccess；仅 admin 可请求 2–12 小时）、`POST /root-credentials/:accountId/delete-mfa`(rootAccess)、`.../recover-password`(rootAccess)、`.../delete-access-key`(rootAccess)、`.../delete-key`(admin) |
 | 资源清理 | `GET /resources/:accountId/:region`、`POST /resources/:accountId/delete`(admin) |
 | 审计 | `GET /audit`、`GET /audit/export`（均 `requireAuditAccess`） |
 | 控制台 | `GET /console-url/:accountId` |
@@ -254,7 +257,7 @@ aws cloudformation describe-organizations-access --profile <payer> --region us-e
 
 admin 恒有，其他角色必须显式授予，且**都不受 `allowed_pages` 影响**：
 
-- `root_access` → 账户页「根用户」敏感操作（Admin 临时凭证 / 删 Root MFA / 恢复根密码）、Admin 控制台登录
+- `root_access` → 账户页「根用户」敏感操作（Admin 临时凭证 / 删 Root MFA / 恢复根密码）、Admin 控制台登录；非 admin 即使有此权限也只能签发 1 小时凭证
 - `bulk_quota_access` → 「批量提额」页；未授予时菜单完全不可见，后端 `requireBulkQuotaAccess` 也会拒绝
 
 后端从数据库实时校验，不信任 JWT 里的旧角色/权限。
@@ -359,7 +362,7 @@ HTML 模板 + Puppeteer 渲染。公司背景库在 `doc-templates.ts`（12 家�
 
 | 功能 | 机制 | 说明 |
 |------|------|------|
-| 生成 Admin 临时凭证 | AssumeRole 到账户管理员角色（见 admin 链路），**不**走受限的 support-quota | 1 小时；支持复制 AK/SK/Token、导出为环境变量、倒计时、刷新 |
+| 生成 Admin 临时凭证 | 优先直接 AssumeRole 到成员账户 `admin-console`，**不**走 `support-quota` | 默认 1 小时；仅平台 admin 可选 1–12 小时，超过 1 小时不回退 OAAR；支持复制 AK/SK/Token、导出环境变量、倒计时与重新生成 |
 | 删除 Root MFA | `sts:AssumeRoot`（任务策略 `IAMDeleteRootUserCredentials`）→ `DeactivateMFADevice` + `DeleteVirtualMFADevice` | 先用管理员凭证 `ListVirtualMFADevices` 定位 root 设备；仅虚拟 MFA |
 | 恢复根用户密码 | `sts:AssumeRoot`（任务策略 `IAMCreateRootUserPassword`）→ `CreateLoginProfile`（省略 UserName/Password） | 触发 AWS 密码恢复流程，向根邮箱发重置邮件 |
 

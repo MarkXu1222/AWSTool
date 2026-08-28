@@ -243,8 +243,9 @@ export const api = {
   enableRegion: (accountId: string, region: string) => request('/regions/enable', { method: 'POST', body: JSON.stringify({ accountId, region }) }),
   enableRegionBatch: (accountIds: string[], region: string) => request('/regions/enable-batch', { method: 'POST', body: JSON.stringify({ accountIds, region }) }),
   getRootCredentials: (accountId: string) => request(`/aws/root-credentials/${accountId}`),
-  // Generate temporary ADMIN credentials (valid ~1 hour) for copy into AWS CLI / SDK
-  getTempCredentials: (accountId: string) => request(`/aws/temp-credentials/${accountId}`),
+  // Generate temporary ADMIN credentials. Admin may request 1–12 hours; other root_access users remain at 1 hour.
+  getTempCredentials: (accountId: string, durationHours = 1) =>
+    request(`/aws/temp-credentials/${accountId}?durationHours=${encodeURIComponent(durationHours)}`, { cache: 'no-store' }),
   // Root user privileged tasks (via sts:AssumeRoot centralized root access)
   deleteRootMFA: (accountId: string) => request(`/aws/root-credentials/${accountId}/delete-mfa`, { method: 'POST' }),
   recoverRootPassword: (accountId: string) => request(`/aws/root-credentials/${accountId}/recover-password`, { method: 'POST' }),

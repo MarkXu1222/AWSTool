@@ -342,7 +342,7 @@ const AccountsPage: React.FC = () => {
             </>
           ) : <span style={{ color: '#999' }}>无数据</span> },
           { key: 'root', label: '根用户', children: (
-            <RootCredentialsPanel accountId={selectedAccount.Id} rootCredentials={detail?.rootCredentials} canRoot={canRoot} loading={detailLoading} />
+            <RootCredentialsPanel accountId={selectedAccount.Id} rootCredentials={detail?.rootCredentials} canRoot={canRoot} isAdmin={isAdmin} isPayer={!!selectedAccount._isPayer} loading={detailLoading} />
           ) },
         ]} />
       </div>
@@ -942,7 +942,7 @@ const AccountsPage: React.FC = () => {
                       </>
                     ) : '无数据' },
                     { key: 'root', label: '根用户', children: (
-                      <RootCredentialsPanel accountId={selectedAccount.Id} rootCredentials={detail?.rootCredentials} canRoot={canRoot} loading={detailLoading} />
+                      <RootCredentialsPanel accountId={selectedAccount.Id} rootCredentials={detail?.rootCredentials} canRoot={canRoot} isAdmin={isAdmin} isPayer={!!selectedAccount._isPayer} loading={detailLoading} />
                     ) },
                   ]} />
                 </Card>

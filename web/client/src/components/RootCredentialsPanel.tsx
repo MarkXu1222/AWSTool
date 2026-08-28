@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { Descriptions, Tag, Button, Space, message, Divider, Tooltip, Alert, Popconfirm } from 'antd';
+import { Descriptions, Tag, Button, Space, message, Divider, Tooltip, Alert, Popconfirm, InputNumber } from 'antd';
 import { ReloadOutlined, CopyOutlined, EyeOutlined, EyeInvisibleOutlined, KeyOutlined, SafetyCertificateOutlined, DeleteOutlined, UnlockOutlined } from '@ant-design/icons';
 import { api } from '../api';
 
@@ -10,6 +10,7 @@ interface TempCreds {
   sessionToken: string;
   expiration: string;
   region: string;
+  durationHours: number;
 }
 
 interface Props {
@@ -17,6 +18,10 @@ interface Props {
   rootCredentials: any;
   // 是否具备根用户凭证操作权限（admin 或被授予 root_access）。无权限时隐藏三个敏感功能。
   canRoot?: boolean;
+  // 只有严格 admin 可以选择超过 1 小时；后端仍会从数据库实时复验。
+  isAdmin?: boolean;
+  // payer 管理账户受 role/tool 会话上限约束，前端固定为 1 小时。
+  isPayer?: boolean;
   // 父组件是否仍在拉取账户详情（含根凭证状态）。为 true 时状态区显示加载中，但操作按钮始终可见。
   loading?: boolean;
 }
@@ -42,9 +47,10 @@ const CredRow: React.FC<{ label: string; value: string; secret?: boolean; reveal
   </div>
 );
 
-const RootCredentialsPanel: React.FC<Props> = ({ accountId, rootCredentials, canRoot, loading: detailLoading }) => {
+const RootCredentialsPanel: React.FC<Props> = ({ accountId, rootCredentials, canRoot, isAdmin, isPayer, loading: detailLoading }) => {
   const isMobile = typeof window !== 'undefined' && window.innerWidth < 769;
   const [creds, setCreds] = useState<TempCreds | null>(null);
+  const [durationHours, setDurationHours] = useState(1);
   const [loading, setLoading] = useState(false);
   const [reveal, setReveal] = useState(false);
   const [now, setNow] = useState(Date.now());
@@ -57,22 +63,17 @@ const RootCredentialsPanel: React.FC<Props> = ({ accountId, rootCredentials, can
   const [statusLoading, setStatusLoading] = useState(false);
   const [deletingKey, setDeletingKey] = useState<string | null>(null);
 
-  // 切换账户/挂载时：清空本地覆盖与刷新结果，并从 sessionStorage 恢复仍在有效期内的临时凭证
+  // 临时管理员凭证仅保留在 React 内存中。挂载时清除旧版本遗留的 sessionStorage 密钥。
   useEffect(() => {
     setReveal(false); setStatusOverride({}); setFetchedStatus(null);
-    try {
-      const raw = sessionStorage.getItem(`awstool:tempCreds:${accountId}`);
-      if (raw) {
-        const c = JSON.parse(raw);
-        if (c?.expiration && new Date(c.expiration).getTime() > Date.now()) {
-          setCreds(c); setNow(Date.now());
-          return;
-        }
-        sessionStorage.removeItem(`awstool:tempCreds:${accountId}`);
-      }
-    } catch { /* ignore */ }
     setCreds(null);
-  }, [accountId]);
+    setDurationHours(1);
+    try {
+      Object.keys(sessionStorage)
+        .filter(key => key.startsWith('awstool:tempCreds:'))
+        .forEach(key => sessionStorage.removeItem(key));
+    } catch { /* 浏览器禁用存储时无需处理 */ }
+  }, [accountId, isAdmin, isPayer]);
 
   const status = { ...(fetchedStatus ?? rootCredentials), ...statusOverride };
 
@@ -153,19 +154,21 @@ const RootCredentialsPanel: React.FC<Props> = ({ accountId, rootCredentials, can
   }, [creds]);
 
   const generate = async () => {
+    const requestedHours = isAdmin && !isPayer ? durationHours : 1;
     setLoading(true);
     try {
-      const res = await api.getTempCredentials(accountId);
+      const res = await api.getTempCredentials(accountId, requestedHours);
       if (res.success) {
         setCreds(res.data);
         setNow(Date.now());
-        // 存入 sessionStorage：切页面/刷新后仍能在有效期内恢复（关标签页清除）
-        try { sessionStorage.setItem(`awstool:tempCreds:${accountId}`, JSON.stringify(res.data)); } catch { /* ignore */ }
-        message.success('已生成 Admin 临时凭证（有效期约 1 小时）');
+        const actualHours = Number(res.data?.durationHours) || requestedHours;
+        message.success(`已生成 Admin 临时凭证（有效期约 ${actualHours} 小时）`);
       } else {
+        if (requestedHours > 1) setDurationHours(1);
         message.error(res.error || '生成失败');
       }
     } catch (e: any) {
+      if (requestedHours > 1) setDurationHours(1);
       message.error(e.message || '生成失败');
     } finally {
       setLoading(false);
@@ -174,12 +177,16 @@ const RootCredentialsPanel: React.FC<Props> = ({ accountId, rootCredentials, can
 
   const remainMs = creds ? new Date(creds.expiration).getTime() - now : 0;
   const expired = remainMs <= 0;
+  const credentialHours = creds?.durationHours || 1;
   const remainText = useMemo(() => {
     if (!creds || remainMs <= 0) return '已过期';
     const total = Math.floor(remainMs / 1000);
-    const m = Math.floor(total / 60);
+    const h = Math.floor(total / 3600);
+    const m = Math.floor((total % 3600) / 60);
     const s = total % 60;
-    return `${m}:${String(s).padStart(2, '0')}`;
+    return h > 0
+      ? `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`
+      : `${m}:${String(s).padStart(2, '0')}`;
   }, [creds, remainMs]);
 
   const envText = creds
@@ -281,7 +288,21 @@ const RootCredentialsPanel: React.FC<Props> = ({ accountId, rootCredentials, can
         <span style={{ fontWeight: 600, fontSize: 13 }}>
           <SafetyCertificateOutlined style={{ marginRight: 6, color: '#1677ff' }} />Admin 临时凭证
         </span>
-        <Space size={4}>
+        <Space size={4} wrap>
+          {isAdmin && !isPayer && (
+            <InputNumber
+              size="small"
+              min={1}
+              max={12}
+              precision={0}
+              value={durationHours}
+              addonAfter="小时"
+              aria-label="Admin 临时凭证有效期（小时）"
+              disabled={loading}
+              onChange={value => setDurationHours(typeof value === 'number' ? Math.min(12, Math.max(1, value)) : 1)}
+              style={{ width: 112 }}
+            />
+          )}
           {creds && (
             <Tooltip title={reveal ? '隐藏明文' : '显示明文'}>
               <Button size="small" type="text" aria-label={reveal ? '隐藏明文' : '显示明文'} icon={reveal ? <EyeInvisibleOutlined /> : <EyeOutlined />} onClick={() => setReveal(r => !r)} />
@@ -294,7 +315,7 @@ const RootCredentialsPanel: React.FC<Props> = ({ accountId, rootCredentials, can
             loading={loading}
             onClick={generate}
           >
-            {creds ? '刷新' : '生成 (1小时)'}
+            {creds ? '重新生成' : `生成 (${isAdmin && !isPayer ? durationHours : 1}小时)`}
           </Button>
         </Space>
       </div>
@@ -316,11 +337,17 @@ const RootCredentialsPanel: React.FC<Props> = ({ accountId, rootCredentials, can
             style={{ marginTop: 8 }}
             type="warning"
             showIcon
-            message="完整管理员权限凭证，请勿泄露。有效期约 1 小时，过期后点『刷新』重新生成。"
+            message={`完整管理员权限凭证，请勿泄露。有效期约 ${credentialHours} 小时，过期后可重新生成。`}
           />
         </div>
       ) : (
-        <p style={{ color: '#999', fontSize: 12, margin: 0 }}>点击生成后可复制到 AWS CLI / SDK 使用（AdministratorAccess，有效期 1 小时）。</p>
+        <p style={{ color: '#999', fontSize: 12, margin: 0 }}>
+          {isPayer
+            ? 'payer 管理账户通过 role/tool 生成，固定有效期 1 小时。'
+            : isAdmin
+              ? '选择 1–12 小时后生成。超过 1 小时仅支持已部署 admin-console 的成员账户。'
+              : '点击生成后可复制到 AWS CLI / SDK 使用（AdministratorAccess，有效期 1 小时）。'}
+        </p>
       )}
         </>
       )}
