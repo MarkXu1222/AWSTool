@@ -98,7 +98,7 @@ doc-templates/architectures/    # 公司架构图（静态资源，可提交）
 | `bulkquota` | `pages/BulkQuota.tsx` | `/api/aws/bulk-quota/*` | 批量提额（按 payer 组织 × 多区域）。**不在 `ALL_PAGE_KEYS` 里**，可见性只由独立权限 `bulk_quota_access` 决定 |
 | `regions` | `pages/Regions.tsx` | `/api/regions/*` | 区域 opt-in 状态与开通 |
 | `billing` | `pages/Billing.tsx` | `/api/aws/billing/*` | 按账户/服务成本、账单拆分、批量导出发票 |
-| `cleanup` | `pages/Cleanup.tsx` | `/api/aws/resources/*` | 资源扫描与删除 |
+| `cleanup` | `pages/Cleanup.tsx` | `/api/aws/resources/*` | 最近 7 天 EC2/EBS/S3/Lambda/IAM 用户扫描；IAM 非敏感详情与手动勾选安全删除，S3 只读 |
 | `tagcompliance` | `pages/TagCompliance.tsx` | `/api/aws/tag-compliance/*` | MAP 标签合规扫描与报告 |
 | `audit` | `pages/AuditLog.tsx` | `/api/aws/audit*` | 审计日志查询与导出 |
 | `settings` | `pages/Settings.tsx` | `/api/auth/*` | 修改密码、MFA、用户管理 |
@@ -120,7 +120,7 @@ doc-templates/architectures/    # 公司架构图（静态资源，可提交）
 - 配额：`GET /quotas/:accountId/:serviceCode`、`POST /quotas/increase`(admin)、`GET /quotas/requests`、`GET /quotas/stats`、`GET /quotas/companies`、`GET /quotas/company/:accountId`、`POST /quotas/generate-doc`、`POST /quotas/sync`、`POST /quotas/sync-account/:accountId`、`GET /quotas/sync-status`、`GET /quotas/sync-stream`(SSE)
 - Bedrock 配额：`GET /bedrock/quotas/:accountId?regions=a,b`（TPM/RPM/TPD，多区域并发；路径特意不放在 `/quotas/` 下，避免被 `/quotas/:accountId/:serviceCode` 通配吃掉）
 - 根凭证：`GET /root-credentials/:accountId`、`GET /temp-credentials/:accountId?durationHours=1`（rootAccess；仅 admin 可请求 2–12 小时）、`POST /root-credentials/:accountId/delete-mfa`(rootAccess)、`.../recover-password`(rootAccess)、`.../delete-access-key`(rootAccess)
-- 资源清理：`GET /resources/:accountId/:region`、`POST /resources/:accountId/delete`(admin)
+- 资源清理：`GET /resources/:accountId/:region` 返回最近 7 天 EC2/EBS/S3/Lambda/IAM 用户（Lambda 按 LastModified，IAM/S3 为全局，单服务失败放入 warnings）；`POST /resources/:accountId/delete` 删除前逐项重新读取并复验时间，EC2/EBS/Lambda 保持 admin/partadmin 兼容，IAM 用户仅数据库实时 strict admin 且服务端级联清理全部依赖，S3 永不自动删除
 - 审计：`GET /audit`、`GET /audit/export`（均 requireAuditAccess）
 - 控制台：`GET /console-url/:accountId`
 - MAP 标签：`GET /tag-compliance/status|config|executions|report|precheck`、`PUT /tag-compliance/config`(admin)、`POST /tag-compliance/scan`(admin)

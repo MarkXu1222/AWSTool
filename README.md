@@ -3,7 +3,7 @@
 企业级 AWS 多账户（多 Organizations）管理平台。带强制 MFA 登录、页面级权限与全量操作审计。
 
 **线上**：https://markxu.co（EC2 Singapore，PM2 进程 `aws-toolbox`）
-**当前版本**：`0.11.0`（见 `web/client/src/version.ts`，左下角展示）
+**当前版本**：`0.12.0`（见 `web/client/src/version.ts`，左下角展示）
 
 **生产接入规模**（配置快照 2026-08-27；账户数快照 2026-08-13）
 
@@ -75,7 +75,7 @@
 | `bulkquota` | `BulkQuota.tsx` | `/api/aws/bulk-quota/*` | 批量提额（按 payer 组织 × 多区域）。**不在 `ALL_PAGE_KEYS` 里**，可见性只由独立权限 `bulk_quota_access` 决定 |
 | `regions` | `Regions.tsx` | `/api/regions/*` | opt-in 区域开通状态扫描与单个/批量开通 |
 | `billing` | `Billing.tsx` | `/api/aws/billing/*` | 按账户/服务成本、账单拆分、批量导出官方账单 PDF |
-| `cleanup` | `Cleanup.tsx` | `/api/aws/resources/*` | 分步流程：选账户 → 看账单 → 扫描资源 → 删除（双重确认） |
+| `cleanup` | `Cleanup.tsx` | `/api/aws/resources/*` | 扫描最近 7 天的 EC2/EBS/S3/Lambda/IAM 用户，展示 IAM 非敏感详情并手动勾选删除；S3 只读 |
 | `tagcompliance` | `TagCompliance.tsx` | `/api/aws/tag-compliance/*` | MAP 标签合规扫描与报告 |
 | `audit` | `AuditLog.tsx` | `/api/aws/audit*` | 审计日志查询与 CSV 导出 |
 | `settings` | `Settings.tsx` | `/api/auth/*` | 改密码、MFA、用户管理 |
@@ -208,7 +208,7 @@ Admin 临时凭证默认 1 小时。数据库当前角色为 `admin` 的平台�
 | Bedrock 配额 | `GET /bedrock/quotas/:accountId?regions=a,b` |
 | 批量提额 | `GET /bulk-quota/payers`、`GET /bulk-quota/accounts/:payerAccountId`、`POST /bulk-quota/submit`、`GET /bulk-quota/job/:jobId`（全部 `requireBulkQuotaAccess`） |
 | 根凭证 | `GET /root-credentials/:accountId`、`GET /temp-credentials/:accountId?durationHours=1`（rootAccess；仅 admin 可请求 2–12 小时）、`POST /root-credentials/:accountId/delete-mfa`(rootAccess)、`.../recover-password`(rootAccess)、`.../delete-access-key`(rootAccess)、`.../delete-key`(admin) |
-| 资源清理 | `GET /resources/:accountId/:region`、`POST /resources/:accountId/delete`(admin) |
+| 资源清理 | `GET /resources/:accountId/:region`（最近 7 天；Lambda 按最近修改；IAM/S3 为全局；失败服务通过 warnings 返回）、`POST /resources/:accountId/delete`（服务端重新读取时间并复验；EC2/EBS/Lambda 兼容 admin/partadmin，IAM 用户仅实时 strict admin 且级联清理依赖；S3 不可删除） |
 | 审计 | `GET /audit`、`GET /audit/export`（均 `requireAuditAccess`） |
 | 控制台 | `GET /console-url/:accountId` |
 | MAP 标签 | `GET /tag-compliance/status\|config\|executions\|report\|precheck\|notify-emails\|re-indexes/status`；`PUT /config`、`POST /scan`、`POST /notify-emails`、`DELETE /notify-emails`、`POST /re-indexes`、`POST /provision`（写操作均 admin） |

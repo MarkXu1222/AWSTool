@@ -5,10 +5,37 @@ import { STSClient, AssumeRoleCommand, GetCallerIdentityCommand, AssumeRootComma
 import { OrganizationsClient, ListAccountsCommand } from '@aws-sdk/client-organizations';
 import { CostExplorerClient, GetCostAndUsageCommand } from '@aws-sdk/client-cost-explorer';
 import { ServiceQuotasClient, ListServiceQuotasCommand, RequestServiceQuotaIncreaseCommand, ListRequestedServiceQuotaChangeHistoryCommand, GetServiceQuotaCommand } from '@aws-sdk/client-service-quotas';
-import { IAMClient, GetAccountSummaryCommand, ListMFADevicesCommand, ListUsersCommand, ListVirtualMFADevicesCommand, DeactivateMFADeviceCommand, DeleteVirtualMFADeviceCommand, DeleteLoginProfileCommand, ListAccessKeysCommand, GetLoginProfileCommand, DeleteAccessKeyCommand } from '@aws-sdk/client-iam';
+import {
+  IAMClient,
+  GetAccountSummaryCommand,
+  GetUserCommand,
+  ListMFADevicesCommand,
+  ListUsersCommand,
+  ListVirtualMFADevicesCommand,
+  DeactivateMFADeviceCommand,
+  DeleteVirtualMFADeviceCommand,
+  DeleteLoginProfileCommand,
+  ListAccessKeysCommand,
+  GetLoginProfileCommand,
+  DeleteAccessKeyCommand,
+  DeleteUserCommand,
+  ListAttachedUserPoliciesCommand,
+  DetachUserPolicyCommand,
+  ListUserPoliciesCommand,
+  DeleteUserPolicyCommand,
+  ListGroupsForUserCommand,
+  RemoveUserFromGroupCommand,
+  ListSigningCertificatesCommand,
+  DeleteSigningCertificateCommand,
+  ListSSHPublicKeysCommand,
+  DeleteSSHPublicKeyCommand,
+  ListServiceSpecificCredentialsCommand,
+  DeleteServiceSpecificCredentialCommand,
+  DeleteUserPermissionsBoundaryCommand,
+} from '@aws-sdk/client-iam';
 import { EC2Client, DescribeInstancesCommand, DescribeVolumesCommand, TerminateInstancesCommand, DeleteVolumeCommand } from '@aws-sdk/client-ec2';
 import { S3Client, ListBucketsCommand } from '@aws-sdk/client-s3';
-import { LambdaClient, ListFunctionsCommand, DeleteFunctionCommand } from '@aws-sdk/client-lambda';
+import { LambdaClient, ListFunctionsCommand, GetFunctionConfigurationCommand, DeleteFunctionCommand } from '@aws-sdk/client-lambda';
 import path from 'path';
 import fs from 'fs';
 import { db } from './db';
@@ -1106,73 +1133,617 @@ export async function getAccountDetail(accountId: string) {
   return detail;
 }
 
-export async function scanResources(accountId: string, region: string) {
-  const creds = await assumeToAccount(accountId);
-  const resources: any[] = [];
+export const CLEANUP_WINDOW_DAYS = 7;
+const CLEANUP_WINDOW_MS = CLEANUP_WINDOW_DAYS * 24 * 60 * 60 * 1000;
+const CLEANUP_FUTURE_SKEW_MS = 5 * 60 * 1000;
 
-  try {
-    const ec2 = new EC2Client({ region, credentials: creds });
-    const inst = await ec2.send(new DescribeInstancesCommand({}));
-    (inst.Reservations || []).forEach(r => (r.Instances || []).forEach(i => {
-      if (i.State?.Name !== 'terminated') resources.push({ type: 'EC2', id: i.InstanceId, name: i.Tags?.find(t => t.Key === 'Name')?.Value || i.InstanceId, arn: '', details: `${i.InstanceType} | ${i.State?.Name}` });
-    }));
-  } catch {}
+export type CleanupResourceType = 'EC2' | 'EBS' | 'S3' | 'Lambda' | 'IAMUser';
+export type CleanupTimeBasis = 'launchTime' | 'createTime' | 'creationDate' | 'lastModified';
 
-  try {
-    const ec2 = new EC2Client({ region, credentials: creds });
-    const vols = await ec2.send(new DescribeVolumesCommand({}));
-    (vols.Volumes || []).forEach(v => resources.push({ type: 'EBS', id: v.VolumeId, name: v.Tags?.find(t => t.Key === 'Name')?.Value || v.VolumeId, arn: '', details: `${v.Size}GB | ${v.State}` }));
-  } catch {}
+export interface CleanupIamDetails {
+  username: string;
+  userId: string;
+  arn: string;
+  path: string;
+  createDate: string;
+  passwordEnabled: boolean;
+  passwordLastUsed?: string;
+  accessKeys: { id: string; status: string; createDate?: string }[];
+  mfaDevices: { serialNumber: string; enableDate?: string }[];
+  groups: string[];
+  attachedPolicies: { name: string; arn: string }[];
+  inlinePolicies: string[];
+  permissionsBoundary?: string;
+  dependencies: {
+    loginProfile: number;
+    accessKeys: number;
+    mfaDevices: number;
+    groups: number;
+    attachedPolicies: number;
+    inlinePolicies: number;
+    signingCertificates: number;
+    sshPublicKeys: number;
+    serviceSpecificCredentials: number;
+    permissionsBoundary: number;
+  };
+}
 
-  if (region === 'us-east-1') {
+export interface CleanupResource {
+  key: string;
+  type: CleanupResourceType;
+  id: string;
+  name: string;
+  arn: string;
+  details: string;
+  eventTime: string;
+  timeBasis: CleanupTimeBasis;
+  scope: 'regional' | 'global';
+  deletable: boolean;
+  iamDetails?: CleanupIamDetails;
+}
+
+export interface CleanupScanResult {
+  resources: CleanupResource[];
+  warnings: string[];
+  cutoff: string;
+  windowDays: number;
+}
+
+export interface IamCleanupSummary {
+  loginProfiles: number;
+  accessKeys: number;
+  mfaDevices: number;
+  virtualMfaDevices: number;
+  attachedPolicies: number;
+  inlinePolicies: number;
+  groups: number;
+  signingCertificates: number;
+  sshPublicKeys: number;
+  serviceSpecificCredentials: number;
+  permissionsBoundaries: number;
+}
+
+export interface CleanupDeleteResult {
+  id: string;
+  type: string;
+  name?: string;
+  ok: boolean;
+  error?: string;
+  alreadyAbsent?: boolean;
+  iamCleanup?: IamCleanupSummary;
+}
+
+function cleanupErrorMessage(error: unknown): string {
+  if (!error || typeof error !== 'object') return String(error);
+  const value = error as { name?: unknown; message?: unknown };
+  const name = typeof value.name === 'string' ? value.name : 'AWS 错误';
+  const message = typeof value.message === 'string' ? value.message : '';
+  return `${name}${message ? `: ${message}` : ''}`.slice(0, 400);
+}
+
+function isNoSuchEntity(error: unknown): boolean {
+  if (!error || typeof error !== 'object') return false;
+  const value = error as { name?: unknown; message?: unknown };
+  const errorName = typeof value.name === 'string' ? value.name : '';
+  return errorName === 'NoSuchEntity'
+    || errorName === 'NoSuchEntityException'
+    || (typeof value.message === 'string' && value.message.includes('NoSuchEntity'));
+}
+
+function isRecentCleanupTime(value: Date | string | undefined, cutoffMs: number, nowMs = Date.now()): boolean {
+  if (!value) return false;
+  const time = value instanceof Date ? value.getTime() : Date.parse(value);
+  return Number.isFinite(time) && time >= cutoffMs && time <= nowMs + CLEANUP_FUTURE_SKEW_MS;
+}
+
+function assertRecentCleanupTime(value: Date | string | undefined, label: string): void {
+  const cutoffMs = Date.now() - CLEANUP_WINDOW_MS;
+  if (!isRecentCleanupTime(value, cutoffMs)) {
+    throw new Error(`拒绝删除 ${label}：资源时间不在最近 ${CLEANUP_WINDOW_DAYS} 天内，或 AWS 未返回可验证时间`);
+  }
+}
+
+async function collectMarkerPages<T>(
+  loadPage: (marker?: string) => Promise<{ items: T[]; marker?: string; truncated?: boolean }>,
+): Promise<T[]> {
+  const items: T[] = [];
+  let marker: string | undefined;
+  do {
+    const page = await loadPage(marker);
+    items.push(...page.items);
+    marker = page.truncated ? page.marker : undefined;
+  } while (marker);
+  return items;
+}
+
+async function getCleanupIamDetails(
+  iam: IAMClient,
+  user: {
+    UserName?: string;
+    UserId?: string;
+    Arn?: string;
+    Path?: string;
+    CreateDate?: Date;
+    PasswordLastUsed?: Date;
+    PermissionsBoundary?: { PermissionsBoundaryArn?: string };
+  },
+  warnings: string[],
+): Promise<CleanupIamDetails> {
+  const username = user.UserName!;
+  const readDetail = async <T>(label: string, operation: () => Promise<T>, fallback: T): Promise<T> => {
     try {
-      const s3 = new S3Client({ region, credentials: creds });
-      const buckets = await s3.send(new ListBucketsCommand({}));
-      (buckets.Buckets || []).forEach(b => resources.push({ type: 'S3', id: b.Name, name: b.Name, arn: '', details: '' }));
-    } catch {}
+      return await operation();
+    } catch (error) {
+      warnings.push(`IAM 用户 ${username} 的${label}读取失败：${cleanupErrorMessage(error)}`);
+      return fallback;
+    }
+  };
+
+  let passwordEnabled = false;
+  try {
+    await iam.send(new GetLoginProfileCommand({ UserName: username }));
+    passwordEnabled = true;
+  } catch (error) {
+    if (!isNoSuchEntity(error)) {
+      warnings.push(`IAM 用户 ${username} 的登录配置读取失败：${cleanupErrorMessage(error)}`);
+    }
   }
 
-  try {
-    const lambda = new LambdaClient({ region, credentials: creds });
-    const fns = await lambda.send(new ListFunctionsCommand({}));
-    (fns.Functions || []).forEach(f => resources.push({ type: 'Lambda', id: f.FunctionName, name: f.FunctionName, arn: f.FunctionArn, details: `${f.Runtime} | ${f.MemorySize}MB` }));
-  } catch {}
+  const [accessKeys, mfaDevices, groups, attachedPolicies, inlinePolicies, signingCertificates, sshPublicKeys, serviceCredentials] = await Promise.all([
+    readDetail('访问密钥', () => collectMarkerPages(async marker => {
+      const page = await iam.send(new ListAccessKeysCommand({ UserName: username, Marker: marker }));
+      return { items: page.AccessKeyMetadata || [], marker: page.Marker, truncated: page.IsTruncated };
+    }), []),
+    readDetail('MFA 设备', () => collectMarkerPages(async marker => {
+      const page = await iam.send(new ListMFADevicesCommand({ UserName: username, Marker: marker }));
+      return { items: page.MFADevices || [], marker: page.Marker, truncated: page.IsTruncated };
+    }), []),
+    readDetail('用户组', () => collectMarkerPages(async marker => {
+      const page = await iam.send(new ListGroupsForUserCommand({ UserName: username, Marker: marker }));
+      return { items: page.Groups || [], marker: page.Marker, truncated: page.IsTruncated };
+    }), []),
+    readDetail('托管策略', () => collectMarkerPages(async marker => {
+      const page = await iam.send(new ListAttachedUserPoliciesCommand({ UserName: username, Marker: marker }));
+      return { items: page.AttachedPolicies || [], marker: page.Marker, truncated: page.IsTruncated };
+    }), []),
+    readDetail('内联策略', () => collectMarkerPages(async marker => {
+      const page = await iam.send(new ListUserPoliciesCommand({ UserName: username, Marker: marker }));
+      return { items: page.PolicyNames || [], marker: page.Marker, truncated: page.IsTruncated };
+    }), []),
+    readDetail('签名证书', () => collectMarkerPages(async marker => {
+      const page = await iam.send(new ListSigningCertificatesCommand({ UserName: username, Marker: marker }));
+      return { items: page.Certificates || [], marker: page.Marker, truncated: page.IsTruncated };
+    }), []),
+    readDetail('SSH 公钥', () => collectMarkerPages(async marker => {
+      const page = await iam.send(new ListSSHPublicKeysCommand({ UserName: username, Marker: marker }));
+      return { items: page.SSHPublicKeys || [], marker: page.Marker, truncated: page.IsTruncated };
+    }), []),
+    readDetail('服务专用凭证', () => collectMarkerPages(async marker => {
+      const page = await iam.send(new ListServiceSpecificCredentialsCommand({ UserName: username, Marker: marker }));
+      return { items: page.ServiceSpecificCredentials || [], marker: page.Marker, truncated: page.IsTruncated };
+    }), []),
+  ]);
 
-  return resources;
+  const boundary = user.PermissionsBoundary?.PermissionsBoundaryArn;
+  return {
+    username,
+    userId: user.UserId || '',
+    arn: user.Arn || '',
+    path: user.Path || '/',
+    createDate: user.CreateDate!.toISOString(),
+    passwordEnabled,
+    passwordLastUsed: user.PasswordLastUsed?.toISOString(),
+    accessKeys: accessKeys.map(key => ({
+      id: key.AccessKeyId || '',
+      status: key.Status || 'Unknown',
+      createDate: key.CreateDate?.toISOString(),
+    })),
+    mfaDevices: mfaDevices.map(device => ({
+      serialNumber: device.SerialNumber || '',
+      enableDate: device.EnableDate?.toISOString(),
+    })),
+    groups: groups.map(group => group.GroupName || '').filter(Boolean),
+    attachedPolicies: attachedPolicies.map(policy => ({
+      name: policy.PolicyName || '',
+      arn: policy.PolicyArn || '',
+    })),
+    inlinePolicies: inlinePolicies.filter(Boolean),
+    permissionsBoundary: boundary,
+    dependencies: {
+      loginProfile: passwordEnabled ? 1 : 0,
+      accessKeys: accessKeys.length,
+      mfaDevices: mfaDevices.length,
+      groups: groups.length,
+      attachedPolicies: attachedPolicies.length,
+      inlinePolicies: inlinePolicies.length,
+      signingCertificates: signingCertificates.length,
+      sshPublicKeys: sshPublicKeys.length,
+      serviceSpecificCredentials: serviceCredentials.length,
+      permissionsBoundary: boundary ? 1 : 0,
+    },
+  };
 }
 
 /**
- * 删除资源清理里选中的资源（资源清理最后一步）。用管理员凭证执行:
- * EC2 → TerminateInstances, EBS → DeleteVolume(仅未挂载可删), Lambda → DeleteFunction。
- * S3 暂不支持(删桶会丢数据/需先清空,风险高)。逐个执行并返回每个资源的成败。
+ * 扫描选定区域及全局服务中最近 7 天创建/启动的资源。
+ * Lambda 没有创建时间，因此按 LastModified 过滤并明确标记为“最近修改”。
+ * 单个服务无权限或失败时返回 warning，避免把 AccessDenied 误报成“没有资源”。
+ */
+export async function scanResources(accountId: string, region: string): Promise<CleanupScanResult> {
+  const creds = await assumeToAccount(accountId);
+  const resources: CleanupResource[] = [];
+  const warnings: string[] = [];
+  const nowMs = Date.now();
+  const cutoffMs = nowMs - CLEANUP_WINDOW_MS;
+
+  try {
+    await withAwsClient(new EC2Client({ region, credentials: creds }), async ec2 => {
+      let nextToken: string | undefined;
+      do {
+        const page = await ec2.send(new DescribeInstancesCommand({ NextToken: nextToken }));
+        for (const reservation of page.Reservations || []) {
+          for (const instance of reservation.Instances || []) {
+            if (!instance.InstanceId || instance.State?.Name === 'terminated'
+              || !isRecentCleanupTime(instance.LaunchTime, cutoffMs, nowMs)) continue;
+            resources.push({
+              key: `EC2:${instance.InstanceId}`,
+              type: 'EC2',
+              id: instance.InstanceId,
+              name: instance.Tags?.find(tag => tag.Key === 'Name')?.Value || instance.InstanceId,
+              arn: '',
+              details: `${instance.InstanceType || '未知规格'} | ${instance.State?.Name || 'unknown'}`,
+              eventTime: instance.LaunchTime!.toISOString(),
+              timeBasis: 'launchTime',
+              scope: 'regional',
+              deletable: true,
+            });
+          }
+        }
+        nextToken = page.NextToken;
+      } while (nextToken);
+    });
+  } catch (error) {
+    warnings.push(`EC2 扫描失败：${cleanupErrorMessage(error)}`);
+  }
+
+  try {
+    await withAwsClient(new EC2Client({ region, credentials: creds }), async ec2 => {
+      let nextToken: string | undefined;
+      do {
+        const page = await ec2.send(new DescribeVolumesCommand({ NextToken: nextToken }));
+        for (const volume of page.Volumes || []) {
+          if (!volume.VolumeId || !isRecentCleanupTime(volume.CreateTime, cutoffMs, nowMs)) continue;
+          resources.push({
+            key: `EBS:${volume.VolumeId}`,
+            type: 'EBS',
+            id: volume.VolumeId,
+            name: volume.Tags?.find(tag => tag.Key === 'Name')?.Value || volume.VolumeId,
+            arn: '',
+            details: `${volume.Size || 0}GB | ${volume.State || 'unknown'}`,
+            eventTime: volume.CreateTime!.toISOString(),
+            timeBasis: 'createTime',
+            scope: 'regional',
+            deletable: true,
+          });
+        }
+        nextToken = page.NextToken;
+      } while (nextToken);
+    });
+  } catch (error) {
+    warnings.push(`EBS 扫描失败：${cleanupErrorMessage(error)}`);
+  }
+
+  try {
+    await withAwsClient(new S3Client({ region: 'us-east-1', credentials: creds }), async s3 => {
+      const page = await s3.send(new ListBucketsCommand({}));
+      for (const bucket of page.Buckets || []) {
+        if (!bucket.Name || !isRecentCleanupTime(bucket.CreationDate, cutoffMs, nowMs)) continue;
+        resources.push({
+          key: `S3:${bucket.Name}`,
+          type: 'S3',
+          id: bucket.Name,
+          name: bucket.Name,
+          arn: `arn:aws:s3:::${bucket.Name}`,
+          details: 'S3 桶不可在平台删除，请前往 AWS 控制台确认桶内数据',
+          eventTime: bucket.CreationDate!.toISOString(),
+          timeBasis: 'creationDate',
+          scope: 'global',
+          deletable: false,
+        });
+      }
+    });
+  } catch (error) {
+    warnings.push(`S3 扫描失败：${cleanupErrorMessage(error)}`);
+  }
+
+  try {
+    await withAwsClient(new LambdaClient({ region, credentials: creds }), async lambda => {
+      let marker: string | undefined;
+      do {
+        const page = await lambda.send(new ListFunctionsCommand({ Marker: marker }));
+        for (const fn of page.Functions || []) {
+          if (!fn.FunctionName || !isRecentCleanupTime(fn.LastModified, cutoffMs, nowMs)) continue;
+          resources.push({
+            key: `Lambda:${fn.FunctionName}`,
+            type: 'Lambda',
+            id: fn.FunctionName,
+            name: fn.FunctionName,
+            arn: fn.FunctionArn || '',
+            details: `${fn.Runtime || '未知运行时'} | ${fn.MemorySize || 0}MB`,
+            eventTime: new Date(fn.LastModified!).toISOString(),
+            timeBasis: 'lastModified',
+            scope: 'regional',
+            deletable: true,
+          });
+        }
+        marker = page.NextMarker;
+      } while (marker);
+    });
+  } catch (error) {
+    warnings.push(`Lambda 扫描失败：${cleanupErrorMessage(error)}`);
+  }
+
+  try {
+    await withAwsClient(new IAMClient({ region: 'us-east-1', credentials: creds }), async iam => {
+      const users = await collectMarkerPages(async marker => {
+        const page = await iam.send(new ListUsersCommand({ Marker: marker }));
+        return { items: page.Users || [], marker: page.Marker, truncated: page.IsTruncated };
+      });
+      for (const user of users) {
+        if (!user.UserName || !isRecentCleanupTime(user.CreateDate, cutoffMs, nowMs)) continue;
+        const iamDetails = await getCleanupIamDetails(iam, user, warnings);
+        resources.push({
+          key: `IAMUser:${user.UserName}`,
+          type: 'IAMUser',
+          id: user.UserName,
+          name: user.UserName,
+          arn: user.Arn || '',
+          details: `密码:${iamDetails.passwordEnabled ? '有' : '无'} | Access Key:${iamDetails.accessKeys.length} | MFA:${iamDetails.mfaDevices.length} | 用户组:${iamDetails.groups.length}`,
+          eventTime: user.CreateDate!.toISOString(),
+          timeBasis: 'createTime',
+          scope: 'global',
+          deletable: true,
+          iamDetails,
+        });
+      }
+    });
+  } catch (error) {
+    warnings.push(`IAM 用户扫描失败：${cleanupErrorMessage(error)}`);
+  }
+
+  resources.sort((a, b) => Date.parse(b.eventTime) - Date.parse(a.eventTime));
+  return {
+    resources,
+    warnings,
+    cutoff: new Date(cutoffMs).toISOString(),
+    windowDays: CLEANUP_WINDOW_DAYS,
+  };
+}
+
+async function ignoreMissingIamEntity(operation: () => Promise<unknown>): Promise<void> {
+  try {
+    await operation();
+  } catch (error) {
+    if (!isNoSuchEntity(error)) throw error;
+  }
+}
+
+async function deleteRecentIamUser(iam: IAMClient, username: string): Promise<{
+  alreadyAbsent: boolean;
+  cleanup: IamCleanupSummary;
+}> {
+  const cleanup: IamCleanupSummary = {
+    loginProfiles: 0,
+    accessKeys: 0,
+    mfaDevices: 0,
+    virtualMfaDevices: 0,
+    attachedPolicies: 0,
+    inlinePolicies: 0,
+    groups: 0,
+    signingCertificates: 0,
+    sshPublicKeys: 0,
+    serviceSpecificCredentials: 0,
+    permissionsBoundaries: 0,
+  };
+
+  let user;
+  try {
+    user = (await iam.send(new GetUserCommand({ UserName: username }))).User;
+  } catch (error) {
+    if (isNoSuchEntity(error)) return { alreadyAbsent: true, cleanup };
+    throw error;
+  }
+  if (!user) throw new Error(`IAM 用户 ${username} 不存在`);
+  assertRecentCleanupTime(user.CreateDate, `IAM 用户 ${username}`);
+
+  try {
+    await iam.send(new GetLoginProfileCommand({ UserName: username }));
+    await ignoreMissingIamEntity(() => iam.send(new DeleteLoginProfileCommand({ UserName: username })));
+    cleanup.loginProfiles = 1;
+  } catch (error) {
+    if (!isNoSuchEntity(error)) throw error;
+  }
+
+  const accessKeys = await collectMarkerPages(async marker => {
+    const page = await iam.send(new ListAccessKeysCommand({ UserName: username, Marker: marker }));
+    return { items: page.AccessKeyMetadata || [], marker: page.Marker, truncated: page.IsTruncated };
+  });
+  for (const key of accessKeys) {
+    if (!key.AccessKeyId) continue;
+    await ignoreMissingIamEntity(() => iam.send(new DeleteAccessKeyCommand({ UserName: username, AccessKeyId: key.AccessKeyId })));
+    cleanup.accessKeys++;
+  }
+
+  const mfaDevices = await collectMarkerPages(async marker => {
+    const page = await iam.send(new ListMFADevicesCommand({ UserName: username, Marker: marker }));
+    return { items: page.MFADevices || [], marker: page.Marker, truncated: page.IsTruncated };
+  });
+  for (const device of mfaDevices) {
+    if (!device.SerialNumber) continue;
+    await ignoreMissingIamEntity(() => iam.send(new DeactivateMFADeviceCommand({ UserName: username, SerialNumber: device.SerialNumber })));
+    cleanup.mfaDevices++;
+    if (/^arn:[^:]+:iam::\d{12}:mfa\//.test(device.SerialNumber)) {
+      await ignoreMissingIamEntity(() => iam.send(new DeleteVirtualMFADeviceCommand({ SerialNumber: device.SerialNumber })));
+      cleanup.virtualMfaDevices++;
+    }
+  }
+
+  const attachedPolicies = await collectMarkerPages(async marker => {
+    const page = await iam.send(new ListAttachedUserPoliciesCommand({ UserName: username, Marker: marker }));
+    return { items: page.AttachedPolicies || [], marker: page.Marker, truncated: page.IsTruncated };
+  });
+  for (const policy of attachedPolicies) {
+    if (!policy.PolicyArn) continue;
+    await ignoreMissingIamEntity(() => iam.send(new DetachUserPolicyCommand({ UserName: username, PolicyArn: policy.PolicyArn })));
+    cleanup.attachedPolicies++;
+  }
+
+  const inlinePolicies = await collectMarkerPages(async marker => {
+    const page = await iam.send(new ListUserPoliciesCommand({ UserName: username, Marker: marker }));
+    return { items: page.PolicyNames || [], marker: page.Marker, truncated: page.IsTruncated };
+  });
+  for (const policyName of inlinePolicies) {
+    await ignoreMissingIamEntity(() => iam.send(new DeleteUserPolicyCommand({ UserName: username, PolicyName: policyName })));
+    cleanup.inlinePolicies++;
+  }
+
+  const groups = await collectMarkerPages(async marker => {
+    const page = await iam.send(new ListGroupsForUserCommand({ UserName: username, Marker: marker }));
+    return { items: page.Groups || [], marker: page.Marker, truncated: page.IsTruncated };
+  });
+  for (const group of groups) {
+    if (!group.GroupName) continue;
+    await ignoreMissingIamEntity(() => iam.send(new RemoveUserFromGroupCommand({ UserName: username, GroupName: group.GroupName })));
+    cleanup.groups++;
+  }
+
+  const certificates = await collectMarkerPages(async marker => {
+    const page = await iam.send(new ListSigningCertificatesCommand({ UserName: username, Marker: marker }));
+    return { items: page.Certificates || [], marker: page.Marker, truncated: page.IsTruncated };
+  });
+  for (const certificate of certificates) {
+    if (!certificate.CertificateId) continue;
+    await ignoreMissingIamEntity(() => iam.send(new DeleteSigningCertificateCommand({ UserName: username, CertificateId: certificate.CertificateId })));
+    cleanup.signingCertificates++;
+  }
+
+  const sshKeys = await collectMarkerPages(async marker => {
+    const page = await iam.send(new ListSSHPublicKeysCommand({ UserName: username, Marker: marker }));
+    return { items: page.SSHPublicKeys || [], marker: page.Marker, truncated: page.IsTruncated };
+  });
+  for (const key of sshKeys) {
+    if (!key.SSHPublicKeyId) continue;
+    await ignoreMissingIamEntity(() => iam.send(new DeleteSSHPublicKeyCommand({ UserName: username, SSHPublicKeyId: key.SSHPublicKeyId })));
+    cleanup.sshPublicKeys++;
+  }
+
+  const serviceCredentials = await collectMarkerPages(async marker => {
+    const page = await iam.send(new ListServiceSpecificCredentialsCommand({ UserName: username, Marker: marker }));
+    return { items: page.ServiceSpecificCredentials || [], marker: page.Marker, truncated: page.IsTruncated };
+  });
+  for (const credential of serviceCredentials) {
+    if (!credential.ServiceSpecificCredentialId) continue;
+    await ignoreMissingIamEntity(() => iam.send(new DeleteServiceSpecificCredentialCommand({
+      UserName: username,
+      ServiceSpecificCredentialId: credential.ServiceSpecificCredentialId,
+    })));
+    cleanup.serviceSpecificCredentials++;
+  }
+
+  if (user.PermissionsBoundary?.PermissionsBoundaryArn) {
+    await ignoreMissingIamEntity(() => iam.send(new DeleteUserPermissionsBoundaryCommand({ UserName: username })));
+    cleanup.permissionsBoundaries = 1;
+  }
+
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      await iam.send(new DeleteUserCommand({ UserName: username }));
+      return { alreadyAbsent: false, cleanup };
+    } catch (error: any) {
+      if (isNoSuchEntity(error)) return { alreadyAbsent: true, cleanup };
+      if (!['DeleteConflict', 'DeleteConflictException'].includes(error?.name) || attempt === 3) throw error;
+      await new Promise(resolve => setTimeout(resolve, attempt * 500));
+    }
+  }
+  throw new Error(`删除 IAM 用户 ${username} 失败`);
+}
+
+/**
+ * 删除用户主动勾选的最近 7 天资源。每项删除前都从 AWS 重新读取时间，
+ * 防止伪造请求绕过扫描窗口。IAM 用户由路由额外限制为 strict admin，
+ * 并在服务端重新枚举、清理全部依赖后删除；S3 永不在此接口删除。
  */
 export async function deleteResources(
   accountId: string,
   region: string,
-  resources: { type: string; id: string; name?: string }[],
-) {
+  resources: { type: CleanupResourceType; id: string; name?: string }[],
+): Promise<CleanupDeleteResult[]> {
   const admin = await getTempAdminCredentials(accountId);
-  const creds = { accessKeyId: admin.accessKeyId, secretAccessKey: admin.secretAccessKey, sessionToken: admin.sessionToken };
+  const creds = {
+    accessKeyId: admin.accessKeyId,
+    secretAccessKey: admin.secretAccessKey,
+    sessionToken: admin.sessionToken,
+  };
   const ec2 = new EC2Client({ region, credentials: creds });
   const lambda = new LambdaClient({ region, credentials: creds });
+  const iam = new IAMClient({ region: 'us-east-1', credentials: creds });
 
-  const results: { id: string; type: string; name?: string; ok: boolean; error?: string }[] = [];
-  for (const r of resources) {
-    try {
-      if (r.type === 'EC2') {
-        await ec2.send(new TerminateInstancesCommand({ InstanceIds: [r.id] }));
-      } else if (r.type === 'EBS') {
-        await ec2.send(new DeleteVolumeCommand({ VolumeId: r.id }));
-      } else if (r.type === 'Lambda') {
-        await lambda.send(new DeleteFunctionCommand({ FunctionName: r.id }));
-      } else {
-        results.push({ id: r.id, type: r.type, name: r.name, ok: false, error: `暂不支持删除 ${r.type}（请在控制台操作）` });
-        continue;
+  const results: CleanupDeleteResult[] = [];
+  try {
+    for (const resource of resources) {
+      try {
+        if (resource.type === 'EC2') {
+          const page = await ec2.send(new DescribeInstancesCommand({ InstanceIds: [resource.id] }));
+          const instance = page.Reservations?.flatMap(item => item.Instances || [])[0];
+          if (!instance) throw new Error(`EC2 ${resource.id} 不存在`);
+          assertRecentCleanupTime(instance.LaunchTime, `EC2 ${resource.id}`);
+          await ec2.send(new TerminateInstancesCommand({ InstanceIds: [resource.id] }));
+        } else if (resource.type === 'EBS') {
+          const page = await ec2.send(new DescribeVolumesCommand({ VolumeIds: [resource.id] }));
+          const volume = page.Volumes?.[0];
+          if (!volume) throw new Error(`EBS ${resource.id} 不存在`);
+          assertRecentCleanupTime(volume.CreateTime, `EBS ${resource.id}`);
+          await ec2.send(new DeleteVolumeCommand({ VolumeId: resource.id }));
+        } else if (resource.type === 'Lambda') {
+          const fn = await lambda.send(new GetFunctionConfigurationCommand({ FunctionName: resource.id }));
+          assertRecentCleanupTime(fn.LastModified, `Lambda ${resource.id}（最近修改时间）`);
+          await lambda.send(new DeleteFunctionCommand({ FunctionName: resource.id }));
+        } else if (resource.type === 'IAMUser') {
+          const deleted = await deleteRecentIamUser(iam, resource.id);
+          results.push({
+            id: resource.id,
+            type: resource.type,
+            name: resource.name,
+            ok: true,
+            alreadyAbsent: deleted.alreadyAbsent,
+            iamCleanup: deleted.cleanup,
+          });
+          continue;
+        } else {
+          results.push({
+            id: resource.id,
+            type: resource.type,
+            name: resource.name,
+            ok: false,
+            error: `暂不支持删除 ${resource.type}（请在控制台操作）`,
+          });
+          continue;
+        }
+        results.push({ id: resource.id, type: resource.type, name: resource.name, ok: true });
+      } catch (error) {
+        results.push({
+          id: resource.id,
+          type: resource.type,
+          name: resource.name,
+          ok: false,
+          error: cleanupErrorMessage(error),
+        });
       }
-      results.push({ id: r.id, type: r.type, name: r.name, ok: true });
-    } catch (e: any) {
-      results.push({ id: r.id, type: r.type, name: r.name, ok: false, error: e?.message || String(e) });
     }
+  } finally {
+    ec2.destroy();
+    lambda.destroy();
+    iam.destroy();
   }
   return results;
 }

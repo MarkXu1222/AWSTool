@@ -31,6 +31,63 @@ async function request(path: string, options: RequestInit = {}) {
   return res.json();
 }
 
+export type CleanupResourceType = 'EC2' | 'EBS' | 'S3' | 'Lambda' | 'IAMUser';
+export type CleanupTimeBasis = 'launchTime' | 'createTime' | 'creationDate' | 'lastModified';
+
+export interface CleanupIamDetails {
+  username: string;
+  userId: string;
+  arn: string;
+  path: string;
+  createDate: string;
+  passwordEnabled: boolean;
+  passwordLastUsed?: string;
+  accessKeys: { id: string; status: string; createDate?: string }[];
+  mfaDevices: { serialNumber: string; enableDate?: string }[];
+  groups: string[];
+  attachedPolicies: { name: string; arn: string }[];
+  inlinePolicies: string[];
+  permissionsBoundary?: string;
+  dependencies: Record<string, number>;
+}
+
+export interface CleanupResource {
+  key: string;
+  type: CleanupResourceType;
+  id: string;
+  name: string;
+  arn: string;
+  details: string;
+  eventTime: string;
+  timeBasis: CleanupTimeBasis;
+  scope: 'regional' | 'global';
+  deletable: boolean;
+  iamDetails?: CleanupIamDetails;
+}
+
+export interface CleanupScanResult {
+  resources: CleanupResource[];
+  warnings: string[];
+  cutoff: string;
+  windowDays: number;
+}
+
+export interface CleanupDeleteInput {
+  type: Exclude<CleanupResourceType, 'S3'>;
+  id: string;
+  name?: string;
+}
+
+export interface CleanupDeleteResult {
+  id: string;
+  type: CleanupResourceType;
+  name?: string;
+  ok: boolean;
+  error?: string;
+  alreadyAbsent?: boolean;
+  iamCleanup?: Record<string, number>;
+}
+
 export const api = {
   // Auth
   login: async (username: string, password: string, totpCode?: string) => {
@@ -170,9 +227,13 @@ export const api = {
     es.onerror = () => { if (onError) onError({ message: 'Connection lost' }); es.close(); };
     return es;
   },
-  scanResources: (accountId: string, region: string) => request(`/aws/resources/${accountId}/${region}`),
-  deleteResources: (accountId: string, region: string, resources: { type: string; id: string; name?: string }[]) =>
-    request(`/aws/resources/${accountId}/delete`, { method: 'POST', body: JSON.stringify({ region, resources }) }),
+  scanResources: (accountId: string, region: string) =>
+    request(`/aws/resources/${encodeURIComponent(accountId)}/${encodeURIComponent(region)}`),
+  deleteResources: (accountId: string, region: string, resources: CleanupDeleteInput[]) =>
+    request(`/aws/resources/${encodeURIComponent(accountId)}/delete`, {
+      method: 'POST',
+      body: JSON.stringify({ region, resources }),
+    }),
   getAuditLog: (limit = 5000) => request(`/aws/audit?limit=${Math.max(1, Math.min(5000, Math.floor(limit)))}`),
   // MAP 标签合规
   tagStatus: () => request('/aws/tag-compliance/status'),

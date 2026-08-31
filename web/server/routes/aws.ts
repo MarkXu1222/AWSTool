@@ -1290,36 +1290,112 @@ awsRouter.post('/root-credentials/:accountId/delete-access-key', requireRootAcce
   } catch (e: any) { res.status(500).json({ error: e.message }); }
 });
 
-// Scan resources
+const CLEANUP_REGION_PATTERN = /^[a-z]{2}(?:-gov)?-[a-z0-9-]+-\d$/;
+const DELETABLE_CLEANUP_TYPES = new Set<aws.CleanupResourceType>(['EC2', 'EBS', 'Lambda', 'IAMUser']);
+
+function isValidCleanupResourceId(type: aws.CleanupResourceType, id: string): boolean {
+  if (type === 'EC2') return /^i-[0-9a-f]{8,32}$/.test(id);
+  if (type === 'EBS') return /^vol-[0-9a-f]{8,32}$/.test(id);
+  if (type === 'Lambda') return /^[A-Za-z0-9-_]{1,64}$/.test(id);
+  if (type === 'IAMUser') return /^[A-Za-z0-9_+=,.@-]{1,64}$/.test(id);
+  return false;
+}
+
+// Scan resources created/launched in the last 7 days. IAM and S3 are global;
+// regional services use the requested region. Partial service failures are returned as warnings.
 awsRouter.get('/resources/:accountId/:region', async (req: Request, res: Response) => {
   try {
-    const resources = await aws.scanResources(String(req.params.accountId), String(req.params.region));
-    res.json({ success: true, data: resources });
+    const accountId = String(req.params.accountId || '').trim();
+    const region = String(req.params.region || '').trim();
+    if (!/^\d{12}$/.test(accountId)) return res.status(400).json({ error: '无效的账户 ID' });
+    if (!CLEANUP_REGION_PATTERN.test(region)) return res.status(400).json({ error: '无效的 AWS 区域' });
+
+    const result = await aws.scanResources(accountId, region);
+    res.setHeader('Cache-Control', 'no-store');
+    res.json({ success: true, data: result });
   } catch (e: any) { res.status(500).json({ error: e.message }); }
 });
 
-// Delete selected resources (资源清理最后一步) — destructive, admin/partadmin only, audited
+// Delete selected recent resources. EC2/EBS/Lambda retain the existing admin/partadmin
+// compatibility; IAM identity deletion additionally requires a current strict-admin identity.
 awsRouter.post('/resources/:accountId/delete', requireAdmin, async (req: Request, res: Response) => {
   try {
-    const accountId = String(req.params.accountId);
+    const accountId = String(req.params.accountId || '').trim();
     if (!/^\d{12}$/.test(accountId)) return res.status(400).json({ error: '无效的账户 ID' });
-    const { region, resources } = req.body || {};
-    if (!region || !Array.isArray(resources) || resources.length === 0) {
-      return res.status(400).json({ error: '缺少 region 或待删除资源列表' });
-    }
-    if (resources.length > 100) return res.status(400).json({ error: '单次最多删除 100 个资源' });
 
-    const results = await aws.deleteResources(accountId, String(region), resources);
-    const okCount = results.filter(r => r.ok).length;
+    const region = typeof req.body?.region === 'string' ? req.body.region.trim() : '';
+    const requestedResources = req.body?.resources;
+    if (!CLEANUP_REGION_PATTERN.test(region)) return res.status(400).json({ error: '无效的 AWS 区域' });
+    if (!Array.isArray(requestedResources) || requestedResources.length === 0) {
+      return res.status(400).json({ error: '待删除资源列表不能为空' });
+    }
+    if (requestedResources.length > 100) return res.status(400).json({ error: '单次最多删除 100 个资源' });
+
+    const resources: { type: aws.CleanupResourceType; id: string; name?: string }[] = [];
+    const seen = new Set<string>();
+    for (const raw of requestedResources) {
+      if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+        return res.status(400).json({ error: '资源列表格式无效' });
+      }
+      const type = String(raw.type || '') as aws.CleanupResourceType;
+      const id = String(raw.id || '').trim();
+      if (!DELETABLE_CLEANUP_TYPES.has(type)) {
+        return res.status(400).json({ error: `不支持删除资源类型 ${type || '(空)'}` });
+      }
+      if (!isValidCleanupResourceId(type, id)) {
+        return res.status(400).json({ error: `${type} 资源 ID 格式无效` });
+      }
+      const key = `${type}:${id}`;
+      if (seen.has(key)) return res.status(400).json({ error: `资源列表存在重复项 ${key}` });
+      seen.add(key);
+      const name = typeof raw.name === 'string'
+        ? raw.name.replace(/[\u0000-\u001f\u007f]/g, '').trim().slice(0, 256)
+        : undefined;
+      resources.push({ type, id, name: name || id });
+    }
+
+    if (resources.some(resource => resource.type === 'IAMUser')) {
+      const tokenUser = (req as any).user;
+      const currentUser = tokenUser?.username ? db.getUser(tokenUser.username) : null;
+      if (!currentUser
+        || String(currentUser.id) !== String(tokenUser?.userId)
+        || currentUser.username !== tokenUser?.username) {
+        return res.status(401).json({ error: '用户身份已变更，请重新登录' });
+      }
+      if (currentUser.role !== 'admin') {
+        return res.status(403).json({ error: '删除 IAM 用户仅限管理员' });
+      }
+    }
+
+    const results = await aws.deleteResources(accountId, region, resources);
+    const okResults = results.filter(result => result.ok);
+    const failedResults = results.filter(result => !result.ok);
+    const iamCleanup = okResults
+      .filter(result => result.type === 'IAMUser' && result.iamCleanup)
+      .map(result => {
+        const summary = result.iamCleanup!;
+        const dependencies = Object.values(summary).reduce((total, count) => total + count, 0);
+        return `${result.id}(依赖${dependencies}项${result.alreadyAbsent ? '，用户已不存在' : ''})`;
+      });
+    const auditParts = [
+      `AWS 账户 ${accountId} · ${region} · 最近 ${aws.CLEANUP_WINDOW_DAYS} 天资源删除 ${okResults.length}/${results.length} 成功`,
+      `成功: ${okResults.slice(0, 30).map(result => `${result.type}:${result.id}`).join(', ') || '无'}`,
+    ];
+    if (failedResults.length > 0) {
+      auditParts.push(`失败: ${failedResults.slice(0, 20).map(result => `${result.type}:${result.id}`).join(', ')}`);
+    }
+    if (iamCleanup.length > 0) auditParts.push(`IAM 清理: ${iamCleanup.join(', ')}`);
+
     const user = (req as any).user;
     db.addAuditLog(
       user?.userId,
       'RESOURCE_DELETE',
-      `AWS 账户 ${accountId} · ${region} · 删除资源 ${okCount}/${results.length} 成功: ${results.filter(r => r.ok).map(r => `${r.type}:${r.id}`).join(', ') || '无'}`,
+      auditParts.join('；'),
       user?.username,
       req.ip,
     );
     (res.locals as any).audited = true;
+    res.setHeader('Cache-Control', 'no-store');
     res.json({ success: true, data: results });
   } catch (e: any) { res.status(500).json({ error: e.message }); }
 });
