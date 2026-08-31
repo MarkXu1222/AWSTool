@@ -503,6 +503,17 @@ code, pre {
 .bottom-nav-item .nav-icon { font-size: 20px; }
 .bottom-nav-item .nav-label { font-size: 10px; font-weight: 500; }
 
+/* iOS 添加到主屏幕后，100dvh 可能仍按浏览器可视区计算，短于 standalone
+   的完整屏幕。让 fixed 的 top/bottom inset 解算真实高度，并将底栏锚定到应用壳。 */
+@media (max-width: 768px) and (display-mode: standalone) {
+  .app-container {
+    height: auto;
+  }
+  .bottom-nav {
+    position: absolute;
+  }
+}
+
 @media (min-width: 769px) {
   .bottom-nav { display: none !important; }
 }
