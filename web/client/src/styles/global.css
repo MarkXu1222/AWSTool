@@ -503,15 +503,36 @@ code, pre {
 .bottom-nav-item .nav-icon { font-size: 20px; }
 .bottom-nav-item .nav-label { font-size: 10px; font-weight: 500; }
 
-/* iOS 添加到主屏幕后，100dvh 可能仍按浏览器可视区计算，短于 standalone
-   的完整屏幕。让 fixed 的 top/bottom inset 解算真实高度，并将底栏锚定到应用壳。 */
-@media (max-width: 768px) and (display-mode: standalone) {
-  .app-container {
-    height: auto;
+/* iOS 主屏应用在键盘收起后可能保留缩短的动态视口。MainLayout 会写入
+   物理屏幕的 CSS 高度并添加 standalone-mode，避免底栏悬在屏幕上方。 */
+@media (max-width: 768px) {
+  html.standalone-mode,
+  html.standalone-mode body,
+  html.standalone-mode #root {
+    height: var(--standalone-screen-height, 100vh);
+    min-height: 0;
+    overflow: hidden;
   }
-  .bottom-nav {
+  html.standalone-mode .app-container {
+    top: 0;
+    right: 0;
+    bottom: auto;
+    left: 0;
+    height: var(--standalone-screen-height, 100vh);
+  }
+  html.standalone-mode .bottom-nav {
     position: absolute;
+    padding-top: 4px;
+    padding-bottom: max(6px, env(safe-area-inset-bottom, 0px));
   }
+  html.standalone-mode .bottom-nav-item {
+    justify-content: center;
+    min-height: 44px;
+    padding: 2px 8px;
+    line-height: 1;
+  }
+  html.standalone-mode .bottom-nav-item .nav-icon { line-height: 1; }
+  html.standalone-mode .bottom-nav-item .nav-label { line-height: 1.2; }
 }
 
 @media (min-width: 769px) {

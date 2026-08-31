@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useLayoutEffect, useRef } from 'react';
 import { Layout, Menu, Button } from 'antd';
 import { HomeOutlined, TeamOutlined, DashboardOutlined, DollarOutlined, SettingOutlined, LogoutOutlined, DeleteOutlined, FileSearchOutlined, GlobalOutlined, TagsOutlined, ThunderboltOutlined } from '@ant-design/icons';
 import DashboardPage from '../pages/Dashboard';
@@ -65,6 +65,73 @@ const MainLayout: React.FC<MainLayoutProps> = ({ onLogout }) => {
   const [allowedPages, setAllowedPages] = useState<string[] | null>(null);
   // 批量提额独立权限；未加载完前按无权限处理，避免菜单闪现
   const [bulkQuotaAccess, setBulkQuotaAccess] = useState(false);
+  const appContainerRef = useRef<HTMLElement | null>(null);
+
+  useLayoutEffect(() => {
+    const navigatorWithStandalone = navigator as Navigator & { standalone?: boolean };
+    const isStandalone = window.matchMedia('(display-mode: standalone)').matches
+      || navigatorWithStandalone.standalone === true;
+    if (!isStandalone) return;
+
+    const root = document.documentElement;
+    let orientationRefreshTimer: number | undefined;
+    let focusRefreshTimer: number | undefined;
+
+    const syncScreenHeight = () => {
+      const { width, height } = window.screen;
+      const isPortrait = window.matchMedia('(orientation: portrait)').matches;
+      const screenHeight = isPortrait ? Math.max(width, height) : Math.min(width, height);
+      root.style.setProperty('--standalone-screen-height', `${screenHeight}px`);
+    };
+
+    // iOS standalone 的键盘收起后可能保留缩短的动态视口；隐藏再恢复全屏壳
+    // 会让 WebKit 重新计算 fixed containing block，同时不产生中间帧。
+    const refreshStandaloneViewport = () => {
+      const appContainer = appContainerRef.current;
+      if (!appContainer) return;
+      const previousDisplay = appContainer.style.display;
+      appContainer.style.display = 'none';
+      void appContainer.offsetHeight;
+      if (previousDisplay) appContainer.style.display = previousDisplay;
+      else appContainer.style.removeProperty('display');
+      void appContainer.offsetHeight;
+    };
+
+    const handleOrientationChange = () => {
+      window.clearTimeout(orientationRefreshTimer);
+      orientationRefreshTimer = window.setTimeout(() => {
+        syncScreenHeight();
+        refreshStandaloneViewport();
+      }, 300);
+    };
+
+    const handleFocusOut = (event: FocusEvent) => {
+      const target = event.target;
+      if (!(target instanceof HTMLInputElement)
+        && !(target instanceof HTMLTextAreaElement)
+        && !(target instanceof HTMLSelectElement)) return;
+      window.clearTimeout(focusRefreshTimer);
+      focusRefreshTimer = window.setTimeout(refreshStandaloneViewport, 400);
+    };
+
+    appContainerRef.current = document.querySelector<HTMLElement>('.app-container');
+    root.classList.add('standalone-mode');
+    syncScreenHeight();
+    const mountRefreshTimer = window.setTimeout(refreshStandaloneViewport, 0);
+    window.addEventListener('orientationchange', handleOrientationChange);
+    document.addEventListener('focusout', handleFocusOut, true);
+
+    return () => {
+      window.clearTimeout(mountRefreshTimer);
+      window.clearTimeout(orientationRefreshTimer);
+      window.clearTimeout(focusRefreshTimer);
+      window.removeEventListener('orientationchange', handleOrientationChange);
+      document.removeEventListener('focusout', handleFocusOut, true);
+      root.classList.remove('standalone-mode');
+      root.style.removeProperty('--standalone-screen-height');
+      appContainerRef.current = null;
+    };
+  }, []);
 
   useEffect(() => {
     api.me().then(r => {
