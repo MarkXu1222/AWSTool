@@ -22,7 +22,8 @@ import {
 } from '@aws-sdk/client-resource-explorer-2';
 import {
   CloudFormationClient, DescribeStackSetCommand, CreateStackSetCommand,
-  CreateStackInstancesCommand, UpdateStackInstancesCommand, ListStackInstancesCommand, ListStackSetOperationsCommand,
+  CreateStackInstancesCommand, UpdateStackInstancesCommand, DeleteStackInstancesCommand,
+  ListStackInstancesCommand, ListStackSetOperationsCommand,
   ListStackSetAutoDeploymentTargetsCommand,
 } from '@aws-sdk/client-cloudformation';
 import {
@@ -916,6 +917,7 @@ export async function provisionOrg(payerAccountId: string): Promise<ProvisionRes
 
 export const RE_AGGREGATOR_STACKSET = 'ResourceExplorerAggregatorIndex';
 export const RE_LOCAL_STACKSET = 'ResourceExplorerLocalIndexes';
+export const RE_SCOPED_LOCAL_STACKSET = 'ResourceExplorerScopedLocalIndexes';
 
 const RE_AGGREGATOR_TEMPLATE = `AWSTemplateFormatVersion: "2010-09-09"
 Description: >
@@ -980,6 +982,14 @@ export interface ReIndexDeployResult {
 
 const REGION_RE = /^[a-z]{2}(-[a-z]+)+-\d$/;
 
+function effectiveStackInstanceStatus(summary: {
+  Status?: string;
+  StackInstanceStatus?: { DetailedStatus?: string };
+}): string {
+  if (summary.Status === 'OUTDATED' || summary.Status === 'INOPERABLE') return summary.Status;
+  return summary.StackInstanceStatus?.DetailedStatus || summary.Status || 'UNKNOWN';
+}
+
 /**
  * 为整个组织下发 Resource Explorer 索引（幂等）。
  * 只在缺失的区域下发实例，已有实例的区域跳过；返回后用 getReIndexStatus 轮询。
@@ -989,10 +999,22 @@ export async function deployReIndexes(
   aggregatorRegion = 'us-east-1',
   localRegions: string[] = [],
   payerLocalRegions: string[] = localRegions,
+  memberEnabledRegions: Record<string, string[]> = {},
+  autoDeploymentRegions: string[] = [],
 ): Promise<ReIndexDeployResult> {
   if (!REGION_RE.test(aggregatorRegion)) throw new Error(`聚合区域不合法: ${aggregatorRegion}`);
   const locals = [...new Set(localRegions.filter(r => REGION_RE.test(r) && r !== aggregatorRegion))];
   const managementLocals = [...new Set(payerLocalRegions.filter(r => REGION_RE.test(r) && r !== aggregatorRegion))];
+  const memberAccountIds = Object.keys(memberEnabledRegions).sort();
+  const aggregatorDisabledAccounts = memberAccountIds.filter(
+    accountId => !memberEnabledRegions[accountId].includes(aggregatorRegion),
+  );
+  if (aggregatorDisabledAccounts.length > 0) {
+    throw new Error(`聚合区域 ${aggregatorRegion} 未在全部 ACTIVE 成员账户启用`);
+  }
+  if (!autoDeploymentRegions.includes(aggregatorRegion)) {
+    throw new Error(`聚合区域 ${aggregatorRegion} 不是新账户默认启用区域，不能用于 AutoDeployment`);
+  }
 
   const creds = await assumePayer(payerAccountId);
   if (!creds) throw new Error('该 payer 不在平台配置（config.payers）中，无法自动部署索引');
@@ -1013,7 +1035,7 @@ export async function deployReIndexes(
   }
 
   // 确保 StackSet 存在（幂等）
-  async function ensureStackSet(name: string, template: string, desc: string) {
+  async function ensureStackSet(name: string, template: string, desc: string, autoDeployment = true) {
     try {
       await cfn.send(new DescribeStackSetCommand({ StackSetName: name, CallAs: 'SELF' }));
       return false; // 已存在
@@ -1025,7 +1047,7 @@ export async function deployReIndexes(
       Description: desc,
       TemplateBody: template,
       PermissionModel: 'SERVICE_MANAGED',
-      AutoDeployment: { Enabled: true, RetainStacksOnAccountRemoval: false },
+      AutoDeployment: { Enabled: autoDeployment, RetainStacksOnAccountRemoval: false },
       ManagedExecution: { Active: true },
       CallAs: 'SELF',
       Tags: [{ Key: 'ManagedBy', Value: 'AWSTool' }, { Key: 'Purpose', Value: 'ResourceExplorer' }],
@@ -1033,66 +1055,278 @@ export async function deployReIndexes(
     return true; // 新建
   }
 
-  // 已部署实例覆盖的区域
-  async function deployedRegions(name: string): Promise<Set<string>> {
+  const retryableStatuses = new Set(['FAILED', 'CANCELLED', 'INOPERABLE', 'OUTDATED', 'SKIPPED_SUSPENDED_ACCOUNT']);
+
+  // 账户 × 区域级别读取现有实例，不能因某区域只有一个实例就误判全组织已覆盖。
+  async function deployedTargets(name: string): Promise<Map<string, string>> {
+    const targets = new Map<string, string>();
+    let token: string | undefined;
+    do {
+      const page = await cfn.send(new ListStackInstancesCommand({
+        StackSetName: name,
+        CallAs: 'SELF',
+        NextToken: token,
+      }));
+      for (const summary of page.Summaries || []) {
+        if (!summary.Account || !summary.Region) continue;
+        const status = effectiveStackInstanceStatus(summary);
+        targets.set(`${summary.Account}:${summary.Region}`, status);
+      }
+      token = page.NextToken;
+    } while (token);
+    return targets;
+  }
+
+  async function rootAutoDeploymentRegions(name: string): Promise<Set<string>> {
     const regions = new Set<string>();
     let token: string | undefined;
     do {
-      const p = await cfn.send(new ListStackInstancesCommand({ StackSetName: name, CallAs: 'SELF', NextToken: token }));
-      for (const s of p.Summaries || []) if (s.Region) regions.add(s.Region);
-      token = p.NextToken;
+      const page = await cfn.send(new ListStackSetAutoDeploymentTargetsCommand({
+        StackSetName: name,
+        CallAs: 'SELF',
+        NextToken: token,
+      }));
+      for (const summary of page.Summaries || []) {
+        if (summary.OrganizationalUnitId !== out.rootOuId) continue;
+        for (const region of summary.Regions || []) regions.add(region);
+      }
+      token = page.NextToken;
     } while (token);
     return regions;
   }
 
-  // ---- 聚合索引 StackSet ----
-  try {
-    const created = await ensureStackSet(RE_AGGREGATOR_STACKSET, RE_AGGREGATOR_TEMPLATE, 'Resource Explorer aggregator index (managed by AWSTool)');
-    const have = await deployedRegions(RE_AGGREGATOR_STACKSET);
-    if (have.has(aggregatorRegion)) {
-      steps.push({ key: 'aggStackSet', label: `聚合索引 StackSet (${aggregatorRegion})`, status: 'skipped', detail: '该区域已有实例' });
-    } else {
-      const op = await cfn.send(new CreateStackInstancesCommand({
-        StackSetName: RE_AGGREGATOR_STACKSET,
-        DeploymentTargets: { OrganizationalUnitIds: [out.rootOuId!] },
-        Regions: [aggregatorRegion],
+  async function submitTargetOperations(
+    stackSetName: string,
+    region: string,
+    targetAccounts: string[],
+    currentTargets: Map<string, string>,
+    allowRootTarget: boolean,
+  ): Promise<string[]> {
+    const missing = targetAccounts.filter(accountId => !currentTargets.has(`${accountId}:${region}`));
+    const failed = targetAccounts.filter(accountId => {
+      const status = currentTargets.get(`${accountId}:${region}`);
+      return status ? retryableStatuses.has(status) : false;
+    });
+    const operationIds: string[] = [];
+
+    if (missing.length === targetAccounts.length && missing.length > 0 && allowRootTarget) {
+      const response = await cfn.send(new CreateStackInstancesCommand({
+        StackSetName: stackSetName,
+        DeploymentTargets: { OrganizationalUnitIds: [out.rootOuId!], AccountFilterType: 'NONE' },
+        Regions: [region],
         OperationPreferences: { FailureTolerancePercentage: 100, MaxConcurrentPercentage: 100 },
         CallAs: 'SELF',
       }));
+      if (response.OperationId) operationIds.push(response.OperationId);
+    } else {
+      for (let offset = 0; offset < missing.length; offset += 50) {
+        const accounts = missing.slice(offset, offset + 50);
+        const response = await cfn.send(new CreateStackInstancesCommand({
+          StackSetName: stackSetName,
+          DeploymentTargets: {
+            OrganizationalUnitIds: [out.rootOuId!],
+            Accounts: accounts,
+            AccountFilterType: 'INTERSECTION',
+          },
+          Regions: [region],
+          OperationPreferences: { FailureTolerancePercentage: 100, MaxConcurrentPercentage: 100 },
+          CallAs: 'SELF',
+        }));
+        if (response.OperationId) operationIds.push(response.OperationId);
+      }
+    }
+
+    for (let offset = 0; offset < failed.length; offset += 50) {
+      const accounts = failed.slice(offset, offset + 50);
+      const response = await cfn.send(new UpdateStackInstancesCommand({
+        StackSetName: stackSetName,
+        DeploymentTargets: {
+          OrganizationalUnitIds: [out.rootOuId!],
+          Accounts: accounts,
+          AccountFilterType: 'INTERSECTION',
+        },
+        Regions: [region],
+        OperationPreferences: { FailureTolerancePercentage: 100, MaxConcurrentPercentage: 100 },
+        CallAs: 'SELF',
+      }));
+      if (response.OperationId) operationIds.push(response.OperationId);
+    }
+    return operationIds;
+  }
+
+  // ---- 聚合索引 StackSet：聚合区必须覆盖全部成员账户 ----
+  try {
+    const created = await ensureStackSet(RE_AGGREGATOR_STACKSET, RE_AGGREGATOR_TEMPLATE, 'Resource Explorer aggregator index (managed by AWSTool)');
+    if (memberAccountIds.length === 0) {
+      const autoRegions = await rootAutoDeploymentRegions(RE_AGGREGATOR_STACKSET);
+      if (autoRegions.has(aggregatorRegion)) {
+        steps.push({ key: 'aggStackSet', label: `聚合索引 StackSet (${aggregatorRegion})`, status: 'skipped', detail: '根 OU 自动部署目标已存在，等待未来成员账户' });
+      } else {
+        const operation = await cfn.send(new CreateStackInstancesCommand({
+          StackSetName: RE_AGGREGATOR_STACKSET,
+          DeploymentTargets: { OrganizationalUnitIds: [out.rootOuId!], AccountFilterType: 'NONE' },
+          Regions: [aggregatorRegion],
+          OperationPreferences: { FailureTolerancePercentage: 100, MaxConcurrentPercentage: 100 },
+          CallAs: 'SELF',
+        }));
+        steps.push({
+          key: 'aggStackSet',
+          label: `聚合索引 StackSet (${aggregatorRegion})`,
+          status: 'created',
+          detail: `${created ? '已创建 StackSet；' : ''}已建立根 OU 自动目标，供未来成员使用（operationId ${operation.OperationId}）`,
+        });
+      }
+    } else {
+      const currentTargets = await deployedTargets(RE_AGGREGATOR_STACKSET);
+      const operations = await submitTargetOperations(
+        RE_AGGREGATOR_STACKSET,
+        aggregatorRegion,
+        memberAccountIds,
+        currentTargets,
+        true,
+      );
       steps.push({
-        key: 'aggStackSet', label: `聚合索引 StackSet (${aggregatorRegion})`, status: 'created',
-        detail: `${created ? '已创建 StackSet 并' : ''}已下发到根 OU（异步，operationId ${op.OperationId}）`,
+        key: 'aggStackSet',
+        label: `聚合索引 StackSet (${aggregatorRegion})`,
+        status: operations.length > 0 ? 'created' : 'skipped',
+        detail: operations.length > 0
+          ? `${created ? '已创建 StackSet；' : ''}已提交 ${operations.length} 个精确覆盖操作（${memberAccountIds.length} 个成员账户）`
+          : `${memberAccountIds.length} 个成员账户均已有实例或正在部署`,
       });
     }
   } catch (e: any) {
     steps.push({ key: 'aggStackSet', label: `聚合索引 StackSet (${aggregatorRegion})`, status: 'failed', detail: awsErrorDetail(e) });
   }
 
-  // ---- 本地索引 StackSet ----
-  if (locals.length === 0) {
-    steps.push({ key: 'localStackSet', label: '本地索引 StackSet', status: 'skipped', detail: '未选择其它区域' });
+  // ---- 本地索引：共同区域自动部署；部分 opt-in 区域使用禁用自动部署的 scoped StackSet ----
+  const memberLocalRegions = memberAccountIds.length === 0
+    ? autoDeploymentRegions.filter(region => region !== aggregatorRegion)
+    : locals.filter(region => memberAccountIds.some(
+      accountId => memberEnabledRegions[accountId].includes(region),
+    ));
+  const commonLocalRegions = memberLocalRegions.filter(region =>
+    autoDeploymentRegions.includes(region)
+    && memberAccountIds.every(accountId => memberEnabledRegions[accountId].includes(region)));
+  const scopedLocalRegions = memberLocalRegions.filter(region => !commonLocalRegions.includes(region));
+  let legacyCleanupSubmitted = false;
+
+  if (memberLocalRegions.length === 0) {
+    steps.push({ key: 'localStackSet', label: '本地索引 StackSet', status: 'skipped', detail: '成员账户没有其它启用区域' });
   } else {
     try {
-      const created = await ensureStackSet(RE_LOCAL_STACKSET, RE_LOCAL_TEMPLATE, 'Resource Explorer local indexes (managed by AWSTool)');
-      const have = await deployedRegions(RE_LOCAL_STACKSET);
-      const missing = locals.filter(r => !have.has(r));
-      if (missing.length === 0) {
-        steps.push({ key: 'localStackSet', label: '本地索引 StackSet', status: 'skipped', detail: `所选 ${locals.length} 个区域均已有实例` });
-      } else {
-        const op = await cfn.send(new CreateStackInstancesCommand({
+      const created = await ensureStackSet(RE_LOCAL_STACKSET, RE_LOCAL_TEMPLATE, 'Resource Explorer common local indexes (managed by AWSTool)');
+      const currentTargets = await deployedTargets(RE_LOCAL_STACKSET);
+      const operations: string[] = [];
+      const failures: string[] = [];
+
+      const autoRegions = await rootAutoDeploymentRegions(RE_LOCAL_STACKSET);
+      const extraAutoRegions = [...autoRegions].filter(region => !commonLocalRegions.includes(region)).sort();
+      if (extraAutoRegions.length > 0) {
+        const cleanup = await cfn.send(new DeleteStackInstancesCommand({
           StackSetName: RE_LOCAL_STACKSET,
-          DeploymentTargets: { OrganizationalUnitIds: [out.rootOuId!] },
-          Regions: missing,
+          DeploymentTargets: { OrganizationalUnitIds: [out.rootOuId!], AccountFilterType: 'NONE' },
+          Regions: extraAutoRegions,
+          RetainStacks: true,
           OperationPreferences: { FailureTolerancePercentage: 100, MaxConcurrentPercentage: 100 },
           CallAs: 'SELF',
         }));
+        legacyCleanupSubmitted = true;
+        if (cleanup.OperationId) operations.push(`cleanup:${cleanup.OperationId}`);
+      }
+
+      let targetPairCount = 0;
+      for (const region of commonLocalRegions) {
+        targetPairCount += memberAccountIds.length;
+        try {
+          if (memberAccountIds.length === 0) {
+            if (!autoRegions.has(region)) {
+              const response = await cfn.send(new CreateStackInstancesCommand({
+                StackSetName: RE_LOCAL_STACKSET,
+                DeploymentTargets: { OrganizationalUnitIds: [out.rootOuId!], AccountFilterType: 'NONE' },
+                Regions: [region],
+                OperationPreferences: { FailureTolerancePercentage: 100, MaxConcurrentPercentage: 100 },
+                CallAs: 'SELF',
+              }));
+              if (response.OperationId) operations.push(`${region}:${response.OperationId}`);
+            }
+          } else {
+            const submitted = await submitTargetOperations(
+              RE_LOCAL_STACKSET,
+              region,
+              memberAccountIds,
+              currentTargets,
+              true,
+            );
+            operations.push(...submitted.map(operationId => `${region}:${operationId}`));
+          }
+        } catch (error: any) {
+          failures.push(`${region}: ${awsErrorDetail(error)}`);
+        }
+      }
+      steps.push({
+        key: 'localStackSet',
+        label: '共同区域本地索引 StackSet',
+        status: failures.length > 0 ? 'failed' : (legacyCleanupSubmitted ? 'pending' : (operations.length > 0 ? 'created' : 'skipped')),
+        detail: failures.length > 0
+          ? `已提交 ${operations.length} 个操作，但 ${failures.length} 个区域失败：${failures.join('；')}`
+          : `${created ? '已创建 StackSet；' : ''}共同区域 ${commonLocalRegions.length} 个 / 目标 ${targetPairCount} 个 / 操作 ${operations.length} 个${legacyCleanupSubmitted ? '；旧宽泛目标正以 RetainStacks=true 无损解绑' : ''}`,
+      });
+    } catch (e: any) {
+      steps.push({ key: 'localStackSet', label: '共同区域本地索引 StackSet', status: 'failed', detail: awsErrorDetail(e) });
+    }
+  }
+
+  if (scopedLocalRegions.length === 0) {
+    steps.push({ key: 'localScopedStackSet', label: '部分区域本地索引 StackSet', status: 'skipped', detail: '没有部分账户独有的 opt-in 区域' });
+  } else {
+    try {
+      const created = await ensureStackSet(
+        RE_SCOPED_LOCAL_STACKSET,
+        RE_LOCAL_TEMPLATE,
+        'Resource Explorer account-scoped local indexes (managed by AWSTool)',
+        false,
+      );
+      if (legacyCleanupSubmitted) {
         steps.push({
-          key: 'localStackSet', label: '本地索引 StackSet', status: 'created',
-          detail: `${created ? '已创建 StackSet 并' : ''}已下发 ${missing.length} 个区域: ${missing.join(', ')}（异步，operationId ${op.OperationId}）`,
+          key: 'localScopedStackSet',
+          label: '部分区域本地索引 StackSet',
+          status: 'pending',
+          detail: `等待旧 StackSet 无损解绑后，再按 ${scopedLocalRegions.length} 个区域的账户交集补齐`,
+        });
+      } else {
+        const currentTargets = await deployedTargets(RE_SCOPED_LOCAL_STACKSET);
+        const operations: string[] = [];
+        const failures: string[] = [];
+        let targetPairCount = 0;
+        for (const region of scopedLocalRegions) {
+          const targetAccounts = memberAccountIds.filter(
+            accountId => memberEnabledRegions[accountId].includes(region),
+          );
+          targetPairCount += targetAccounts.length;
+          try {
+            const submitted = await submitTargetOperations(
+              RE_SCOPED_LOCAL_STACKSET,
+              region,
+              targetAccounts,
+              currentTargets,
+              false,
+            );
+            operations.push(...submitted.map(operationId => `${region}:${operationId}`));
+          } catch (error: any) {
+            failures.push(`${region}: ${awsErrorDetail(error)}`);
+          }
+        }
+        steps.push({
+          key: 'localScopedStackSet',
+          label: '部分区域本地索引 StackSet',
+          status: failures.length > 0 ? 'failed' : (operations.length > 0 ? 'created' : 'skipped'),
+          detail: failures.length > 0
+            ? `已提交 ${operations.length} 个操作，但 ${failures.length} 个区域失败：${failures.join('；')}`
+            : `${created ? '已创建 AutoDeployment=false StackSet；' : ''}按 ${targetPairCount} 个账户×区域目标提交 ${operations.length} 个操作`,
         });
       }
     } catch (e: any) {
-      steps.push({ key: 'localStackSet', label: '本地索引 StackSet', status: 'failed', detail: awsErrorDetail(e) });
+      steps.push({ key: 'localScopedStackSet', label: '部分区域本地索引 StackSet', status: 'failed', detail: awsErrorDetail(e) });
     }
   }
 
@@ -1140,14 +1374,14 @@ export interface ReIndexStackSetStatus {
   latestOperation?: { operationId?: string; action?: string; status?: string; timestamp?: Date };
 }
 
-/** 查询两个索引 StackSet 的部署进度，供前端轮询 */
+/** 查询 Resource Explorer 索引 StackSet 的部署进度，供前端轮询 */
 export async function getReIndexStatus(payerAccountId: string, region = 'us-east-1'): Promise<{ payerAccountId: string; stackSets: ReIndexStackSetStatus[] }> {
   const creds = await assumePayer(payerAccountId);
   if (!creds) throw new Error('该 payer 不在平台配置（config.payers）中');
   const cfn = new CloudFormationClient({ region, credentials: creds });
 
   const stackSets: ReIndexStackSetStatus[] = [];
-  for (const name of [RE_AGGREGATOR_STACKSET, RE_LOCAL_STACKSET]) {
+  for (const name of [RE_AGGREGATOR_STACKSET, RE_LOCAL_STACKSET, RE_SCOPED_LOCAL_STACKSET]) {
     const entry: ReIndexStackSetStatus = { name, exists: false, instanceCount: 0, regions: [], statusCounts: {} };
     try {
       await cfn.send(new DescribeStackSetCommand({ StackSetName: name, CallAs: 'SELF' }));
@@ -1163,7 +1397,7 @@ export async function getReIndexStatus(payerAccountId: string, region = 'us-east
       for (const s of p.Summaries || []) {
         entry.instanceCount++;
         if (s.Region) regions.add(s.Region);
-        const st = s.StackInstanceStatus?.DetailedStatus || s.Status || 'UNKNOWN';
+        const st = effectiveStackInstanceStatus(s);
         entry.statusCounts[st] = (entry.statusCounts[st] || 0) + 1;
       }
       token = p.NextToken;
@@ -1279,16 +1513,41 @@ export async function removeNotifySubscription(subscriptionArn: string): Promise
 // 全自动接入 runner 使用的区域发现与精确 StackSet 覆盖检查
 // ============================================================
 
-/** 只返回 payer 管理账户已启用或无需 opt-in 的商业区域。 */
-export async function getEnabledRegions(payerAccountId: string): Promise<string[]> {
+interface RegionAvailability {
+  enabledRegions: string[];
+  defaultRegions: string[];
+}
+
+async function getRegionAvailability(payerAccountId: string): Promise<RegionAvailability> {
   const creds = await assumePayer(payerAccountId);
   if (!creds) throw new Error('该 payer 不在平台配置（config.payers）中，无法查询可用区域');
   const ec2 = new EC2Client({ region: 'us-east-1', credentials: creds });
-  const response = await ec2.send(new DescribeRegionsCommand({ AllRegions: true }));
-  return (response.Regions || [])
-    .filter(item => item.RegionName && (item.OptInStatus === 'opt-in-not-required' || item.OptInStatus === 'opted-in'))
-    .map(item => item.RegionName!)
-    .sort();
+  try {
+    const response = await ec2.send(new DescribeRegionsCommand({ AllRegions: true }));
+    const available = (response.Regions || []).filter(item => item.RegionName);
+    return {
+      enabledRegions: available
+        .filter(item => item.OptInStatus === 'opt-in-not-required' || item.OptInStatus === 'opted-in')
+        .map(item => item.RegionName!)
+        .sort(),
+      defaultRegions: available
+        .filter(item => item.OptInStatus === 'opt-in-not-required')
+        .map(item => item.RegionName!)
+        .sort(),
+    };
+  } finally {
+    ec2.destroy();
+  }
+}
+
+/** 只返回 payer 管理账户已启用或无需 opt-in 的商业区域。 */
+export async function getEnabledRegions(payerAccountId: string): Promise<string[]> {
+  return (await getRegionAvailability(payerAccountId)).enabledRegions;
+}
+
+/** 返回新账户默认启用、可安全用于 StackSet AutoDeployment 的区域。 */
+export async function getDefaultRegions(payerAccountId: string): Promise<string[]> {
+  return (await getRegionAvailability(payerAccountId)).defaultRegions;
 }
 
 /**
@@ -1329,6 +1588,54 @@ export async function getMemberEnabledRegions(payerAccountId: string): Promise<R
   return result;
 }
 
+export interface OrgEnabledRegionsResult {
+  payerAccountId: string;
+  payerRegions: string[];
+  defaultRegions: string[];
+  regions: string[];
+  aggregatorRegions: string[];
+  memberAccountCount: number;
+  memberEnabledRegions: Record<string, string[]>;
+  regionAccountCounts: Record<string, number>;
+}
+
+/**
+ * 读取 payer 与所有 ACTIVE 成员账户的实际启用区域并取并集。
+ * 手工索引部署必须使用这份动态结果，不能依赖会随 AWS 新区域发布而过期的固定列表。
+ */
+export async function getOrgEnabledRegions(payerAccountId: string): Promise<OrgEnabledRegionsResult> {
+  const [payerAvailability, memberEnabledRegions] = await Promise.all([
+    getRegionAvailability(payerAccountId),
+    getMemberEnabledRegions(payerAccountId),
+  ]);
+  const { enabledRegions: payerRegions, defaultRegions } = payerAvailability;
+  const allRegions = new Set(payerRegions);
+  const regionAccountCounts: Record<string, number> = {};
+  for (const regions of Object.values(memberEnabledRegions)) {
+    for (const region of regions) {
+      allRegions.add(region);
+      regionAccountCounts[region] = (regionAccountCounts[region] || 0) + 1;
+    }
+  }
+  for (const region of payerRegions) {
+    regionAccountCounts[region] = (regionAccountCounts[region] || 0) + 1;
+  }
+  const memberAccountIds = Object.keys(memberEnabledRegions);
+  const aggregatorRegions = defaultRegions.filter(region => memberAccountIds.every(
+    accountId => memberEnabledRegions[accountId].includes(region),
+  ));
+  return {
+    payerAccountId,
+    payerRegions,
+    defaultRegions,
+    regions: [...allRegions].sort(),
+    aggregatorRegions,
+    memberAccountCount: memberAccountIds.length,
+    memberEnabledRegions,
+    regionAccountCounts,
+  };
+}
+
 export interface StackSetTargetStatus {
   accountId: string;
   region: string;
@@ -1337,6 +1644,9 @@ export interface StackSetTargetStatus {
 
 export interface OnboardingStackSetStatus extends ReIndexStackSetStatus {
   requiredRegions: string[];
+  rootRequiredRegions: string[];
+  extraRootRegions: string[];
+  autoDeploymentRequired: boolean;
   expectedInstanceCount: number;
   missingInstanceCount: number;
   pendingInstanceCount: number;
@@ -1388,10 +1698,42 @@ export async function getOnboardingStackSetStatus(
     accountToken = page.NextToken;
   } while (accountToken);
 
+  const autoDeploymentRegionSet = new Set(await getDefaultRegions(payerAccountId));
+  const hasMemberAccounts = memberAccounts.length > 0;
+  const localRequiredRegions = hasMemberAccounts
+    ? [...new Set(localRegions)].filter(region => memberAccounts.some(
+      accountId => memberEnabledRegions[accountId]?.includes(region),
+    )).sort()
+    : [...autoDeploymentRegionSet].filter(region => region !== aggregatorRegion).sort();
+  const commonLocalRegions = localRequiredRegions.filter(region =>
+    autoDeploymentRegionSet.has(region)
+    && memberAccounts.every(accountId => memberEnabledRegions[accountId]?.includes(region)));
+  const scopedLocalRegions = localRequiredRegions.filter(region => !commonLocalRegions.includes(region));
   const definitions = [
-    { name: AUTO_TAGGER_STACKSET_NAME, requiredRegions: ['us-east-1'] },
-    { name: RE_AGGREGATOR_STACKSET, requiredRegions: [aggregatorRegion] },
-    { name: RE_LOCAL_STACKSET, requiredRegions: [...new Set(localRegions)].sort() },
+    {
+      name: AUTO_TAGGER_STACKSET_NAME,
+      requiredRegions: ['us-east-1'],
+      rootRequiredRegions: ['us-east-1'],
+      autoDeploymentRequired: true,
+    },
+    {
+      name: RE_AGGREGATOR_STACKSET,
+      requiredRegions: [aggregatorRegion],
+      rootRequiredRegions: [aggregatorRegion],
+      autoDeploymentRequired: true,
+    },
+    {
+      name: RE_LOCAL_STACKSET,
+      requiredRegions: commonLocalRegions,
+      rootRequiredRegions: commonLocalRegions,
+      autoDeploymentRequired: true,
+    },
+    {
+      name: RE_SCOPED_LOCAL_STACKSET,
+      requiredRegions: scopedLocalRegions,
+      rootRequiredRegions: [],
+      autoDeploymentRequired: false,
+    },
   ];
   const stackSets: OnboardingStackSetStatus[] = [];
 
@@ -1414,6 +1756,9 @@ export async function getOnboardingStackSetStatus(
       regions: [],
       statusCounts: {},
       requiredRegions: definition.requiredRegions,
+      rootRequiredRegions: definition.rootRequiredRegions,
+      extraRootRegions: [],
+      autoDeploymentRequired: definition.autoDeploymentRequired,
       expectedInstanceCount: expectedKeys.size,
       missingInstanceCount: expectedKeys.size,
       pendingInstanceCount: 0,
@@ -1452,11 +1797,17 @@ export async function getOnboardingStackSetStatus(
       }
       targetToken = page.NextToken;
     } while (targetToken);
-    entry.rootTargeted = definition.requiredRegions.length === 0 || definition.requiredRegions.every(region =>
-      autoTargets.some(target => target.ou === rootOuId && target.regions.includes(region)));
+    const actualRootRegions = new Set(autoTargets
+      .filter(target => target.ou === rootOuId)
+      .flatMap(target => target.regions));
+    entry.rootTargeted = definition.rootRequiredRegions.every(region => actualRootRegions.has(region));
+    entry.extraRootRegions = definition.name === RE_LOCAL_STACKSET
+      ? [...actualRootRegions].filter(region => !definition.rootRequiredRegions.includes(region)).sort()
+      : [];
     entry.configurationValid = entry.permissionModel === 'SERVICE_MANAGED'
-      && entry.autoDeploymentEnabled
-      && entry.rootTargeted;
+      && entry.autoDeploymentEnabled === definition.autoDeploymentRequired
+      && entry.rootTargeted
+      && entry.extraRootRegions.length === 0;
 
     const targetStatuses = new Map<string, { status: string; reason?: string }>();
     const regions = new Set<string>();
@@ -1470,7 +1821,7 @@ export async function getOnboardingStackSetStatus(
       for (const summary of page.Summaries || []) {
         entry.instanceCount++;
         if (summary.Region) regions.add(summary.Region);
-        const status = summary.StackInstanceStatus?.DetailedStatus || summary.Status || 'UNKNOWN';
+        const status = effectiveStackInstanceStatus(summary);
         entry.statusCounts[status] = (entry.statusCounts[status] || 0) + 1;
         if (summary.Account && summary.Region) {
           targetStatuses.set(`${summary.Account}:${summary.Region}`, { status, reason: summary.StatusReason });
@@ -1519,11 +1870,15 @@ export async function getOnboardingStackSetStatus(
       const target = targetStatuses.get(key);
       const status = target?.status;
       if (!status) {
-        entry.missingTargets.push({ accountId, region });
+        if ([RE_LOCAL_STACKSET, RE_SCOPED_LOCAL_STACKSET].includes(definition.name)) {
+          existingIndexCandidates.push({ accountId, region, status: 'MISSING' });
+        } else {
+          entry.missingTargets.push({ accountId, region });
+        }
       } else if (['CURRENT', 'SUCCEEDED'].includes(status)) {
         // 仅真正完成的 ACTIVE 目标计为成功。
-      } else if (['FAILED', 'CANCELLED', 'INOPERABLE', 'SKIPPED_SUSPENDED_ACCOUNT'].includes(status)) {
-        const indexAlreadyExists = definition.name === RE_LOCAL_STACKSET
+      } else if (['FAILED', 'CANCELLED', 'INOPERABLE', 'OUTDATED', 'SKIPPED_SUSPENDED_ACCOUNT'].includes(status)) {
+        const indexAlreadyExists = [RE_LOCAL_STACKSET, RE_SCOPED_LOCAL_STACKSET].includes(definition.name)
           && status === 'FAILED'
           && /AlreadyExists|index already exists/i.test(target?.reason || '');
         if (indexAlreadyExists) existingIndexCandidates.push({ accountId, region, status });
@@ -1545,6 +1900,8 @@ export async function getOnboardingStackSetStatus(
           const status = result.target.status || 'FAILED';
           entry.statusCounts[status] = Math.max(0, (entry.statusCounts[status] || 0) - 1);
           entry.statusCounts.ACTIVE_EXISTING_INDEX = (entry.statusCounts.ACTIVE_EXISTING_INDEX || 0) + 1;
+        } else if (result.target.status === 'MISSING') {
+          entry.missingTargets.push({ accountId: result.target.accountId, region: result.target.region });
         } else {
           entry.failedTargets.push(result.target);
         }
@@ -1572,14 +1929,16 @@ export async function getOnboardingStackSetStatus(
 
     const operationStatus = entry.latestOperation?.status || '';
     const operationActive = ['RUNNING', 'QUEUED', 'STOPPING'].includes(operationStatus);
-    entry.complete = definition.requiredRegions.length === 0 || (
-      entry.exists
-      && entry.configurationValid
-      && entry.missingInstanceCount === 0
-      && entry.pendingInstanceCount === 0
-      && entry.failedInstanceCount === 0
-      && !operationActive
-    );
+    entry.complete = definition.requiredRegions.length === 0
+      ? entry.extraRootRegions.length === 0
+      : (
+        entry.exists
+        && entry.configurationValid
+        && entry.missingInstanceCount === 0
+        && entry.pendingInstanceCount === 0
+        && entry.failedInstanceCount === 0
+        && !operationActive
+      );
     stackSets.push(entry);
   }
 
@@ -1588,8 +1947,11 @@ export async function getOnboardingStackSetStatus(
     memberAccountCount: memberAccounts.length,
     complete: stackSets.every(item => item.complete),
     failed: stackSets.some(item => item.requiredRegions.length > 0 && (
-      !item.exists
-      || (item.exists && (!item.autoDeploymentEnabled || item.permissionModel !== 'SERVICE_MANAGED'))
+      (!item.exists && item.name === AUTO_TAGGER_STACKSET_NAME)
+      || (item.exists && (
+        item.permissionModel !== 'SERVICE_MANAGED'
+        || item.autoDeploymentEnabled !== item.autoDeploymentRequired
+      ))
     )),
     stackSets,
   };
@@ -1623,18 +1985,53 @@ export async function repairOnboardingStackSetCoverage(
   if (!rootOuId) throw new Error('未取到组织根 OU');
 
   for (const stackSet of status.stackSets) {
-    if (stackSet.complete || stackSet.requiredRegions.length === 0) continue;
-    if (!stackSet.exists) throw new Error(`StackSet ${stackSet.name} 不存在，需返回部署阶段重建`);
-    if (stackSet.permissionModel !== 'SERVICE_MANAGED' || !stackSet.autoDeploymentEnabled) {
-      throw new Error(`StackSet ${stackSet.name} 未启用 SERVICE_MANAGED AutoDeployment`);
+    if (stackSet.complete) continue;
+    if (stackSet.requiredRegions.length === 0 && stackSet.extraRootRegions.length === 0) continue;
+    if (!stackSet.exists) {
+      const definition = stackSet.name === RE_AGGREGATOR_STACKSET
+        ? {
+          template: RE_AGGREGATOR_TEMPLATE,
+          description: 'Resource Explorer aggregator index (managed by AWSTool)',
+          autoDeployment: true,
+        }
+        : [RE_LOCAL_STACKSET, RE_SCOPED_LOCAL_STACKSET].includes(stackSet.name)
+          ? {
+            template: RE_LOCAL_TEMPLATE,
+            description: stackSet.name === RE_SCOPED_LOCAL_STACKSET
+              ? 'Resource Explorer account-scoped local indexes (managed by AWSTool)'
+              : 'Resource Explorer common local indexes (managed by AWSTool)',
+            autoDeployment: stackSet.name !== RE_SCOPED_LOCAL_STACKSET,
+          }
+          : null;
+      if (!definition) throw new Error(`StackSet ${stackSet.name} 不存在，需返回部署阶段重建`);
+      await cfn.send(new CreateStackSetCommand({
+        StackSetName: stackSet.name,
+        Description: definition.description,
+        TemplateBody: definition.template,
+        PermissionModel: 'SERVICE_MANAGED',
+        AutoDeployment: { Enabled: definition.autoDeployment, RetainStacksOnAccountRemoval: false },
+        ManagedExecution: { Active: true },
+        CallAs: 'SELF',
+        Tags: [{ Key: 'ManagedBy', Value: 'AWSTool' }, { Key: 'Purpose', Value: 'ResourceExplorer' }],
+      }));
+      return {
+        submitted: true,
+        stackSetName: stackSet.name,
+        detail: `已创建 ${definition.autoDeployment ? 'AutoDeployment=true' : 'AutoDeployment=false'} 的 ${stackSet.name}`,
+      };
+    }
+    if (stackSet.permissionModel !== 'SERVICE_MANAGED'
+      || stackSet.autoDeploymentEnabled !== stackSet.autoDeploymentRequired) {
+      throw new Error(`StackSet ${stackSet.name} 权限模型或 AutoDeployment 配置不符合预期`);
     }
     if (['RUNNING', 'QUEUED', 'STOPPING'].includes(stackSet.latestOperation?.status || '')) continue;
 
-    if (!stackSet.rootTargeted) {
-      const response = await cfn.send(new CreateStackInstancesCommand({
+    if (stackSet.extraRootRegions.length > 0) {
+      const response = await cfn.send(new DeleteStackInstancesCommand({
         StackSetName: stackSet.name,
         DeploymentTargets: { OrganizationalUnitIds: [rootOuId], AccountFilterType: 'NONE' },
-        Regions: stackSet.requiredRegions,
+        Regions: stackSet.extraRootRegions,
+        RetainStacks: true,
         OperationPreferences: { FailureTolerancePercentage: 100, MaxConcurrentPercentage: 100 },
         CallAs: 'SELF',
       }));
@@ -1642,7 +2039,23 @@ export async function repairOnboardingStackSetCoverage(
         submitted: true,
         stackSetName: stackSet.name,
         operationId: response.OperationId,
-        detail: `${stackSet.name} 已重新绑定根 OU 和 ${stackSet.requiredRegions.length} 个目标区域`,
+        detail: `${stackSet.name} 正在以 RetainStacks=true 无损解绑 ${stackSet.extraRootRegions.length} 个历史宽泛区域`,
+      };
+    }
+
+    if (!stackSet.rootTargeted && stackSet.rootRequiredRegions.length > 0) {
+      const response = await cfn.send(new CreateStackInstancesCommand({
+        StackSetName: stackSet.name,
+        DeploymentTargets: { OrganizationalUnitIds: [rootOuId], AccountFilterType: 'NONE' },
+        Regions: stackSet.rootRequiredRegions,
+        OperationPreferences: { FailureTolerancePercentage: 100, MaxConcurrentPercentage: 100 },
+        CallAs: 'SELF',
+      }));
+      return {
+        submitted: true,
+        stackSetName: stackSet.name,
+        operationId: response.OperationId,
+        detail: `${stackSet.name} 已重新绑定根 OU 和 ${stackSet.rootRequiredRegions.length} 个共同启用区域`,
       };
     }
 

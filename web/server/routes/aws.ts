@@ -34,7 +34,12 @@ const requireAdmin = (req: Request, res: Response, next: any) => {
 const requireStrictAdmin = (req: Request, res: Response, next: any) => {
   const tokenUser = (req as any).user;
   const currentUser = tokenUser?.username ? db.getUser(tokenUser.username) : null;
-  if (!currentUser || currentUser.role !== 'admin') {
+  if (!currentUser
+    || String(currentUser.id) !== String(tokenUser?.userId)
+    || currentUser.username !== tokenUser?.username) {
+    return res.status(401).json({ error: '用户身份已变更，请重新登录' });
+  }
+  if (currentUser.role !== 'admin') {
     return res.status(403).json({ error: '仅管理员可访问' });
   }
   next();
@@ -48,7 +53,7 @@ awsRouter.get('/tag-compliance/status', async (_req: Request, res: Response) => 
 });
 
 // 全自动接入：提交后由持久化 runner 完成资源、索引、S3 配置和最终校验。
-awsRouter.post('/tag-compliance/onboarding', requireAdmin, async (req: Request, res: Response) => {
+awsRouter.post('/tag-compliance/onboarding', requireStrictAdmin, async (req: Request, res: Response) => {
   try {
     const user = (req as any).user;
     const result = tagOnboarding.submitTagOnboarding({
@@ -96,7 +101,7 @@ awsRouter.get('/tag-compliance/onboarding/:jobId', async (req: Request, res: Res
   } catch (e: any) { res.status(500).json({ error: e.message }); }
 });
 
-awsRouter.post('/tag-compliance/onboarding/:jobId/retry', requireAdmin, async (req: Request, res: Response) => {
+awsRouter.post('/tag-compliance/onboarding/:jobId/retry', requireStrictAdmin, async (req: Request, res: Response) => {
   try {
     const job = tagOnboarding.retryOnboarding(String(req.params.jobId || ''));
     const user = (req as any).user;
@@ -123,7 +128,7 @@ awsRouter.get('/tag-compliance/config', async (_req: Request, res: Response) => 
 });
 
 // 写入组织配置 orgs.json（viewer 拦截 + ETag 防陈旧覆盖 + 校验 + 审计）
-awsRouter.put('/tag-compliance/config', requireAdmin, async (req: Request, res: Response) => {
+awsRouter.put('/tag-compliance/config', requireStrictAdmin, async (req: Request, res: Response) => {
   try {
     if (!req.body || Array.isArray(req.body) || !Object.prototype.hasOwnProperty.call(req.body, 'etag')) {
       return res.status(400).json({ error: '保存组织配置必须携带最近读取到的 ETag，请先重新加载' });
@@ -143,12 +148,25 @@ awsRouter.put('/tag-compliance/config', requireAdmin, async (req: Request, res: 
   }
 });
 
-// 触发扫描（viewer 拦截 + 审计）
-awsRouter.post('/tag-compliance/scan', requireAdmin, async (req: Request, res: Response) => {
+// 触发扫描（严格 admin + 显式风险确认 + 审计）。中央状态机未暴露本次
+// dry-run/正式模式，后端不能根据上一份报告推断，必须由操作者确认中央配置。
+const MAP_SCAN_CONFIRMATION = 'TRIGGER_MAP_SCAN_WITH_CENTRAL_MODE';
+awsRouter.post('/tag-compliance/scan', requireStrictAdmin, async (req: Request, res: Response) => {
   try {
+    if (req.body?.confirmation !== MAP_SCAN_CONFIRMATION) {
+      return res.status(400).json({
+        error: '触发前必须确认：本次运行模式由中央状态机配置决定，可能真实修改所有已配置组织的资源标签',
+      });
+    }
     const r = await tagCompliance.startScan();
     const user = (req as any).user;
-    db.addAuditLog(user?.userId, 'TAG_SCAN_TRIGGER', `触发 MAP 标签扫描: ${r.executionArn}`, user?.username, req.ip);
+    db.addAuditLog(
+      user?.userId,
+      'TAG_SCAN_TRIGGER',
+      `显式确认中央运行模式后触发 MAP 标签扫描: ${r.executionArn}`,
+      user?.username,
+      req.ip,
+    );
     (res.locals as any).audited = true;
     res.json({ success: true, data: r });
   } catch (e: any) { res.status(500).json({ error: e.message }); }
@@ -183,7 +201,7 @@ awsRouter.get('/tag-compliance/notify-emails', async (_req: Request, res: Respon
   } catch (e: any) { res.status(500).json({ error: e.message }); }
 });
 
-awsRouter.post('/tag-compliance/notify-emails', requireAdmin, async (req: Request, res: Response) => {
+awsRouter.post('/tag-compliance/notify-emails', requireStrictAdmin, async (req: Request, res: Response) => {
   try {
     const email = String(req.body?.email || '').trim();
     const r = await tagCompliance.addNotifyEmail(email);
@@ -196,7 +214,7 @@ awsRouter.post('/tag-compliance/notify-emails', requireAdmin, async (req: Reques
   } catch (e: any) { res.status(500).json({ error: e.message }); }
 });
 
-awsRouter.delete('/tag-compliance/notify-emails', requireAdmin, async (req: Request, res: Response) => {
+awsRouter.delete('/tag-compliance/notify-emails', requireStrictAdmin, async (req: Request, res: Response) => {
   try {
     const subscriptionArn = String(req.body?.subscriptionArn || req.query.subscriptionArn || '').trim();
     const endpoint = String(req.body?.endpoint || '').trim();
@@ -209,16 +227,41 @@ awsRouter.delete('/tag-compliance/notify-emails', requireAdmin, async (req: Requ
 });
 
 // 下发 Resource Explorer 索引 StackSet（替代控制台 Quick Setup，异步执行）
-awsRouter.post('/tag-compliance/re-indexes', requireAdmin, async (req: Request, res: Response) => {
+awsRouter.post('/tag-compliance/re-indexes', requireStrictAdmin, async (req: Request, res: Response) => {
   try {
     const payer = String(req.body?.payerAccountId || '').trim();
     if (!/^\d{12}$/.test(payer)) return res.status(400).json({ error: '请提供 12 位 payer 账户 ID' });
     const aggregatorRegion = String(req.body?.aggregatorRegion || 'us-east-1').trim();
-    const localRegions = Array.isArray(req.body?.localRegions) ? req.body.localRegions.map((r: any) => String(r).trim()) : [];
-    const r = await tagCompliance.deployReIndexes(payer, aggregatorRegion, localRegions);
+    const requestedLocalRegions: string[] = Array.isArray(req.body?.localRegions)
+      ? [...new Set<string>((req.body.localRegions as unknown[])
+        .map(region => String(region).trim())
+        .filter(Boolean))].sort()
+      : [];
+    const coverage = await tagCompliance.getOrgEnabledRegions(payer);
+    if (!coverage.aggregatorRegions.includes(aggregatorRegion)) {
+      return res.status(400).json({ error: `聚合区域 ${aggregatorRegion} 未在 payer 与全部 ACTIVE 成员账户共同启用` });
+    }
+    const requiredLocalRegions = coverage.regions.filter(region => region !== aggregatorRegion).sort();
+    const missing = requiredLocalRegions.filter(region => !requestedLocalRegions.includes(region));
+    const unexpected = requestedLocalRegions.filter(region => !requiredLocalRegions.includes(region));
+    if (missing.length > 0 || unexpected.length > 0) {
+      return res.status(400).json({
+        error: '索引区域必须与组织实际启用区域完全一致，请重新读取区域后再提交',
+        data: { missing, unexpected, requiredLocalRegions },
+      });
+    }
+    const payerLocalRegions = coverage.payerRegions.filter(region => region !== aggregatorRegion);
+    const r = await tagCompliance.deployReIndexes(
+      payer,
+      aggregatorRegion,
+      requiredLocalRegions,
+      payerLocalRegions,
+      coverage.memberEnabledRegions,
+      coverage.defaultRegions,
+    );
     const user = (req as any).user;
     db.addAuditLog(user?.userId, 'TAG_RE_INDEX_DEPLOY',
-      `下发 RE 索引 payer ${payer} — 聚合 ${aggregatorRegion}, 本地 ${r.localRegions.length} 区域; ${r.steps.map(s => `${s.label}:${s.status}`).join(', ')}`,
+      `下发 RE 索引 payer ${payer} — 聚合 ${aggregatorRegion}, 本地 ${r.localRegions.length} 区域, 成员 ${coverage.memberAccountCount} 个; ${r.steps.map(s => `${s.label}:${s.status}`).join(', ')}`,
       user?.username, req.ip);
     (res.locals as any).audited = true;
     res.json({ success: true, data: r });
@@ -234,8 +277,17 @@ awsRouter.get('/tag-compliance/re-indexes/status', async (req: Request, res: Res
   } catch (e: any) { res.status(500).json({ error: e.message }); }
 });
 
+// 动态读取 payer + ACTIVE 成员账户的实际启用区域，供手工索引部署使用。
+awsRouter.get('/tag-compliance/enabled-regions', requireStrictAdmin, async (req: Request, res: Response) => {
+  try {
+    const payer = String(req.query.payer || '').trim();
+    if (!/^\d{12}$/.test(payer)) return res.status(400).json({ error: '请提供 12 位 payer 账户 ID' });
+    res.json({ success: true, data: await tagCompliance.getOrgEnabledRegions(payer) });
+  } catch (e: any) { res.status(500).json({ error: e.message }); }
+});
+
 // 一键接入：自动补齐该 payer 组织的前置资源（RE 跨账户访问/聚合索引/OrgView/search-role/StackSet）
-awsRouter.post('/tag-compliance/provision', requireAdmin, async (req: Request, res: Response) => {
+awsRouter.post('/tag-compliance/provision', requireStrictAdmin, async (req: Request, res: Response) => {
   try {
     const payer = String(req.body?.payerAccountId || '').trim();
     if (!/^\d{12}$/.test(payer)) return res.status(400).json({ error: '请提供 12 位 payer 账户 ID' });

@@ -11,7 +11,7 @@ AWS 多账户管理平台。用于跨组织管理成员账户：配额提升、�
 
 | 应用 | 位置 | 包名 / 版本 | 状态 | 说明 |
 |------|------|-------------|------|------|
-| **Web 版（生产）** | `web/` | `aws-toolbox-web` / `APP_VERSION 0.11.0` | ✅ **在维护** | 部署在 EC2（https://markxu.co）。日常改动几乎都在这里。 |
+| **Web 版（生产）** | `web/` | `aws-toolbox-web` / `APP_VERSION 0.13.0` | ✅ **在维护** | 部署在 EC2（https://markxu.co）。日常改动几乎都在这里。 |
 | 桌面版（旧） | 根 `src/` + `electron/` | `aws-toolbox` / `0.1.0` | ⚠️ 旧版/基本冻结 | 早期 Electron macOS 版，`main: dist/main/index.js`。除非专门维护桌面版，否则**不要动**。 |
 
 **结论：接到"平台/网站"相关的需求，一律在 `web/` 下操作。**
@@ -123,7 +123,7 @@ doc-templates/architectures/    # 公司架构图（静态资源，可提交）
 - 资源清理：`GET /resources/:accountId/:region` 返回最近 7 天 EC2/EBS/S3/Lambda/IAM 用户（Lambda 按 LastModified，IAM/S3 为全局，单服务失败放入 warnings）；`POST /resources/:accountId/delete` 删除前逐项重新读取并复验时间，EC2/EBS/Lambda 保持 admin/partadmin 兼容，IAM 用户仅数据库实时 strict admin 且服务端级联清理全部依赖，S3 永不自动删除
 - 审计：`GET /audit`、`GET /audit/export`（均 requireAuditAccess）
 - 控制台：`GET /console-url/:accountId`
-- MAP 标签：`GET /tag-compliance/status|config|executions|report|precheck`、`PUT /tag-compliance/config`(admin)、`POST /tag-compliance/scan`(admin)
+- MAP 标签：读取端点包括 `GET /tag-compliance/status|config|executions|report|precheck`、`GET /tag-compliance/enabled-regions?payer=...`；所有写端点（onboarding/retry、config、scan、notify、re-indexes、provision）均使用 `requireStrictAdmin`。`POST /scan` 必须携带中央运行模式确认；re-indexes 动态读取 payer + ACTIVE 成员区域，聚合区仅允许 `opt-in-not-required` 默认区域。默认本地区域由 AutoDeployment StackSet 覆盖根 OU，opt-in 区域由独立 `AutoDeployment=false` StackSet 按账户交集精确下发；旧宽泛目标以 `RetainStacks=true` 无损解绑
 
 区域路由 `/api/regions`（regionsRouter）：
 - `GET /status`、`POST /scan`、`POST /scan/:accountId`、`POST /enable`、`POST /enable-batch`
@@ -134,8 +134,8 @@ doc-templates/architectures/    # 公司架构图（静态资源，可提交）
 
 | 守卫 | 实际放行范围 | 用途 |
 |------|--------------|------|
-| `requireAdmin` | **admin + partadmin**（只拦 viewer） | 提额、资源删除、MAP 标签写操作、删 access key。名字容易误解，但这是预期行为 —— partadmin 就该有这些能力 |
-| `requireStrictAdmin` | 仅 admin | 账户权限检测（`roles-status` / `roles-check`）。从数据库读当前角色，不信任 JWT |
+| `requireAdmin` | **admin + partadmin**（只拦 viewer） | 提额、普通资源删除、删 access key。名字容易误解，但保留既有 partadmin 行为 |
+| `requireStrictAdmin` | 仅 admin | MAP 标签全部写操作、账户权限检测（`roles-status` / `roles-check`）、IAM 用户删除。从数据库实时读取并核对用户 ID，不信任 JWT 中可能过期的角色 |
 | `requireRootAccess` | root_access 或 admin | 根用户敏感操作 |
 | `requireAuditAccess` | 审计页可见者 | 审计日志查询/导出 |
 | `requireBulkQuotaAccess` | bulk_quota_access 或 admin | 批量提额 |

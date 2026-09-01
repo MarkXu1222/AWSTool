@@ -249,7 +249,10 @@ export const api = {
   tagGetConfig: () => request('/aws/tag-compliance/config'),
   tagPutConfig: (orgs: any[], etag: string | null) =>
     request('/aws/tag-compliance/config', { method: 'PUT', body: JSON.stringify({ orgs, etag }) }),
-  tagScan: () => request('/aws/tag-compliance/scan', { method: 'POST' }),
+  tagScan: () => request('/aws/tag-compliance/scan', {
+    method: 'POST',
+    body: JSON.stringify({ confirmation: 'TRIGGER_MAP_SCAN_WITH_CENTRAL_MODE' }),
+  }),
   tagExecutions: () => request('/aws/tag-compliance/executions'),
   tagReport: () => request('/aws/tag-compliance/report'),
   tagPrecheck: (payer: string) => request(`/aws/tag-compliance/precheck?payer=${encodeURIComponent(payer)}`),
@@ -267,6 +270,8 @@ export const api = {
     request('/aws/tag-compliance/re-indexes', { method: 'POST', body: JSON.stringify({ payerAccountId, aggregatorRegion, localRegions }) }),
   tagReIndexStatus: (payer: string) =>
     request(`/aws/tag-compliance/re-indexes/status?payer=${encodeURIComponent(payer)}`),
+  tagEnabledRegions: (payer: string) =>
+    request(`/aws/tag-compliance/enabled-regions?payer=${encodeURIComponent(payer)}`),
   exportAuditLog: async (format: 'csv' | 'json') => {
     const token = getToken();
     const res = await fetch(`${BASE}/aws/audit/export?format=${format}`, {

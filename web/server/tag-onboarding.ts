@@ -242,8 +242,9 @@ async function runWaitManagementIndex(job: TagOnboardingJob): Promise<void> {
 }
 
 async function runDeployReIndexes(job: TagOnboardingJob): Promise<void> {
-  const [payerEnabledRegions, memberEnabledRegions] = await Promise.all([
+  const [payerEnabledRegions, defaultRegions, memberEnabledRegions] = await Promise.all([
     tagCompliance.getEnabledRegions(job.payerAccountId),
+    tagCompliance.getDefaultRegions(job.payerAccountId),
     tagCompliance.getMemberEnabledRegions(job.payerAccountId),
   ]);
   const aggregatorRegion = 'us-east-1';
@@ -291,14 +292,21 @@ async function runDeployReIndexes(job: TagOnboardingJob): Promise<void> {
     });
   }
 
-  const allEnabledRegions = new Set(payerEnabledRegions);
+  const memberLocalRegions = new Set<string>();
   for (const regions of Object.values(memberEnabledRegions)) {
-    for (const region of regions) allEnabledRegions.add(region);
+    for (const region of regions) {
+      if (region !== aggregatorRegion) memberLocalRegions.add(region);
+    }
   }
-  const localRegions = [...allEnabledRegions].filter(region => region !== aggregatorRegion).sort();
+  const localRegions = [...memberLocalRegions].sort();
   const payerLocalRegions = payerEnabledRegions.filter(region => region !== aggregatorRegion);
   const result = await tagCompliance.deployReIndexes(
-    job.payerAccountId, aggregatorRegion, localRegions, payerLocalRegions,
+    job.payerAccountId,
+    aggregatorRegion,
+    localRegions,
+    payerLocalRegions,
+    memberEnabledRegions,
+    defaultRegions,
   );
   const failed = result.steps.filter(step => step.status === 'failed'
     || (step.key === 'payerLocalIndexes' && step.status === 'pending'));

@@ -18,16 +18,6 @@ interface ProvisionResult {
   payerAccountId: string; centralAccountId: string; orgId?: string; rootOuId?: string;
   steps: ProvisionStep[]; searchRoleArn?: string; viewArn?: string; needsRetry: boolean;
 }
-// Resource Explorer 支持的常用区域（用于索引部署选择）
-const RE_ALL_REGIONS = [
-  'us-east-1', 'us-east-2', 'us-west-1', 'us-west-2',
-  'eu-west-1', 'eu-west-2', 'eu-west-3', 'eu-central-1', 'eu-north-1', 'eu-south-1',
-  'ap-northeast-1', 'ap-northeast-2', 'ap-northeast-3', 'ap-south-1',
-  'ap-southeast-1', 'ap-southeast-2', 'ca-central-1', 'sa-east-1',
-];
-// 默认本地索引区域：除 us-east-1（默认聚合区）外的常规区域
-const RE_DEFAULT_LOCAL_REGIONS = RE_ALL_REGIONS.filter(r => r !== 'us-east-1');
-
 const PROV_META: Record<ProvisionStatus, { color: string; text: string }> = {
   created: { color: 'green', text: '已创建' },
   ok: { color: 'green', text: '已就绪' },
@@ -112,13 +102,73 @@ const AddOrgModal: React.FC<{
 
   const [provisioning, setProvisioning] = useState(false);
   const [provResult, setProvResult] = useState<ProvisionResult | null>(null);
-  // Resource Explorer 索引部署
+  // Resource Explorer 索引部署：区域必须从 payer + ACTIVE 成员账户实时读取。
   const [aggRegion, setAggRegion] = useState('us-east-1');
-  const [localRegions, setLocalRegions] = useState<string[]>(RE_DEFAULT_LOCAL_REGIONS);
+  const [availableRegions, setAvailableRegions] = useState<string[]>([]);
+  const [aggregatorRegions, setAggregatorRegions] = useState<string[]>([]);
+  const [localRegions, setLocalRegions] = useState<string[]>([]);
+  const [regionsLoading, setRegionsLoading] = useState(false);
+  const [regionAccountCounts, setRegionAccountCounts] = useState<Record<string, number>>({});
+  const regionRequestIdRef = useRef(0);
   const [reDeploying, setReDeploying] = useState(false);
   const [reSteps, setReSteps] = useState<ProvisionStep[] | null>(null);
   const [reStatus, setReStatus] = useState<any[] | null>(null);
   const [reStatusLoading, setReStatusLoading] = useState(false);
+
+  const loadEnabledRegions = async (silent = false) => {
+    const payerAccountId = payer.trim();
+    if (!/^\d{12}$/.test(payerAccountId)) {
+      if (!silent) message.warning('请输入 12 位 payer 账户 ID');
+      return;
+    }
+    const requestId = ++regionRequestIdRef.current;
+    setRegionsLoading(true);
+    try {
+      const r = await api.tagEnabledRegions(payerAccountId);
+      if (requestId !== regionRequestIdRef.current) return;
+      if (!r.success) {
+        setAvailableRegions([]);
+        setAggregatorRegions([]);
+        setLocalRegions([]);
+        setRegionAccountCounts({});
+        if (!silent) message.error(r.error || '读取组织启用区域失败');
+        return;
+      }
+      const regions = Array.isArray(r.data?.regions) ? r.data.regions : [];
+      const validAggregatorRegions = Array.isArray(r.data?.aggregatorRegions)
+        ? r.data.aggregatorRegions
+        : [];
+      if (regions.length === 0 || validAggregatorRegions.length === 0) {
+        setAvailableRegions([]);
+        setAggregatorRegions([]);
+        setLocalRegions([]);
+        setRegionAccountCounts({});
+        message.warning('未读取到全账户共同启用的聚合区域，已禁止手工下发索引');
+        return;
+      }
+      const nextAggregator = validAggregatorRegions.includes(aggRegion)
+        ? aggRegion
+        : (validAggregatorRegions.includes('us-east-1') ? 'us-east-1' : validAggregatorRegions[0]);
+      setAvailableRegions(regions);
+      setAggregatorRegions(validAggregatorRegions);
+      setAggRegion(nextAggregator);
+      setLocalRegions(regions.filter((region: string) => region !== nextAggregator));
+      setRegionAccountCounts(r.data?.regionAccountCounts || {});
+      if (!silent) {
+        message.success(`已读取 ${r.data?.memberAccountCount ?? 0} 个成员账户，共 ${regions.length} 个实际启用区域`);
+      }
+    } catch (e: any) {
+      if (requestId === regionRequestIdRef.current) {
+        setAvailableRegions([]);
+        setAggregatorRegions([]);
+        setLocalRegions([]);
+        setRegionAccountCounts({});
+        if (!silent) message.error(e.message);
+      }
+    } finally {
+      if (requestId === regionRequestIdRef.current) setRegionsLoading(false);
+    }
+  };
 
   const loadReStatus = async (silent = false) => {
     if (!/^\d{12}$/.test(payer.trim())) { if (!silent) message.warning('请输入 12 位 payer 账户 ID'); return; }
@@ -133,6 +183,12 @@ const AddOrgModal: React.FC<{
 
   const handleDeployReIndexes = async () => {
     if (!/^\d{12}$/.test(payer.trim())) { message.warning('请输入 12 位 payer 账户 ID'); return; }
+    if (availableRegions.length === 0) { message.warning('请先读取组织实际启用区域'); return; }
+    if (!aggregatorRegions.includes(aggRegion)
+      || localRegions.some(region => !availableRegions.includes(region) || region === aggRegion)) {
+      message.error('区域选择已过期，请重新读取组织实际启用区域');
+      return;
+    }
     setReDeploying(true); setReSteps(null);
     const hide = message.loading('正在下发 Resource Explorer 索引 StackSet...', 0);
     try {
@@ -149,10 +205,12 @@ const AddOrgModal: React.FC<{
   };
 
   const reset = () => {
+    regionRequestIdRef.current += 1;
     setPayer(''); setData(null); setChecking(false);
     setOrgId(''); setSearchRoleArn(''); setViewArn(''); setTagValue(''); setExcludeAccounts('');
     setProvisioning(false); setProvResult(null);
-    setAggRegion('us-east-1'); setLocalRegions(RE_DEFAULT_LOCAL_REGIONS);
+    setAggRegion('us-east-1'); setAvailableRegions([]); setAggregatorRegions([]); setLocalRegions([]);
+    setRegionsLoading(false); setRegionAccountCounts({});
     setReDeploying(false); setReSteps(null); setReStatus(null); setReStatusLoading(false);
   };
 
@@ -160,6 +218,7 @@ const AddOrgModal: React.FC<{
 
   const handleDetect = async () => {
     if (!/^\d{12}$/.test(payer.trim())) { message.warning('请输入 12 位 payer 账户 ID'); return; }
+    void loadEnabledRegions();
     setChecking(true); setData(null);
     try {
       const r = await api.tagPrecheck(payer.trim());
@@ -249,7 +308,15 @@ const AddOrgModal: React.FC<{
 
       <Space.Compact style={{ width: '100%', marginBottom: 16 }}>
         <Input addonBefore="Payer 账户 ID" value={payer} maxLength={12}
-          onChange={e => setPayer(e.target.value.replace(/\D/g, ''))}
+          onChange={e => {
+            regionRequestIdRef.current += 1;
+            setPayer(e.target.value.replace(/\D/g, ''));
+            setAvailableRegions([]);
+            setAggregatorRegions([]);
+            setLocalRegions([]);
+            setRegionAccountCounts({});
+            setRegionsLoading(false);
+          }}
           onPressEnter={handleDetect} placeholder="12 位账户 ID" />
         <Button type="primary" icon={<SearchOutlined />} loading={checking} onClick={handleDetect}>检测</Button>
       </Space.Compact>
@@ -261,27 +328,49 @@ const AddOrgModal: React.FC<{
           children: (
             <>
               <Alert type="info" showIcon style={{ marginBottom: 12 }}
-                message="给组织内所有账户建立 Resource Explorer 索引"
-                description="扫描器靠 Resource Explorer 发现资源，每个账户的每个区域都需要索引，缺索引的区域会成为扫描盲区。这里用两个 StackSet 全组织下发：聚合区域建 AGGREGATOR，其余区域建 LOCAL。索引创建由 AWS 异步完成（整组织可能 15-30 分钟以上），下发后可随时刷新进度。" />
+                message="按组织实际启用区域建立 Resource Explorer 索引"
+                description="扫描器靠 Resource Explorer 发现资源，每个成员账户启用的每个区域都需要索引。聚合区只可选择 payer 与全部 ACTIVE 成员共同启用的区域；本地索引会按区域精确下发到实际启用该区的账户。读取失败时禁止下发，避免扫描盲区或无效实例。" />
+              <Space wrap style={{ marginBottom: 8 }}>
+                <Button size="small" icon={<ReloadOutlined />} loading={regionsLoading}
+                  disabled={!/^\d{12}$/.test(payer.trim())} onClick={() => loadEnabledRegions()}>
+                  读取实际区域
+                </Button>
+                {availableRegions.length > 0 && (
+                  <span style={{ fontSize: 12, color: 'rgba(0,0,0,0.55)' }}>
+                    已发现 {availableRegions.length} 个区域
+                  </span>
+                )}
+              </Space>
+              {availableRegions.length === 0 && (
+                <Alert type="warning" showIcon style={{ marginBottom: 8 }}
+                  message="尚未取得组织实际区域，已禁止下发索引" />
+              )}
               <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginBottom: 8 }}>
                 <span style={{ fontSize: 12 }}>聚合区域</span>
-                <Select size="small" style={{ width: 150 }} value={aggRegion}
-                  onChange={v => { setAggRegion(v); setLocalRegions(prev => prev.filter(r => r !== v)); }}
-                  options={RE_ALL_REGIONS.map(r => ({ label: r, value: r }))} />
-                <span style={{ fontSize: 12 }}>本地索引区域</span>
-                <Select size="small" mode="multiple" allowClear style={{ minWidth: 320, flex: 1 }}
-                  maxTagCount="responsive" placeholder="选择其它区域（不含聚合区域）"
-                  value={localRegions} onChange={v => setLocalRegions(v.filter((r: string) => r !== aggRegion))}
-                  options={RE_ALL_REGIONS.filter(r => r !== aggRegion).map(r => ({ label: r, value: r }))} />
+                <Select size="small" style={{ width: 190 }} value={aggRegion}
+                  disabled={aggregatorRegions.length === 0}
+                  onChange={v => {
+                    setAggRegion(v);
+                    setLocalRegions(availableRegions.filter(region => region !== v));
+                  }}
+                  options={aggregatorRegions.map(region => ({
+                    label: `${region} (${regionAccountCounts[region] || 0} 个账户)`, value: region,
+                  }))} />
+                <span style={{ fontSize: 12 }}>本地索引区域（自动全量覆盖）</span>
+                <Select size="small" mode="multiple" style={{ minWidth: 320, flex: 1 }}
+                  maxTagCount="responsive" placeholder="读取实际区域后自动填充"
+                  disabled
+                  value={localRegions}
+                  options={availableRegions.filter(r => r !== aggRegion).map(region => ({
+                    label: `${region} (${regionAccountCounts[region] || 0} 个账户)`, value: region,
+                  }))} />
               </div>
               <Space wrap style={{ marginBottom: 8 }}>
-                <Button size="small" onClick={() => setLocalRegions(RE_ALL_REGIONS.filter(r => r !== aggRegion))}>全选</Button>
-                <Button size="small" onClick={() => setLocalRegions([])}>清空（只建聚合区）</Button>
                 <Popconfirm title="下发 Resource Explorer 索引？"
                   description={`将在该组织所有成员账户部署索引：聚合区 ${aggRegion} + 本地区 ${localRegions.length} 个。操作幂等，已有实例的区域会跳过。`}
                   okText="下发" cancelText="取消" onConfirm={handleDeployReIndexes}>
                   <Button size="small" type="primary" ghost loading={reDeploying}
-                    disabled={!/^\d{12}$/.test(payer.trim())}>下发索引</Button>
+                    disabled={!/^\d{12}$/.test(payer.trim()) || availableRegions.length === 0}>下发索引</Button>
                 </Popconfirm>
                 <Button size="small" icon={<ReloadOutlined />} loading={reStatusLoading} onClick={() => loadReStatus()}>刷新进度</Button>
               </Space>
@@ -1101,11 +1190,9 @@ const TagCompliancePage: React.FC = () => {
           <p className="page-header-subtitle">自动发现并给缺 map-migrated 标签的资源打标（MAP 2.0 合规）</p>
         </div>
         <Popconfirm
-          title="触发一次扫描？"
-          description={dryRun === false
-            ? '当前是「正式打标」模式，本次运行会真实给资源打标（由中央系统的最小权限角色执行）。'
-            : '将触发中央系统对所有已配置组织执行一次扫描/打标流程。'}
-          okText="触发" cancelText="取消" onConfirm={handleScan}>
+          title="确认触发中央 MAP 流程？"
+          description="中央状态机未向平台暴露本次是 DryRun 还是真实打标。请先在中央系统确认当前运行模式；继续操作可能修改所有已配置组织的资源标签。"
+          okText="已确认中央模式，触发" cancelText="取消" onConfirm={handleScan}>
           <Button type="primary" icon={<PlayCircleOutlined />} loading={scanning}>触发扫描</Button>
         </Popconfirm>
       </div>

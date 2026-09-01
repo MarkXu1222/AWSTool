@@ -3,7 +3,7 @@
 企业级 AWS 多账户（多 Organizations）管理平台。带强制 MFA 登录、页面级权限与全量操作审计。
 
 **线上**：https://markxu.co（EC2 Singapore，PM2 进程 `aws-toolbox`）
-**当前版本**：`0.12.3`（见 `web/client/src/version.ts`，左下角展示）
+**当前版本**：`0.13.0`（见 `web/client/src/version.ts`，左下角展示）
 
 **生产接入规模**（配置快照 2026-08-27；账户数快照 2026-08-13）
 
