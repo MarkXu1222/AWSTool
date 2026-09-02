@@ -33,7 +33,7 @@
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
-import { spawnSync } from 'child_process';
+import { spawn, ChildProcess } from 'child_process';
 import puppeteer, { Browser, Page } from 'puppeteer-core';
 import { getConsoleSigninUrl } from './aws-service';
 
@@ -44,20 +44,176 @@ const DISPLAY = process.env.BILLING_EXPORT_DISPLAY || (process.platform === 'lin
 const PER_ACCOUNT_TIMEOUT = 210_000;
 // 网络空闲后再等多久点打印
 const SETTLE_MS = Number(process.env.BILLING_EXPORT_SETTLE_MS || 8000);
-// 服务器内存有限（2C4G 且 node 常驻占用较大），并发上限压到 3
-const MAX_CONCURRENCY = Number(process.env.BILLING_EXPORT_MAX_CONCURRENCY || 3);
+// 服务器内存有限（2C4G 且 node 常驻占用较大），全局 runner 一次只跑一个 job。
+const configuredConcurrency = Number(process.env.BILLING_EXPORT_MAX_CONCURRENCY || 3);
+const MAX_CONCURRENCY = Number.isFinite(configuredConcurrency)
+  ? Math.max(1, Math.min(10, Math.floor(configuredConcurrency)))
+  : 3;
 // 账单语言。服务器需装对应字体，否则渲染成方框（已装 google-noto-sans-cjk-sc-fonts）
 const LOCALE = process.env.BILLING_EXPORT_LOCALE || 'zh-CN';
 
+export class BillingExportCancelledError extends Error {
+  constructor(message = '账单导出已取消') {
+    super(message);
+    this.name = 'BillingExportCancelledError';
+  }
+}
+
+export class BillingExportProcessCleanupError extends Error {
+  constructor(processName: string, pid?: number) {
+    super(`${processName} 进程${pid ? ` (PID ${pid})` : ''}在强制终止期限内未退出，账单导出 runner 已暂停`);
+    this.name = 'BillingExportProcessCleanupError';
+  }
+}
+
+function throwIfAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) throw new BillingExportCancelledError();
+}
+
+async function abortableSleep(ms: number, signal?: AbortSignal): Promise<void> {
+  throwIfAborted(signal);
+  if (!signal) {
+    await new Promise(resolve => setTimeout(resolve, ms));
+    return;
+  }
+  await new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      signal.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    const onAbort = () => {
+      clearTimeout(timer);
+      signal.removeEventListener('abort', onAbort);
+      reject(new BillingExportCancelledError());
+    };
+    signal.addEventListener('abort', onAbort, { once: true });
+  });
+}
+
+const PROCESS_TERM_GRACE_MS = 5_000;
+const PROCESS_KILL_GRACE_MS = 2_000;
+const BROWSER_LAUNCH_TIMEOUT_MS = 20_000;
+const browserShutdowns = new WeakMap<Browser, Promise<void>>();
+
+function childHasExited(child: ChildProcess): boolean {
+  return child.exitCode !== null || child.signalCode !== null;
+}
+
+function signalChildProcessTree(child: ChildProcess, signal: NodeJS.Signals): void {
+  if (childHasExited(child)) return;
+  if (process.platform !== 'win32' && child.pid) {
+    try {
+      process.kill(-child.pid, signal);
+      return;
+    } catch (error: any) {
+      if (error?.code === 'ESRCH' && childHasExited(child)) return;
+      // 不是独立进程组、进程组已变化或无权限时回退到直接终止主进程。
+    }
+  }
+  try {
+    child.kill(signal);
+  } catch (error: any) {
+    if (error?.code !== 'ESRCH') throw error;
+  }
+}
+
+function waitForChildExit(child: ChildProcess, timeoutMs: number): Promise<boolean> {
+  if (childHasExited(child)) return Promise.resolve(true);
+  return new Promise(resolve => {
+    let settled = false;
+    const finish = (exited: boolean) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      child.removeListener('exit', onExit);
+      resolve(exited);
+    };
+    const onExit = () => finish(true);
+    const timer = setTimeout(() => finish(childHasExited(child)), timeoutMs);
+    timer.unref?.();
+    child.once('exit', onExit);
+    if (childHasExited(child)) finish(true);
+  });
+}
+
+function closeBrowserBounded(browser: Browser): Promise<void> {
+  const existing = browserShutdowns.get(browser);
+  if (existing) return existing;
+  const shutdown = (async () => {
+    const child = browser.process();
+    let closedGracefully = false;
+    try {
+      closedGracefully = await Promise.race([
+        browser.close().then(() => true),
+        new Promise<boolean>(resolve => {
+          const timer = setTimeout(() => resolve(false), PROCESS_TERM_GRACE_MS);
+          timer.unref?.();
+        }),
+      ]);
+    } catch { /* 继续终止底层进程树 */ }
+    if (closedGracefully || !child || childHasExited(child)) return;
+
+    try { signalChildProcessTree(child, 'SIGTERM'); } catch { /* SIGKILL 继续兜底 */ }
+    if (!await waitForChildExit(child, PROCESS_TERM_GRACE_MS)) {
+      try { signalChildProcessTree(child, 'SIGKILL'); } catch { /* 最终状态检查会报错 */ }
+      if (!await waitForChildExit(child, PROCESS_KILL_GRACE_MS)) {
+        throw new BillingExportProcessCleanupError('Chrome', child.pid);
+      }
+    }
+    try { browser.disconnect(); } catch { /* 已断开 */ }
+  })();
+  browserShutdowns.set(browser, shutdown);
+  return shutdown;
+}
+
+function findExecutable(command: string): string {
+  const candidates = path.isAbsolute(command)
+    ? [command]
+    : (process.env.PATH || '').split(path.delimiter).filter(Boolean).map(dir => path.join(dir, command));
+  for (const candidate of candidates) {
+    try {
+      fs.accessSync(candidate, fs.constants.X_OK);
+      return candidate;
+    } catch { /* 继续查找 */ }
+  }
+  throw new Error(`未找到可执行命令: ${command}`);
+}
+
 function findChrome(): string {
   const candidates = [
+    process.env.CHROME_PATH || '',
     '/usr/bin/google-chrome-stable',
     '/usr/bin/google-chrome',
     '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
-    process.env.CHROME_PATH || '',
   ];
-  for (const c of candidates) if (c && fs.existsSync(c)) return c;
-  throw new Error('未找到 Chrome 可执行文件');
+  for (const candidate of candidates) {
+    if (!candidate) continue;
+    try {
+      fs.accessSync(candidate, fs.constants.X_OK);
+      return candidate;
+    } catch { /* 继续查找 */ }
+  }
+  throw new Error('未找到可执行的 Chrome');
+}
+
+export function getBillingExporterMaxConcurrency(): number {
+  return MAX_CONCURRENCY;
+}
+
+/** 在启动任何 Chrome 前检查运行依赖和输出目录。 */
+export function preflightBillingExporter(outputRoot?: string): void {
+  findChrome();
+  findExecutable('zip');
+  if (process.platform === 'linux') {
+    const displayMatch = /^:(\d+)/.exec(DISPLAY);
+    if (!displayMatch) throw new Error('Linux 账单导出必须配置 BILLING_EXPORT_DISPLAY');
+    const socketPath = `/tmp/.X11-unix/X${displayMatch[1]}`;
+    if (!fs.existsSync(socketPath)) throw new Error(`Xvfb 未就绪: ${socketPath}`);
+  }
+  if (outputRoot) {
+    fs.mkdirSync(outputRoot, { recursive: true, mode: 0o700 });
+    fs.accessSync(outputRoot, fs.constants.W_OK);
+  }
 }
 
 export interface ExportTask {
@@ -131,13 +287,14 @@ window.__hittable = function(el){
 const inflight = new WeakMap<Page, number>();
 const lastActivity = new WeakMap<Page, number>();
 
-async function waitNetworkIdle(page: Page, idleMs: number, timeoutMs: number): Promise<boolean> {
+async function waitNetworkIdle(page: Page, idleMs: number, timeoutMs: number, signal?: AbortSignal): Promise<boolean> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
+    throwIfAborted(signal);
     const n = inflight.get(page) ?? 0;
     const quiet = Date.now() - (lastActivity.get(page) ?? 0);
     if (n <= 0 && quiet >= idleMs) return true;
-    await new Promise(r => setTimeout(r, 300));
+    await abortableSleep(300, signal);
   }
   return false;
 }
@@ -148,19 +305,28 @@ function listPdfs(dir: string): Set<string> {
 }
 
 /** 等目录里出现新 PDF 且大小稳定 */
-async function waitForNewPdf(dir: string, before: Set<string>, timeoutMs: number): Promise<string | null> {
+async function waitForNewPdf(
+  dir: string,
+  before: Set<string>,
+  timeoutMs: number,
+  signal?: AbortSignal,
+): Promise<string | null> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
+    throwIfAborted(signal);
     for (const f of listPdfs(dir)) {
       if (before.has(f)) continue;
       const p = path.join(dir, f);
       try {
         const s1 = fs.statSync(p).size;
-        await new Promise(r => setTimeout(r, 900));
+        await abortableSleep(900, signal);
         if (fs.existsSync(p) && fs.statSync(p).size === s1 && s1 > 1000) return f;
-      } catch { /* 正在写，下一轮再看 */ }
+      } catch (error) {
+        if (error instanceof BillingExportCancelledError) throw error;
+        // 正在写，下一轮再看
+      }
     }
-    await new Promise(r => setTimeout(r, 600));
+    await abortableSleep(600, signal);
   }
   return null;
 }
@@ -170,7 +336,8 @@ function pdfPageCount(buf: Buffer): number {
 }
 
 /** 处理单个账户：独立浏览器 + 独立落盘目录 */
-async function captureOne(task: ExportTask, outDir: string): Promise<ExportResult> {
+async function captureOne(task: ExportTask, outDir: string, signal?: AbortSignal): Promise<ExportResult> {
+  throwIfAborted(signal);
   const { accountId, year, month } = task;
   const mm = String(month).padStart(2, '0');
   const nameBase = safeName(task.accountName ? `${task.accountName}-${accountId}` : accountId);
@@ -184,28 +351,54 @@ async function captureOne(task: ExportTask, outDir: string): Promise<ExportResul
 
   let browser: Browser | undefined;
   let page: Page | undefined;
+  let abortHandler: (() => void) | undefined;
   try {
     const dest = billsUrl(year, month);
-    const signin = await getConsoleSigninUrl(accountId, dest, 'auto');
+    // 账单抓取固定使用只读会话；support 角色缺失时明确失败，绝不回退管理员角色。
+    const signin = await getConsoleSigninUrl(accountId, dest, 'support', signal);
+    throwIfAborted(signal);
 
-    browser = await puppeteer.launch({
-      executablePath: findChrome(),
-      headless: false,                 // 必须 headed，靠 Xvfb 提供显示
-      userDataDir: profileDir,
-      env: DISPLAY ? { ...process.env, DISPLAY } : process.env,
-      args: [
-        '--kiosk-printing',            // window.print() 直接落盘
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-        '--disable-dev-shm-usage',
-        '--no-first-run',
-        '--no-default-browser-check',
-        '--disable-popup-blocking',
-        '--window-size=1440,900',
-        `--lang=${LOCALE}`,            // AWS 控制台按此语言渲染账单
-      ],
-      defaultViewport: null,
-    });
+    try {
+      browser = await puppeteer.launch({
+        executablePath: findChrome(),
+        headless: false,                 // 必须 headed，靠 Xvfb 提供显示
+        userDataDir: profileDir,
+        env: DISPLAY ? { ...process.env, DISPLAY } : process.env,
+        args: [
+          '--kiosk-printing',            // window.print() 直接落盘
+          '--no-sandbox',
+          '--disable-setuid-sandbox',
+          '--disable-dev-shm-usage',
+          '--no-first-run',
+          '--no-default-browser-check',
+          '--disable-popup-blocking',
+          '--window-size=1440,900',
+          `--lang=${LOCALE}`,            // AWS 控制台按此语言渲染账单
+        ],
+        defaultViewport: null,
+        // 必须短于 index.ts 的 30 秒优雅停机 deadline；AbortSignal 会让底层进程管理器立即 kill Chrome。
+        timeout: BROWSER_LAUNCH_TIMEOUT_MS,
+        signal,
+      });
+    } catch (launchError: any) {
+      // Puppeteer 的 timeout catch 会异步执行 browserCloseCallback；在向 runner 返回前留足其
+      // 5 秒 graceful close + 2 秒强杀窗口，避免 shutdown 提前 process.exit()。
+      const cleanupWaitMs = signal?.aborted
+        ? PROCESS_KILL_GRACE_MS
+        : launchError?.name === 'TimeoutError'
+          ? PROCESS_TERM_GRACE_MS + PROCESS_KILL_GRACE_MS
+          : 0;
+      if (cleanupWaitMs > 0) {
+        await new Promise(resolve => setTimeout(resolve, cleanupWaitMs));
+      }
+      throw launchError;
+    }
+
+    abortHandler = () => {
+      if (browser) void closeBrowserBounded(browser).catch(() => undefined);
+    };
+    signal?.addEventListener('abort', abortHandler, { once: true });
+    throwIfAborted(signal);
 
     page = await browser.newPage();
     // 光有 --lang 不够，AWS 控制台还看 Accept-Language。
@@ -234,14 +427,21 @@ async function captureOne(task: ExportTask, outDir: string): Promise<ExportResul
     })()`;
     let ready = false;
     for (let attempt = 1; attempt <= 3 && !ready; attempt++) {
+      throwIfAborted(signal);
       try {
         await page.goto(attempt === 1 ? signin : dest, { waitUntil: 'domcontentloaded', timeout: 45000 });
-      } catch { /* 超时不代表失败，继续等内容 */ }
-      try { await page.waitForFunction(READY, { timeout: 45000 }); ready = true; }
-      catch {
+      } catch {
+        throwIfAborted(signal);
+        // 超时不代表失败，继续等内容
+      }
+      try {
+        await page.waitForFunction(READY, { timeout: 45000 });
+        ready = true;
+      } catch {
+        throwIfAborted(signal);
         const errPage = await page.evaluate(
           `/无法加载您的页面|Unable to load|正在调查问题/i.test(document.body.innerText||'')`).catch(() => false);
-        if (errPage) await new Promise(r => setTimeout(r, 8000));   // AWS 侧疑似限流，退避
+        if (errPage) await abortableSleep(8000, signal);   // AWS 侧疑似限流，退避
       }
     }
     if (!ready) throw new Error('账单内容未渲染（AWS 侧限流或故障）');
@@ -255,9 +455,12 @@ async function captureOne(task: ExportTask, outDir: string): Promise<ExportResul
         for(var i=0;i<sp.length;i++){var r=sp[i].getBoundingClientRect();if(r.width>1&&r.height>1) return false;}
         return true;
       })()`, { timeout: 60000, polling: 500 });
-    } catch { /* 指示器没消失也继续，靠网络空闲兜底 */ }
-    await waitNetworkIdle(page, 2500, 60000);
-    await new Promise(r => setTimeout(r, SETTLE_MS));
+    } catch {
+      throwIfAborted(signal);
+      // 指示器没消失也继续，靠网络空闲兜底
+    }
+    await waitNetworkIdle(page, 2500, 60000, signal);
+    await abortableSleep(SETTLE_MS, signal);
 
     const errNow = await page.evaluate(
       `/无法加载您的页面|Unable to load|正在调查问题/i.test(document.body.innerText||'')`).catch(() => false);
@@ -324,7 +527,7 @@ async function captureOne(task: ExportTask, outDir: string): Promise<ExportResul
       }
       return n;
     })()`);
-    if (turned) await new Promise(r => setTimeout(r, 2000));
+    if (turned) await abortableSleep(2000, signal);
 
     // 点弹窗里的「打印」。AWS 会构建打印文档并自行调用 window.print()，kiosk 落盘。
     const btn: any = await page.evaluate(`(function(){
@@ -347,7 +550,7 @@ async function captureOne(task: ExportTask, outDir: string): Promise<ExportResul
     else await page.evaluate(`document.querySelector('[data-bp2="1"]').click()`);
     log('已点弹窗「打印」，等待落盘');
 
-    const produced = await waitForNewPdf(tmpDir, before, PER_ACCOUNT_TIMEOUT);
+    const produced = await waitForNewPdf(tmpDir, before, PER_ACCOUNT_TIMEOUT, signal);
     if (!produced) throw new Error('超时未生成 PDF');
 
     // 搬到输出目录并校验：印到网页外壳时通常只有 1 页
@@ -363,81 +566,218 @@ async function captureOne(task: ExportTask, outDir: string): Promise<ExportResul
     result.pages = pages;
     log(`完成 ${(buf.length / 1024).toFixed(0)}KB ${pages} 页`);
   } catch (e: any) {
+    if (signal?.aborted || e instanceof BillingExportCancelledError) {
+      log('已取消');
+      throw new BillingExportCancelledError();
+    }
     result.error = e?.message || String(e);
     log(`失败: ${result.error}`);
   } finally {
-    try { if (page) await page.close(); } catch { }
-    try { if (browser) await browser.close(); } catch { }
+    if (abortHandler) signal?.removeEventListener('abort', abortHandler);
+    let cleanupError: unknown;
+    try { if (browser) await closeBrowserBounded(browser); } catch (error) { cleanupError = error; }
     try { fs.rmSync(profileDir, { recursive: true, force: true }); } catch { }
     try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch { }
+    if (cleanupError) throw cleanupError;
   }
   return result;
 }
 
-async function runPool<T, R>(items: T[], limit: number, fn: (item: T, idx: number) => Promise<R>): Promise<R[]> {
+async function runPool<T, R>(
+  items: T[],
+  limit: number,
+  signal: AbortSignal | undefined,
+  fn: (item: T, idx: number, workerSignal: AbortSignal) => Promise<R>,
+): Promise<R[]> {
   const results: R[] = new Array(items.length);
+  const poolController = new AbortController();
+  const abortPool = () => poolController.abort();
+  if (signal?.aborted) abortPool();
+  else signal?.addEventListener('abort', abortPool, { once: true });
+
   let cursor = 0;
-  const workers = Array.from({ length: Math.min(limit, items.length) }, async (_, w) => {
-    await new Promise(r => setTimeout(r, w * 2500));   // 错开启动，避免几个 Chrome 一起抢资源
-    while (true) {
-      const idx = cursor++;
-      if (idx >= items.length) break;
-      results[idx] = await fn(items[idx], idx);
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async (_, workerIndex) => {
+    try {
+      await abortableSleep(workerIndex * 2500, poolController.signal); // 错开启动，避免几个 Chrome 一起抢资源
+      while (true) {
+        throwIfAborted(poolController.signal);
+        const idx = cursor++;
+        if (idx >= items.length) break;
+        results[idx] = await fn(items[idx], idx, poolController.signal);
+      }
+    } catch (error) {
+      // 任一 worker 出现取消或进程清理异常后立即阻止其它 worker 领取新任务，
+      // 并通知仍在运行的 Chrome 尽快退出；随后等待所有清理完成再向上抛错。
+      abortPool();
+      throw error;
     }
   });
-  await Promise.all(workers);
-  return results;
+
+  try {
+    const settled = await Promise.allSettled(workers);
+    const cleanupFailure = settled.find((item): item is PromiseRejectedResult =>
+      item.status === 'rejected' && item.reason instanceof BillingExportProcessCleanupError);
+    if (cleanupFailure) throw cleanupFailure.reason;
+    const rejected = settled.find((item): item is PromiseRejectedResult => item.status === 'rejected');
+    if (rejected) throw rejected.reason;
+    return results;
+  } finally {
+    signal?.removeEventListener('abort', abortPool);
+  }
 }
 
-/**
- * 主入口：批量导出并打包 zip
- * @param concurrency 并发账户数，服务器内存有限，实际会被压到 MAX_CONCURRENCY
- */
+async function createZip(zipPath: string, inputs: string[], cwd: string, signal?: AbortSignal): Promise<void> {
+  throwIfAborted(signal);
+  const zipExecutable = findExecutable('zip');
+  const configuredTimeoutMs = Number(process.env.BILLING_EXPORT_ZIP_TIMEOUT_MS || 10 * 60_000);
+  const zipTimeoutMs = Number.isFinite(configuredTimeoutMs)
+    ? Math.max(60_000, Math.min(30 * 60_000, Math.floor(configuredTimeoutMs)))
+    : 10 * 60_000;
+
+  await new Promise<void>((resolve, reject) => {
+    const child = spawn(zipExecutable, ['-j', zipPath, ...inputs], {
+      cwd,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      detached: process.platform !== 'win32',
+    });
+    let output = '';
+    let deadlineTimer: ReturnType<typeof setTimeout> | null = null;
+    let forceKillTimer: ReturnType<typeof setTimeout> | null = null;
+    let finalDeadlineTimer: ReturnType<typeof setTimeout> | null = null;
+    let stopReason: 'abort' | 'timeout' | null = null;
+    let settled = false;
+    const append = (chunk: Buffer) => { output = (output + chunk.toString('utf-8')).slice(-8192); };
+    child.stdout.on('data', append);
+    child.stderr.on('data', append);
+    const cleanup = () => {
+      signal?.removeEventListener('abort', onAbort);
+      if (deadlineTimer) clearTimeout(deadlineTimer);
+      if (forceKillTimer) clearTimeout(forceKillTimer);
+      if (finalDeadlineTimer) clearTimeout(finalDeadlineTimer);
+      deadlineTimer = null;
+      forceKillTimer = null;
+      finalDeadlineTimer = null;
+    };
+    const finish = (error?: Error) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      if (error) reject(error);
+      else resolve();
+    };
+    const stopError = () => stopReason === 'abort'
+      ? new BillingExportCancelledError()
+      : new Error(`zip 打包超过 ${Math.round(zipTimeoutMs / 1000)} 秒，已终止`);
+    const requestStop = (reason: 'abort' | 'timeout') => {
+      if (settled || stopReason) return;
+      stopReason = reason;
+      if (childHasExited(child)) return finish(stopError());
+      try { signalChildProcessTree(child, 'SIGTERM'); } catch { /* 强杀定时器继续兜底 */ }
+      forceKillTimer = setTimeout(() => {
+        if (!childHasExited(child)) {
+          try { signalChildProcessTree(child, 'SIGKILL'); } catch { /* 最终 deadline 会报错 */ }
+        }
+      }, PROCESS_TERM_GRACE_MS);
+      forceKillTimer.unref?.();
+      finalDeadlineTimer = setTimeout(() => {
+        finish(childHasExited(child)
+          ? stopError()
+          : new BillingExportProcessCleanupError('zip', child.pid));
+      }, PROCESS_TERM_GRACE_MS + PROCESS_KILL_GRACE_MS);
+      finalDeadlineTimer.unref?.();
+    };
+    const onAbort = () => requestStop('abort');
+    signal?.addEventListener('abort', onAbort, { once: true });
+    if (signal?.aborted) onAbort();
+    deadlineTimer = setTimeout(() => requestStop('timeout'), zipTimeoutMs);
+    deadlineTimer.unref?.();
+    child.once('error', error => finish(error));
+    child.once('close', code => {
+      if (stopReason) return finish(stopError());
+      if (signal?.aborted) return finish(new BillingExportCancelledError());
+      if (code === 0) return finish();
+      finish(new Error(`zip 打包失败 (exit=${code}): ${output}`));
+    });
+  });
+}
+
+export interface BillingExportOptions {
+  concurrency?: number;
+  signal?: AbortSignal;
+  workDir?: string;
+  onProgress?: (done: number, total: number, result: ExportResult) => void;
+  onPhase?: (phase: 'capturing' | 'packaging') => void;
+}
+
+/** 主入口：严格只读抓取全部任务，并异步打包为 zip。 */
 export async function exportBillingInvoices(
   tasks: ExportTask[],
-  concurrency = 2,
-  onProgress?: (done: number, total: number, result: ExportResult) => void,
+  options: BillingExportOptions = {},
 ): Promise<{ zipPath: string; results: ExportResult[]; workDir: string }> {
   if (!tasks.length) throw new Error('任务列表为空');
-  const cap = Math.max(1, Math.min(MAX_CONCURRENCY, concurrency));
+  const requested = Number(options.concurrency ?? MAX_CONCURRENCY);
+  const cap = Number.isFinite(requested)
+    ? Math.max(1, Math.min(MAX_CONCURRENCY, Math.floor(requested)))
+    : MAX_CONCURRENCY;
+  const { signal, onProgress, onPhase } = options;
+  throwIfAborted(signal);
 
-  const workDir = fs.mkdtempSync(path.join(os.tmpdir(), 'billing-export-'));
-  const pdfDir = path.join(workDir, 'pdfs');
-  fs.mkdirSync(pdfDir, { recursive: true });
-  console.log(`[billing-export] ${tasks.length} 个任务，并发 ${cap}，DISPLAY=${DISPLAY || '(本机桌面)'}`);
-
-  let done = 0;
-  // 每个账户各自起停浏览器（会话隔离），失败重试 2 次
-  const results = await runPool(tasks, cap, async (task) => {
-    let r = await captureOne(task, pdfDir);
-    for (let t = 2; !r.ok && t <= 2; t++) {
-      await new Promise(res => setTimeout(res, 6000));
-      r = await captureOne(task, pdfDir);
+  const workDir = options.workDir || fs.mkdtempSync(path.join(os.tmpdir(), 'billing-export-'));
+  try {
+    preflightBillingExporter(path.dirname(workDir));
+    if (options.workDir) {
+      fs.rmSync(workDir, { recursive: true, force: true });
+      fs.mkdirSync(workDir, { recursive: true, mode: 0o700 });
     }
-    done += 1;
-    if (onProgress) { try { onProgress(done, tasks.length, r); } catch { } }
-    return r;
-  });
+    const pdfDir = path.join(workDir, 'pdfs');
+    fs.mkdirSync(pdfDir, { recursive: true });
+    console.log(`[billing-export] ${tasks.length} 个任务，并发 ${cap}，DISPLAY=${DISPLAY || '(本机桌面)'}`);
+    onPhase?.('capturing');
 
-  // summary
-  const lines = [
-    `账单批量导出汇总  ${new Date().toISOString()}`, '',
-    `总数 ${results.length}   成功 ${results.filter(r => r.ok).length}   失败 ${results.filter(r => !r.ok).length}`, '',
-  ];
-  for (const r of results) {
-    lines.push(`[${r.ok ? 'OK' : 'FAIL'}] ${r.filename}${r.ok ? `  ${r.pages} 页` : '  -- ' + (r.error || 'unknown')}`);
-  }
-  fs.writeFileSync(path.join(pdfDir, '_summary.txt'), lines.join('\n') + '\n');
+    let done = 0;
+    // 每个账户各自起停浏览器（会话隔离），普通失败重试 1 次；取消不重试。
+    const results = await runPool(tasks, cap, signal, async (task, _idx, workerSignal) => {
+      let result = await captureOne(task, pdfDir, workerSignal);
+      if (!result.ok) {
+        await abortableSleep(6000, workerSignal);
+        result = await captureOne(task, pdfDir, workerSignal);
+      }
+      done += 1;
+      try { onProgress?.(done, tasks.length, result); } catch { /* 进度回调不影响导出 */ }
+      return result;
+    });
 
-  const zipPath = path.join(workDir, `billing-invoices-${Date.now()}.zip`);
-  const zipInputs = fs.readdirSync(pdfDir).map(f => path.join(pdfDir, f));
-  const z = spawnSync('zip', ['-j', zipPath, ...zipInputs], { cwd: workDir, encoding: 'utf-8' });
-  if (z.status !== 0) {
-    throw new Error(`zip 打包失败 (exit=${z.status}): ${z.stderr || z.stdout || ''}`);
+    throwIfAborted(signal);
+    onPhase?.('packaging');
+    const lines = [
+      `账单批量导出汇总  ${new Date().toISOString()}`, '',
+      `总数 ${results.length}   成功 ${results.filter(result => result.ok).length}   失败 ${results.filter(result => !result.ok).length}`, '',
+    ];
+    for (const result of results) {
+      lines.push(`[${result.ok ? 'OK' : 'FAIL'}] ${result.filename}${result.ok ? `  ${result.pages} 页` : '  -- ' + (result.error || 'unknown')}`);
+    }
+    fs.writeFileSync(path.join(pdfDir, '_summary.txt'), lines.join('\n') + '\n');
+
+    const zipPath = path.join(workDir, `billing-invoices-${Date.now()}.zip`);
+    const zipInputs = fs.readdirSync(pdfDir).map(file => path.join(pdfDir, file));
+    await createZip(zipPath, zipInputs, workDir, signal);
+    fs.rmSync(pdfDir, { recursive: true, force: true });
+    return { zipPath, results, workDir };
+  } catch (error) {
+    try {
+      cleanupWorkDir(workDir);
+    } catch (cleanupError) {
+      console.error('[billing-export] 失败后的目录清理也失败:', cleanupError);
+      if (!(error instanceof BillingExportProcessCleanupError)) throw cleanupError;
+    }
+    throw error;
   }
-  return { zipPath, results, workDir };
 }
 
-export function cleanupWorkDir(workDir: string) {
-  try { fs.rmSync(workDir, { recursive: true, force: true }); } catch { }
+export function cleanupWorkDir(workDir: string): void {
+  try {
+    fs.rmSync(workDir, { recursive: true, force: true });
+  } catch (error: any) {
+    throw new Error(`清理账单导出目录 ${path.basename(workDir)} 失败: ${error?.message || String(error)}`);
+  }
 }

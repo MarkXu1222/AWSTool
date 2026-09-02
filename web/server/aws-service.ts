@@ -87,6 +87,7 @@ const supportRoleUnavailable: Set<string> = new Set();
 
 const QUOTA_REGION_CONCURRENCY = 6;
 const AWS_REQUEST_TIMEOUT_MS = 30_000;
+const CONSOLE_FEDERATION_TIMEOUT_MS = 20_000;
 const BEDROCK_REGION_TIMEOUT_MS = 15_000;
 
 /** AWS SDK v3 的 Client 持有 keep-alive socket；每次临时创建后必须主动释放。 */
@@ -105,13 +106,19 @@ async function withAwsClient<TClient extends { destroy(): void }, TResult>(
 async function withAbortTimeout<TResult>(
   timeoutMs: number,
   operation: (signal: AbortSignal) => Promise<TResult>,
+  externalSignal?: AbortSignal,
 ): Promise<TResult> {
   const controller = new AbortController();
+  const onExternalAbort = () => controller.abort();
+  if (externalSignal?.aborted) controller.abort();
+  else externalSignal?.addEventListener('abort', onExternalAbort, { once: true });
   const timer = setTimeout(() => controller.abort(), timeoutMs);
+  timer.unref?.();
   try {
     return await operation(controller.signal);
   } finally {
     clearTimeout(timer);
+    externalSignal?.removeEventListener('abort', onExternalAbort);
   }
 }
 
@@ -1754,7 +1761,12 @@ export async function deleteResources(
  * 以便前端能区分「该账户未部署该角色」与其它问题。不使用 supportRoleUnavailable 缓存，
  * 保证刚创建的角色能立即生效。
  */
-async function assumeRoleStrict(accountId: string, roleName: string, sessionPrefix: string) {
+async function assumeRoleStrict(
+  accountId: string,
+  roleName: string,
+  sessionPrefix: string,
+  externalSignal?: AbortSignal,
+) {
   const roleArn = `arn:aws:iam::${accountId}:role/${roleName}`;
   // 受限账户的 support-quota 要求 ExternalId；admin 类角色不受此约束，带上也无害
   const externalId = roleName === SUPPORT_ROLE_NAME ? getExternalId(accountId) : undefined;
@@ -1765,7 +1777,7 @@ async function assumeRoleStrict(accountId: string, roleName: string, sessionPref
       RoleSessionName: `${sessionPrefix}-${accountId}`.slice(0, 64),
       DurationSeconds: 3600,
       ...(externalId ? { ExternalId: externalId } : {}),
-    }), { abortSignal: signal })),
+    }), { abortSignal: signal }), externalSignal),
   );
   return {
     accessKeyId: resp.Credentials!.AccessKeyId!,
@@ -1854,7 +1866,11 @@ async function assumeAdminViaOAAR(accountId: string) {
  * 最终会话权限 = 角色权限 ∩ session policy = 只读。
  * 这是 STS 层面的硬限制，不是界面层的约束，非特权用户拿到的会话确实无法写。
  */
-async function assumePayerForConsole(payerRoleArn: string, mode: 'admin' | 'readonly') {
+async function assumePayerForConsole(
+  payerRoleArn: string,
+  mode: 'admin' | 'readonly',
+  externalSignal?: AbortSignal,
+) {
   const resp = await withAwsClient(
     new STSClient({ region: DEFAULT_REGION, credentials: BASE_CREDENTIALS }),
     sts => withAbortTimeout(AWS_REQUEST_TIMEOUT_MS, signal => sts.send(new AssumeRoleCommand({
@@ -1864,7 +1880,7 @@ async function assumePayerForConsole(payerRoleArn: string, mode: 'admin' | 'read
       ...(mode === 'readonly'
         ? { PolicyArns: [{ arn: 'arn:aws:iam::aws:policy/ReadOnlyAccess' }] }
         : {}),
-    }), { abortSignal: signal })),
+    }), { abortSignal: signal }), externalSignal),
   );
   return {
     accessKeyId: resp.Credentials!.AccessKeyId!,
@@ -1888,6 +1904,7 @@ export async function getConsoleSigninUrl(
   accountId: string,
   destinationUrl: string,
   access: 'auto' | 'support' | 'admin' = 'auto',
+  signal?: AbortSignal,
 ) {
   // payer 管理账户上不存在 support-quota：SERVICE_MANAGED StackSet 不覆盖管理账户，
   // 我们也不为 payer 单独创建该角色。它的入口统一走 role/tool，
@@ -1900,14 +1917,14 @@ export async function getConsoleSigninUrl(
   // Get temporary credentials for the target account
   let creds;
   if (selfPayer) {
-    creds = await assumePayerForConsole(selfPayer.roleArn, access === 'admin' ? 'admin' : 'readonly');
+    creds = await assumePayerForConsole(selfPayer.roleArn, access === 'admin' ? 'admin' : 'readonly', signal);
   } else if (access === 'admin') {
     // Admin：默认 OrganizationAccountAccessRole
     creds = await assumeAdminViaOAAR(accountId);
   } else if (access === 'support') {
     // 只读：一级跳专用 support-quota 角色
     try {
-      creds = await assumeRoleStrict(accountId, SUPPORT_ROLE_NAME, 'console-support');
+      creds = await assumeRoleStrict(accountId, SUPPORT_ROLE_NAME, 'console-support', signal);
     } catch (e: any) {
       throw new Error(
         `无法以 只读(support-quota) 权限登录账户 ${accountId} 的控制台：` +
@@ -1928,11 +1945,17 @@ export async function getConsoleSigninUrl(
   });
 
   const getTokenUrl = `https://signin.aws.amazon.com/federation?Action=getSigninToken&Session=${encodeURIComponent(sessionJson)}`;
-  const tokenResp = await fetch(getTokenUrl);
-  if (!tokenResp.ok) {
-    throw new Error(`获取登录令牌失败: ${tokenResp.status}`);
-  }
-  const { SigninToken } = await tokenResp.json() as { SigninToken: string };
+  const { SigninToken } = await withAbortTimeout(
+    CONSOLE_FEDERATION_TIMEOUT_MS,
+    async requestSignal => {
+      const tokenResp = await fetch(getTokenUrl, { signal: requestSignal });
+      if (!tokenResp.ok) {
+        throw new Error(`获取登录令牌失败: ${tokenResp.status}`);
+      }
+      return tokenResp.json() as Promise<{ SigninToken: string }>;
+    },
+    signal,
+  );
 
   // Step 2: Build the login URL with the token + destination
   const loginUrl = `https://signin.aws.amazon.com/federation?Action=login` +

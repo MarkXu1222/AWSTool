@@ -11,6 +11,7 @@ import { regionsRouter } from './routes/regions';
 import { migrateEncryptMFASecrets, backupDB } from './db';
 import { startScheduler, getSchedulerStatus } from './scheduler';
 import { startTagOnboardingRunner } from './tag-onboarding';
+import { startBillingExportRunner, stopBillingExportRunner } from './billing-export-jobs';
 
 const app = express();
 app.set('trust proxy', 1);
@@ -120,10 +121,46 @@ app.get('*', (_req, res) => {
   }
 });
 
-app.listen(Number(PORT), '127.0.0.1', () => {
+const server = app.listen(Number(PORT), '127.0.0.1', async () => {
   console.log(`🚀 AWS Toolbox Web running on http://127.0.0.1:${PORT}`);
   console.log(`   Environment: ${process.env.NODE_ENV || 'development'}`);
-  // Start background data sync and recover durable MAP onboarding jobs.
-  startScheduler();
-  startTagOnboardingRunner();
+  try {
+    // 先取得 billing runner 的 OS 单实例锁；失败时不允许此进程继续提供可能竞争写 DB 的 API。
+    await startBillingExportRunner();
+    startScheduler();
+    startTagOnboardingRunner();
+  } catch (error) {
+    console.error('[Startup] 后台 runner 启动失败，服务将退出:', error);
+    server.close(() => process.exit(1));
+  }
 });
+
+let shutdownPromise: Promise<void> | null = null;
+function shutdown(signal: NodeJS.Signals): Promise<void> {
+  if (shutdownPromise) return shutdownPromise;
+  shutdownPromise = (async () => {
+    console.log(`[Shutdown] 收到 ${signal}，停止接收请求并清理账单导出进程`);
+    const closeServer = new Promise<void>((resolve, reject) => {
+      server.close(error => error ? reject(error) : resolve());
+    });
+    const deadline = new Promise<never>((_resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('优雅停机超过 30 秒')), 30_000);
+      timer.unref?.();
+    });
+    try {
+      await Promise.race([
+        Promise.all([stopBillingExportRunner(), closeServer]),
+        deadline,
+      ]);
+      console.log('[Shutdown] 账单导出进程与 HTTP server 已安全停止');
+      process.exit(0);
+    } catch (error) {
+      console.error('[Shutdown] 优雅停机失败:', error);
+      process.exit(1);
+    }
+  })();
+  return shutdownPromise;
+}
+
+process.once('SIGTERM', () => void shutdown('SIGTERM'));
+process.once('SIGINT', () => void shutdown('SIGINT'));

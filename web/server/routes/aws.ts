@@ -1,9 +1,16 @@
 import { Router, Request, Response } from 'express';
 import * as aws from '../aws-service';
-import { db, TagOnboardingConflictError } from '../db';
+import { db, BillingExportJob, TagOnboardingConflictError } from '../db';
 import { generateQuotaDoc, getCompanyForAccount } from '../doc-generator';
 import { COMPANY_PROFILES } from '../doc-templates';
-import { exportBillingInvoices, cleanupWorkDir, ExportTask } from '../billing-exporter';
+import {
+  cancelBillingExport,
+  getBillingExportDownload,
+  getBillingExportJob,
+  getBillingExportJobsForUser,
+  submitBillingExport,
+  toBillingExportJobView,
+} from '../billing-export-jobs';
 import { auditLogsToCsv, enrichAuditLog } from '../audit-presentation';
 import { syncAccountRoles, getAccountRolesSummary } from '../account-roles';
 import { getDepartedSummary, backfillDepartures } from '../account-lifecycle';
@@ -13,8 +20,7 @@ import {
 } from '../restricted-accounts';
 import * as tagCompliance from '../tag-compliance';
 import * as tagOnboarding from '../tag-onboarding';
-import fs from 'fs';
-import path from 'path';
+import { pipeline } from 'stream/promises';
 
 export const awsRouter = Router();
 
@@ -354,6 +360,37 @@ const requireAuditAccess = (req: Request, res: Response, next: any) => {
   return res.status(403).json({ error: '无权访问审计日志' });
 };
 
+// 账单导出会读取多个账户的 Billing 页面，必须实时校验 billing 页面权限。
+// 旧用户的 null/undefined 仍按现有兼容规则视为全部页面，异常值 fail closed。
+const requireBillingAccess = (req: Request, res: Response, next: any) => {
+  const tokenUser = (req as any).user;
+  const currentUser = tokenUser?.username ? db.getUser(tokenUser.username) : null;
+  if (!currentUser
+    || String(currentUser.id) !== String(tokenUser?.userId)
+    || currentUser.username !== tokenUser?.username) {
+    return res.status(401).json({ error: '用户身份已变更，请重新登录' });
+  }
+  const allowedPages = (currentUser as any).allowed_pages;
+  const allowed = currentUser.role === 'admin'
+    || allowedPages == null
+    || (Array.isArray(allowedPages) && allowedPages.includes('billing'));
+  if (!allowed) return res.status(403).json({ error: '无权导出账单，请联系管理员分配账单页面权限' });
+  (res.locals as any).billingUser = currentUser;
+  next();
+};
+
+function isBillingJobOwner(user: any, job: BillingExportJob): boolean {
+  if (job.createdByUserId != null) {
+    return user?.id != null && String(user.id) === job.createdByUserId;
+  }
+  // 兼容迁移前没有稳定 owner ID 的历史记录；新任务绝不按用户名授权。
+  return user?.username === job.createdBy;
+}
+
+function canAccessBillingJob(user: any, job: BillingExportJob): boolean {
+  return user?.role === 'admin' || isBillingJobOwner(user, job);
+}
+
 // Test connection
 awsRouter.get('/connection', async (_req: Request, res: Response) => {
   try {
@@ -645,65 +682,126 @@ awsRouter.get('/quotas/company/:accountId', async (req: Request, res: Response) 
   } catch (e: any) { res.status(500).json({ error: e.message }); }
 });
 
-// Batch export AWS Console Billing → Bills PDFs (zip)
-// Body: { accountIds: string[], months: string[] "YYYY-MM", concurrency?: number }
-awsRouter.post('/billing/export-invoices', async (req: Request, res: Response) => {
+// Billing PDF 后台 job：提交/状态/取消/下载均为短请求，下载产物保留固定 TTL。
+awsRouter.post('/billing/export-jobs', requireBillingAccess, async (req: Request, res: Response) => {
   try {
-    const { accountIds, months, concurrency } = req.body as {
-      accountIds: string[]; months: string[]; concurrency?: number;
-    };
-    if (!Array.isArray(accountIds) || accountIds.length === 0) {
-      return res.status(400).json({ error: '请选择至少一个账号' });
+    const user = (res.locals as any).billingUser;
+    if (user.id == null) return res.status(500).json({ error: '当前用户缺少稳定 ID，无法创建账单导出任务' });
+    const job = submitBillingExport({
+      accountIds: req.body?.accountIds,
+      months: req.body?.months,
+      createdBy: user.username,
+      createdByUserId: String(user.id),
+    });
+    try {
+      db.addAuditLog(
+        user.id,
+        'BILLING_EXPORT_SUBMIT',
+        `创建账单导出任务 ${job.id} · ${new Set(job.tasks.map(item => item.accountId)).size} 个账户 · ${job.total} 份 PDF`,
+        user.username,
+        req.ip,
+      );
+      (res.locals as any).audited = true;
+    } catch (auditError: any) {
+      console.error(`[BillingExport] job ${job.id} 审计写入失败:`, auditError.message);
     }
-    if (!Array.isArray(months) || months.length === 0) {
-      return res.status(400).json({ error: '请选择至少一个月份' });
+    res.status(202).json({ success: true, data: toBillingExportJobView(job) });
+  } catch (e: any) {
+    const message = e?.message || String(e);
+    if (e?.code === 'BILLING_EXPORT_OWNER_ACTIVE') {
+      return res.status(409).json({ error: message, activeJobId: e.activeJobId });
     }
-    // 拿 accountName 用于文件名
-    const { accounts } = db.getAccountsCache();
-    const nameById: Record<string, string> = {};
-    for (const a of accounts) nameById[a.Id] = a.Name || '';
-
-    // 展开为 (账号 × 月份) 任务
-    const tasks: ExportTask[] = [];
-    for (const aid of accountIds) {
-      for (const m of months) {
-        const match = /^(\d{4})-(\d{1,2})$/.exec(m);
-        if (!match) continue;
-        tasks.push({
-          accountId: aid,
-          accountName: nameById[aid] || undefined,
-          year: parseInt(match[1], 10),
-          month: parseInt(match[2], 10),
-        });
-      }
+    if (e?.code === 'BILLING_EXPORT_QUEUE_FULL') {
+      res.setHeader('Retry-After', '15');
+      return res.status(429).json({ error: message });
     }
-    if (!tasks.length) return res.status(400).json({ error: '月份格式错误' });
+    const clientError = /请选择|必须是 12 位|格式错误|超出允许范围|任务过多|不在平台缓存/.test(message);
+    res.status(clientError ? 400 : 503).json({ error: message });
+  }
+});
 
-    // 上限保护：避免一次跑太多
-    if (tasks.length > 200) {
-      return res.status(400).json({ error: `任务过多 (${tasks.length})，请分批（≤200）` });
+// 当前用户最近任务；admin 可查看全局任务，刷新页面或关闭弹窗后可恢复进度。
+awsRouter.get('/billing/export-jobs', requireBillingAccess, (req: Request, res: Response) => {
+  try {
+    const user = (res.locals as any).billingUser;
+    const limit = Math.max(1, Math.min(20, Math.floor(Number(req.query.limit || 10)) || 10));
+    const userId = user.id == null ? '' : String(user.id);
+    const jobs = getBillingExportJobsForUser(user.username, userId, user.role === 'admin', limit)
+      .map(job => ({ ...toBillingExportJobView(job), ownedByCurrentUser: isBillingJobOwner(user, job) }));
+    res.json({ success: true, data: jobs });
+  } catch (e: any) { res.status(500).json({ error: e.message }); }
+});
+
+awsRouter.get('/billing/export-jobs/:jobId', requireBillingAccess, (req: Request, res: Response) => {
+  try {
+    const user = (res.locals as any).billingUser;
+    const job = getBillingExportJob(String(req.params.jobId));
+    if (!job) return res.status(404).json({ error: '账单导出任务不存在或已清理' });
+    if (!canAccessBillingJob(user, job)) return res.status(403).json({ error: '只能查看自己创建的账单导出任务' });
+    res.json({ success: true, data: toBillingExportJobView(job) });
+  } catch (e: any) { res.status(500).json({ error: e.message }); }
+});
+
+awsRouter.post('/billing/export-jobs/:jobId/cancel', requireBillingAccess, (req: Request, res: Response) => {
+  try {
+    const user = (res.locals as any).billingUser;
+    const existing = getBillingExportJob(String(req.params.jobId));
+    if (!existing) return res.status(404).json({ error: '账单导出任务不存在或已清理' });
+    if (!canAccessBillingJob(user, existing)) return res.status(403).json({ error: '只能取消自己创建的账单导出任务' });
+    const job = cancelBillingExport(existing.id);
+    try {
+      db.addAuditLog(user.id, 'BILLING_EXPORT_CANCEL', `取消账单导出任务 ${job.id}`, user.username, req.ip);
+      (res.locals as any).audited = true;
+    } catch (auditError: any) {
+      console.error(`[BillingExport] job ${job.id} 取消审计写入失败:`, auditError.message);
     }
+    res.status(job.status === 'cancelling' ? 202 : 200).json({ success: true, data: toBillingExportJobView(job) });
+  } catch (e: any) {
+    const message = e?.message || String(e);
+    res.status(/已经结束|无法取消/.test(message) ? 409 : 500).json({ error: message });
+  }
+});
 
-    const { zipPath, results, workDir } = await exportBillingInvoices(
-      tasks,
-      concurrency || 10,
-    );
-
-    // 附加一个 summary.txt 到 zip 里（方便用户对账，看哪些失败）
-    const okCount = results.filter(r => r.ok).length;
-    const failCount = results.length - okCount;
-    const filename = `billing-invoices-${Date.now()}-${okCount}ok-${failCount}fail.zip`;
+awsRouter.get('/billing/export-jobs/:jobId/download', requireBillingAccess, async (req: Request, res: Response) => {
+  let download: ReturnType<typeof getBillingExportDownload> | null = null;
+  try {
+    const user = (res.locals as any).billingUser;
+    const existing = getBillingExportJob(String(req.params.jobId));
+    if (!existing) return res.status(404).json({ error: '账单导出任务不存在或已清理' });
+    if (!canAccessBillingJob(user, existing)) return res.status(403).json({ error: '只能下载自己创建的账单导出文件' });
+    download = getBillingExportDownload(existing.id);
+    const { job, stream, fileSize } = download;
+    try {
+      db.addAuditLog(user.id, 'BILLING_EXPORT_DOWNLOAD_START', `开始下载账单导出任务 ${job.id} · 成功 ${job.ok} · 失败 ${job.failed}`, user.username, req.ip);
+      (res.locals as any).audited = true;
+    } catch (auditError: any) {
+      console.error(`[BillingExport] job ${job.id} 下载开始审计写入失败:`, auditError.message);
+    }
 
     res.setHeader('Content-Type', 'application/zip');
-    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
-    res.setHeader('X-Export-Summary', `total=${tasks.length};ok=${okCount};fail=${failCount}`);
-
-    const stream = fs.createReadStream(zipPath);
-    stream.pipe(res);
-    stream.on('close', () => cleanupWorkDir(workDir));
-    stream.on('error', () => cleanupWorkDir(workDir));
+    res.setHeader('Content-Length', String(fileSize));
+    res.setHeader('Content-Disposition', `attachment; filename="${job.downloadFilename}"`);
+    res.setHeader('Cache-Control', 'private, no-store');
+    await pipeline(stream, res);
+    try {
+      db.addAuditLog(user.id, 'BILLING_EXPORT_DOWNLOAD', `完成下载账单导出任务 ${job.id} · ${fileSize} bytes`, user.username, req.ip);
+    } catch (auditError: any) {
+      console.error(`[BillingExport] job ${job.id} 下载完成审计写入失败:`, auditError.message);
+    }
   } catch (e: any) {
-    res.status(500).json({ error: e?.message || String(e) });
+    const message = e?.message || String(e);
+    if (res.headersSent) {
+      console.error(`[BillingExport] 下载流中断 ${req.params.jobId}:`, e);
+      if (!res.destroyed) res.destroy(e instanceof Error ? e : new Error(message));
+      return;
+    }
+    const status = /已过期|已不存在/.test(message) ? 410 : /尚未就绪/.test(message) ? 409 : 500;
+    res.status(status).json({ error: message });
+  } finally {
+    if (download) {
+      if (!download.stream.destroyed) download.stream.destroy();
+      download.release();
+    }
   }
 });
 

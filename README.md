@@ -3,7 +3,7 @@
 企业级 AWS 多账户（多 Organizations）管理平台。带强制 MFA 登录、页面级权限与全量操作审计。
 
 **线上**：https://markxu.co（EC2 Singapore，PM2 进程 `aws-toolbox`）
-**当前版本**：`0.13.1`（见 `web/client/src/version.ts`，左下角展示）
+**当前版本**：`0.14.0`（见 `web/client/src/version.ts`，左下角展示）
 
 **生产接入规模**（配置快照 2026-08-27；账户数快照 2026-08-13）
 
@@ -203,7 +203,7 @@ Admin 临时凭证默认 1 小时。数据库当前角色为 `admin` 的平台�
 | 账户 | `GET /accounts`、`POST /accounts/refresh`、`GET /accounts/:id/detail`、`GET /connection` |
 | 账户角色自愈 | `GET /accounts/roles-status`、`POST /accounts/roles-check`（均 `requireStrictAdmin`） |
 | 仪表盘 | `GET /dashboard/summary` |
-| 账单 | `GET /billing/by-account`、`GET /billing/by-service/:accountId`、`GET /billing/breakdown/:accountId`、`POST /billing/export-invoices` |
+| 账单 | `GET /billing/by-account`、`GET /billing/by-service/:accountId`、`GET /billing/breakdown/:accountId`；PDF job：`POST/GET /billing/export-jobs`、`GET /billing/export-jobs/:jobId`、`POST .../:jobId/cancel`、`GET .../:jobId/download`（均 `requireBillingAccess`，单任务再校验 owner/admin） |
 | 配额 | `GET /quotas/:accountId/:serviceCode`、`POST /quotas/increase`(admin)、`GET /quotas/requests`、`GET /quotas/stats`、`GET /quotas/companies`、`GET /quotas/company/:accountId`、`POST /quotas/generate-doc`、`POST /quotas/sync`、`POST /quotas/sync-account/:accountId`、`GET /quotas/sync-status`、`GET /quotas/sync-stream`(SSE) |
 | Bedrock 配额 | `GET /bedrock/quotas/:accountId?regions=a,b` |
 | 批量提额 | `GET /bulk-quota/payers`、`GET /bulk-quota/accounts/:payerAccountId`、`POST /bulk-quota/submit`、`GET /bulk-quota/job/:jobId`（全部 `requireBulkQuotaAccess`） |
@@ -231,6 +231,7 @@ Admin 临时凭证默认 1 小时。数据库当前角色为 `admin` 的平台�
 | `requireStrictAdmin` | 仅 admin | 账户权限检测 |
 | `requireRootAccess` | root_access 或 admin | 根用户敏感操作 |
 | `requireAuditAccess` | 审计页可见者 | 审计日志 |
+| `requireBillingAccess` | billing 页可见者 | 账单 PDF job；任务状态、取消和下载另校验创建者或 admin |
 | `requireBulkQuotaAccess` | bulk_quota_access 或 admin | 批量提额 |
 
 `requireAdmin` 的名字容易误解 —— 它放行 partadmin，这是预期行为。需要严格 admin 的场景用 `requireStrictAdmin`。
@@ -341,11 +342,22 @@ HTML 模板 + Puppeteer 渲染。公司背景库在 `doc-templates.ts`（12 家�
 
 ### 批量导出官方账单 PDF
 
-产出的是 AWS 自家生成的打印文档，与手动「打印 → 另存为 PDF」一致。流程：联邦免登录进账单页 → 等数据加载完 → 点页面「打印」→ 点弹窗「打印」→ AWS 调 `window.print()` → Chrome 静默另存为 PDF → 打包 zip。
+产出的是 AWS 自家生成的打印文档，与手动「打印 → 另存为 PDF」一致。底层流程：严格只读 Federation 会话 → Billing Bills 页面 → 等数据加载 → 点两级「打印」→ AWS 调 `window.print()` → Chrome 静默另存为 PDF → zip。
 
-账号选择支持上传 `.xlsx`：文件只在浏览器本地解析，不上传服务器；扫描所有工作表并提取独立的 12 位 AWS Account ID，只勾选平台账户列表中已存在的账号。单文件限制 5 MiB / 1,000 个 ZIP 项 / 12 MiB 单项实际解压 / 24 MiB 总实际解压 / 50,000 个单元格，解析在独立 Worker 中执行并有 20 秒超时；月份仍由页面单独选择，后端继续执行账户白名单与 200 任务上限复验。
+账号选择支持上传 `.xlsx`：文件只在浏览器本地解析，不上传服务器；扫描所有工作表并提取独立的 12 位 AWS Account ID，只勾选平台账户列表中已存在的账号。单文件限制 5 MiB / 50,000 个单元格，月份仍由页面单独选择，后端继续执行账户白名单与 200 任务上限复验。
 
-四个必须遵守的约束（都是踩坑换来的，改这块前务必先读 `billing-exporter.ts` 顶部注释）：
+编排层在 `billing-export-jobs.ts`：提交接口立即返回 `202 + jobId`，前端在页面可见时约每 3 秒轮询、隐藏时降至约 15 秒，遇到 429/5xx/网络错误会指数退避，并可关闭弹窗后恢复。服务器一次只执行一个 job，job 内并发由 `BILLING_EXPORT_MAX_CONCURRENCY` 统一限制（默认 3），不接受前端虚假并发；每个用户最多一个活跃任务，全局最多 10 个 queued（可用 `BILLING_EXPORT_MAX_QUEUED_JOBS` 调整）。状态包含真实完成数、成功/失败、动态 ETA 和队列位置。取消会停止领取新任务、等待 worker 收尾，并以有界 TERM→KILL 流程关闭活动 Chrome/zip 后清理半成品；若最终期限内仍无法确认进程树退出，当前 job 标记失败且 runner 暂停接单，避免残留进程与下一任务重叠。
+
+安全与生命周期：
+
+- 所有抓取固定调用 `getConsoleSigninUrl(..., 'support')`。payer 使用 `role/tool + ReadOnlyAccess` session policy，成员账户必须进入 `support-quota`；角色缺失时该份失败，**绝不回退 OAAR/admin**
+- submit/list/status/cancel/download 都实时检查 `billing` 页面权限；新任务 owner 绑定不可复用的用户 ID，旧记录仅在缺少 ID 时兼容用户名；单任务查询、取消和下载还要求 owner 或 admin。admin 列表可查看全局任务，但页面会优先恢复当前 admin 自己的 active job
+- 入队前以及实际执行前都会检查 Chrome、Xvfb socket、`zip` 和输出目录，依赖缺失时不会启动任何浏览器
+- job 元数据持久化在 `billing_export_jobs`；PM2 重启后 queued 任务继续排队，原 running/cancelling 标记 `interrupted`，避免伪装为仍在执行
+- 完成的 zip 默认保留 24 小时并支持重复鉴权下载；下载先打开文件并持有 lease，TTL 清理会等待活动下载结束，再清理文件并标记 `expired`
+- 轮询状态不写审计，提交、取消、下载分别记录 `BILLING_EXPORT_SUBMIT`、`BILLING_EXPORT_CANCEL`、`BILLING_EXPORT_DOWNLOAD`
+
+四个必须遵守的抓取约束（都是踩坑换来的，改这块前务必先读 `billing-exporter.ts` 顶部注释）：
 
 1. **必须 headed + `--kiosk-printing`**。headless 没有打印子系统，AWS 的打印流程跑不完。服务器靠 Xvfb（`:99`）提供 headed 环境，并预设打印首选项锁定「另存为 PDF」
 2. **必须等数据真正加载完**。首屏出现「账单周期」≠ 数据就绪，过早点打印会缺内容。等的是加载指示器消失 + 网络空闲 + 固定缓冲
@@ -446,7 +458,9 @@ curl -s "https://markxu.co/$BUNDLE" | grep -oE '0\.4\.7'
 
 ### HTTPS
 
-Nginx 反代 + Let's Encrypt（`markxu.co`，自动续期），80 强制跳 443，HSTS 开启。Node 只监听 `127.0.0.1:3000`，外网只能经 Nginx。配置脚本 `web/setup-nginx.sh`。
+Nginx 反代 + Let's Encrypt（`markxu.co`，自动续期），80 强制跳 443，HSTS 开启。Node 只监听 `127.0.0.1:3000`，外网只能经 Nginx。配置脚本 `web/setup-nginx.sh`；脚本为 zip 下载设置 10 分钟流式传输窗口，job 控制 API 本身都是短请求。
+
+账单导出运行依赖：可执行 Chrome、常驻 Xvfb（默认 `:99`）、`zip` 与 CJK 字体。可用环境变量：`BILLING_EXPORT_DISPLAY`、`BILLING_EXPORT_SETTLE_MS`、`BILLING_EXPORT_MAX_CONCURRENCY`、`BILLING_EXPORT_MAX_QUEUED_JOBS`、`BILLING_EXPORT_OUTPUT_DIR`、`BILLING_EXPORT_TTL_HOURS`；runner 启动只检查输出目录，提交任务时再完整预检，避免缺依赖导致整个服务无法启动。
 
 ### 常见改动改哪里
 
@@ -470,7 +484,7 @@ Nginx 反代 + Let's Encrypt（`markxu.co`，自动续期），80 强制跳 443�
 
 应该提交：`web/server/**`、`web/client/src/**`、`web/package*.json`、`doc-templates/architectures/**`、`config.example.json`、`electron/**`、`src/**`
 
-**绝对不提交**：`data/db.json`、`data/backups/**`、`config.json`、`提额文档/`、`node_modules/`、`dist/`
+**绝对不提交**：`data/db.json`、`data/backups/**`、`data/exports/**`、`config.json`、`提额文档/`、`node_modules/`、`dist/`
 
 ### EC2 上的禁止操作
 
@@ -494,18 +508,6 @@ Nginx 反代 + Let's Encrypt（`markxu.co`，自动续期），80 强制跳 443�
 ---
 
 ## 已知待办
-
-### 账单批量导出的编排层
-
-`billing-exporter.ts` 本身扎实，问题在路由和前端：
-
-- **界面上的并发数是假的**。前端默认 10、上限 15，但 `MAX_CONCURRENCY` 默认把它压到 3。预估耗时公式按前端值算，实际低估 3 倍以上
-- **整批跑完才响应**。同步 POST，完成前不发任何字节。`setup-nginx.sh` 没设 `proxy_read_timeout`（Nginx 默认 60s），Node `requestTimeout` 默认 300s，任务上限 200 份与这个模式矛盾。断连后服务端 Chrome 还在跑，无法取消
-- **无进度反馈**。`exportBillingInvoices` 已预留 `onProgress`，路由没用
-- **端点没有权限守卫**。只过 `authMiddleware`，而内部用 `getConsoleSigninUrl(..., 'auto')` 可能落到 `OrganizationAccountAccessRole`（admin 级会话）。账单页只需读，改成 `'support'` 更贴合最小权限
-- `zip` 是系统命令依赖，且在所有 PDF 跑完后才执行，缺包会整批白跑到最后一步才报错
-
-改法建议照搬 `bulk-quota` 已有的 job 模式（submit → jobId → 轮询），顺带解决进度与取消。
 
 ### 其它
 

@@ -16,3 +16,4 @@ server-access/
 
 # 运行时数据备份
 data/backups/
+data/exports/

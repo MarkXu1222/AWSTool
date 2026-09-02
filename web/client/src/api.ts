@@ -31,6 +31,73 @@ async function request(path: string, options: RequestInit = {}) {
   return res.json();
 }
 
+export class BillingJobRequestError extends Error {
+  constructor(
+    message: string,
+    public readonly status: number,
+    public readonly retryAfterMs?: number,
+    public readonly details?: Record<string, any>,
+  ) {
+    super(message);
+    this.name = 'BillingJobRequestError';
+  }
+}
+
+function parseRetryAfterMs(value: string | null): number | undefined {
+  if (!value) return undefined;
+  const seconds = Number(value);
+  if (Number.isFinite(seconds) && seconds >= 0) return seconds * 1000;
+  const dateMs = Date.parse(value);
+  return Number.isFinite(dateMs) ? Math.max(0, dateMs - Date.now()) : undefined;
+}
+
+// 仅账单导出 job 使用严格 HTTP 语义和短请求 deadline，避免轮询连接半开后永久卡住。
+async function billingJobRequest(path: string, options: RequestInit = {}) {
+  const token = getToken();
+  const controller = new AbortController();
+  let timedOut = false;
+  const onCallerAbort = () => controller.abort();
+  if (options.signal?.aborted) controller.abort();
+  else options.signal?.addEventListener('abort', onCallerAbort, { once: true });
+  const timeout = window.setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, 15_000);
+
+  try {
+    const res = await fetch(`${BASE}${path}`, {
+      ...options,
+      signal: controller.signal,
+      headers: {
+        'Content-Type': 'application/json',
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        ...options.headers,
+      },
+    });
+    const payload = await res.json().catch(() => ({}));
+    if (res.status === 401) {
+      localStorage.removeItem('token');
+      window.location.href = '/';
+      throw new BillingJobRequestError(payload.error || '登录已过期', 401);
+    }
+    if (!res.ok) {
+      throw new BillingJobRequestError(
+        payload.error || `请求失败 (${res.status})`,
+        res.status,
+        parseRetryAfterMs(res.headers.get('Retry-After')),
+        payload,
+      );
+    }
+    return payload;
+  } catch (error) {
+    if (timedOut) throw new BillingJobRequestError('账单导出状态请求超时，将自动重试', 0);
+    throw error;
+  } finally {
+    window.clearTimeout(timeout);
+    options.signal?.removeEventListener('abort', onCallerAbort);
+  }
+}
+
 export type CleanupResourceType = 'EC2' | 'EBS' | 'S3' | 'Lambda' | 'IAMUser';
 export type CleanupTimeBasis = 'launchTime' | 'createTime' | 'creationDate' | 'lastModified';
 
@@ -160,28 +227,107 @@ export const api = {
   },
   // List company profiles (for manual doc-generation UI)
   listCompanies: () => request('/aws/quotas/companies'),
-  // Batch export AWS Console Billing → Bills PDFs, returns a zip
-  exportBillingInvoices: async (params: { accountIds: string[]; months: string[]; concurrency?: number }) => {
-    const token = getToken();
-    const res = await fetch(`${BASE}/aws/billing/export-invoices`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
-      body: JSON.stringify(params),
-    });
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({ error: '导出失败' }));
-      throw new Error(err.error || '导出失败');
+  // 账单 PDF 后台 job：提交、恢复、轮询、取消、鉴权下载
+  billingExportSubmit: (params: { accountIds: string[]; months: string[] }) =>
+    billingJobRequest('/aws/billing/export-jobs', { method: 'POST', body: JSON.stringify(params) }),
+  billingExportJobs: (limit = 10) =>
+    billingJobRequest(`/aws/billing/export-jobs?limit=${Math.max(1, Math.min(20, Math.floor(limit)))}`),
+  billingExportJob: (jobId: string) =>
+    billingJobRequest(`/aws/billing/export-jobs/${encodeURIComponent(jobId)}`),
+  billingExportCancel: (jobId: string) =>
+    billingJobRequest(`/aws/billing/export-jobs/${encodeURIComponent(jobId)}/cancel`, { method: 'POST' }),
+  prepareBillingExportDownload: async (suggestedFilename = 'billing-invoices.zip') => {
+    const safeSuggestedFilename = /^[A-Za-z0-9._-]+\.zip$/i.test(suggestedFilename)
+      ? suggestedFilename
+      : 'billing-invoices.zip';
+    const showSaveFilePicker = (window as any).showSaveFilePicker as undefined | ((options: any) => Promise<any>);
+    if (!showSaveFilePicker) return { cancelled: false, fileHandle: null as any };
+    try {
+      // 必须是点击处理器中的第一个 await，保留 Chromium 的 transient user activation。
+      const fileHandle = await showSaveFilePicker({
+        suggestedName: safeSuggestedFilename,
+        types: [{ description: 'ZIP 压缩包', accept: { 'application/zip': ['.zip'] } }],
+      });
+      return { cancelled: false, fileHandle };
+    } catch (error: any) {
+      if (error?.name === 'AbortError') return { cancelled: true, fileHandle: null as any };
+      // 企业浏览器策略可能禁用 picker；回退到有大小上限的传统下载。
+      if (error?.name === 'SecurityError' || error?.name === 'NotAllowedError') {
+        return { cancelled: false, fileHandle: null as any };
+      }
+      throw error;
     }
-    const summary = res.headers.get('X-Export-Summary') || '';
-    const disposition = res.headers.get('Content-Disposition') || '';
-    const match = disposition.match(/filename="(.+)"/);
-    const filename = match ? match[1] : 'billing-invoices.zip';
-    const blob = await res.blob();
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url; a.download = filename; a.click();
-    URL.revokeObjectURL(url);
-    return summary;
+  },
+  downloadBillingExport: async (jobId: string, suggestedFilename = 'billing-invoices.zip', fileHandle?: any) => {
+    const token = getToken();
+    const path = `/aws/billing/export-jobs/${encodeURIComponent(jobId)}/download`;
+    const safeSuggestedFilename = /^[A-Za-z0-9._-]+\.zip$/i.test(suggestedFilename)
+      ? suggestedFilename
+      : 'billing-invoices.zip';
+    let writable: any = null;
+
+    const controller = new AbortController();
+    const headerTimeout = window.setTimeout(() => controller.abort(), 30_000);
+    try {
+      const res = await fetch(`${BASE}${path}`, {
+        signal: controller.signal,
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+      });
+      window.clearTimeout(headerTimeout);
+      if (res.status === 401) {
+        localStorage.removeItem('token');
+        window.location.href = '/';
+        throw new BillingJobRequestError('登录已过期', 401);
+      }
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ error: '下载失败' }));
+        throw new BillingJobRequestError(
+          err.error || '下载失败',
+          res.status,
+          parseRetryAfterMs(res.headers.get('Retry-After')),
+        );
+      }
+
+      if (fileHandle) {
+        if (!res.body) throw new Error('浏览器未提供可读取的下载流');
+        writable = await fileHandle.createWritable();
+        await res.body.pipeTo(writable);
+        writable = null;
+        return { cancelled: false, streamed: true };
+      }
+
+      // Safari/Firefox 暂无 File System Access API：允许传统下载，但严格限制 JS heap 峰值。
+      const fallbackLimitBytes = 128 * 1024 * 1024;
+      const contentLength = Number(res.headers.get('Content-Length'));
+      if (!Number.isFinite(contentLength) || contentLength <= 0 || contentLength > fallbackLimitBytes) {
+        await res.body?.cancel().catch(() => undefined);
+        throw new Error('当前浏览器无法安全流式保存该 ZIP；请使用 Chrome/Edge，或将导出任务拆分到 128 MB 以内');
+      }
+      const disposition = res.headers.get('Content-Disposition') || '';
+      const match = disposition.match(/filename="([^"]+)"/);
+      const filename = match ? match[1] : safeSuggestedFilename;
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement('a');
+      anchor.href = url;
+      anchor.download = filename;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      window.setTimeout(() => URL.revokeObjectURL(url), 30_000);
+      return { cancelled: false, streamed: false };
+    } catch (error: any) {
+      if (writable) {
+        try { await writable.abort(); } catch { /* 保留原始下载错误 */ }
+        writable = null;
+      }
+      if (error?.name === 'AbortError') {
+        throw new BillingJobRequestError('下载连接建立超时，请重试', 0);
+      }
+      throw error;
+    } finally {
+      window.clearTimeout(headerTimeout);
+    }
   },
   // Generate quota increase PDF document — downloads the file
   generateQuotaDoc: async (params: { accountId?: string; accountName?: string; companyKey?: string; serviceCode: string; quotaName: string; region: string; requestedValue: number; currentValue?: number }) => {

@@ -1,10 +1,11 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { Card, Table, Tag, Button, message, DatePicker, Input, Modal, Select, InputNumber, Space, Alert, Upload } from 'antd';
-import { ReloadOutlined, SearchOutlined, FilePdfOutlined, UploadOutlined } from '@ant-design/icons';
+import { Card, Table, Tag, Button, message, DatePicker, Input, Modal, Select, Space, Alert, Progress, Upload } from 'antd';
+import { ReloadOutlined, SearchOutlined, FilePdfOutlined, DownloadOutlined, StopOutlined, PlusOutlined, UploadOutlined } from '@ant-design/icons';
 import dayjs from 'dayjs';
-import { api } from '../api';
+import { api, BillingJobRequestError } from '../api';
 import { exportToCSV } from '../utils/export';
 import { scanAccountIdsFromXlsx } from '../utils/account-import';
+
 const { RangePicker } = DatePicker;
 
 interface AccountImportSummary {
@@ -17,21 +18,42 @@ interface AccountImportSummary {
   unmatchedAccountIds: string[];
 }
 
+function normalizeExportJobForDisplay(job: any): any {
+  if (!job || job.status !== 'completed') return job;
+  const expiresAt = Date.parse(job.expiresAt || '');
+  if (!Number.isFinite(expiresAt) || expiresAt <= Date.now()) {
+    return {
+      ...job,
+      status: 'expired',
+      downloadReady: false,
+      error: job.error || '账单导出文件已超过保留期限或过期时间无效',
+    };
+  }
+  return job;
+}
+
 const BillingPage: React.FC = () => {
   const [costData, setCostData] = useState<any[]>([]);
   const [loading, setLoading] = useState(false);
   const [dateRange, setDateRange] = useState<[dayjs.Dayjs, dayjs.Dayjs]>([dayjs().subtract(1, 'month').startOf('month'), dayjs()]);
   const [totalCost, setTotalCost] = useState(0);
   const [searchText, setSearchText] = useState('');
+
   // 批量导出账单相关状态
   const [accounts, setAccounts] = useState<any[]>([]);
   const [exportModalOpen, setExportModalOpen] = useState(false);
   const [selectedAccountIds, setSelectedAccountIds] = useState<string[]>([]);
   const [selectedMonths, setSelectedMonths] = useState<string[]>([]);
-  const [concurrency, setConcurrency] = useState<number>(10);
-  const [exporting, setExporting] = useState(false);
   const [accountImporting, setAccountImporting] = useState(false);
   const [accountImportSummary, setAccountImportSummary] = useState<AccountImportSummary | null>(null);
+  const [exportSubmitting, setExportSubmitting] = useState(false);
+  const [exportJobId, setExportJobId] = useState<string | null>(null);
+  const [exportJob, setExportJob] = useState<any>(null);
+  const [exportCancelling, setExportCancelling] = useState(false);
+  const [exportDownloading, setExportDownloading] = useState(false);
+  const [exportPollError, setExportPollError] = useState<string | null>(null);
+  const [exportLastUpdatedAt, setExportLastUpdatedAt] = useState<string | null>(null);
+
   // 生成近 12 个月的候选月份
   const monthCandidates = useMemo(() => {
     const arr: { value: string; label: string }[] = [];
@@ -44,13 +66,114 @@ const BillingPage: React.FC = () => {
     }
     return arr;
   }, []);
-  useEffect(() => { fetchCosts(); loadAccounts(); }, []);
+
+  useEffect(() => { fetchCosts(); loadAccounts(); void loadRecentExportJob(); }, []);
+
   const loadAccounts = async () => {
     try {
       const res = await api.listAccounts();
       if (res.success) setAccounts(res.data);
     } catch {}
   };
+
+  const loadRecentExportJob = async () => {
+    try {
+      const res = await api.billingExportJobs(20);
+      const jobs = res.success && Array.isArray(res.data) ? res.data : [];
+      // Admin 列表可能包含全局任务，但页面只能自动恢复当前用户自己的任务。
+      const latest = jobs.find((job: any) => job.ownedByCurrentUser
+        && ['queued', 'running', 'cancelling'].includes(job.status))
+        || jobs.find((job: any) => job.ownedByCurrentUser);
+      if (latest) {
+        const normalized = normalizeExportJobForDisplay(latest);
+        setExportJob(normalized);
+        setExportJobId(normalized.id);
+        setExportLastUpdatedAt(new Date().toISOString());
+        setExportPollError(null);
+      }
+    } catch (error: any) {
+      // 账单主页面仍可使用；打开导出界面后可看到连接状态。
+      setExportPollError(error?.message || '无法恢复最近的账单导出任务');
+    }
+  };
+
+  // 任务在后台执行；关闭弹窗或页面后仍可通过最新任务恢复。
+  useEffect(() => {
+    if (!exportJobId) return;
+    let stopped = false;
+    let inFlight = false;
+    let failures = 0;
+    let timer: number | undefined;
+
+    const schedule = (delayMs: number) => {
+      if (stopped) return;
+      if (timer !== undefined) window.clearTimeout(timer);
+      timer = window.setTimeout(() => void tick(), Math.min(delayMs, 2_147_000_000));
+    };
+    const tick = async () => {
+      if (stopped || inFlight) return;
+      inFlight = true;
+      try {
+        const res = await api.billingExportJob(exportJobId);
+        if (stopped) return;
+        if (!res.success) throw new Error(res.error || '获取账单导出进度失败');
+        failures = 0;
+        const job = normalizeExportJobForDisplay(res.data);
+        setExportJob(job);
+        setExportLastUpdatedAt(new Date().toISOString());
+        setExportPollError(null);
+        if (['queued', 'running', 'cancelling'].includes(job.status)) {
+          schedule(document.hidden ? 15_000 : 3_000);
+        } else if (job.status === 'completed') {
+          const expiresAt = Date.parse(job.expiresAt || '');
+          if (Number.isFinite(expiresAt)) schedule(Math.max(1_000, expiresAt - Date.now() + 250));
+        } else {
+          setExportJobId(null);
+        }
+      } catch (error: any) {
+        if (stopped) return;
+        const status = error instanceof BillingJobRequestError ? error.status : 0;
+        if ([401, 403, 404, 410].includes(status)
+          || (status >= 400 && status < 500 && status !== 429)) {
+          if (status === 401) return;
+          const unavailableMessage = error.message || '账单导出任务已不可访问';
+          setExportPollError(unavailableMessage);
+          setExportJob((current: any) => current ? {
+            ...current,
+            status: status === 410 ? 'expired' : 'failed',
+            downloadReady: false,
+            error: unavailableMessage,
+          } : null);
+          setExportJobId(null);
+          message.error(`${unavailableMessage}，可新建导出任务`);
+          return;
+        }
+        failures += 1;
+        setExportPollError(`${error.message || '进度连接异常'}；正在第 ${failures} 次自动重试`);
+        const baseDelay = document.hidden ? 15_000 : 3_000;
+        const exponentialDelay = Math.min(60_000, baseDelay * (2 ** Math.min(failures, 4)));
+        const retryAfterMs = error instanceof BillingJobRequestError ? (error.retryAfterMs || 0) : 0;
+        schedule(Math.max(exponentialDelay, retryAfterMs) + Math.floor(Math.random() * 1_000));
+      } finally {
+        inFlight = false;
+      }
+    };
+    const onVisibilityChange = () => {
+      if (document.hidden || stopped) return;
+      if (timer !== undefined) window.clearTimeout(timer);
+      timer = undefined;
+      void tick();
+    };
+
+    document.addEventListener('visibilitychange', onVisibilityChange);
+    void tick();
+    return () => {
+      stopped = true;
+      document.removeEventListener('visibilitychange', onVisibilityChange);
+      if (timer !== undefined) window.clearTimeout(timer);
+    };
+  }, [exportJobId]);
+
   const fetchCosts = async () => {
     setLoading(true);
     try {
@@ -66,19 +189,34 @@ const BillingPage: React.FC = () => {
     } catch (e: any) { message.error(e.message); }
     finally { setLoading(false); }
   };
+
   const tableData = costData.flatMap((p: any) => (p.Groups || []).map((g: any) => ({
     key: `${p.TimePeriod.Start}-${g.Keys[0]}`, period: `${p.TimePeriod.Start} ~ ${p.TimePeriod.End}`,
     accountId: g.Keys[0], cost: parseFloat(g.Metrics.UnblendedCost.Amount || '0'),
   }))).sort((a, b) => b.cost - a.cost);
+
   const filtered = tableData.filter(d => !searchText || d.accountId.includes(searchText));
+
   // 批量导出账单
   const openExportModal = () => {
-    setSelectedAccountIds([]);
-    setSelectedMonths([dayjs().subtract(1, 'month').format('YYYY-M')]);
-    setConcurrency(10);
-    setAccountImportSummary(null);
+    if (!exportJob) {
+      setSelectedAccountIds([]);
+      setSelectedMonths([dayjs().subtract(1, 'month').format('YYYY-M')]);
+      setAccountImportSummary(null);
+    }
     setExportModalOpen(true);
   };
+
+  const startNewExport = () => {
+    setExportJob(null);
+    setExportJobId(null);
+    setExportPollError(null);
+    setExportLastUpdatedAt(null);
+    setSelectedAccountIds([]);
+    setSelectedMonths([dayjs().subtract(1, 'month').format('YYYY-M')]);
+    setAccountImportSummary(null);
+  };
+
   const handleAccountWorkbook = async (file: File) => {
     if (!accounts.length) {
       message.warning('账户列表尚未加载完成，请稍后重试');
@@ -120,30 +258,134 @@ const BillingPage: React.FC = () => {
       setAccountImporting(false);
     }
   };
+
   const handleExportInvoices = async () => {
     if (!selectedAccountIds.length) return message.warning('请选择至少一个账号');
     if (!selectedMonths.length) return message.warning('请选择至少一个月份');
-    const taskCount = selectedAccountIds.length * selectedMonths.length;
-    if (taskCount > 200) return message.warning(`任务过多 (${taskCount})，请分批`);
-    setExporting(true);
-    const hide = message.loading(`正在导出 ${taskCount} 份账单 PDF（预计 ${Math.ceil(taskCount * 15 / concurrency)} 秒）...`, 0);
+    const count = selectedAccountIds.length * selectedMonths.length;
+    if (count > 200) return message.warning(`任务过多 (${count})，请分批`);
+    setExportSubmitting(true);
     try {
-      const summary = await api.exportBillingInvoices({
-        accountIds: selectedAccountIds,
-        months: selectedMonths,
-        concurrency,
-      });
-      hide();
-      message.success(`导出完成 (${summary})`);
-      setExportModalOpen(false);
+      const res = await api.billingExportSubmit({ accountIds: selectedAccountIds, months: selectedMonths });
+      if (!res.success) throw new Error(res.error || '提交失败');
+      const job = normalizeExportJobForDisplay(res.data);
+      setExportJob(job);
+      setExportJobId(job.id);
+      setExportLastUpdatedAt(new Date().toISOString());
+      setExportPollError(null);
+      message.success(`已提交 ${job.total} 份账单，正在后台执行`);
     } catch (err: any) {
-      hide();
-      message.error(err.message || '导出失败');
+      const activeJobId = err instanceof BillingJobRequestError && err.status === 409
+        ? err.details?.activeJobId
+        : undefined;
+      if (typeof activeJobId === 'string') {
+        try {
+          const active = await api.billingExportJob(activeJobId);
+          if (active.success) {
+            const job = normalizeExportJobForDisplay(active.data);
+            setExportJob(job);
+            setExportJobId(job.id);
+            setExportLastUpdatedAt(new Date().toISOString());
+            setExportPollError(null);
+            message.warning('你已有进行中的任务，已恢复其进度');
+            return;
+          }
+        } catch (recoveryError: any) {
+          message.error(recoveryError.message || '恢复进行中的任务失败');
+          return;
+        }
+      }
+      message.error(err.message || '提交失败');
     } finally {
-      setExporting(false);
+      setExportSubmitting(false);
     }
   };
+
+  const handleCancelExport = () => {
+    if (!exportJobId) return;
+    Modal.confirm({
+      title: '取消账单导出？',
+      content: '正在运行的浏览器会被关闭，已生成的临时文件会清理。',
+      okText: '确认取消',
+      okButtonProps: { danger: true },
+      cancelText: '继续执行',
+      onOk: async () => {
+        setExportCancelling(true);
+        try {
+          const res = await api.billingExportCancel(exportJobId);
+          if (!res.success) throw new Error(res.error || '取消失败');
+          const job = normalizeExportJobForDisplay(res.data);
+          setExportJob(job);
+          setExportLastUpdatedAt(new Date().toISOString());
+          setExportPollError(null);
+          message.success(job.status === 'cancelled' ? '任务已取消' : '正在停止任务');
+        } catch (err: any) {
+          message.error(err.message || '取消失败');
+        } finally {
+          setExportCancelling(false);
+        }
+      },
+    });
+  };
+
+  const handleDownloadExport = async () => {
+    if (!exportJobId) return;
+    setExportDownloading(true);
+    try {
+      const destination = await api.prepareBillingExportDownload(exportJob?.downloadFilename);
+      if (destination.cancelled) return;
+      // 用户选择保存位置后再重新鉴权并刷新 TTL，避免耗尽 picker 的点击激活窗口。
+      const latest = await api.billingExportJob(exportJobId);
+      if (!latest.success) throw new Error(latest.error || '刷新导出状态失败');
+      const job = normalizeExportJobForDisplay(latest.data);
+      setExportJob(job);
+      setExportLastUpdatedAt(new Date().toISOString());
+      setExportPollError(null);
+      if (job.status !== 'completed' || !job.downloadReady) {
+        if (job.status === 'expired') setExportJobId(null);
+        message.warning(job.status === 'expired' ? '导出文件已过期，请新建任务' : '导出文件尚未就绪');
+        return;
+      }
+      const outcome = await api.downloadBillingExport(exportJobId, job.downloadFilename, destination.fileHandle);
+      if (!outcome.cancelled) {
+        message.success(outcome.streamed ? '账单压缩包已保存' : '账单压缩包已开始下载');
+      }
+    } catch (err: any) {
+      if (err instanceof BillingJobRequestError && [403, 404, 410].includes(err.status)) {
+        setExportJob((current: any) => current ? {
+          ...current,
+          status: err.status === 410 ? 'expired' : 'failed',
+          downloadReady: false,
+          error: err.message,
+        } : null);
+        setExportJobId(null);
+      }
+      message.error(err.message || '下载失败');
+    } finally {
+      setExportDownloading(false);
+    }
+  };
+
   const taskCount = selectedAccountIds.length * selectedMonths.length;
+  const exportActive = !!exportJob && ['queued', 'running', 'cancelling'].includes(exportJob.status);
+  const exportPartialSuccess = exportJob?.status === 'completed' && Number(exportJob.failed) > 0;
+  const exportDownloadReady = exportJob?.status === 'completed' && exportJob.downloadReady === true;
+  const phaseLabels: Record<string, string> = {
+    preflight: '环境检查 / 排队',
+    capturing: '抓取 AWS 官方账单 PDF',
+    packaging: '打包 ZIP',
+    ready: '文件已就绪',
+  };
+  const statusLabels: Record<string, string> = {
+    queued: '排队中', running: '执行中', cancelling: '正在取消', cancelled: '已取消',
+    completed: '已完成', failed: '失败', interrupted: '服务重启中断', expired: '文件已过期',
+  };
+  const statusColors: Record<string, string> = {
+    queued: 'blue', running: 'processing', cancelling: 'orange', cancelled: 'default',
+    completed: 'success', failed: 'error', interrupted: 'warning', expired: 'default',
+  };
+  const failedExportResults = (exportJob?.results || []).filter((result: any) => !result.ok);
+
   return (
     <div>
       <div className="page-header">
@@ -164,7 +406,9 @@ const BillingPage: React.FC = () => {
           </Space>
           <Space size={8} wrap>
             <Input placeholder="搜索账户ID..." prefix={<SearchOutlined />} value={searchText} onChange={e => setSearchText(e.target.value)} allowClear size="small" style={{ width: 200 }} />
-            <Button size="small" type="primary" icon={<FilePdfOutlined />} onClick={openExportModal}>批量导出账单 PDF</Button>
+            <Button size="small" type="primary" icon={<FilePdfOutlined />} onClick={openExportModal}>
+              {exportActive ? '查看导出进度' : exportJob ? '查看最近导出' : '批量导出账单 PDF'}
+            </Button>
             <Button size="small" onClick={() => exportToCSV(filtered.map(d => ({ 账期: d.period, 账户: d.accountId, '费用(USD)': d.cost.toFixed(4) })), 'billing')}>导出 CSV</Button>
           </Space>
         </div>
@@ -176,116 +420,224 @@ const BillingPage: React.FC = () => {
             { title: '占比', key: 'pct', render: (_: any, r: any) => <Tag color="blue">{totalCost > 0 ? ((r.cost / totalCost) * 100).toFixed(1) : 0}%</Tag> },
           ]} />
       </Card>
+
       {/* 批量导出账单 PDF Modal */}
       <Modal
         title={<span><FilePdfOutlined style={{ marginRight: 6 }} />批量导出账单 PDF</span>}
         open={exportModalOpen}
-        onOk={handleExportInvoices}
+        onOk={exportJob ? undefined : handleExportInvoices}
         onCancel={() => setExportModalOpen(false)}
-        okText={`导出 ${taskCount || 0} 份 PDF`}
-        cancelText="取消"
-        confirmLoading={exporting}
-        width={720}
+        okText={`提交 ${taskCount || 0} 份 PDF`}
+        cancelText="关闭"
+        confirmLoading={exportSubmitting}
+        width={760}
         okButtonProps={{ disabled: !selectedAccountIds.length || !selectedMonths.length || taskCount > 200 }}
-      >
-        <Alert
-          type="info"
-          showIcon
-          style={{ marginBottom: 12 }}
-          message="从 AWS Console → Billing → Bills 页面抓取官方账单摘要，打包为 zip 下载。"
-          description="账号已加密免登录访问；每份约需 10-20 秒。任务总数 ≤ 200。"
-        />
-        <div style={{ marginBottom: 12 }}>
-          <div style={{ marginBottom: 4, fontWeight: 500 }}>账号 <span style={{ color: '#999', fontWeight: 400 }}>({selectedAccountIds.length}/{accounts.length})</span></div>
-          <Space style={{ marginBottom: 6 }} size={4} wrap>
-            <Button size="small" onClick={() => { setSelectedAccountIds(accounts.map(a => a.Id)); setAccountImportSummary(null); }}>全选</Button>
-            <Button size="small" onClick={() => { setSelectedAccountIds([]); setAccountImportSummary(null); }}>清空</Button>
-            <Upload
-              accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-              maxCount={1}
-              showUploadList={false}
-              beforeUpload={(file) => {
-                void handleAccountWorkbook(file);
-                return Upload.LIST_IGNORE;
-              }}
-            >
-              <Button size="small" icon={<UploadOutlined />} loading={accountImporting} disabled={!accounts.length}>
-                上传 Excel 识别
+        footer={exportJob ? (
+          <Space wrap>
+            <Button onClick={() => setExportModalOpen(false)}>关闭</Button>
+            {exportActive && (
+              <Button danger icon={<StopOutlined />} loading={exportCancelling} onClick={handleCancelExport}>
+                取消任务
               </Button>
-            </Upload>
+            )}
+            {exportDownloadReady && (
+              <Button type="primary" icon={<DownloadOutlined />} loading={exportDownloading} onClick={handleDownloadExport}>
+                下载 ZIP
+              </Button>
+            )}
+            {!exportActive && (
+              <Button icon={<PlusOutlined />} onClick={startNewExport}>新建导出</Button>
+            )}
           </Space>
-          <Select
-            mode="multiple"
-            style={{ width: '100%' }}
-            placeholder="选择要导出的账号"
-            value={selectedAccountIds}
-            onChange={(value) => { setSelectedAccountIds(value); setAccountImportSummary(null); }}
-            showSearch
-            optionFilterProp="label"
-            maxTagCount={5}
-            options={accounts.map((a: any) => ({
-              label: `${a.Name || a.Id} (${a.Id})`,
-              value: a.Id,
-            }))}
-          />
-          <div style={{ marginTop: 5, color: '#999', fontSize: 12 }}>
-            仅读取 .xlsx 的所有工作表并识别独立 12 位账户 ID；文件只在浏览器本地处理，不会上传。含前导零的 ID 请在 Excel 中设为文本。
-          </div>
-          {accountImportSummary && (
+        ) : undefined}
+      >
+        {exportJob ? (
+          <div>
+            <div
+              role="status"
+              aria-live="polite"
+              aria-atomic="true"
+              style={{ position: 'absolute', width: 1, height: 1, padding: 0, margin: -1, overflow: 'hidden', clip: 'rect(0, 0, 0, 0)', whiteSpace: 'nowrap', border: 0 }}
+            >
+              {exportPartialSuccess ? '导出完成，部分项目失败' : (statusLabels[exportJob.status] || exportJob.status)}；
+              {phaseLabels[exportJob.phase] || exportJob.phase}
+            </div>
+            {exportPollError && exportActive && (
+              <Alert
+                type="warning"
+                showIcon
+                style={{ marginBottom: 12 }}
+                message="进度连接暂时中断"
+                description={exportPollError}
+              />
+            )}
             <Alert
-              type={accountImportSummary.matchedCount > 0 && accountImportSummary.unmatchedAccountIds.length === 0 ? 'success' : 'warning'}
+              type={exportPartialSuccess ? 'warning'
+                : exportJob.status === 'completed' ? 'success'
+                  : ['failed', 'interrupted'].includes(exportJob.status) ? 'error'
+                    : exportJob.status === 'expired' ? 'warning' : 'info'}
               showIcon
-              style={{ marginTop: 8 }}
-              message={`Excel 识别：匹配 ${accountImportSummary.matchedCount}/${accountImportSummary.detectedCount} 个账户`}
-              description={(
-                <div>
-                  <div>
-                    {accountImportSummary.fileName} · {accountImportSummary.sheetCount} 个工作表 · 扫描 {accountImportSummary.scannedCellCount.toLocaleString()} 个单元格
-                    {accountImportSummary.duplicateCount > 0 ? ` · 忽略 ${accountImportSummary.duplicateCount} 个重复 ID` : ''}
-                  </div>
-                  {accountImportSummary.unmatchedAccountIds.length > 0 && (
-                    <div style={{ marginTop: 4 }}>
-                      平台未匹配 {accountImportSummary.unmatchedAccountIds.length} 个：
-                      <code>{accountImportSummary.unmatchedAccountIds.slice(0, 10).join(', ')}</code>
-                      {accountImportSummary.unmatchedAccountIds.length > 10 ? '…' : ''}
-                    </div>
-                  )}
+              style={{ marginBottom: 16 }}
+              message={
+                <Space wrap>
+                  <span>{exportPartialSuccess ? '已完成（部分失败）' : (statusLabels[exportJob.status] || exportJob.status)}</span>
+                  <Tag color={exportPartialSuccess ? 'warning' : (statusColors[exportJob.status] || 'default')}>{phaseLabels[exportJob.phase] || exportJob.phase}</Tag>
+                </Space>
+              }
+              description={exportJob.error || (exportPartialSuccess
+                ? 'ZIP 已生成；失败项目未写入 PDF，请按下方失败原因排查后单独重试。'
+                : exportActive
+                  ? '任务在服务器后台运行，关闭此弹窗不会中断；稍后重新打开可恢复进度。'
+                  : '任务执行记录已保留。')}
+            />
+            <Progress
+              percent={exportJob.progress || 0}
+              status={exportPartialSuccess ? 'normal'
+                : exportJob.status === 'completed' ? 'success'
+                  : ['failed', 'interrupted'].includes(exportJob.status) ? 'exception'
+                    : exportActive ? 'active' : 'normal'}
+            />
+            <div style={{ marginTop: 12, padding: 12, background: 'var(--color-bg-subtle, #f5f5f5)', borderRadius: 6 }}>
+              <Space size={18} wrap>
+                {exportJob.createdBy && <span>创建人 <strong>{exportJob.createdBy}</strong></span>}
+                <span>进度 <strong>{exportJob.done}/{exportJob.total}</strong></span>
+                <span>成功 <strong style={{ color: '#52c41a' }}>{exportJob.ok}</strong></span>
+                <span>失败 <strong style={{ color: exportJob.failed ? '#ff4d4f' : undefined }}>{exportJob.failed}</strong></span>
+                <span>服务器并发 <strong>{exportJob.effectiveConcurrency}</strong></span>
+                {exportJob.queuePosition && <span>队列位置 <strong>{exportJob.queuePosition}</strong></span>}
+                {exportJob.etaSeconds && <span>预计剩余 <strong>约 {Math.ceil(exportJob.etaSeconds / 60)} 分钟</strong></span>}
+                {exportLastUpdatedAt && <span>最后更新 <strong>{dayjs(exportLastUpdatedAt).format('HH:mm:ss')}</strong></span>}
+              </Space>
+              {exportJob.status === 'completed' && (
+                <div style={{ marginTop: 8, color: 'rgba(0,0,0,0.55)', fontSize: 12 }}>
+                  文件大小 {exportJob.fileSize ? `${(exportJob.fileSize / 1024 / 1024).toFixed(1)} MB` : '-'}；
+                  保留至 {exportJob.expiresAt ? dayjs(exportJob.expiresAt).format('YYYY-MM-DD HH:mm') : '-'}
                 </div>
               )}
-            />
-          )}
-        </div>
-        <div style={{ marginBottom: 12 }}>
-          <div style={{ marginBottom: 4, fontWeight: 500 }}>月份 <span style={{ color: '#999', fontWeight: 400 }}>({selectedMonths.length} 个)</span></div>
-          <Space style={{ marginBottom: 6 }} size={4}>
-            <Button size="small" onClick={() => setSelectedMonths(monthCandidates.slice(0, 3).map(m => m.value))}>近 3 个月</Button>
-            <Button size="small" onClick={() => setSelectedMonths(monthCandidates.slice(0, 6).map(m => m.value))}>近 6 个月</Button>
-            <Button size="small" onClick={() => setSelectedMonths(monthCandidates.map(m => m.value))}>近 12 个月</Button>
-            <Button size="small" onClick={() => setSelectedMonths([])}>清空</Button>
-          </Space>
-          <Select
-            mode="multiple"
-            style={{ width: '100%' }}
-            placeholder="选择月份"
-            value={selectedMonths}
-            onChange={setSelectedMonths}
-            options={monthCandidates}
-          />
-        </div>
-        <div>
-          <div style={{ marginBottom: 4, fontWeight: 500 }}>并发数</div>
-          <InputNumber min={1} max={15} value={concurrency} onChange={v => setConcurrency(v || 10)} style={{ width: 120 }} />
-          <span style={{ color: '#999', marginLeft: 12, fontSize: 12 }}>建议 10，最大 15</span>
-        </div>
-        {taskCount > 0 && (
-          <div style={{ marginTop: 14, padding: 10, background: 'var(--color-bg-subtle, #f5f5f5)', borderRadius: 4, fontSize: 12 }}>
-            <div>总任务: <strong>{taskCount}</strong> 份 PDF ({selectedAccountIds.length} 账号 × {selectedMonths.length} 月份)</div>
-            <div>预估耗时: <strong>{Math.ceil(taskCount * 15 / concurrency)}</strong> 秒（并发 {concurrency}，每份约 15s）</div>
-            {taskCount > 200 && <div style={{ color: 'var(--color-danger, #ff4d4f)' }}>⚠️ 超出 200 上限，请减少</div>}
+            </div>
+            {failedExportResults.length > 0 && (
+              <div style={{ marginTop: 16 }}>
+                <div style={{ marginBottom: 8, fontWeight: 500 }}>失败明细（{failedExportResults.length}）</div>
+                <Table
+                  size="small"
+                  rowKey={(row: any) => `${row.accountId}-${row.year}-${row.month}`}
+                  dataSource={failedExportResults}
+                  pagination={{ pageSize: 5, size: 'small' }}
+                  columns={[
+                    { title: '账户', dataIndex: 'accountId', width: 130, render: (value: string) => <code>{value}</code> },
+                    { title: '月份', key: 'month', width: 90, render: (_: any, row: any) => `${row.year}-${String(row.month).padStart(2, '0')}` },
+                    { title: '原因', dataIndex: 'error', ellipsis: true },
+                  ]}
+                />
+              </div>
+            )}
           </div>
+        ) : (
+          <>
+            <Alert
+              type="info"
+              showIcon
+              style={{ marginBottom: 12 }}
+              message="从 AWS Console → Billing → Bills 页面抓取官方账单摘要，后台打包为 ZIP。"
+              description="全部使用严格只读会话；实际并发由服务器统一控制。提交后可关闭弹窗，任务总数 ≤ 200。"
+            />
+            <div style={{ marginBottom: 12 }}>
+              <label htmlFor="billing-export-account-select" style={{ display: 'block', marginBottom: 4, fontWeight: 500 }}>
+                账号 <span style={{ color: '#999', fontWeight: 400 }}>({selectedAccountIds.length}/{accounts.length})</span>
+              </label>
+              <Space style={{ marginBottom: 6 }} size={4} wrap>
+                <Button size="small" onClick={() => { setSelectedAccountIds(accounts.map(a => a.Id)); setAccountImportSummary(null); }}>全选</Button>
+                <Button size="small" onClick={() => { setSelectedAccountIds([]); setAccountImportSummary(null); }}>清空</Button>
+                <Upload
+                  accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                  maxCount={1}
+                  showUploadList={false}
+                  beforeUpload={(file) => {
+                    void handleAccountWorkbook(file);
+                    return Upload.LIST_IGNORE;
+                  }}
+                >
+                  <Button size="small" icon={<UploadOutlined />} loading={accountImporting} disabled={!accounts.length}>
+                    上传 Excel 识别
+                  </Button>
+                </Upload>
+              </Space>
+              <Select
+                id="billing-export-account-select"
+                aria-label="选择要导出的 AWS 账户"
+                mode="multiple"
+                style={{ width: '100%' }}
+                placeholder="选择要导出的账号"
+                value={selectedAccountIds}
+                onChange={(value) => { setSelectedAccountIds(value); setAccountImportSummary(null); }}
+                showSearch
+                optionFilterProp="label"
+                maxTagCount={5}
+                options={accounts.map((account: any) => ({
+                  label: `${account.Name || account.Id} (${account.Id})`,
+                  value: account.Id,
+                }))}
+              />
+              <div style={{ marginTop: 5, color: '#999', fontSize: 12 }}>
+                仅读取 .xlsx 的所有工作表并识别独立 12 位账户 ID；文件只在浏览器本地处理，不会上传。含前导零的 ID 请在 Excel 中设为文本。
+              </div>
+              {accountImportSummary && (
+                <Alert
+                  type={accountImportSummary.matchedCount > 0 && accountImportSummary.unmatchedAccountIds.length === 0 ? 'success' : 'warning'}
+                  showIcon
+                  style={{ marginTop: 8 }}
+                  message={`Excel 识别：匹配 ${accountImportSummary.matchedCount}/${accountImportSummary.detectedCount} 个账户`}
+                  description={(
+                    <div>
+                      <div>
+                        {accountImportSummary.fileName} · {accountImportSummary.sheetCount} 个工作表 · 扫描 {accountImportSummary.scannedCellCount.toLocaleString()} 个单元格
+                        {accountImportSummary.duplicateCount > 0 ? ` · 忽略 ${accountImportSummary.duplicateCount} 个重复 ID` : ''}
+                      </div>
+                      {accountImportSummary.unmatchedAccountIds.length > 0 && (
+                        <div style={{ marginTop: 4 }}>
+                          平台未匹配 {accountImportSummary.unmatchedAccountIds.length} 个：
+                          <code>{accountImportSummary.unmatchedAccountIds.slice(0, 10).join(', ')}</code>
+                          {accountImportSummary.unmatchedAccountIds.length > 10 ? '…' : ''}
+                        </div>
+                      )}
+                    </div>
+                  )}
+                />
+              )}
+            </div>
+            <div style={{ marginBottom: 12 }}>
+              <label htmlFor="billing-export-month-select" style={{ display: 'block', marginBottom: 4, fontWeight: 500 }}>
+                月份 <span style={{ color: '#999', fontWeight: 400 }}>({selectedMonths.length} 个)</span>
+              </label>
+              <Space style={{ marginBottom: 6 }} size={4} wrap>
+                <Button size="small" onClick={() => setSelectedMonths(monthCandidates.slice(0, 3).map(month => month.value))}>近 3 个月</Button>
+                <Button size="small" onClick={() => setSelectedMonths(monthCandidates.slice(0, 6).map(month => month.value))}>近 6 个月</Button>
+                <Button size="small" onClick={() => setSelectedMonths(monthCandidates.map(month => month.value))}>近 12 个月</Button>
+                <Button size="small" onClick={() => setSelectedMonths([])}>清空</Button>
+              </Space>
+              <Select
+                id="billing-export-month-select"
+                aria-label="选择账单月份"
+                mode="multiple"
+                style={{ width: '100%' }}
+                placeholder="选择月份"
+                value={selectedMonths}
+                onChange={setSelectedMonths}
+                options={monthCandidates}
+              />
+            </div>
+            {taskCount > 0 && (
+              <div style={{ marginTop: 14, padding: 10, background: 'var(--color-bg-subtle, #f5f5f5)', borderRadius: 4, fontSize: 12 }}>
+                <div>总任务：<strong>{taskCount}</strong> 份 PDF（{selectedAccountIds.length} 个账号 × {selectedMonths.length} 个月份）</div>
+                <div>执行方式：服务器有界并发，实时进度与动态剩余时间以任务状态为准。</div>
+                {taskCount > 200 && <div style={{ color: 'var(--color-danger, #ff4d4f)' }}>超出 200 上限，请减少账号或月份。</div>}
+              </div>
+            )}
+          </>
         )}
       </Modal>
     </div>
   );
 };
+
 export default BillingPage;

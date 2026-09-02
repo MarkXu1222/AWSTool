@@ -25,6 +25,11 @@ server {
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto \$scheme;
         proxy_cache_bypass \$http_upgrade;
+
+        # 后台 job 控制 API 都是短请求；下载 zip 时允许较长的流式传输窗口。
+        proxy_read_timeout 10m;
+        proxy_send_timeout 10m;
+        send_timeout 10m;
     }
 }
 EOF

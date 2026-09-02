@@ -97,6 +97,55 @@ export interface TagOnboardingJob {
   completedAt?: string;
 }
 
+export type BillingExportJobStatus =
+  | 'queued'
+  | 'running'
+  | 'cancelling'
+  | 'cancelled'
+  | 'completed'
+  | 'failed'
+  | 'interrupted'
+  | 'expired';
+export type BillingExportJobPhase = 'preflight' | 'capturing' | 'packaging' | 'ready';
+
+export interface BillingExportTask {
+  accountId: string;
+  accountName?: string;
+  year: number;
+  month: number;
+}
+
+export interface BillingExportResult extends BillingExportTask {
+  filename: string;
+  ok: boolean;
+  error?: string;
+  pages?: number;
+}
+
+export interface BillingExportJob {
+  id: string;
+  createdBy: string;
+  createdByUserId?: string;
+  status: BillingExportJobStatus;
+  phase: BillingExportJobPhase;
+  tasks: BillingExportTask[];
+  total: number;
+  done: number;
+  ok: number;
+  failed: number;
+  effectiveConcurrency: number;
+  results: BillingExportResult[];
+  createdAt: string;
+  updatedAt: string;
+  startedAt?: string;
+  finishedAt?: string;
+  cancelRequestedAt?: string;
+  expiresAt?: string;
+  downloadFilename?: string;
+  fileSize?: number;
+  error?: string;
+}
+
 interface DBSchema {
   users: any[];
   quota_requests: any[];
@@ -105,11 +154,13 @@ interface DBSchema {
   accounts_cache: any[];
   accounts_cache_time: string;
   tag_onboarding_jobs: TagOnboardingJob[];
+  billing_export_jobs: BillingExportJob[];
   [key: string]: any;
 }
 
 const ARRAY_FIELDS = [
   'users', 'quota_requests', 'audit_log', 'region_data', 'accounts_cache', 'tag_onboarding_jobs',
+  'billing_export_jobs',
 ] as const;
 
 // In-memory cache to avoid reading file on every request
@@ -124,7 +175,7 @@ function ensureDir() {
 function emptyDB(): DBSchema {
   return {
     users: [], quota_requests: [], audit_log: [], region_data: [], accounts_cache: [],
-    accounts_cache_time: '', tag_onboarding_jobs: [],
+    accounts_cache_time: '', tag_onboarding_jobs: [], billing_export_jobs: [],
   };
 }
 
@@ -310,6 +361,156 @@ export function recoverTagOnboardingJobs(): number {
   }
   if (recovered > 0) writeDB(data);
   return recovered;
+}
+
+function cloneBillingExportJob(job: BillingExportJob): BillingExportJob {
+  return JSON.parse(JSON.stringify(job));
+}
+
+const BILLING_EXPORT_ACTIVE_STATUSES = new Set<BillingExportJobStatus>(['queued', 'running', 'cancelling']);
+const configuredBillingExportQueueLimit = Number(process.env.BILLING_EXPORT_MAX_QUEUED_JOBS || 10);
+const BILLING_EXPORT_MAX_QUEUED_JOBS = Number.isFinite(configuredBillingExportQueueLimit)
+  ? Math.max(1, Math.min(100, Math.floor(configuredBillingExportQueueLimit)))
+  : 10;
+
+export class BillingExportQueueConflictError extends Error {
+  code: 'BILLING_EXPORT_OWNER_ACTIVE' | 'BILLING_EXPORT_QUEUE_FULL';
+  activeJobId?: string;
+
+  constructor(code: 'BILLING_EXPORT_OWNER_ACTIVE' | 'BILLING_EXPORT_QUEUE_FULL', activeJobId?: string) {
+    super(code === 'BILLING_EXPORT_OWNER_ACTIVE'
+      ? '你已有正在排队或执行的账单导出任务，请等待完成或先取消'
+      : `账单导出队列已满（最多 ${BILLING_EXPORT_MAX_QUEUED_JOBS} 个排队任务），请稍后重试`);
+    this.name = 'BillingExportQueueConflictError';
+    this.code = code;
+    this.activeJobId = activeJobId;
+  }
+}
+
+export function createBillingExportJob(input: {
+  createdBy: string;
+  createdByUserId: string;
+  tasks: BillingExportTask[];
+  effectiveConcurrency: number;
+}): BillingExportJob {
+  const data = readDB();
+  const createdByUserId = input.createdByUserId.trim();
+  if (!createdByUserId) throw new Error('创建账单导出任务时缺少稳定用户 ID');
+
+  // 校验和写入之间没有 await，确保同一 Node 进程内并发提交不会越过队列上限。
+  const ownerActiveJob = data.billing_export_jobs.find(item => {
+    if (!BILLING_EXPORT_ACTIVE_STATUSES.has(item.status)) return false;
+    return item.createdByUserId != null
+      ? item.createdByUserId === createdByUserId
+      : item.createdBy === input.createdBy;
+  });
+  if (ownerActiveJob) {
+    throw new BillingExportQueueConflictError('BILLING_EXPORT_OWNER_ACTIVE', ownerActiveJob.id);
+  }
+  const queuedCount = data.billing_export_jobs.filter(item => item.status === 'queued').length;
+  if (queuedCount >= BILLING_EXPORT_MAX_QUEUED_JOBS) {
+    throw new BillingExportQueueConflictError('BILLING_EXPORT_QUEUE_FULL');
+  }
+
+  const now = new Date().toISOString();
+  const job: BillingExportJob = {
+    id: randomUUID(),
+    createdBy: input.createdBy,
+    createdByUserId,
+    status: 'queued',
+    phase: 'preflight',
+    tasks: input.tasks,
+    total: input.tasks.length,
+    done: 0,
+    ok: 0,
+    failed: 0,
+    effectiveConcurrency: input.effectiveConcurrency,
+    results: [],
+    createdAt: now,
+    updatedAt: now,
+  };
+  data.billing_export_jobs.push(job);
+
+  // 活跃任务和 TTL 内可下载任务必须全部保留；其它历史终态最多保留最近 100 条。
+  const nowMs = Date.now();
+  const protectedJobs = data.billing_export_jobs.filter(item => {
+    if (BILLING_EXPORT_ACTIVE_STATUSES.has(item.status)) return true;
+    if (item.status !== 'completed') return false;
+    if (!item.expiresAt) return true;
+    const expiresAt = new Date(item.expiresAt).getTime();
+    return !Number.isFinite(expiresAt) || expiresAt > nowMs;
+  });
+  const protectedIds = new Set(protectedJobs.map(item => item.id));
+  const historical = data.billing_export_jobs
+    .filter(item => !protectedIds.has(item.id))
+    .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
+    .slice(-100);
+  data.billing_export_jobs = [...historical, ...protectedJobs]
+    .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+  writeDB(data);
+  return cloneBillingExportJob(job);
+}
+
+export function getBillingExportJob(jobId: string): BillingExportJob | null {
+  const job = readDB().billing_export_jobs.find(item => item.id === jobId);
+  return job ? cloneBillingExportJob(job) : null;
+}
+
+export function listBillingExportJobs(): BillingExportJob[] {
+  return readDB().billing_export_jobs.map(cloneBillingExportJob);
+}
+
+export function listBillingExportJobsForUser(
+  username: string,
+  userId: string,
+  isAdmin: boolean,
+  limit = 10,
+): BillingExportJob[] {
+  return readDB().billing_export_jobs
+    .filter(job => isAdmin
+      || (job.createdByUserId != null ? job.createdByUserId === userId : job.createdBy === username))
+    .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+    .slice(0, Math.max(1, Math.min(50, limit)))
+    .map(cloneBillingExportJob);
+}
+
+export function listQueuedBillingExportJobs(): BillingExportJob[] {
+  return readDB().billing_export_jobs
+    .filter(job => job.status === 'queued')
+    .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
+    .map(cloneBillingExportJob);
+}
+
+export function updateBillingExportJob(jobId: string, updates: Partial<BillingExportJob>): BillingExportJob {
+  const data = readDB();
+  const job = data.billing_export_jobs.find(item => item.id === jobId);
+  if (!job) throw new Error(`账单导出任务不存在: ${jobId}`);
+  const immutable = {
+    id: job.id,
+    createdBy: job.createdBy,
+    createdByUserId: job.createdByUserId,
+    tasks: job.tasks,
+    createdAt: job.createdAt,
+  };
+  Object.assign(job, updates, immutable, { updatedAt: new Date().toISOString() });
+  writeDB(data);
+  return cloneBillingExportJob(job);
+}
+
+export function recoverBillingExportJobs(): number {
+  const data = readDB();
+  let interrupted = 0;
+  const now = new Date().toISOString();
+  for (const job of data.billing_export_jobs) {
+    if (!['running', 'cancelling'].includes(job.status)) continue;
+    job.status = 'interrupted';
+    job.finishedAt = now;
+    job.updatedAt = now;
+    job.error = '服务重启中断了正在执行的导出，请重新提交';
+    interrupted++;
+  }
+  if (interrupted > 0) writeDB(data);
+  return interrupted;
 }
 
 // === Auto-backup: keep a daily rotating copy of the DB ===

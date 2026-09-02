@@ -31,14 +31,16 @@ function maskSensitive(obj: any): any {
   return out;
 }
 
-function isNoise(path: string): boolean {
-  return NOISE_SUFFIXES.some(sfx => path.endsWith(sfx));
+function isNoise(method: string, path: string): boolean {
+  if (NOISE_SUFFIXES.some(sfx => path.endsWith(sfx))) return true;
+  // 账单 job 列表和状态每 2 秒轮询，不写审计；下载路径会显式记录。
+  return method === 'GET' && /^\/billing\/export-jobs(?:\/[^/]+)?$/.test(path);
 }
 
 export function auditMiddleware(req: Request, res: Response, next: NextFunction) {
   // SSE 流不记（长连接，无意义）
   if (req.path.includes('sync-stream')) return next();
-  if (isNoise(req.path)) return next();
+  if (isNoise(req.method, req.path)) return next();
 
   const start = Date.now();
 
@@ -66,20 +68,25 @@ export function auditMiddleware(req: Request, res: Response, next: NextFunction)
     }
 
     const duration = Date.now() - start;
-    db.addAuditLog(
-      user.userId,
-      'API_CALL',
-      `${method} ${fullPath} → ${res.statusCode} (${duration}ms)`,
-      user.username,
-      req.ip,
-      {
-        method,
-        path: fullPath,
-        status: res.statusCode,
-        duration_ms: duration,
-        params: paramsCombined,
-      },
-    );
+    try {
+      db.addAuditLog(
+        user.userId,
+        'API_CALL',
+        `${method} ${fullPath} → ${res.statusCode} (${duration}ms)`,
+        user.username,
+        req.ip,
+        {
+          method,
+          path: fullPath,
+          status: res.statusCode,
+          duration_ms: duration,
+          params: paramsCombined,
+        },
+      );
+    } catch (error) {
+      // finish 事件中的异常不能再向 Express 传播，否则会变成未捕获异常并影响进程。
+      console.error(`[Audit] 写入失败: ${method} ${fullPath}`, error);
+    }
   });
 
   next();

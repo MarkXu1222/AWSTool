@@ -33,6 +33,10 @@ const explicitActions: Record<string, Omit<AuditDisplay, 'target' | 'result' | '
   REGION_ENABLE: { category: '区域管理', operation: '启用区域' },
   REGION_BATCH_ENABLE: { category: '区域管理', operation: '批量启用区域' },
   REGION_DISABLE: { category: '区域管理', operation: '禁用区域' },
+  BILLING_EXPORT_SUBMIT: { category: '账单分析', operation: '提交账单 PDF 导出' },
+  BILLING_EXPORT_CANCEL: { category: '账单分析', operation: '取消账单 PDF 导出' },
+  BILLING_EXPORT_DOWNLOAD_START: { category: '账单分析', operation: '开始下载账单 PDF' },
+  BILLING_EXPORT_DOWNLOAD: { category: '账单分析', operation: '完成下载账单 PDF' },
 };
 
 function parseTechnicalFields(log: any): TechnicalFields {
@@ -112,13 +116,21 @@ function describeApiCall(method: string, path: string, params: any): Omit<AuditD
     const range = dateRangeTarget(query);
     return { category: '账单分析', operation: '查询服务账单', target: [accountTarget(match[1]), range].filter(Boolean).join(' · ') };
   }
-  if (path === '/api/aws/billing/export-invoices') {
+  if (path === '/api/aws/billing/export-jobs') {
     const accountCount = Array.isArray(body.accountIds) ? body.accountIds.length : 0;
     const monthCount = Array.isArray(body.months) ? body.months.length : 0;
     return {
       category: '账单分析',
-      operation: '导出账单 PDF',
-      target: `${accountCount} 个账户 · ${monthCount} 个月份`,
+      operation: method === 'POST' ? '提交账单 PDF 导出' : '查看账单导出任务',
+      target: accountCount || monthCount ? `${accountCount} 个账户 · ${monthCount} 个月份` : '账单导出任务',
+    };
+  }
+  match = path.match(/^\/api\/aws\/billing\/export-jobs\/([^/]+)\/(cancel|download)$/);
+  if (match) {
+    return {
+      category: '账单分析',
+      operation: match[2] === 'cancel' ? '取消账单 PDF 导出' : '下载账单 PDF',
+      target: `任务 ${match[1]}`,
     };
   }
 

@@ -11,7 +11,7 @@ AWS 多账户管理平台。用于跨组织管理成员账户：配额提升、�
 
 | 应用 | 位置 | 包名 / 版本 | 状态 | 说明 |
 |------|------|-------------|------|------|
-| **Web 版（生产）** | `web/` | `aws-toolbox-web` / `APP_VERSION 0.13.1` | ✅ **在维护** | 部署在 EC2（https://markxu.co）。日常改动几乎都在这里。 |
+| **Web 版（生产）** | `web/` | `aws-toolbox-web` / `APP_VERSION 0.14.0` | ✅ **在维护** | 部署在 EC2（https://markxu.co）。日常改动几乎都在这里。 |
 | 桌面版（旧） | 根 `src/` + `electron/` | `aws-toolbox` / `0.1.0` | ⚠️ 旧版/基本冻结 | 早期 Electron macOS 版，`main: dist/main/index.js`。除非专门维护桌面版，否则**不要动**。 |
 
 **结论：接到"平台/网站"相关的需求，一律在 `web/` 下操作。**
@@ -37,7 +37,7 @@ AWS 多账户管理平台。用于跨组织管理成员账户：配额提升、�
 ```
 web/
 ├── server/                     # 后端（Express，tsx 直跑）
-│   ├── index.ts                # 入口：中间件、CORS 白名单、限速、挂载路由、静态服务、启动 scheduler
+│   ├── index.ts                # 入口：中间件、CORS、限速、路由、静态服务、scheduler 与持久化 job runners
 │   ├── auth.ts                 # authRouter（登录/MFA/用户CRUD）+ authMiddleware + 页面权限模型
 │   ├── audit.ts                # auditMiddleware：记录所有已认证 API 调用
 │   ├── audit-presentation.ts   # 审计日志展示增强 + CSV 导出
@@ -49,7 +49,8 @@ web/
 │   ├── notify.ts               # 飞书通知（配额变动/达成）
 │   ├── tag-compliance.ts       # MAP 标签合规（Step Functions 扫描 + S3 报告）
 │   ├── account-roles.ts        # ★账户角色自愈：探测成员账户角色 → 缺失则触发 StackSet 补齐 → 超限告警
-│   ├── billing-exporter.ts     # 批量导出 AWS 控制台账单 PDF → zip
+│   ├── billing-export-jobs.ts  # 账单导出持久化 job、全局队列、取消、TTL 下载与重启恢复
+│   ├── billing-exporter.ts     # 严格只读抓取 AWS 官方账单 PDF + 可取消 zip 打包
 │   └── routes/
 │       ├── aws.ts              # ★awsRouter：主业务端点（40+），含权限守卫
 │       └── regions.ts          # regionsRouter：区域 opt-in 状态/扫描/开通
@@ -116,7 +117,7 @@ doc-templates/architectures/    # 公司架构图（静态资源，可提交）
 - 账户：`GET /accounts`、`POST /accounts/refresh`、`GET /accounts/:id/detail`、`GET /connection`
 - 账户角色自愈：`GET /accounts/roles-status`、`POST /accounts/roles-check`（均 requireStrictAdmin）。注意这两条必须定义在 `/accounts/:id/detail` 之前，否则被通配吃掉
 - 仪表盘：`GET /dashboard/summary`
-- 账单：`GET /billing/by-account`、`GET /billing/by-service/:accountId`、`GET /billing/breakdown/:accountId`、`POST /billing/export-invoices`
+- 账单：`GET /billing/by-account`、`GET /billing/by-service/:accountId`、`GET /billing/breakdown/:accountId`；PDF job：`POST/GET /billing/export-jobs`、`GET /billing/export-jobs/:jobId`、`POST /billing/export-jobs/:jobId/cancel`、`GET /billing/export-jobs/:jobId/download`（全部 `requireBillingAccess`，单 job 再校验 owner/admin）
 - 配额：`GET /quotas/:accountId/:serviceCode`、`POST /quotas/increase`(admin)、`GET /quotas/requests`、`GET /quotas/stats`、`GET /quotas/companies`、`GET /quotas/company/:accountId`、`POST /quotas/generate-doc`、`POST /quotas/sync`、`POST /quotas/sync-account/:accountId`、`GET /quotas/sync-status`、`GET /quotas/sync-stream`(SSE)
 - Bedrock 配额：`GET /bedrock/quotas/:accountId?regions=a,b`（TPM/RPM/TPD，多区域并发；路径特意不放在 `/quotas/` 下，避免被 `/quotas/:accountId/:serviceCode` 通配吃掉）
 - 根凭证：`GET /root-credentials/:accountId`、`GET /temp-credentials/:accountId?durationHours=1`（rootAccess；仅 admin 可请求 2–12 小时）、`POST /root-credentials/:accountId/delete-mfa`(rootAccess)、`.../recover-password`(rootAccess)、`.../delete-access-key`(rootAccess)
@@ -139,8 +140,9 @@ doc-templates/architectures/    # 公司架构图（静态资源，可提交）
 | `requireRootAccess` | root_access 或 admin | 根用户敏感操作 |
 | `requireAuditAccess` | 审计页可见者 | 审计日志查询/导出 |
 | `requireBulkQuotaAccess` | bulk_quota_access 或 admin | 批量提额 |
+| `requireBillingAccess` | billing 页可见者 | 账单 PDF job；状态/取消/下载另校验 owner/admin |
 
-注意 `authMiddleware` 是直接把 JWT payload 挂到 `req.user`，所以 `req.user.role` 是签发时的角色。需要严格判断的守卫（`requireStrictAdmin` / `requireRootAccess` / `requireAuditAccess`）都改为从 `db.getUser()` 实时读，避免降权用户在 token 过期前继续按旧角色通过。
+注意 `authMiddleware` 是直接把 JWT payload 挂到 `req.user`，所以 `req.user.role` 是签发时的角色。需要严格判断的守卫（`requireStrictAdmin` / `requireRootAccess` / `requireAuditAccess` / `requireBillingAccess`）都改为从 `db.getUser()` 实时读，避免降权用户在 token 过期前继续按旧角色通过。
 
 ---
 
@@ -212,7 +214,8 @@ web { port, adminPassword, jwtSecret, encryptionKey, feishuWebhook }
         pm2 restart aws-toolbox
   ```
 - **数据安全红线**：绝不提交 `data/`、`config.json`、密钥；绝不 `git add -A`/`git add .`；EC2 上绝不 `git stash`/`git reset --hard`/`git checkout -- data/`。
-- Nginx + HTTPS：`web/setup-nginx.sh`。
+- Nginx + HTTPS：`web/setup-nginx.sh`；zip 下载流式超时 10 分钟。
+- 账单导出依赖可执行 Chrome、Xvfb `:99`、`zip`、CJK 字体及可写的 `data/exports/`。关键变量：`BILLING_EXPORT_MAX_CONCURRENCY`（默认 3）、`BILLING_EXPORT_MAX_QUEUED_JOBS`（默认 10）、`BILLING_EXPORT_TTL_HOURS`（默认 24）、`BILLING_EXPORT_OUTPUT_DIR`。
 
 ---
 
@@ -258,8 +261,12 @@ web { port, adminPassword, jwtSecret, encryptionKey, feishuWebhook }
 补不上的账户：账户未完成激活时 CloudFormation 返回 `OptInRequired`(403)，StackSet 无论如何都进不去，`account-roles.ts` 会重试 3 次后标记 `unreachable` 并飞书告警，需人工先处理账户本身（这类账户通常零账单）。
 
 ### 修改账单批量导出
-- `client/src/utils/account-import.ts` / `account-import.worker.ts` / `account-import-config.ts` 负责浏览器本地 `.xlsx` 账户识别：主线程预检 ZIP 目录，Worker 流式复验实际解压量并可在 20 秒超时后终止；限制 5 MiB 文件、1,000 个 ZIP 项、12 MiB 单项、24 MiB 总解压量、50,000 单元格，只输出独立 12 位 ID。
-- `pages/Billing.tsx` 将识别结果与平台账户列表求交集；有匹配时替换账户勾选，零匹配时保留原选择。文件不上传，月份选择与后端导出协议不变。
+- `billing-exporter.ts` 只负责严格 `support` 会话抓取、单任务浏览器隔离、AbortSignal、worker drain 与 Chrome/zip 有界进程树关闭；最终 deadline 仍无法确认退出时必须抛出 `BillingExportProcessCleanupError`。
+- `billing-export-jobs.ts` 负责参数规范化、单 job 全局队列、持久化状态、取消、TTL、下载 lease 和重启中断语义；进程清理异常时会暂停 runner，避免残留进程与下一 job 重叠，不要在路由里重新实现长任务。
+- `client/src/utils/account-import.ts` / `account-import.worker.ts` / `account-import-config.ts` 负责浏览器本地 `.xlsx` 账户识别：不上传文件；主线程校验 ZIP 目录，Worker 流式复验实际解压量并可在 20 秒超时后终止；限制 5 MiB 文件、12 MiB 单项、24 MiB 总解压量、50,000 单元格，只输出独立 12 位 ID。`Billing.tsx` 再与平台账户列表求交集，后端白名单和 200 任务上限仍是最终边界。
+- 新任务必须用稳定 `createdByUserId` 授权；仅迁移前无 ID 的历史任务可回退用户名。每 owner 最多一个活跃任务，全局 queued 默认最多 10；admin 全局列表必须标记 `ownedByCurrentUser`，前端优先恢复自己的 active job。
+- API 改动同步 `routes/aws.ts`、`audit.ts`、`audit-presentation.ts`、`client/src/api.ts` 与 `pages/Billing.tsx`。
+- 状态轮询不记审计；submit/cancel/download 显式审计。任何改动都必须保持 `access='support'`，不得恢复 `auto` 的 admin 回退。
 
 ### 新增一个公司（提额文档模板）
 - `web/server/doc-templates.ts`：`COMPANY_PROFILES` 加公司资料；`ACCOUNT_TO_COMPANY` / `PAYER_TO_COMPANY` 加映射；架构图放 `doc-templates/architectures/`。
