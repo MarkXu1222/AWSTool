@@ -519,7 +519,7 @@ export async function recoverRootPassword(accountId: string) {
     return { accountId, ok: true, recoveryAllowed: true };
   } catch (e: any) {
     if (e?.name === 'EntityAlreadyExistsException' || e?.name === 'EntityAlreadyExists') {
-      throw Object.assign(new Error('该账户已存在 root 登录密码，无需允许恢复'), {
+      throw Object.assign(new Error('该账户已具备 Root 密码恢复条件，请直接使用根邮箱执行「忘记密码」流程'), {
         code: 'ROOT_PASSWORD_ALREADY_EXISTS',
       });
     }
