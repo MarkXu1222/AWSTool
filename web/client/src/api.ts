@@ -31,6 +31,81 @@ async function request(path: string, options: RequestInit = {}) {
   return res.json();
 }
 
+export type BillingExportJobStatus =
+  | 'queued'
+  | 'running'
+  | 'cancelling'
+  | 'cancelled'
+  | 'completed'
+  | 'failed'
+  | 'interrupted'
+  | 'expired';
+
+export type BillingExportJobPhase = 'preflight' | 'capturing' | 'packaging' | 'ready';
+export type BillingExportJobListScope = 'mine' | 'all';
+
+export interface BillingExportTask {
+  accountId: string;
+  accountName?: string;
+  year: number;
+  month: number;
+}
+
+export interface BillingExportResult extends BillingExportTask {
+  filename: string;
+  ok: boolean;
+  error?: string;
+  pages?: number;
+}
+
+export interface BillingExportJobView {
+  id: string;
+  createdBy: string;
+  createdByUserId?: string;
+  ownedByCurrentUser?: boolean;
+  status: BillingExportJobStatus;
+  phase: BillingExportJobPhase;
+  tasks: BillingExportTask[];
+  total: number;
+  done: number;
+  ok: number;
+  failed: number;
+  effectiveConcurrency: number;
+  results: BillingExportResult[];
+  createdAt: string;
+  updatedAt: string;
+  startedAt?: string;
+  finishedAt?: string;
+  cancelRequestedAt?: string;
+  expiresAt?: string; // 仅兼容 0.14.0 产生的旧记录，新记录永久保留。
+  downloadFilename?: string;
+  fileSize?: number;
+  error?: string;
+  progress: number;
+  etaSeconds?: number;
+  queuePosition?: number;
+  downloadReady: boolean;
+}
+
+export interface BillingExportJobResponse {
+  success: boolean;
+  data: BillingExportJobView;
+  error?: string;
+}
+
+export interface BillingExportJobListResponse {
+  success: boolean;
+  data: BillingExportJobView[];
+  error?: string;
+  pagination: {
+    page: number;
+    limit: number;
+    total: number;
+    totalPages: number;
+    scope: BillingExportJobListScope;
+  };
+}
+
 export class BillingJobRequestError extends Error {
   constructor(
     message: string,
@@ -52,7 +127,7 @@ function parseRetryAfterMs(value: string | null): number | undefined {
 }
 
 // 仅账单导出 job 使用严格 HTTP 语义和短请求 deadline，避免轮询连接半开后永久卡住。
-async function billingJobRequest(path: string, options: RequestInit = {}) {
+async function billingJobRequest<T>(path: string, options: RequestInit = {}): Promise<T> {
   const token = getToken();
   const controller = new AbortController();
   let timedOut = false;
@@ -88,7 +163,7 @@ async function billingJobRequest(path: string, options: RequestInit = {}) {
         payload,
       );
     }
-    return payload;
+    return payload as T;
   } catch (error) {
     if (timedOut) throw new BillingJobRequestError('账单导出状态请求超时，将自动重试', 0);
     throw error;
@@ -229,13 +304,19 @@ export const api = {
   listCompanies: () => request('/aws/quotas/companies'),
   // 账单 PDF 后台 job：提交、恢复、轮询、取消、鉴权下载
   billingExportSubmit: (params: { accountIds: string[]; months: string[] }) =>
-    billingJobRequest('/aws/billing/export-jobs', { method: 'POST', body: JSON.stringify(params) }),
-  billingExportJobs: (limit = 10) =>
-    billingJobRequest(`/aws/billing/export-jobs?limit=${Math.max(1, Math.min(20, Math.floor(limit)))}`),
+    billingJobRequest<BillingExportJobResponse>('/aws/billing/export-jobs', { method: 'POST', body: JSON.stringify(params) }),
+  billingExportJobs: (options: { page?: number; limit?: number; scope?: BillingExportJobListScope } = {}) => {
+    const page = Math.max(1, Math.floor(options.page || 1));
+    const limit = Math.max(1, Math.min(50, Math.floor(options.limit || 20)));
+    const scope = options.scope || 'mine';
+    return billingJobRequest<BillingExportJobListResponse>(
+      `/aws/billing/export-jobs?page=${page}&limit=${limit}&scope=${encodeURIComponent(scope)}`,
+    );
+  },
   billingExportJob: (jobId: string) =>
-    billingJobRequest(`/aws/billing/export-jobs/${encodeURIComponent(jobId)}`),
+    billingJobRequest<BillingExportJobResponse>(`/aws/billing/export-jobs/${encodeURIComponent(jobId)}`),
   billingExportCancel: (jobId: string) =>
-    billingJobRequest(`/aws/billing/export-jobs/${encodeURIComponent(jobId)}/cancel`, { method: 'POST' }),
+    billingJobRequest<BillingExportJobResponse>(`/aws/billing/export-jobs/${encodeURIComponent(jobId)}/cancel`, { method: 'POST' }),
   prepareBillingExportDownload: async (suggestedFilename = 'billing-invoices.zip') => {
     const safeSuggestedFilename = /^[A-Za-z0-9._-]+\.zip$/i.test(suggestedFilename)
       ? suggestedFilename

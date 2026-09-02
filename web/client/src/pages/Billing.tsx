@@ -1,12 +1,13 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { Card, Table, Tag, Button, message, DatePicker, Input, Modal, Select, Space, Alert, Progress, Upload } from 'antd';
-import { ReloadOutlined, SearchOutlined, FilePdfOutlined, DownloadOutlined, StopOutlined, PlusOutlined, UploadOutlined } from '@ant-design/icons';
+import { ReloadOutlined, SearchOutlined, FilePdfOutlined, DownloadOutlined, StopOutlined, PlusOutlined, UploadOutlined, HistoryOutlined, EyeOutlined } from '@ant-design/icons';
 import dayjs from 'dayjs';
-import { api, BillingJobRequestError } from '../api';
+import { api, BillingExportJobView, BillingJobRequestError } from '../api';
 import { exportToCSV } from '../utils/export';
 import { scanAccountIdsFromXlsx } from '../utils/account-import';
 
 const { RangePicker } = DatePicker;
+const HISTORY_PAGE_SIZE = 10;
 
 interface AccountImportSummary {
   fileName: string;
@@ -16,20 +17,6 @@ interface AccountImportSummary {
   scannedCellCount: number;
   sheetCount: number;
   unmatchedAccountIds: string[];
-}
-
-function normalizeExportJobForDisplay(job: any): any {
-  if (!job || job.status !== 'completed') return job;
-  const expiresAt = Date.parse(job.expiresAt || '');
-  if (!Number.isFinite(expiresAt) || expiresAt <= Date.now()) {
-    return {
-      ...job,
-      status: 'expired',
-      downloadReady: false,
-      error: job.error || '账单导出文件已超过保留期限或过期时间无效',
-    };
-  }
-  return job;
 }
 
 const BillingPage: React.FC = () => {
@@ -48,11 +35,16 @@ const BillingPage: React.FC = () => {
   const [accountImportSummary, setAccountImportSummary] = useState<AccountImportSummary | null>(null);
   const [exportSubmitting, setExportSubmitting] = useState(false);
   const [exportJobId, setExportJobId] = useState<string | null>(null);
-  const [exportJob, setExportJob] = useState<any>(null);
+  const [exportJob, setExportJob] = useState<BillingExportJobView | null>(null);
   const [exportCancelling, setExportCancelling] = useState(false);
-  const [exportDownloading, setExportDownloading] = useState(false);
+  const [exportDownloadingJobId, setExportDownloadingJobId] = useState<string | null>(null);
   const [exportPollError, setExportPollError] = useState<string | null>(null);
   const [exportLastUpdatedAt, setExportLastUpdatedAt] = useState<string | null>(null);
+  const [historyModalOpen, setHistoryModalOpen] = useState(false);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyJobs, setHistoryJobs] = useState<BillingExportJobView[]>([]);
+  const [historyPage, setHistoryPage] = useState(1);
+  const [historyTotal, setHistoryTotal] = useState(0);
 
   // 生成近 12 个月的候选月份
   const monthCandidates = useMemo(() => {
@@ -78,22 +70,35 @@ const BillingPage: React.FC = () => {
 
   const loadRecentExportJob = async () => {
     try {
-      const res = await api.billingExportJobs(20);
+      const res = await api.billingExportJobs({ page: 1, limit: 20, scope: 'mine' });
       const jobs = res.success && Array.isArray(res.data) ? res.data : [];
-      // Admin 列表可能包含全局任务，但页面只能自动恢复当前用户自己的任务。
-      const latest = jobs.find((job: any) => job.ownedByCurrentUser
-        && ['queued', 'running', 'cancelling'].includes(job.status))
-        || jobs.find((job: any) => job.ownedByCurrentUser);
+      const latest = jobs.find(job => ['queued', 'running', 'cancelling'].includes(job.status)) || jobs[0];
       if (latest) {
-        const normalized = normalizeExportJobForDisplay(latest);
-        setExportJob(normalized);
-        setExportJobId(normalized.id);
+        const detail = await api.billingExportJob(latest.id);
+        if (!detail.success) throw new Error(detail.error || '无法恢复最近的账单导出任务');
+        setExportJob(detail.data);
+        setExportJobId(detail.data.id);
         setExportLastUpdatedAt(new Date().toISOString());
         setExportPollError(null);
       }
     } catch (error: any) {
       // 账单主页面仍可使用；打开导出界面后可看到连接状态。
       setExportPollError(error?.message || '无法恢复最近的账单导出任务');
+    }
+  };
+
+  const loadExportHistory = async (page = 1) => {
+    setHistoryLoading(true);
+    try {
+      const res = await api.billingExportJobs({ page, limit: HISTORY_PAGE_SIZE, scope: 'mine' });
+      if (!res.success) throw new Error(res.error || '获取导出记录失败');
+      setHistoryJobs(res.data || []);
+      setHistoryPage(res.pagination.page);
+      setHistoryTotal(res.pagination.total);
+    } catch (error: any) {
+      message.error(error?.message || '获取导出记录失败');
+    } finally {
+      setHistoryLoading(false);
     }
   };
 
@@ -118,16 +123,13 @@ const BillingPage: React.FC = () => {
         if (stopped) return;
         if (!res.success) throw new Error(res.error || '获取账单导出进度失败');
         failures = 0;
-        const job = normalizeExportJobForDisplay(res.data);
+        const job = res.data;
         setExportJob(job);
         setExportLastUpdatedAt(new Date().toISOString());
         setExportPollError(null);
         if (['queued', 'running', 'cancelling'].includes(job.status)) {
           schedule(document.hidden ? 15_000 : 3_000);
-        } else if (job.status === 'completed') {
-          const expiresAt = Date.parse(job.expiresAt || '');
-          if (Number.isFinite(expiresAt)) schedule(Math.max(1_000, expiresAt - Date.now() + 250));
-        } else {
+        } else if (job.status !== 'completed') {
           setExportJobId(null);
         }
       } catch (error: any) {
@@ -268,7 +270,7 @@ const BillingPage: React.FC = () => {
     try {
       const res = await api.billingExportSubmit({ accountIds: selectedAccountIds, months: selectedMonths });
       if (!res.success) throw new Error(res.error || '提交失败');
-      const job = normalizeExportJobForDisplay(res.data);
+      const job = res.data;
       setExportJob(job);
       setExportJobId(job.id);
       setExportLastUpdatedAt(new Date().toISOString());
@@ -282,7 +284,7 @@ const BillingPage: React.FC = () => {
         try {
           const active = await api.billingExportJob(activeJobId);
           if (active.success) {
-            const job = normalizeExportJobForDisplay(active.data);
+            const job = active.data;
             setExportJob(job);
             setExportJobId(job.id);
             setExportLastUpdatedAt(new Date().toISOString());
@@ -314,7 +316,7 @@ const BillingPage: React.FC = () => {
         try {
           const res = await api.billingExportCancel(exportJobId);
           if (!res.success) throw new Error(res.error || '取消失败');
-          const job = normalizeExportJobForDisplay(res.data);
+          const job = res.data;
           setExportJob(job);
           setExportLastUpdatedAt(new Date().toISOString());
           setExportPollError(null);
@@ -328,41 +330,74 @@ const BillingPage: React.FC = () => {
     });
   };
 
-  const handleDownloadExport = async () => {
-    if (!exportJobId) return;
-    setExportDownloading(true);
+  const handleDownloadExport = async (targetJob: BillingExportJobView | null = exportJob) => {
+    if (!targetJob?.id) return;
+    const targetJobId = targetJob.id;
+    setExportDownloadingJobId(targetJobId);
     try {
-      const destination = await api.prepareBillingExportDownload(exportJob?.downloadFilename);
+      const destination = await api.prepareBillingExportDownload(targetJob.downloadFilename);
       if (destination.cancelled) return;
-      // 用户选择保存位置后再重新鉴权并刷新 TTL，避免耗尽 picker 的点击激活窗口。
-      const latest = await api.billingExportJob(exportJobId);
+      // picker 必须是第一个 await；选择保存位置后再鉴权并确认服务器文件仍可下载。
+      const latest = await api.billingExportJob(targetJobId);
       if (!latest.success) throw new Error(latest.error || '刷新导出状态失败');
-      const job = normalizeExportJobForDisplay(latest.data);
-      setExportJob(job);
-      setExportLastUpdatedAt(new Date().toISOString());
-      setExportPollError(null);
+      const job = latest.data;
+      if (targetJobId === exportJobId) {
+        setExportJob(job);
+        setExportLastUpdatedAt(new Date().toISOString());
+        setExportPollError(null);
+      }
       if (job.status !== 'completed' || !job.downloadReady) {
-        if (job.status === 'expired') setExportJobId(null);
-        message.warning(job.status === 'expired' ? '导出文件已过期，请新建任务' : '导出文件尚未就绪');
+        if (targetJobId === exportJobId && job.status === 'expired') setExportJobId(null);
+        message.warning(job.status === 'expired' ? '该历史导出文件已不可用' : '导出文件尚未就绪');
         return;
       }
-      const outcome = await api.downloadBillingExport(exportJobId, job.downloadFilename, destination.fileHandle);
+      const outcome = await api.downloadBillingExport(targetJobId, job.downloadFilename, destination.fileHandle);
       if (!outcome.cancelled) {
         message.success(outcome.streamed ? '账单压缩包已保存' : '账单压缩包已开始下载');
       }
     } catch (err: any) {
       if (err instanceof BillingJobRequestError && [403, 404, 410].includes(err.status)) {
-        setExportJob((current: any) => current ? {
-          ...current,
-          status: err.status === 410 ? 'expired' : 'failed',
-          downloadReady: false,
-          error: err.message,
-        } : null);
-        setExportJobId(null);
+        if (err.status === 410) {
+          setHistoryJobs(current => current.map(job => job.id === targetJobId ? {
+            ...job,
+            status: 'expired',
+            downloadReady: false,
+            error: err.message,
+          } : job));
+        }
+        if (targetJobId === exportJobId) {
+          setExportJob((current) => current ? {
+            ...current,
+            status: err.status === 410 ? 'expired' : 'failed',
+            downloadReady: false,
+            error: err.message,
+          } : null);
+          setExportJobId(null);
+        }
       }
       message.error(err.message || '下载失败');
     } finally {
-      setExportDownloading(false);
+      setExportDownloadingJobId(null);
+    }
+  };
+
+  const openExportHistory = () => {
+    setHistoryModalOpen(true);
+    void loadExportHistory(1);
+  };
+
+  const openHistoricalJob = async (job: BillingExportJobView) => {
+    try {
+      const detail = await api.billingExportJob(job.id);
+      if (!detail.success) throw new Error(detail.error || '获取导出详情失败');
+      setExportJob(detail.data);
+      setExportJobId(detail.data.id);
+      setExportLastUpdatedAt(new Date().toISOString());
+      setExportPollError(null);
+      setHistoryModalOpen(false);
+      setExportModalOpen(true);
+    } catch (error: any) {
+      message.error(error?.message || '获取导出详情失败');
     }
   };
 
@@ -378,13 +413,13 @@ const BillingPage: React.FC = () => {
   };
   const statusLabels: Record<string, string> = {
     queued: '排队中', running: '执行中', cancelling: '正在取消', cancelled: '已取消',
-    completed: '已完成', failed: '失败', interrupted: '服务重启中断', expired: '文件已过期',
+    completed: '已完成', failed: '失败', interrupted: '服务重启中断', expired: '历史文件不可用',
   };
   const statusColors: Record<string, string> = {
     queued: 'blue', running: 'processing', cancelling: 'orange', cancelled: 'default',
     completed: 'success', failed: 'error', interrupted: 'warning', expired: 'default',
   };
-  const failedExportResults = (exportJob?.results || []).filter((result: any) => !result.ok);
+  const failedExportResults = (exportJob?.results || []).filter(result => !result.ok);
 
   return (
     <div>
@@ -406,6 +441,7 @@ const BillingPage: React.FC = () => {
           </Space>
           <Space size={8} wrap>
             <Input placeholder="搜索账户ID..." prefix={<SearchOutlined />} value={searchText} onChange={e => setSearchText(e.target.value)} allowClear size="small" style={{ width: 200 }} />
+            <Button size="small" icon={<HistoryOutlined />} onClick={openExportHistory}>导出记录</Button>
             <Button size="small" type="primary" icon={<FilePdfOutlined />} onClick={openExportModal}>
               {exportActive ? '查看导出进度' : exportJob ? '查看最近导出' : '批量导出账单 PDF'}
             </Button>
@@ -441,7 +477,7 @@ const BillingPage: React.FC = () => {
               </Button>
             )}
             {exportDownloadReady && (
-              <Button type="primary" icon={<DownloadOutlined />} loading={exportDownloading} onClick={handleDownloadExport}>
+              <Button type="primary" icon={<DownloadOutlined />} loading={exportDownloadingJobId === exportJob?.id} onClick={() => void handleDownloadExport(exportJob)}>
                 下载 ZIP
               </Button>
             )}
@@ -511,7 +547,7 @@ const BillingPage: React.FC = () => {
               {exportJob.status === 'completed' && (
                 <div style={{ marginTop: 8, color: 'rgba(0,0,0,0.55)', fontSize: 12 }}>
                   文件大小 {exportJob.fileSize ? `${(exportJob.fileSize / 1024 / 1024).toFixed(1)} MB` : '-'}；
-                  保留至 {exportJob.expiresAt ? dayjs(exportJob.expiresAt).format('YYYY-MM-DD HH:mm') : '-'}
+                  服务器长期保留，可从“导出记录”随时重复下载
                 </div>
               )}
             </div>
@@ -635,6 +671,92 @@ const BillingPage: React.FC = () => {
             )}
           </>
         )}
+      </Modal>
+
+      <Modal
+        title={<span><HistoryOutlined style={{ marginRight: 6 }} />账单导出记录</span>}
+        open={historyModalOpen}
+        onCancel={() => setHistoryModalOpen(false)}
+        width={980}
+        footer={(
+          <Space>
+            <Button icon={<ReloadOutlined />} loading={historyLoading} onClick={() => void loadExportHistory(historyPage)}>刷新</Button>
+            <Button onClick={() => setHistoryModalOpen(false)}>关闭</Button>
+          </Space>
+        )}
+      >
+        <Alert
+          type="info"
+          showIcon
+          style={{ marginBottom: 12 }}
+          message="导出记录与 ZIP 在服务器长期保留"
+          description="这里显示当前用户的全部历史任务；已完成且文件可用的记录可以随时重复下载。"
+        />
+        <Table<BillingExportJobView>
+          size="small"
+          rowKey="id"
+          loading={historyLoading}
+          dataSource={historyJobs}
+          pagination={{
+            current: historyPage,
+            pageSize: HISTORY_PAGE_SIZE,
+            total: historyTotal,
+            showSizeChanger: false,
+            showTotal: total => `共 ${total} 条记录`,
+            onChange: page => void loadExportHistory(page),
+          }}
+          columns={[
+            {
+              title: '创建时间',
+              dataIndex: 'createdAt',
+              width: 150,
+              render: (value: string) => dayjs(value).format('YYYY-MM-DD HH:mm'),
+            },
+            {
+              title: '状态',
+              dataIndex: 'status',
+              width: 120,
+              render: (value: string, record) => (
+                <Tag color={record.status === 'completed' && record.failed > 0 ? 'warning' : (statusColors[value] || 'default')}>
+                  {record.status === 'completed' && record.failed > 0 ? '完成（部分失败）' : (statusLabels[value] || value)}
+                </Tag>
+              ),
+            },
+            { title: '任务数', dataIndex: 'total', width: 75 },
+            {
+              title: '结果',
+              key: 'result',
+              width: 120,
+              render: (_value, record) => <span><span style={{ color: '#52c41a' }}>{record.ok} 成功</span> / <span style={{ color: record.failed ? '#ff4d4f' : undefined }}>{record.failed} 失败</span></span>,
+            },
+            {
+              title: 'ZIP 大小',
+              dataIndex: 'fileSize',
+              width: 100,
+              render: (value?: number) => value ? `${(value / 1024 / 1024).toFixed(1)} MB` : '-',
+            },
+            {
+              title: '操作',
+              key: 'actions',
+              width: 190,
+              render: (_value, record) => (
+                <Space size={4}>
+                  <Button size="small" icon={<EyeOutlined />} onClick={() => void openHistoricalJob(record)}>详情</Button>
+                  <Button
+                    size="small"
+                    type="primary"
+                    icon={<DownloadOutlined />}
+                    disabled={!record.downloadReady}
+                    loading={exportDownloadingJobId === record.id}
+                    onClick={() => void handleDownloadExport(record)}
+                  >
+                    下载
+                  </Button>
+                </Space>
+              ),
+            },
+          ]}
+        />
       </Modal>
     </div>
   );

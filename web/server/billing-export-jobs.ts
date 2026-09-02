@@ -32,19 +32,13 @@ const RUNNER_LOCK_PORT = Number.isInteger(configuredRunnerLockPort)
   && configuredRunnerLockPort <= 65535
   ? configuredRunnerLockPort
   : 39173;
-const configuredTtlHours = Number(process.env.BILLING_EXPORT_TTL_HOURS || 24);
-const OUTPUT_TTL_MS = (Number.isFinite(configuredTtlHours)
-  ? Math.max(1, Math.min(168, configuredTtlHours))
-  : 24) * 60 * 60_000;
 const RUNNER_INTERVAL_MS = 2_000;
-const SWEEP_INTERVAL_MS = 60_000;
 const MAX_TASKS = 200;
 
 let runnerStarted = false;
 let runnerStopping = false;
 let runnerLockServer: net.Server | null = null;
 let runnerTimer: ReturnType<typeof setInterval> | null = null;
-let sweepTimer: ReturnType<typeof setInterval> | null = null;
 let tickInProgress = false;
 let activeJobId: string | null = null;
 let activeController: AbortController | null = null;
@@ -65,10 +59,6 @@ function jobDir(jobId: string): string {
     throw new Error('账单导出目录越界');
   }
   return candidate;
-}
-
-function hasActiveDownload(jobId: string): boolean {
-  return (activeDownloadLeases.get(jobId) || 0) > 0;
 }
 
 function acquireDownloadLease(jobId: string): () => void {
@@ -148,12 +138,6 @@ function queuePosition(job: BillingExportJob): number | undefined {
   return index >= 0 ? index + 1 : undefined;
 }
 
-function validExpiryTime(job: BillingExportJob): number | null {
-  if (!job.expiresAt) return null;
-  const expiresAt = new Date(job.expiresAt).getTime();
-  return Number.isFinite(expiresAt) ? expiresAt : null;
-}
-
 export function toBillingExportJobView(job: BillingExportJob): BillingExportJob & {
   progress: number;
   etaSeconds?: number;
@@ -170,16 +154,13 @@ export function toBillingExportJobView(job: BillingExportJob): BillingExportJob 
     : job.phase === 'packaging'
       ? 98
       : Math.min(95, Math.round((job.done / Math.max(1, job.total)) * 95));
-  const expiresAt = validExpiryTime(job);
   return {
     ...job,
     progress,
     etaSeconds,
     queuePosition: queuePosition(job),
-    downloadReady: job.status === 'completed'
-      && !!job.downloadFilename
-      && expiresAt !== null
-      && expiresAt > Date.now(),
+    // expiresAt 仅作为旧记录兼容字段；新旧 completed 产物都按永久保留语义处理。
+    downloadReady: job.status === 'completed' && !!job.downloadFilename,
   };
 }
 
@@ -212,10 +193,11 @@ export function getBillingExportJobsForUser(
   username: string,
   userId: string,
   isAdmin: boolean,
-  limit = 10,
-): BillingExportJob[] {
-  sweepExpiredJobs();
-  return listBillingExportJobsForUser(username, userId, isAdmin, limit);
+  scope: 'mine' | 'all',
+  offset: number,
+  limit: number,
+): ReturnType<typeof listBillingExportJobsForUser> {
+  return listBillingExportJobsForUser(username, userId, isAdmin, scope, offset, limit);
 }
 
 export function cancelBillingExport(jobId: string): BillingExportJob {
@@ -251,15 +233,10 @@ export function getBillingExportDownload(jobId: string): {
   fileSize: number;
   release: () => void;
 } {
-  sweepExpiredJobs();
   const job = getBillingExportJob(jobId);
   if (!job) throw new Error('账单导出任务不存在');
-  if (job.status === 'expired') throw new Error('账单导出文件已过期');
+  if (job.status === 'expired') throw new Error('账单导出文件已不可用');
   if (job.status !== 'completed' || !job.downloadFilename) throw new Error('账单导出文件尚未就绪');
-  const expiresAt = validExpiryTime(job);
-  if (expiresAt === null || expiresAt <= Date.now()) {
-    throw new Error('账单导出文件已过期');
-  }
 
   const safeFilename = path.basename(job.downloadFilename);
   if (safeFilename !== job.downloadFilename || !/^[A-Za-z0-9._-]+$/.test(safeFilename)) {
@@ -357,7 +334,7 @@ async function runJob(jobId: string): Promise<void> {
       downloadFilename,
       fileSize: fs.statSync(finalPath).size,
       finishedAt,
-      expiresAt: new Date(Date.now() + OUTPUT_TTL_MS).toISOString(),
+      expiresAt: undefined,
       error: undefined,
     });
     console.log(`[BillingExport] job ${job.id} completed: ok=${ok} failed=${failed}`);
@@ -420,47 +397,16 @@ async function tick(): Promise<void> {
   }
 }
 
-function sweepExpiredJobs(): void {
-  const now = Date.now();
-  const knownIds = new Set<string>();
+function cleanupTransientWorkDirectories(): void {
+  // 仅清理明确未完成的任务目录；completed、legacy expired 和 orphan 目录都永久保留，避免误删历史 ZIP。
   for (const job of listBillingExportJobs()) {
+    if (!['cancelled', 'failed', 'interrupted'].includes(job.status)) continue;
     try {
-      const directory = jobDir(job.id);
-      knownIds.add(job.id);
-      if (job.status === 'completed') {
-        const expiresAt = validExpiryTime(job);
-        if (expiresAt !== null && expiresAt > now) continue;
-        if (hasActiveDownload(job.id)) continue;
-        // 只有实际删除成功后才标记 expired；失败会落入 catch 并在下一轮重试。
-        cleanupWorkDir(directory);
-        updateBillingExportJob(job.id, {
-          status: 'expired',
-          downloadFilename: undefined,
-          fileSize: undefined,
-          error: expiresAt === null
-            ? '导出文件过期时间无效，已按安全策略清理'
-            : '导出文件已按保留策略清理',
-        });
-      } else if (['cancelled', 'failed', 'interrupted', 'expired'].includes(job.status)) {
-        if (!hasActiveDownload(job.id)) cleanupWorkDir(directory);
-      }
+      cleanupWorkDir(jobDir(job.id));
     } catch (error) {
-      console.error(`[BillingExport] 跳过不安全或无法清理的任务目录 ${job.id}:`, error);
+      console.error(`[BillingExport] 清理未完成任务目录 ${job.id} 失败:`, error);
     }
   }
-
-  // 清理由旧版本、崩溃或 DB 历史裁剪留下的孤立目录；至少保留一小时避免误删正在落盘的目录。
-  try {
-    for (const entry of fs.readdirSync(OUTPUT_ROOT, { withFileTypes: true })) {
-      if (!entry.isDirectory() || knownIds.has(entry.name) || !BILLING_EXPORT_JOB_ID_RE.test(entry.name)) continue;
-      try {
-        const candidate = jobDir(entry.name);
-        if (now - fs.statSync(candidate).mtimeMs > 60 * 60_000) cleanupWorkDir(candidate);
-      } catch (error) {
-        console.error(`[BillingExport] 清理孤立目录 ${entry.name} 失败:`, error);
-      }
-    }
-  } catch { /* 输出目录尚未创建时无需处理 */ }
 }
 
 function wakeRunner(): void {
@@ -517,13 +463,11 @@ export async function startBillingExportRunner(): Promise<void> {
   try {
     const interrupted = recoverBillingExportJobs();
     if (interrupted > 0) console.warn(`[BillingExport] 已将 ${interrupted} 个重启中断任务标记为 interrupted`);
-    sweepExpiredJobs();
+    cleanupTransientWorkDirectories();
     runnerStarted = true;
     void tick();
     runnerTimer = setInterval(() => void tick(), RUNNER_INTERVAL_MS);
     runnerTimer.unref?.();
-    sweepTimer = setInterval(sweepExpiredJobs, SWEEP_INTERVAL_MS);
-    sweepTimer.unref?.();
   } catch (error) {
     runnerStarted = false;
     await releaseRunnerLock().catch(releaseError => {
@@ -538,9 +482,7 @@ export async function stopBillingExportRunner(): Promise<void> {
   runnerStopping = true;
   runnerStarted = false;
   if (runnerTimer) clearInterval(runnerTimer);
-  if (sweepTimer) clearInterval(sweepTimer);
   runnerTimer = null;
-  sweepTimer = null;
 
   const running = activeRunPromise;
   activeController?.abort();

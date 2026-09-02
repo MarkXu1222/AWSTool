@@ -430,23 +430,7 @@ export function createBillingExportJob(input: {
     updatedAt: now,
   };
   data.billing_export_jobs.push(job);
-
-  // 活跃任务和 TTL 内可下载任务必须全部保留；其它历史终态最多保留最近 100 条。
-  const nowMs = Date.now();
-  const protectedJobs = data.billing_export_jobs.filter(item => {
-    if (BILLING_EXPORT_ACTIVE_STATUSES.has(item.status)) return true;
-    if (item.status !== 'completed') return false;
-    if (!item.expiresAt) return true;
-    const expiresAt = new Date(item.expiresAt).getTime();
-    return !Number.isFinite(expiresAt) || expiresAt > nowMs;
-  });
-  const protectedIds = new Set(protectedJobs.map(item => item.id));
-  const historical = data.billing_export_jobs
-    .filter(item => !protectedIds.has(item.id))
-    .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
-    .slice(-100);
-  data.billing_export_jobs = [...historical, ...protectedJobs]
-    .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+  // 账单导出是长期可追溯记录：任务元数据不做隐式裁剪，避免记录与服务器 ZIP 失去关联。
   writeDB(data);
   return cloneBillingExportJob(job);
 }
@@ -460,18 +444,36 @@ export function listBillingExportJobs(): BillingExportJob[] {
   return readDB().billing_export_jobs.map(cloneBillingExportJob);
 }
 
+export type BillingExportJobListScope = 'mine' | 'all';
+
+export interface BillingExportJobPage {
+  jobs: BillingExportJob[];
+  total: number;
+  offset: number;
+  limit: number;
+}
+
 export function listBillingExportJobsForUser(
   username: string,
   userId: string,
   isAdmin: boolean,
-  limit = 10,
-): BillingExportJob[] {
-  return readDB().billing_export_jobs
-    .filter(job => isAdmin
+  scope: BillingExportJobListScope = 'mine',
+  offset = 0,
+  limit = 20,
+): BillingExportJobPage {
+  const listAll = isAdmin && scope === 'all';
+  const filtered = readDB().billing_export_jobs
+    .filter(job => listAll
       || (job.createdByUserId != null ? job.createdByUserId === userId : job.createdBy === username))
-    .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
-    .slice(0, Math.max(1, Math.min(50, limit)))
-    .map(cloneBillingExportJob);
+    .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  const safeOffset = Math.max(0, Math.floor(offset) || 0);
+  const safeLimit = Math.max(1, Math.min(50, Math.floor(limit) || 20));
+  return {
+    jobs: filtered.slice(safeOffset, safeOffset + safeLimit).map(cloneBillingExportJob),
+    total: filtered.length,
+    offset: safeOffset,
+    limit: safeLimit,
+  };
 }
 
 export function listQueuedBillingExportJobs(): BillingExportJob[] {

@@ -391,6 +391,13 @@ function canAccessBillingJob(user: any, job: BillingExportJob): boolean {
   return user?.role === 'admin' || isBillingJobOwner(user, job);
 }
 
+function billingJobViewForUser(user: any, job: BillingExportJob) {
+  return {
+    ...toBillingExportJobView(job),
+    ownedByCurrentUser: isBillingJobOwner(user, job),
+  };
+}
+
 // Test connection
 awsRouter.get('/connection', async (_req: Request, res: Response) => {
   try {
@@ -705,7 +712,7 @@ awsRouter.post('/billing/export-jobs', requireBillingAccess, async (req: Request
     } catch (auditError: any) {
       console.error(`[BillingExport] job ${job.id} 审计写入失败:`, auditError.message);
     }
-    res.status(202).json({ success: true, data: toBillingExportJobView(job) });
+    res.status(202).json({ success: true, data: billingJobViewForUser(user, job) });
   } catch (e: any) {
     const message = e?.message || String(e);
     if (e?.code === 'BILLING_EXPORT_OWNER_ACTIVE') {
@@ -720,15 +727,37 @@ awsRouter.post('/billing/export-jobs', requireBillingAccess, async (req: Request
   }
 });
 
-// 当前用户最近任务；admin 可查看全局任务，刷新页面或关闭弹窗后可恢复进度。
+// 历史任务分页列表。默认仅返回当前用户；admin 只有显式 scope=all 才查看全局，自动恢复不会混入他人任务。
 awsRouter.get('/billing/export-jobs', requireBillingAccess, (req: Request, res: Response) => {
   try {
     const user = (res.locals as any).billingUser;
-    const limit = Math.max(1, Math.min(20, Math.floor(Number(req.query.limit || 10)) || 10));
+    const rawScope = String(req.query.scope || 'mine');
+    if (!['mine', 'all'].includes(rawScope)) return res.status(400).json({ error: 'scope 必须是 mine 或 all' });
+    if (rawScope === 'all' && user.role !== 'admin') return res.status(403).json({ error: '只有管理员可查看全部账单导出记录' });
+    const scope = rawScope as 'mine' | 'all';
+    const page = Math.max(1, Math.floor(Number(req.query.page || 1)) || 1);
+    const limit = Math.max(1, Math.min(50, Math.floor(Number(req.query.limit || 20)) || 20));
     const userId = user.id == null ? '' : String(user.id);
-    const jobs = getBillingExportJobsForUser(user.username, userId, user.role === 'admin', limit)
-      .map(job => ({ ...toBillingExportJobView(job), ownedByCurrentUser: isBillingJobOwner(user, job) }));
-    res.json({ success: true, data: jobs });
+    const result = getBillingExportJobsForUser(
+      user.username,
+      userId,
+      user.role === 'admin',
+      scope,
+      (page - 1) * limit,
+      limit,
+    );
+    const jobs = result.jobs.map(job => billingJobViewForUser(user, job));
+    res.json({
+      success: true,
+      data: jobs,
+      pagination: {
+        page,
+        limit: result.limit,
+        total: result.total,
+        totalPages: Math.ceil(result.total / result.limit),
+        scope,
+      },
+    });
   } catch (e: any) { res.status(500).json({ error: e.message }); }
 });
 
@@ -738,7 +767,7 @@ awsRouter.get('/billing/export-jobs/:jobId', requireBillingAccess, (req: Request
     const job = getBillingExportJob(String(req.params.jobId));
     if (!job) return res.status(404).json({ error: '账单导出任务不存在或已清理' });
     if (!canAccessBillingJob(user, job)) return res.status(403).json({ error: '只能查看自己创建的账单导出任务' });
-    res.json({ success: true, data: toBillingExportJobView(job) });
+    res.json({ success: true, data: billingJobViewForUser(user, job) });
   } catch (e: any) { res.status(500).json({ error: e.message }); }
 });
 
@@ -755,7 +784,7 @@ awsRouter.post('/billing/export-jobs/:jobId/cancel', requireBillingAccess, (req:
     } catch (auditError: any) {
       console.error(`[BillingExport] job ${job.id} 取消审计写入失败:`, auditError.message);
     }
-    res.status(job.status === 'cancelling' ? 202 : 200).json({ success: true, data: toBillingExportJobView(job) });
+    res.status(job.status === 'cancelling' ? 202 : 200).json({ success: true, data: billingJobViewForUser(user, job) });
   } catch (e: any) {
     const message = e?.message || String(e);
     res.status(/已经结束|无法取消/.test(message) ? 409 : 500).json({ error: message });
@@ -795,7 +824,7 @@ awsRouter.get('/billing/export-jobs/:jobId/download', requireBillingAccess, asyn
       if (!res.destroyed) res.destroy(e instanceof Error ? e : new Error(message));
       return;
     }
-    const status = /已过期|已不存在/.test(message) ? 410 : /尚未就绪/.test(message) ? 409 : 500;
+    const status = /已过期|已不存在|已不可用/.test(message) ? 410 : /尚未就绪/.test(message) ? 409 : 500;
     res.status(status).json({ error: message });
   } finally {
     if (download) {

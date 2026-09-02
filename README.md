@@ -3,7 +3,7 @@
 企业级 AWS 多账户（多 Organizations）管理平台。带强制 MFA 登录、页面级权限与全量操作审计。
 
 **线上**：https://markxu.co（EC2 Singapore，PM2 进程 `aws-toolbox`）
-**当前版本**：`0.14.0`（见 `web/client/src/version.ts`，左下角展示）
+**当前版本**：`0.14.1`（见 `web/client/src/version.ts`，左下角展示）
 
 **生产接入规模**（配置快照 2026-08-27；账户数快照 2026-08-13）
 
@@ -351,10 +351,10 @@ HTML 模板 + Puppeteer 渲染。公司背景库在 `doc-templates.ts`（12 家�
 安全与生命周期：
 
 - 所有抓取固定调用 `getConsoleSigninUrl(..., 'support')`。payer 使用 `role/tool + ReadOnlyAccess` session policy，成员账户必须进入 `support-quota`；角色缺失时该份失败，**绝不回退 OAAR/admin**
-- submit/list/status/cancel/download 都实时检查 `billing` 页面权限；新任务 owner 绑定不可复用的用户 ID，旧记录仅在缺少 ID 时兼容用户名；单任务查询、取消和下载还要求 owner 或 admin。admin 列表可查看全局任务，但页面会优先恢复当前 admin 自己的 active job
+- submit/list/status/cancel/download 都实时检查 `billing` 页面权限；新任务 owner 绑定不可复用的用户 ID，旧记录仅在缺少 ID 时兼容用户名；单任务查询、取消和下载还要求 owner 或 admin。历史列表默认 `scope=mine`，admin 只有显式 `scope=all` 才查看全局
 - 入队前以及实际执行前都会检查 Chrome、Xvfb socket、`zip` 和输出目录，依赖缺失时不会启动任何浏览器
 - job 元数据持久化在 `billing_export_jobs`；PM2 重启后 queued 任务继续排队，原 running/cancelling 标记 `interrupted`，避免伪装为仍在执行
-- 完成的 zip 默认保留 24 小时并支持重复鉴权下载；下载先打开文件并持有 lease，TTL 清理会等待活动下载结束，再清理文件并标记 `expired`
+- 完成的 ZIP 和 job 元数据在服务器长期保留并支持重复鉴权下载；`expired` 仅兼容旧版本已清理或文件确实丢失的历史记录
 - 轮询状态不写审计，提交、取消、下载分别记录 `BILLING_EXPORT_SUBMIT`、`BILLING_EXPORT_CANCEL`、`BILLING_EXPORT_DOWNLOAD`
 
 四个必须遵守的抓取约束（都是踩坑换来的，改这块前务必先读 `billing-exporter.ts` 顶部注释）：
@@ -460,7 +460,7 @@ curl -s "https://markxu.co/$BUNDLE" | grep -oE '0\.4\.7'
 
 Nginx 反代 + Let's Encrypt（`markxu.co`，自动续期），80 强制跳 443，HSTS 开启。Node 只监听 `127.0.0.1:3000`，外网只能经 Nginx。配置脚本 `web/setup-nginx.sh`；脚本为 zip 下载设置 10 分钟流式传输窗口，job 控制 API 本身都是短请求。
 
-账单导出运行依赖：可执行 Chrome、常驻 Xvfb（默认 `:99`）、`zip` 与 CJK 字体。可用环境变量：`BILLING_EXPORT_DISPLAY`、`BILLING_EXPORT_SETTLE_MS`、`BILLING_EXPORT_MAX_CONCURRENCY`、`BILLING_EXPORT_MAX_QUEUED_JOBS`、`BILLING_EXPORT_OUTPUT_DIR`、`BILLING_EXPORT_TTL_HOURS`；runner 启动只检查输出目录，提交任务时再完整预检，避免缺依赖导致整个服务无法启动。
+账单导出运行依赖：可执行 Chrome、常驻 Xvfb（默认 `:99`）、`zip` 与 CJK 字体。可用环境变量：`BILLING_EXPORT_DISPLAY`、`BILLING_EXPORT_SETTLE_MS`、`BILLING_EXPORT_MAX_CONCURRENCY`、`BILLING_EXPORT_MAX_QUEUED_JOBS`、`BILLING_EXPORT_OUTPUT_DIR`；runner 启动只检查输出目录，提交任务时再完整预检。ZIP 不自动过期，需监控 `data/exports/` 所在磁盘容量并纳入独立备份策略。
 
 ### 常见改动改哪里
 

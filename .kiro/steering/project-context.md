@@ -11,7 +11,7 @@ AWS 多账户管理平台。用于跨组织管理成员账户：配额提升、�
 
 | 应用 | 位置 | 包名 / 版本 | 状态 | 说明 |
 |------|------|-------------|------|------|
-| **Web 版（生产）** | `web/` | `aws-toolbox-web` / `APP_VERSION 0.14.0` | ✅ **在维护** | 部署在 EC2（https://markxu.co）。日常改动几乎都在这里。 |
+| **Web 版（生产）** | `web/` | `aws-toolbox-web` / `APP_VERSION 0.14.1` | ✅ **在维护** | 部署在 EC2（https://markxu.co）。日常改动几乎都在这里。 |
 | 桌面版（旧） | 根 `src/` + `electron/` | `aws-toolbox` / `0.1.0` | ⚠️ 旧版/基本冻结 | 早期 Electron macOS 版，`main: dist/main/index.js`。除非专门维护桌面版，否则**不要动**。 |
 
 **结论：接到"平台/网站"相关的需求，一律在 `web/` 下操作。**
@@ -49,7 +49,7 @@ web/
 │   ├── notify.ts               # 飞书通知（配额变动/达成）
 │   ├── tag-compliance.ts       # MAP 标签合规（Step Functions 扫描 + S3 报告）
 │   ├── account-roles.ts        # ★账户角色自愈：探测成员账户角色 → 缺失则触发 StackSet 补齐 → 超限告警
-│   ├── billing-export-jobs.ts  # 账单导出持久化 job、全局队列、取消、TTL 下载与重启恢复
+│   ├── billing-export-jobs.ts  # 账单导出持久化 job、全局队列、永久历史、重复下载与重启恢复
 │   ├── billing-exporter.ts     # 严格只读抓取 AWS 官方账单 PDF + 可取消 zip 打包
 │   └── routes/
 │       ├── aws.ts              # ★awsRouter：主业务端点（40+），含权限守卫
@@ -215,7 +215,7 @@ web { port, adminPassword, jwtSecret, encryptionKey, feishuWebhook }
   ```
 - **数据安全红线**：绝不提交 `data/`、`config.json`、密钥；绝不 `git add -A`/`git add .`；EC2 上绝不 `git stash`/`git reset --hard`/`git checkout -- data/`。
 - Nginx + HTTPS：`web/setup-nginx.sh`；zip 下载流式超时 10 分钟。
-- 账单导出依赖可执行 Chrome、Xvfb `:99`、`zip`、CJK 字体及可写的 `data/exports/`。关键变量：`BILLING_EXPORT_MAX_CONCURRENCY`（默认 3）、`BILLING_EXPORT_MAX_QUEUED_JOBS`（默认 10）、`BILLING_EXPORT_TTL_HOURS`（默认 24）、`BILLING_EXPORT_OUTPUT_DIR`。
+- 账单导出依赖可执行 Chrome、Xvfb `:99`、`zip`、CJK 字体及可写的 `data/exports/`。关键变量：`BILLING_EXPORT_MAX_CONCURRENCY`（默认 3）、`BILLING_EXPORT_MAX_QUEUED_JOBS`（默认 10）、`BILLING_EXPORT_OUTPUT_DIR`。ZIP 不自动过期，必须监控磁盘容量。
 
 ---
 
@@ -262,9 +262,9 @@ web { port, adminPassword, jwtSecret, encryptionKey, feishuWebhook }
 
 ### 修改账单批量导出
 - `billing-exporter.ts` 只负责严格 `support` 会话抓取、单任务浏览器隔离、AbortSignal、worker drain 与 Chrome/zip 有界进程树关闭；最终 deadline 仍无法确认退出时必须抛出 `BillingExportProcessCleanupError`。
-- `billing-export-jobs.ts` 负责参数规范化、单 job 全局队列、持久化状态、取消、TTL、下载 lease 和重启中断语义；进程清理异常时会暂停 runner，避免残留进程与下一 job 重叠，不要在路由里重新实现长任务。
+- `billing-export-jobs.ts` 负责参数规范化、单 job 全局队列、永久历史、分页查询、取消、重复鉴权下载和重启中断语义；completed/expired/orphan 目录不得由 runner 自动删除，进程清理异常时会暂停 runner，避免残留进程与下一 job 重叠。
 - `client/src/utils/account-import.ts` / `account-import.worker.ts` / `account-import-config.ts` 负责浏览器本地 `.xlsx` 账户识别：不上传文件；主线程校验 ZIP 目录，Worker 流式复验实际解压量并可在 20 秒超时后终止；限制 5 MiB 文件、12 MiB 单项、24 MiB 总解压量、50,000 单元格，只输出独立 12 位 ID。`Billing.tsx` 再与平台账户列表求交集，后端白名单和 200 任务上限仍是最终边界。
-- 新任务必须用稳定 `createdByUserId` 授权；仅迁移前无 ID 的历史任务可回退用户名。每 owner 最多一个活跃任务，全局 queued 默认最多 10；admin 全局列表必须标记 `ownedByCurrentUser`，前端优先恢复自己的 active job。
+- 新任务必须用稳定 `createdByUserId` 授权；仅迁移前无 ID 的历史任务可回退用户名。每 owner 最多一个活跃任务，全局 queued 默认最多 10；历史列表默认 `scope=mine`，admin 只有显式 `scope=all` 才查看全局，前端自动恢复固定使用 mine。
 - API 改动同步 `routes/aws.ts`、`audit.ts`、`audit-presentation.ts`、`client/src/api.ts` 与 `pages/Billing.tsx`。
 - 状态轮询不记审计；submit/cancel/download 显式审计。任何改动都必须保持 `access='support'`，不得恢复 `auto` 的 admin 回退。
 
