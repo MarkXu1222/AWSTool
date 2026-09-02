@@ -11,7 +11,7 @@ AWS 多账户管理平台。用于跨组织管理成员账户：配额提升、�
 
 | 应用 | 位置 | 包名 / 版本 | 状态 | 说明 |
 |------|------|-------------|------|------|
-| **Web 版（生产）** | `web/` | `aws-toolbox-web` / `APP_VERSION 0.13.0` | ✅ **在维护** | 部署在 EC2（https://markxu.co）。日常改动几乎都在这里。 |
+| **Web 版（生产）** | `web/` | `aws-toolbox-web` / `APP_VERSION 0.13.1` | ✅ **在维护** | 部署在 EC2（https://markxu.co）。日常改动几乎都在这里。 |
 | 桌面版（旧） | 根 `src/` + `electron/` | `aws-toolbox` / `0.1.0` | ⚠️ 旧版/基本冻结 | 早期 Electron macOS 版，`main: dist/main/index.js`。除非专门维护桌面版，否则**不要动**。 |
 
 **结论：接到"平台/网站"相关的需求，一律在 `web/` 下操作。**
@@ -70,7 +70,7 @@ web/
 │       │   ├── EmptyState.tsx / ErrorBoundary.tsx
 │       ├── pages/              # 每个业务页面一个文件（见下表）
 │       ├── styles/global.css
-│       └── utils/              # cache.ts（前端缓存）、color.ts、export.ts
+│       └── utils/              # cache/color/export；account-import*.ts（本地 Excel 识别、ZIP 限制、Worker）
 │
 ├── package.json                # Web 版依赖与脚本
 ├── Dockerfile / docker-compose.yml
@@ -256,6 +256,10 @@ web { port, adminPassword, jwtSecret, encryptionKey, feishuWebhook }
 `admin-console` 为什么必须有：INVITED（邀请加入）的账户不自带 `OrganizationAccountAccessRole`，payer 二级跳进不去，只有直接信任平台身份的 `admin-console` 能拿到 admin 临时凭证。模板 `MaxSessionDuration=43200`；平台默认签发 1 小时，仅数据库当前角色为 admin 的用户可选 2–12 小时。超过 1 小时只走平台长期身份到成员 `admin-console` 的直接一级跳；payer 管理账户和 OAAR 二级链仍限 1 小时。已有模板只通过显式 `--refresh-template` 按单 payer 迁移。
 
 补不上的账户：账户未完成激活时 CloudFormation 返回 `OptInRequired`(403)，StackSet 无论如何都进不去，`account-roles.ts` 会重试 3 次后标记 `unreachable` 并飞书告警，需人工先处理账户本身（这类账户通常零账单）。
+
+### 修改账单批量导出
+- `client/src/utils/account-import.ts` / `account-import.worker.ts` / `account-import-config.ts` 负责浏览器本地 `.xlsx` 账户识别：主线程预检 ZIP 目录，Worker 流式复验实际解压量并可在 20 秒超时后终止；限制 5 MiB 文件、1,000 个 ZIP 项、12 MiB 单项、24 MiB 总解压量、50,000 单元格，只输出独立 12 位 ID。
+- `pages/Billing.tsx` 将识别结果与平台账户列表求交集；有匹配时替换账户勾选，零匹配时保留原选择。文件不上传，月份选择与后端导出协议不变。
 
 ### 新增一个公司（提额文档模板）
 - `web/server/doc-templates.ts`：`COMPANY_PROFILES` 加公司资料；`ACCOUNT_TO_COMPANY` / `PAYER_TO_COMPANY` 加映射；架构图放 `doc-templates/architectures/`。

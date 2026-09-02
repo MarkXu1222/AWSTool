@@ -1,11 +1,21 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { Card, Table, Tag, Button, message, DatePicker, Input, Modal, Select, InputNumber, Space, Alert } from 'antd';
-import { ReloadOutlined, SearchOutlined, FilePdfOutlined } from '@ant-design/icons';
+import { Card, Table, Tag, Button, message, DatePicker, Input, Modal, Select, InputNumber, Space, Alert, Upload } from 'antd';
+import { ReloadOutlined, SearchOutlined, FilePdfOutlined, UploadOutlined } from '@ant-design/icons';
 import dayjs from 'dayjs';
 import { api } from '../api';
 import { exportToCSV } from '../utils/export';
-
+import { scanAccountIdsFromXlsx } from '../utils/account-import';
 const { RangePicker } = DatePicker;
+
+interface AccountImportSummary {
+  fileName: string;
+  detectedCount: number;
+  matchedCount: number;
+  duplicateCount: number;
+  scannedCellCount: number;
+  sheetCount: number;
+  unmatchedAccountIds: string[];
+}
 
 const BillingPage: React.FC = () => {
   const [costData, setCostData] = useState<any[]>([]);
@@ -13,7 +23,6 @@ const BillingPage: React.FC = () => {
   const [dateRange, setDateRange] = useState<[dayjs.Dayjs, dayjs.Dayjs]>([dayjs().subtract(1, 'month').startOf('month'), dayjs()]);
   const [totalCost, setTotalCost] = useState(0);
   const [searchText, setSearchText] = useState('');
-
   // 批量导出账单相关状态
   const [accounts, setAccounts] = useState<any[]>([]);
   const [exportModalOpen, setExportModalOpen] = useState(false);
@@ -21,7 +30,8 @@ const BillingPage: React.FC = () => {
   const [selectedMonths, setSelectedMonths] = useState<string[]>([]);
   const [concurrency, setConcurrency] = useState<number>(10);
   const [exporting, setExporting] = useState(false);
-
+  const [accountImporting, setAccountImporting] = useState(false);
+  const [accountImportSummary, setAccountImportSummary] = useState<AccountImportSummary | null>(null);
   // 生成近 12 个月的候选月份
   const monthCandidates = useMemo(() => {
     const arr: { value: string; label: string }[] = [];
@@ -34,16 +44,13 @@ const BillingPage: React.FC = () => {
     }
     return arr;
   }, []);
-
   useEffect(() => { fetchCosts(); loadAccounts(); }, []);
-
   const loadAccounts = async () => {
     try {
       const res = await api.listAccounts();
       if (res.success) setAccounts(res.data);
     } catch {}
   };
-
   const fetchCosts = async () => {
     setLoading(true);
     try {
@@ -59,22 +66,60 @@ const BillingPage: React.FC = () => {
     } catch (e: any) { message.error(e.message); }
     finally { setLoading(false); }
   };
-
   const tableData = costData.flatMap((p: any) => (p.Groups || []).map((g: any) => ({
     key: `${p.TimePeriod.Start}-${g.Keys[0]}`, period: `${p.TimePeriod.Start} ~ ${p.TimePeriod.End}`,
     accountId: g.Keys[0], cost: parseFloat(g.Metrics.UnblendedCost.Amount || '0'),
   }))).sort((a, b) => b.cost - a.cost);
-
   const filtered = tableData.filter(d => !searchText || d.accountId.includes(searchText));
-
   // 批量导出账单
   const openExportModal = () => {
     setSelectedAccountIds([]);
     setSelectedMonths([dayjs().subtract(1, 'month').format('YYYY-M')]);
     setConcurrency(10);
+    setAccountImportSummary(null);
     setExportModalOpen(true);
   };
+  const handleAccountWorkbook = async (file: File) => {
+    if (!accounts.length) {
+      message.warning('账户列表尚未加载完成，请稍后重试');
+      return;
+    }
 
+    setAccountImporting(true);
+    setAccountImportSummary(null);
+    try {
+      const result = await scanAccountIdsFromXlsx(file);
+      const knownAccountIds = new Set(accounts.map(account => String(account.Id)));
+      const matchedAccountIds = result.accountIds.filter(accountId => knownAccountIds.has(accountId));
+      const unmatchedAccountIds = result.accountIds.filter(accountId => !knownAccountIds.has(accountId));
+
+      setAccountImportSummary({
+        fileName: file.name,
+        detectedCount: result.accountIds.length,
+        matchedCount: matchedAccountIds.length,
+        duplicateCount: result.duplicateCount,
+        scannedCellCount: result.scannedCellCount,
+        sheetCount: result.sheetCount,
+        unmatchedAccountIds,
+      });
+
+      if (result.accountIds.length === 0) {
+        message.warning('Excel 中未识别到独立的 12 位 AWS 账户 ID');
+        return;
+      }
+      if (matchedAccountIds.length === 0) {
+        message.warning('识别到的账户均不在当前平台账户列表中，已保留原选择');
+        return;
+      }
+
+      setSelectedAccountIds(matchedAccountIds);
+      message.success(`已从 Excel 识别并勾选 ${matchedAccountIds.length} 个账户`);
+    } catch (error: any) {
+      message.error(error?.message || 'Excel 识别失败，请检查文件格式');
+    } finally {
+      setAccountImporting(false);
+    }
+  };
   const handleExportInvoices = async () => {
     if (!selectedAccountIds.length) return message.warning('请选择至少一个账号');
     if (!selectedMonths.length) return message.warning('请选择至少一个月份');
@@ -98,9 +143,7 @@ const BillingPage: React.FC = () => {
       setExporting(false);
     }
   };
-
   const taskCount = selectedAccountIds.length * selectedMonths.length;
-
   return (
     <div>
       <div className="page-header">
@@ -133,7 +176,6 @@ const BillingPage: React.FC = () => {
             { title: '占比', key: 'pct', render: (_: any, r: any) => <Tag color="blue">{totalCost > 0 ? ((r.cost / totalCost) * 100).toFixed(1) : 0}%</Tag> },
           ]} />
       </Card>
-
       {/* 批量导出账单 PDF Modal */}
       <Modal
         title={<span><FilePdfOutlined style={{ marginRight: 6 }} />批量导出账单 PDF</span>}
@@ -155,16 +197,29 @@ const BillingPage: React.FC = () => {
         />
         <div style={{ marginBottom: 12 }}>
           <div style={{ marginBottom: 4, fontWeight: 500 }}>账号 <span style={{ color: '#999', fontWeight: 400 }}>({selectedAccountIds.length}/{accounts.length})</span></div>
-          <Space style={{ marginBottom: 6 }} size={4}>
-            <Button size="small" onClick={() => setSelectedAccountIds(accounts.map(a => a.Id))}>全选</Button>
-            <Button size="small" onClick={() => setSelectedAccountIds([])}>清空</Button>
+          <Space style={{ marginBottom: 6 }} size={4} wrap>
+            <Button size="small" onClick={() => { setSelectedAccountIds(accounts.map(a => a.Id)); setAccountImportSummary(null); }}>全选</Button>
+            <Button size="small" onClick={() => { setSelectedAccountIds([]); setAccountImportSummary(null); }}>清空</Button>
+            <Upload
+              accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+              maxCount={1}
+              showUploadList={false}
+              beforeUpload={(file) => {
+                void handleAccountWorkbook(file);
+                return Upload.LIST_IGNORE;
+              }}
+            >
+              <Button size="small" icon={<UploadOutlined />} loading={accountImporting} disabled={!accounts.length}>
+                上传 Excel 识别
+              </Button>
+            </Upload>
           </Space>
           <Select
             mode="multiple"
             style={{ width: '100%' }}
             placeholder="选择要导出的账号"
             value={selectedAccountIds}
-            onChange={setSelectedAccountIds}
+            onChange={(value) => { setSelectedAccountIds(value); setAccountImportSummary(null); }}
             showSearch
             optionFilterProp="label"
             maxTagCount={5}
@@ -173,6 +228,32 @@ const BillingPage: React.FC = () => {
               value: a.Id,
             }))}
           />
+          <div style={{ marginTop: 5, color: '#999', fontSize: 12 }}>
+            仅读取 .xlsx 的所有工作表并识别独立 12 位账户 ID；文件只在浏览器本地处理，不会上传。含前导零的 ID 请在 Excel 中设为文本。
+          </div>
+          {accountImportSummary && (
+            <Alert
+              type={accountImportSummary.matchedCount > 0 && accountImportSummary.unmatchedAccountIds.length === 0 ? 'success' : 'warning'}
+              showIcon
+              style={{ marginTop: 8 }}
+              message={`Excel 识别：匹配 ${accountImportSummary.matchedCount}/${accountImportSummary.detectedCount} 个账户`}
+              description={(
+                <div>
+                  <div>
+                    {accountImportSummary.fileName} · {accountImportSummary.sheetCount} 个工作表 · 扫描 {accountImportSummary.scannedCellCount.toLocaleString()} 个单元格
+                    {accountImportSummary.duplicateCount > 0 ? ` · 忽略 ${accountImportSummary.duplicateCount} 个重复 ID` : ''}
+                  </div>
+                  {accountImportSummary.unmatchedAccountIds.length > 0 && (
+                    <div style={{ marginTop: 4 }}>
+                      平台未匹配 {accountImportSummary.unmatchedAccountIds.length} 个：
+                      <code>{accountImportSummary.unmatchedAccountIds.slice(0, 10).join(', ')}</code>
+                      {accountImportSummary.unmatchedAccountIds.length > 10 ? '…' : ''}
+                    </div>
+                  )}
+                </div>
+              )}
+            />
+          )}
         </div>
         <div style={{ marginBottom: 12 }}>
           <div style={{ marginBottom: 4, fontWeight: 500 }}>月份 <span style={{ color: '#999', fontWeight: 400 }}>({selectedMonths.length} 个)</span></div>
@@ -207,5 +288,4 @@ const BillingPage: React.FC = () => {
     </div>
   );
 };
-
 export default BillingPage;
