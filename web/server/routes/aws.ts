@@ -1421,8 +1421,8 @@ awsRouter.post('/root-credentials/:accountId/delete-mfa', requireRootAccess, asy
   } catch (e: any) { res.status(500).json({ error: e.message }); }
 });
 
-// Recover (re-enable) member account root user password via centralized root access (sts:AssumeRoot).
-// Triggers AWS password recovery flow (reset email to the account's root address). Full-admin only, audited.
+// Allow a member account root user to recover its password via centralized root access (sts:AssumeRoot).
+// Uses the IAMCreateRootUserPassword task policy and is restricted to users with root-access permission.
 awsRouter.post('/root-credentials/:accountId/recover-password', requireRootAccess, async (req: Request, res: Response) => {
   try {
     const accountId = String(req.params.accountId);
@@ -1434,13 +1434,18 @@ awsRouter.post('/root-credentials/:accountId/recover-password', requireRootAcces
     db.addAuditLog(
       user?.userId,
       'ROOT_PASSWORD_RECOVER',
-      `AWS 账户 ${accountId} · 允许恢复根用户密码（删除现有根密码，改由根邮箱自助重置）`,
+      `AWS 账户 ${accountId} · 允许恢复根用户密码（IAMCreateRootUserPassword）`,
       user?.username,
       req.ip,
     );
     (res.locals as any).audited = true;
     res.json({ success: true, data: result });
-  } catch (e: any) { res.status(500).json({ error: e.message }); }
+  } catch (e: any) {
+    if (e?.code === 'ROOT_PASSWORD_ALREADY_EXISTS') {
+      return res.status(409).json({ error: e.message });
+    }
+    res.status(500).json({ error: e.message });
+  }
 });
 
 // Delete a member account root user access key via centralized root access (sts:AssumeRoot).

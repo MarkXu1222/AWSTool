@@ -112,9 +112,7 @@ const RootCredentialsPanel: React.FC<Props> = ({ accountId, rootCredentials, can
     try {
       const res = await api.recoverRootPassword(accountId);
       if (res.success) {
-        message.success(res.data?.alreadyNoPassword
-          ? '该根用户本来就没有密码，现在即可去控制台用根邮箱「忘记密码」重置'
-          : '已删除根用户密码，现在可去控制台用根邮箱「忘记密码」重置');
+        message.success('已允许通过根邮箱恢复密码，请在 root 登录页使用「忘记密码」流程');
       } else {
         message.error(res.error || '恢复失败');
       }
@@ -219,8 +217,8 @@ const RootCredentialsPanel: React.FC<Props> = ({ accountId, rootCredentials, can
               {canRoot && (
                 <Popconfirm
                   title="允许恢复根用户密码"
-                  description="将删除该账户根用户现有密码，使其可通过根邮箱自助重置。之后请到该账户登录页点「忘记密码」，用根邮箱收邮件设置新密码。操作会被审计。"
-                  okText="确认删除密码" cancelText="取消"
+                  description="将通过 AWS Organizations 集中式根访问允许该成员账户使用根邮箱执行「忘记密码」流程；不会读取、生成、保存或删除现有 root 密码。操作会被审计。"
+                  okText="允许恢复" cancelText="取消"
                   onConfirm={handleRecoverPassword}
                 >
                   <Button size="small" type="link" icon={<UnlockOutlined />} loading={pwdLoading}>允许恢复密码</Button>

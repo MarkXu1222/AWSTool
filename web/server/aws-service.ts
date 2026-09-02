@@ -15,6 +15,7 @@ import {
   DeactivateMFADeviceCommand,
   DeleteVirtualMFADeviceCommand,
   DeleteLoginProfileCommand,
+  CreateLoginProfileCommand,
   ListAccessKeysCommand,
   GetLoginProfileCommand,
   DeleteAccessKeyCommand,
@@ -504,28 +505,28 @@ export async function deleteRootMFA(accountId: string) {
 }
 
 /**
- * 允许恢复成员账户根用户密码。
+ * 允许成员账户根用户通过标准「忘记密码」流程恢复密码。
  *
- * 做法：AssumeRoot(IAMDeleteRootUserCredentials) → DeleteLoginProfile（省略 UserName 即 root 本身），
- * 即【删除该账户根用户现有的密码】。删除后根用户处于「无密码」状态，
- * 之后到该账户登录页用根邮箱走「忘记密码」，AWS 会发重置邮件，由所有者自行设置新密码。
- *
- * 为什么不是 CreateLoginProfile：那是给 root 直接设一个新密码，
- * 且在已有密码时会报 EntityAlreadyExists；我们要的是把密码控制权交还给邮箱持有者。
+ * AssumeRoot(IAMCreateRootUserPassword) 返回仅限该特权任务的 root 会话；
+ * CreateLoginProfile 必须省略 UserName 和 Password，由 AWS 启用根邮箱恢复流程。
+ * 若登录密码已存在则明确返回冲突，绝不删除或覆盖现有密码。
  */
 export async function recoverRootPassword(accountId: string) {
-  const rootCreds = await assumeRoot(accountId, ROOT_TASK_POLICY.delete);
+  const rootCreds = await assumeRoot(accountId, ROOT_TASK_POLICY.createPassword);
   const iamRoot = new IAMClient({ region: DEFAULT_REGION, credentials: rootCreds });
   try {
-    await iamRoot.send(new DeleteLoginProfileCommand({}));
+    await iamRoot.send(new CreateLoginProfileCommand({}));
+    return { accountId, ok: true, recoveryAllowed: true };
   } catch (e: any) {
-    // 本来就没有密码：已经是可走「忘记密码」的状态，视为幂等成功
-    if (e?.name === 'NoSuchEntityException' || e?.name === 'NoSuchEntity') {
-      return { accountId, ok: true, alreadyNoPassword: true };
+    if (e?.name === 'EntityAlreadyExistsException' || e?.name === 'EntityAlreadyExists') {
+      throw Object.assign(new Error('该账户已存在 root 登录密码，无需允许恢复'), {
+        code: 'ROOT_PASSWORD_ALREADY_EXISTS',
+      });
     }
     throw e;
+  } finally {
+    iamRoot.destroy();
   }
-  return { accountId, ok: true, alreadyNoPassword: false };
 }
 
 /**
