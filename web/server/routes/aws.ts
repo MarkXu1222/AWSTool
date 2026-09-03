@@ -592,7 +592,10 @@ function getDashboardLiveCounters() {
     quotaPending = db.getQuotaRequests().filter((r: any) =>
       r.status !== 'CASE_CLOSED' && Number(r.current_value) < Number(r.desired_value)).length;
   } catch { /* 同上 */ }
-  return { roleIssues, quotaPending };
+  // 离场账户：只计当前仍处于「已离开」状态的（rejoined 的不算）
+  let departed = 0;
+  try { departed = getDepartedSummary().total; } catch { /* 同上 */ }
+  return { roleIssues, quotaPending, departed };
 }
 
 // Dashboard summary — cached, instant

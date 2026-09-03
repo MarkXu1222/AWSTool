@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { Card, Table, Row, Col, Skeleton } from 'antd';
-import { DollarOutlined, TeamOutlined, AlertOutlined, LinkOutlined, SafetyCertificateOutlined, RiseOutlined } from '@ant-design/icons';
+import { DollarOutlined, TeamOutlined, AlertOutlined, LinkOutlined, SafetyCertificateOutlined, RiseOutlined, UserAddOutlined, LogoutOutlined } from '@ant-design/icons';
 import { api } from '../api';
 import EmptyState from '../components/EmptyState';
 
@@ -90,6 +90,7 @@ const Dashboard: React.FC<DashboardProps> = ({ onNavigate }) => {
   // undefined = 后端未返回（从未跑过角色检测），此时隐藏整卡而不是显示误导性的 0
   const [roleIssues, setRoleIssues] = useState<{ unreachable: number; pending: number } | undefined>(undefined);
   const [quotaPending, setQuotaPending] = useState(0);
+  const [departed, setDeparted] = useState(0);
   const [caseOpened7d, setCaseOpened7d] = useState(0);
   const [connected, setConnected] = useState(false);
   const [connSummary, setConnSummary] = useState<{ ok: number; total: number }>({ ok: 0, total: 0 });
@@ -118,6 +119,7 @@ const Dashboard: React.FC<DashboardProps> = ({ onNavigate }) => {
           setTopPayers(d.topPayers || []);
           setRoleIssues(d.roleIssues);
           setQuotaPending(d.quotaPending || 0);
+          setDeparted(d.departed || 0);
         }
       })
       .catch(() => {})
@@ -149,6 +151,15 @@ const Dashboard: React.FC<DashboardProps> = ({ onNavigate }) => {
   const costVal = useCountUp(totalCost, !costLoading);
 
   const roleIssueTotal = roleIssues ? roleIssues.unreachable + roleIssues.pending : 0;
+  // 近 30 天新增账户（客户端从缓存列表算，JoinedTimestamp 由 Organizations 提供）
+  const joined30d = accounts.filter((a: any) => {
+    const t = a.JoinedTimestamp ? new Date(a.JoinedTimestamp).getTime() : 0;
+    return t > Date.now() - 30 * 24 * 3600 * 1000;
+  }).length;
+  // 连接状态三态：全部连接=正常；挂少数=部分异常（黄）；挂 1/3 以上才红色异常
+  const connFailed = connSummary.total - connSummary.ok;
+  const connState: 'ok' | 'partial' | 'down' = connSummary.total === 0 || connFailed === 0
+    ? 'ok' : (connFailed / connSummary.total > 1 / 3 ? 'down' : 'partial');
 
   const topColumns = [
     { title: '#', key: 'rank', width: 48, align: 'center' as const, render: (_: any, __: any, i: number) => <RankBadge rank={i + 1} /> },
@@ -220,10 +231,12 @@ const Dashboard: React.FC<DashboardProps> = ({ onNavigate }) => {
             onClick={onNavigate ? () => onNavigate('quotas') : undefined} />
         </Col>
         <Col xs={12} sm={12} md={6}>
+          {/* 三态：43/44 只挂 1 个组织时显示黄色「部分异常」而非全红，避免误导成平台整体故障 */}
           <KpiCard icon={<LinkOutlined />} label="连接状态"
-            tint={connected ? '#f6ffed' : '#fff2f0'} color={connected ? '#52c41a' : '#ff4d4f'}
-            value={connected ? '正常' : connLoading ? '检查中' : '异常'}
-            valueColor={connected ? '#52c41a' : connLoading ? '#8a94a6' : '#ff4d4f'}
+            tint={connState === 'ok' ? '#f6ffed' : connState === 'partial' ? '#fffbe6' : '#fff2f0'}
+            color={connState === 'ok' ? '#52c41a' : connState === 'partial' ? '#faad14' : '#ff4d4f'}
+            value={connLoading ? '检查中' : connState === 'ok' ? '正常' : connState === 'partial' ? `${connFailed} 个组织异常` : '异常'}
+            valueColor={connLoading ? '#8a94a6' : connState === 'ok' ? '#52c41a' : connState === 'partial' ? '#d48806' : '#ff4d4f'}
             loading={connLoading} sub={connLabel}
             onClick={onNavigate ? () => onNavigate('settings') : undefined} />
         </Col>
@@ -251,6 +264,19 @@ const Dashboard: React.FC<DashboardProps> = ({ onNavigate }) => {
             loading={costLoading}
             sub="Case 未关闭且当前值未到目标"
             onClick={onNavigate ? () => onNavigate('quotas') : undefined} />
+        </Col>
+        <Col xs={12} sm={12} md={6}>
+          <KpiCard icon={<UserAddOutlined />} label="近 30 天新增账户" tint="#eff4ff" color="#2563eb"
+            value={joined30d} loading={!ready}
+            sub="按加入组织时间统计"
+            onClick={onNavigate ? () => onNavigate('accounts') : undefined} />
+        </Col>
+        <Col xs={12} sm={12} md={6}>
+          <KpiCard icon={<LogoutOutlined />} label="已离开组织账户"
+            tint={departed > 0 ? '#fafafa' : '#f6ffed'} color={departed > 0 ? '#8a94a6' : '#52c41a'}
+            value={departed} loading={costLoading}
+            sub="被移出后未重新加入"
+            onClick={onNavigate ? () => onNavigate('accounts') : undefined} />
         </Col>
       </Row>
 
