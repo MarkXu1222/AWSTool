@@ -570,12 +570,37 @@ awsRouter.get('/billing/by-account', async (req: Request, res: Response) => {
   } catch (e: any) { res.status(500).json({ error: e.message }); }
 });
 
+// 实时运营计数（读内存 DB，轻量，不进费用缓存 —— 保证永远新鲜）：
+// - roleIssues: 账户角色自愈的异常计数。刻意只返回计数不返回 problems 明细，
+//   明细仍走 requireStrictAdmin 的 /accounts/roles-status，权限模型不被破坏。
+// - quotaPending: 配额待达标数（Case 未关闭且当前值未到目标值）。
+function getDashboardLiveCounters() {
+  let roleIssues: { unreachable: number; pending: number } | undefined;
+  try {
+    const roles = getAccountRolesSummary();
+    // 从未跑过角色检测（total=0，如新部署）时不返回该字段，前端据此隐藏整卡，
+    // 避免显示误导性的「0 异常」
+    if (roles.total > 0) {
+      roleIssues = {
+        unreachable: roles.byState['unreachable'] || 0,
+        pending: (roles.byState['pending'] || 0) + (roles.byState['retrying'] || 0),
+      };
+    }
+  } catch { /* 角色数据不可用时静默降级，不影响费用展示 */ }
+  let quotaPending = 0;
+  try {
+    quotaPending = db.getQuotaRequests().filter((r: any) =>
+      r.status !== 'CASE_CLOSED' && Number(r.current_value) < Number(r.desired_value)).length;
+  } catch { /* 同上 */ }
+  return { roleIssues, quotaPending };
+}
+
 // Dashboard summary — cached, instant
 awsRouter.get('/dashboard/summary', async (_req: Request, res: Response) => {
   try {
     const cached = db.getDashboardCache();
     if (cached) {
-      res.json({ success: true, data: cached });
+      res.json({ success: true, data: { ...cached, ...getDashboardLiveCounters() } });
       // Refresh in background if older than 1 hour
       const age = cached.cachedAt ? Date.now() - new Date(cached.cachedAt).getTime() : Infinity;
       if (age > 60 * 60 * 1000) {
@@ -585,7 +610,7 @@ awsRouter.get('/dashboard/summary', async (_req: Request, res: Response) => {
     }
     // No cache — compute now
     const summary = await refreshDashboardCache();
-    res.json({ success: true, data: summary });
+    res.json({ success: true, data: { ...summary, ...getDashboardLiveCounters() } });
   } catch (e: any) { res.status(500).json({ error: e.message }); }
 });
 
@@ -609,7 +634,23 @@ export async function refreshDashboardCache() {
     .map(([accountId, cost]) => ({ key: accountId, accountId, cost }))
     .sort((a, b) => b.cost - a.cost)
     .slice(0, 10);
-  const summary = { totalCost, topAccounts };
+  // 组织（payer）维度聚合：账户级 Top 只反映单账户，这里回答「哪个组织整体在烧钱」。
+  // 账户→payer 映射来自账户缓存的 _payer；缓存缺失的账户归入「未知」而不是丢弃，
+  // 保证 topPayers 各项之和与 totalCost 口径一致。
+  const cachedAccounts: any[] = db.getAccountsCache().accounts || [];
+  const payerOf = new Map<string, string>(cachedAccounts.map((a: any) => [a.Id, a._payer || '未知']));
+  const payerCostMap: Record<string, { cost: number; accounts: number }> = {};
+  for (const [acctId, cost] of Object.entries(accountCostMap)) {
+    const p = payerOf.get(acctId) || '未知';
+    if (!payerCostMap[p]) payerCostMap[p] = { cost: 0, accounts: 0 };
+    payerCostMap[p].cost += cost;
+    payerCostMap[p].accounts += 1;
+  }
+  const topPayers = Object.entries(payerCostMap)
+    .map(([payer, v]) => ({ key: payer, payer, cost: v.cost, accounts: v.accounts }))
+    .sort((a, b) => b.cost - a.cost)
+    .slice(0, 10);
+  const summary = { totalCost, topAccounts, topPayers };
   db.setDashboardCache(summary);
   return { ...summary, cachedAt: new Date().toISOString() };
 }

@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { Card, Table, Row, Col, Skeleton } from 'antd';
-import { DollarOutlined, TeamOutlined, AlertOutlined, LinkOutlined } from '@ant-design/icons';
+import { DollarOutlined, TeamOutlined, AlertOutlined, LinkOutlined, SafetyCertificateOutlined, RiseOutlined } from '@ant-design/icons';
 import { api } from '../api';
 import EmptyState from '../components/EmptyState';
 
@@ -86,6 +86,10 @@ const Dashboard: React.FC<DashboardProps> = ({ onNavigate }) => {
   const [accounts, setAccounts] = useState<any[]>([]);
   const [totalCost, setTotalCost] = useState(0);
   const [topAccounts, setTopAccounts] = useState<any[]>([]);
+  const [topPayers, setTopPayers] = useState<any[]>([]);
+  // undefined = 后端未返回（从未跑过角色检测），此时隐藏整卡而不是显示误导性的 0
+  const [roleIssues, setRoleIssues] = useState<{ unreachable: number; pending: number } | undefined>(undefined);
+  const [quotaPending, setQuotaPending] = useState(0);
   const [caseOpened7d, setCaseOpened7d] = useState(0);
   const [connected, setConnected] = useState(false);
   const [connSummary, setConnSummary] = useState<{ ok: number; total: number }>({ ok: 0, total: 0 });
@@ -111,6 +115,9 @@ const Dashboard: React.FC<DashboardProps> = ({ onNavigate }) => {
           const d = res.data || {};
           setTotalCost(d.totalCost || 0);
           setTopAccounts(d.topAccounts || []);
+          setTopPayers(d.topPayers || []);
+          setRoleIssues(d.roleIssues);
+          setQuotaPending(d.quotaPending || 0);
         }
       })
       .catch(() => {})
@@ -141,6 +148,8 @@ const Dashboard: React.FC<DashboardProps> = ({ onNavigate }) => {
   const caseCountVal = useCountUp(caseOpened7d, ready);
   const costVal = useCountUp(totalCost, !costLoading);
 
+  const roleIssueTotal = roleIssues ? roleIssues.unreachable + roleIssues.pending : 0;
+
   const topColumns = [
     { title: '#', key: 'rank', width: 48, align: 'center' as const, render: (_: any, __: any, i: number) => <RankBadge rank={i + 1} /> },
     {
@@ -158,6 +167,25 @@ const Dashboard: React.FC<DashboardProps> = ({ onNavigate }) => {
     },
     {
       title: '占比', key: 'pct', width: 220,
+      render: (_: any, record: any) => <MiniBar pct={totalCost > 0 ? (record.cost / totalCost) * 100 : 0} />,
+    },
+  ];
+
+  const payerColumns = [
+    { title: '#', key: 'rank', width: 48, align: 'center' as const, render: (_: any, __: any, i: number) => <RankBadge rank={i + 1} /> },
+    {
+      title: '组织', dataIndex: 'payer', key: 'payer',
+      render: (payer: string, record: any) => (
+        <span><strong>{payer}</strong><br />
+          <span style={{ fontSize: 12, color: '#8a94a6' }}>{record.accounts} 个计费账户</span></span>
+      ),
+    },
+    {
+      title: '本月费用', dataIndex: 'cost', key: 'cost', align: 'right' as const, width: 130,
+      render: (cost: number) => <span style={{ fontWeight: 600, fontVariantNumeric: 'tabular-nums' }}>{fmtUSD(cost)}</span>,
+    },
+    {
+      title: '占比', key: 'pct', width: 150,
       render: (_: any, record: any) => <MiniBar pct={totalCost > 0 ? (record.cost / totalCost) * 100 : 0} />,
     },
   ];
@@ -202,15 +230,53 @@ const Dashboard: React.FC<DashboardProps> = ({ onNavigate }) => {
       </Row>
 
 
-      {/* 本月费用 Top 10 */}
-      <Card size="small" title="本月费用 Top 10">
-        {costLoading ? (
-          <Skeleton active paragraph={{ rows: 6 }} />
-        ) : (
-          <Table size="small" dataSource={topAccounts} columns={topColumns} pagination={false} rowKey="key"
-            locale={{ emptyText: <EmptyState icon={<DollarOutlined />} description="暂无本月费用数据" hint="费用数据每 2 小时同步一次" /> }} />
+      {/* 运营状态行：权限异常 / 配额待达标（数据来自 /dashboard/summary 的实时计数） */}
+      <Row gutter={[16, 16]} style={{ marginBottom: 16 }}>
+        {roleIssues !== undefined && (
+          <Col xs={12} sm={12} md={6}>
+            <KpiCard icon={<SafetyCertificateOutlined />} label="权限异常账户"
+              tint={roleIssueTotal > 0 ? '#fff2f0' : '#f6ffed'} color={roleIssueTotal > 0 ? '#ff4d4f' : '#52c41a'}
+              value={roleIssueTotal > 0 ? roleIssueTotal : '全部正常'}
+              valueColor={roleIssueTotal > 0 ? '#cf1322' : '#52c41a'}
+              loading={costLoading}
+              sub={roleIssueTotal > 0 ? `无法访问 ${roleIssues.unreachable} / 补齐中 ${roleIssues.pending}` : '角色探测无异常'}
+              onClick={onNavigate ? () => onNavigate('accounts') : undefined} />
+          </Col>
         )}
-      </Card>
+        <Col xs={12} sm={12} md={6}>
+          <KpiCard icon={<RiseOutlined />} label="配额待达标"
+            tint={quotaPending > 0 ? '#fffbe6' : '#f6ffed'} color={quotaPending > 0 ? '#faad14' : '#52c41a'}
+            value={quotaPending}
+            valueColor={quotaPending > 0 ? '#d48806' : '#1a2233'}
+            loading={costLoading}
+            sub="Case 未关闭且当前值未到目标"
+            onClick={onNavigate ? () => onNavigate('quotas') : undefined} />
+        </Col>
+      </Row>
+
+      {/* 费用 Top：左 = 账户维度，右 = 组织(payer)维度 */}
+      <Row gutter={[16, 16]}>
+        <Col xs={24} lg={14}>
+          <Card size="small" title="本月费用 Top 10（账户）">
+            {costLoading ? (
+              <Skeleton active paragraph={{ rows: 6 }} />
+            ) : (
+              <Table size="small" dataSource={topAccounts} columns={topColumns} pagination={false} rowKey="key"
+                locale={{ emptyText: <EmptyState icon={<DollarOutlined />} description="暂无本月费用数据" hint="费用数据每 2 小时同步一次" /> }} />
+            )}
+          </Card>
+        </Col>
+        <Col xs={24} lg={10}>
+          <Card size="small" title="本月费用 Top 10（组织）">
+            {costLoading ? (
+              <Skeleton active paragraph={{ rows: 6 }} />
+            ) : (
+              <Table size="small" dataSource={topPayers} columns={payerColumns} pagination={false} rowKey="key"
+                locale={{ emptyText: <EmptyState icon={<DollarOutlined />} description="暂无组织费用数据" hint="费用缓存刷新后展示（每 2 小时）" /> }} />
+            )}
+          </Card>
+        </Col>
+      </Row>
     </div>
   );
 };
