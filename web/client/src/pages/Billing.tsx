@@ -713,6 +713,12 @@ const BillingPage: React.FC = () => {
               render: (value: string) => dayjs(value).format('YYYY-MM-DD HH:mm'),
             },
             {
+              title: '导出人',
+              dataIndex: 'createdBy',
+              width: 110,
+              ellipsis: true,
+            },
+            {
               title: '状态',
               dataIndex: 'status',
               width: 120,
