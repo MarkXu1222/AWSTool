@@ -771,14 +771,17 @@ awsRouter.post('/billing/export-jobs', requireBillingAccess, async (req: Request
   }
 });
 
-// 历史任务分页列表。默认仅返回当前用户；admin 只有显式 scope=all 才查看全局，自动恢复不会混入他人任务。
+// 历史任务分页列表。admin 默认查看全局；其他用户始终只返回本人记录。自动恢复显式请求 scope=mine。
 awsRouter.get('/billing/export-jobs', requireBillingAccess, (req: Request, res: Response) => {
   try {
     const user = (res.locals as any).billingUser;
-    const rawScope = String(req.query.scope || 'mine');
-    if (!['mine', 'all'].includes(rawScope)) return res.status(400).json({ error: 'scope 必须是 mine 或 all' });
-    if (rawScope === 'all' && user.role !== 'admin') return res.status(403).json({ error: '只有管理员可查看全部账单导出记录' });
-    const scope = rawScope as 'mine' | 'all';
+    const requestedScope = req.query.scope == null ? undefined : String(req.query.scope);
+    if (requestedScope !== undefined && !['mine', 'all'].includes(requestedScope)) {
+      return res.status(400).json({ error: 'scope 必须是 mine 或 all' });
+    }
+    const scope: 'mine' | 'all' = user.role === 'admin'
+      ? ((requestedScope as 'mine' | 'all' | undefined) ?? 'all')
+      : 'mine';
     const page = Math.max(1, Math.floor(Number(req.query.page || 1)) || 1);
     const limit = Math.max(1, Math.min(50, Math.floor(Number(req.query.limit || 20)) || 20));
     const userId = user.id == null ? '' : String(user.id);

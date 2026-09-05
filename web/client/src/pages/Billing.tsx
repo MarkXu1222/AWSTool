@@ -90,7 +90,7 @@ const BillingPage: React.FC = () => {
   const loadExportHistory = async (page = 1) => {
     setHistoryLoading(true);
     try {
-      const res = await api.billingExportJobs({ page, limit: HISTORY_PAGE_SIZE, scope: 'mine' });
+      const res = await api.billingExportJobs({ page, limit: HISTORY_PAGE_SIZE });
       if (!res.success) throw new Error(res.error || '获取导出记录失败');
       setHistoryJobs(res.data || []);
       setHistoryPage(res.pagination.page);
@@ -690,7 +690,7 @@ const BillingPage: React.FC = () => {
           showIcon
           style={{ marginBottom: 12 }}
           message="导出记录与 ZIP 在服务器长期保留"
-          description="这里显示当前用户的全部历史任务；已完成且文件可用的记录可以随时重复下载。"
+          description="管理员显示全部用户的历史任务，其他用户仅显示自己的历史任务；已完成且文件可用的记录可以随时重复下载。"
         />
         <Table<BillingExportJobView>
           size="small"

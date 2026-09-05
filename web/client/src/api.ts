@@ -308,9 +308,10 @@ export const api = {
   billingExportJobs: (options: { page?: number; limit?: number; scope?: BillingExportJobListScope } = {}) => {
     const page = Math.max(1, Math.floor(options.page || 1));
     const limit = Math.max(1, Math.min(50, Math.floor(options.limit || 20)));
-    const scope = options.scope || 'mine';
+    const query = new URLSearchParams({ page: String(page), limit: String(limit) });
+    if (options.scope) query.set('scope', options.scope);
     return billingJobRequest<BillingExportJobListResponse>(
-      `/aws/billing/export-jobs?page=${page}&limit=${limit}&scope=${encodeURIComponent(scope)}`,
+      `/aws/billing/export-jobs?${query.toString()}`,
     );
   },
   billingExportJob: (jobId: string) =>
