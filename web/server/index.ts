@@ -110,6 +110,13 @@ app.get('/api/scheduler/status', authMiddleware, (_req, res) => {
 // 运维监控（仅严格 admin；不走 auditMiddleware，避免高频轮询刷爆审计日志）
 app.use('/api/ops', authMiddleware, requireOpsAdmin, opsRouter);
 
+// API 兜底 404 —— 必须在 SPA fallback 之前。
+// 否则未匹配的 /api/* （扫描器探测 /api/v1/.env 之类）会掉进 app.get('*')
+// 拿到 200 + index.html：不泄露数据，但 200 会鼓励扫描器持续加大探测。
+app.all('/api/*', (_req, res) => {
+  res.status(404).json({ error: 'Not found' });
+});
+
 // Serve static frontend
 import fs from 'fs';
 const possiblePaths = [
