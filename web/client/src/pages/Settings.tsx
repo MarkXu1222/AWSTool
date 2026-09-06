@@ -132,8 +132,8 @@ const SettingsPage: React.FC<SettingsPageProps> = ({ onLogout }) => {
           <p className="page-header-subtitle">管理连接、安全策略和用户</p>
         </div>
       </div>
-      {/* 表单类 tab 限宽更易读；用户管理是宽表格放开整宽；安全 tab 两卡并排需要更宽 */}
-      <div style={{ maxWidth: settingsTab === 'users' ? undefined : settingsTab === 'security' ? 920 : 720 }}>
+      {/* 各 tab 按内容限宽：全放开会在宽屏把表格列拉出大空档 */}
+      <div style={{ maxWidth: settingsTab === 'users' ? 1080 : settingsTab === 'security' ? 920 : 720 }}>
       <Tabs activeKey={settingsTab} onChange={setSettingsTab} items={[
         { key: 'connection', label: '连接', children: (() => {
           const failed = connection.filter((c: any) => !c.ok);
@@ -263,7 +263,7 @@ const SettingsPage: React.FC<SettingsPageProps> = ({ onLogout }) => {
                 )},
                 // admin 恒有全部权限：三列都刷红色「全部」标签是重复强调，
                 // 角色列的红 admin 标签已表达该语义，权限列用弱化文字即可
-                { title: '页面权限', render: (_: any, record: any) => {
+                { title: '页面权限', width: 320, render: (_: any, record: any) => {
                   if (record.role === 'admin') return <span style={{ color: '#8a94a6', fontSize: 12 }}>全部（管理员）</span>;
                   const pages: string[] = Array.isArray(record.allowed_pages) ? record.allowed_pages : ALL_PAGE_KEYS;
                   if (pages.length === ALL_PAGE_KEYS.length) return <Tag color="green" style={{ margin: 0 }}>全部</Tag>;
@@ -302,7 +302,7 @@ const SettingsPage: React.FC<SettingsPageProps> = ({ onLogout }) => {
                       { key: 'delete', label: <span style={{ color: '#ff4d4f' }}>删除用户</span>, onClick: () => {
                         Modal.confirm({ title: `确定删除用户 ${record.username}？`, okText: '删除', okType: 'danger', cancelText: '取消', onOk: () => handleDeleteUser(record.id) });
                       } },
-                    ] }}>
+                    ] }} placement="bottomRight">
                       <Button size="small" icon={<MoreOutlined />} aria-label="更多操作" />
                     </Dropdown>
                   </Space>
