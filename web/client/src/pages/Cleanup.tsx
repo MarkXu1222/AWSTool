@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { Alert, Button, Card, Descriptions, Input, Select, Space, Steps, Table, Tag, message } from 'antd';
-import { ArrowRightOutlined, DeleteOutlined, DollarOutlined, SearchOutlined } from '@ant-design/icons';
+import { ArrowRightOutlined, DeleteOutlined, DollarOutlined, ExclamationCircleOutlined, SearchOutlined } from '@ant-design/icons';
 import {
   api,
   CleanupDeleteInput,
@@ -14,6 +14,57 @@ import DangerConfirm from '../components/DangerConfirm';
 import EmptyState from '../components/EmptyState';
 
 const REGIONS = ['us-east-1', 'us-east-2', 'us-west-1', 'us-west-2', 'eu-west-1', 'eu-central-1', 'ap-southeast-1', 'ap-northeast-1'];
+const ALL_REGIONS = '__all__';
+
+// ===== 预估月费（删除决策的核心依据）=====
+// 近似 on-demand 月价（us-east-1 口径，730h）。仅用于删除决策参考，不是账单口径；
+// 未收录的规格按同 family 最近档位或不显示，宁缺毋滥。
+const EC2_MONTHLY_USD: Record<string, number> = {
+  't2.micro': 8.5, 't2.small': 17, 't2.medium': 34, 't2.large': 68,
+  't3.micro': 7.6, 't3.small': 15.2, 't3.medium': 30.4, 't3.large': 60.8, 't3.xlarge': 121.6, 't3.2xlarge': 243.2,
+  't3a.medium': 27.4, 't3a.large': 54.8, 't3a.xlarge': 109.6,
+  'm5.large': 70, 'm5.xlarge': 140, 'm5.2xlarge': 280, 'm5.4xlarge': 560,
+  'm6i.large': 70, 'm6i.xlarge': 140, 'm6i.2xlarge': 280,
+  'c5.large': 62, 'c5.xlarge': 124, 'c5.2xlarge': 248, 'c5.4xlarge': 496,
+  'c6i.large': 62, 'c6i.xlarge': 124, 'c6i.2xlarge': 248,
+  'r5.large': 92, 'r5.xlarge': 184, 'r5.2xlarge': 368,
+  'g4dn.xlarge': 384, 'g5.xlarge': 734, 'p3.2xlarge': 2234,
+};
+const EBS_USD_PER_GB_MONTH = 0.08; // gp2/gp3 近似
+
+// 从后端 details 字符串（如 "t3.xlarge | running" / "500GB | in-use"）解析估价与风险
+function estimateMonthlyCost(resource: CleanupResource): number | null {
+  const [spec, state] = resource.details.split('|').map(s => s.trim());
+  if (resource.type === 'EC2') {
+    const price = EC2_MONTHLY_USD[spec];
+    if (price === undefined) return null;
+    // 停止的实例不再计算算力费用（EBS 卷费用单独按卷计）
+    return state === 'running' ? price : 0;
+  }
+  if (resource.type === 'EBS') {
+    const gb = parseInt(spec, 10);
+    return Number.isFinite(gb) ? gb * EBS_USD_PER_GB_MONTH : null;
+  }
+  return null; // Lambda/S3/IAM 无固定月费
+}
+
+// 风险标记：删「正在使用」的资源代价最高，必须一眼可辨
+function riskOf(resource: CleanupResource): { label: string; color: string } | null {
+  const state = (resource.details.split('|')[1] || '').trim();
+  if (resource.type === 'EC2') {
+    if (state === 'running') return { label: '运行中', color: 'red' };
+    if (state === 'stopped') return { label: '已停止', color: 'default' };
+  }
+  if (resource.type === 'EBS') {
+    if (state === 'in-use') return { label: '挂载中', color: 'red' };
+    if (state === 'available') return { label: '未挂载', color: 'orange' };
+  }
+  return null;
+}
+
+function fmtUsd(v: number): string {
+  return `$${v.toFixed(2)}`;
+}
 
 type CostRow = { name: string; cost: number };
 type RegionCostRow = { region: string; cost: number };
@@ -151,26 +202,48 @@ const CleanupPage: React.FC = () => {
     }
   };
 
+  const [scanProgress, setScanProgress] = useState('');
+
   const scanResources = async () => {
     if (!selectedAccount) return;
     setLoading(true);
     resetScan();
     try {
-      const res = await api.scanResources(selectedAccount, selectedRegion);
-      if (res.success) {
-        const data = res.data as CleanupScanResult;
-        if (!data || !Array.isArray(data.resources) || !Array.isArray(data.warnings)) {
-          throw new Error('扫描接口返回格式无效');
+      // 全区域模式：逐区域串行扫描（后端单次只支持一个区域），聚合结果。
+      // IAM/S3 是全局资源、每个区域都会返回，用 key 去重。
+      const regionsToScan = selectedRegion === ALL_REGIONS ? REGIONS : [selectedRegion];
+      const merged = new Map<string, CleanupResource>();
+      const allWarnings: string[] = [];
+      let meta: Pick<CleanupScanResult, 'cutoff' | 'windowDays'> | null = null;
+      for (let i = 0; i < regionsToScan.length; i++) {
+        const region = regionsToScan[i];
+        if (regionsToScan.length > 1) setScanProgress(`${i + 1}/${regionsToScan.length} ${region}`);
+        try {
+          const res = await api.scanResources(selectedAccount, region);
+          if (!res.success) { allWarnings.push(`${region}: ${res.error}`); continue; }
+          const data = res.data as CleanupScanResult;
+          if (!data || !Array.isArray(data.resources) || !Array.isArray(data.warnings)) {
+            allWarnings.push(`${region}: 扫描接口返回格式无效`);
+            continue;
+          }
+          // 标注来源区域：全区域模式下删除时要按区域分组调用后端
+          data.resources.forEach(r => merged.set(r.key, { ...r, _region: region } as CleanupResource & { _region: string }));
+          data.warnings.forEach(w => allWarnings.push(regionsToScan.length > 1 ? `${region}: ${w}` : w));
+          meta = { cutoff: data.cutoff, windowDays: data.windowDays };
+        } catch (error: any) {
+          allWarnings.push(`${region}: ${error.message}`);
         }
-        setResources(data.resources);
-        setWarnings(data.warnings);
-        setScanMeta({ cutoff: data.cutoff, windowDays: data.windowDays });
-        setStep(2);
-        message.success(`发现 ${data.resources.length} 个最近 ${data.windowDays} 天的资源`);
-      } else {
-        message.error(res.error);
       }
+      setScanProgress('');
+      if (!meta) throw new Error('所有区域扫描均失败');
+      const list = Array.from(merged.values());
+      setResources(list);
+      setWarnings(allWarnings);
+      setScanMeta(meta);
+      setStep(2);
+      message.success(`发现 ${list.length} 个最近 ${meta.windowDays} 天的资源`);
     } catch (error: any) {
+      setScanProgress('');
       message.error(error.message);
     } finally {
       setLoading(false);
@@ -194,23 +267,34 @@ const CleanupPage: React.FC = () => {
 
     setDeleting(true);
     try {
-      const res = await api.deleteResources(selectedAccount, selectedRegion, toDelete);
-      if (res.success) {
-        const results = (res.data || []) as CleanupDeleteResult[];
-        const ok = results.filter(result => result.ok).length;
-        const failed = results.filter(result => !result.ok);
-        if (failed.length === 0) {
-          message.success(`已处理 ${ok} 个资源`);
-        } else {
-          message.warning(`成功 ${ok} 个，失败 ${failed.length} 个`);
-          failed.slice(0, 4).forEach(result => message.error(`${result.type} ${result.id}: ${result.error}`));
-        }
-        setSelectedKeys([]);
-        setConfirmOpen(false);
-        await scanResources();
-      } else {
-        message.error(res.error || '删除失败');
+      // 按资源来源区域分组删除（全区域扫描时资源可能来自多个 region；
+      // 单区域模式 _region 就是 selectedRegion，行为与原来一致）
+      const byRegion = new Map<string, CleanupDeleteInput[]>();
+      selectedResources
+        .filter((resource): resource is CleanupResource & { type: CleanupDeleteInput['type']; _region?: string } => resource.deletable && resource.type !== 'S3')
+        .forEach(resource => {
+          const region = (resource as any)._region || (selectedRegion === ALL_REGIONS ? REGIONS[0] : selectedRegion);
+          if (!byRegion.has(region)) byRegion.set(region, []);
+          byRegion.get(region)!.push({ type: resource.type, id: resource.id, name: resource.name });
+        });
+
+      const results: CleanupDeleteResult[] = [];
+      for (const [region, items] of byRegion) {
+        const res = await api.deleteResources(selectedAccount, region, items);
+        if (res.success) results.push(...((res.data || []) as CleanupDeleteResult[]));
+        else items.forEach(item => results.push({ type: item.type, id: item.id, ok: false, error: res.error || '删除失败' } as CleanupDeleteResult));
       }
+      const ok = results.filter(result => result.ok).length;
+      const failed = results.filter(result => !result.ok);
+      if (failed.length === 0) {
+        message.success(`已处理 ${ok} 个资源`);
+      } else {
+        message.warning(`成功 ${ok} 个，失败 ${failed.length} 个`);
+        failed.slice(0, 4).forEach(result => message.error(`${result.type} ${result.id}: ${result.error}`));
+      }
+      setSelectedKeys([]);
+      setConfirmOpen(false);
+      await scanResources();
     } catch (error: any) {
       message.error(error.message || '删除失败');
     } finally {
@@ -232,8 +316,20 @@ const CleanupPage: React.FC = () => {
   const billedRegions = costByRegion
     .map(row => row.region)
     .filter(region => /^[a-z]{2}(?:-gov)?-[a-z0-9-]+-\d$/.test(region));
-  const scanRegionOptions = (billedRegions.length ? billedRegions : REGIONS)
-    .map(region => ({ label: region, value: region }));
+  const scanRegionOptions = [
+    { label: `全部区域（${REGIONS.length} 个，逐个扫描）`, value: ALL_REGIONS },
+    ...(billedRegions.length ? billedRegions : REGIONS).map(region => ({ label: region, value: region })),
+  ];
+
+  // 选中项的预估月费合计（仅统计能估价的项）
+  const selectedCostTotal = useMemo(() => selectedResources.reduce((sum, resource) => {
+    const cost = estimateMonthlyCost(resource);
+    return sum + (cost ?? 0);
+  }, 0), [selectedResources]);
+  const selectedRunningCount = useMemo(
+    () => selectedResources.filter(resource => riskOf(resource)?.color === 'red').length,
+    [selectedResources],
+  );
 
   return (
     <div>
@@ -331,7 +427,9 @@ const CleanupPage: React.FC = () => {
                   showSearch
                   options={scanRegionOptions}
                 />
-                <Button type="primary" icon={<ArrowRightOutlined />} onClick={scanResources} loading={loading}>扫描最近 7 天资源</Button>
+                <Button type="primary" icon={<ArrowRightOutlined />} onClick={scanResources} loading={loading}>
+                  {loading && scanProgress ? `扫描中 ${scanProgress}` : '扫描最近 7 天资源'}
+                </Button>
                 <span style={{ color: '#8a94a6', fontSize: 12 }}>IAM 用户和 S3 桶为全局资源，与所选区域一起返回</span>
               </Space>
             </Card>
@@ -359,6 +457,12 @@ const CleanupPage: React.FC = () => {
                 <Button danger icon={<DeleteOutlined />} disabled={selectedKeys.length === 0} onClick={() => setConfirmOpen(true)}>
                   删除选中 ({selectedKeys.length})
                 </Button>
+                {selectedKeys.length > 0 && (
+                  <span style={{ fontSize: 12, color: '#4a5468' }}>
+                    预估释放月费 <b style={{ color: '#cf1322', fontVariantNumeric: 'tabular-nums' }}>{fmtUsd(selectedCostTotal)}</b>
+                    {selectedRunningCount > 0 && <b style={{ color: '#cf1322', marginLeft: 8 }}><ExclamationCircleOutlined /> 含 {selectedRunningCount} 个运行中/挂载中资源</b>}
+                  </span>
+                )}
                 <span style={{ color: '#4a5468', fontSize: 12 }}>
                   共 {resources.length} 个资源。EC2 / EBS / Lambda 可删除；IAM 用户仅管理员可删除；S3 只能查看。
                 </span>
@@ -407,7 +511,34 @@ const CleanupPage: React.FC = () => {
                       </div>
                     ),
                   },
-                  { title: '范围', dataIndex: 'scope', width: 75, render: scope => scope === 'global' ? <Tag>全局</Tag> : <Tag color="blue">区域</Tag> },
+                  {
+                    title: '区域', key: 'region', width: 120,
+                    render: (_, record) => record.scope === 'global'
+                      ? <Tag>全局</Tag>
+                      : <code style={{ fontSize: 11 }}>{(record as any)._region || selectedRegion}</code>,
+                  },
+                  {
+                    title: '预估月费', key: 'cost', width: 95, align: 'right' as const,
+                    sorter: (a, b) => (estimateMonthlyCost(a) ?? -1) - (estimateMonthlyCost(b) ?? -1),
+                    render: (_, record) => {
+                      const cost = estimateMonthlyCost(record);
+                      if (cost === null) return <span style={{ color: '#b6bdca' }}>—</span>;
+                      return (
+                        <span style={{ fontVariantNumeric: 'tabular-nums', fontWeight: cost > 50 ? 600 : 400, color: cost > 50 ? '#cf1322' : '#4a5468' }}>
+                          {fmtUsd(cost)}
+                        </span>
+                      );
+                    },
+                  },
+                  {
+                    title: '风险', key: 'risk', width: 80,
+                    filters: [{ text: '运行中/挂载中', value: 'red' }, { text: '其他', value: 'other' }],
+                    onFilter: (value, record) => value === 'red' ? riskOf(record)?.color === 'red' : riskOf(record)?.color !== 'red',
+                    render: (_, record) => {
+                      const risk = riskOf(record);
+                      return risk ? <Tag color={risk.color} style={{ margin: 0 }}>{risk.label}</Tag> : <span style={{ color: '#b6bdca' }}>—</span>;
+                    },
+                  },
                   { title: '详情', dataIndex: 'details', ellipsis: true, render: details => <span style={{ color: '#4a5468' }}>{details}</span> },
                 ]}
               />
@@ -420,6 +551,12 @@ const CleanupPage: React.FC = () => {
             description={(
               <div>
                 <p>将永久处理选中的 <b>{selectedKeys.length}</b> 个资源，操作不可逆。</p>
+                <p>
+                  预估释放月费 <b style={{ color: '#cf1322' }}>{fmtUsd(selectedCostTotal)}</b>（近似值，供决策参考）。
+                  {selectedRunningCount > 0 && (
+                    <b style={{ color: '#cf1322' }}> 其中 {selectedRunningCount} 个资源正在运行/挂载中——请再次确认不是生产资源。</b>
+                  )}
+                </p>
                 <p>EC2 会被终止、EBS 卷会被删除、Lambda 函数会被删除。</p>
                 {selectedIamCount > 0 && (
                   <Alert
