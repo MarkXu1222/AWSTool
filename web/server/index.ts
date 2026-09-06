@@ -123,6 +123,13 @@ app.use(express.static(clientDist, {
     // 带内容 hash 的 JS/CSS 可安全长期缓存(文件名变了自然失效)。
     if (filePath.endsWith('index.html')) {
       res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+    } else if (/assets[\\/][^\\/]+-[\w-]{8,}\.(js|css)$/.test(filePath)) {
+      // vite 产物：/assets/index-<hash>.js|css → 一年 immutable。
+      // 之前是 max-age=0，2MB bundle 每次访问都要重新下载/校验，跨境网络下首屏极慢。
+      res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+    } else if (/\.(png|ico|svg|woff2?)$/.test(filePath)) {
+      // 图标等无 hash 静态资源：缓存 1 天（改动少，可接受的过期窗口）
+      res.setHeader('Cache-Control', 'public, max-age=86400');
     }
   },
 }));

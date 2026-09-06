@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useLayoutEffect, useRef } from 'react';
-import { Layout, Menu, Button } from 'antd';
+import { Layout, Menu, Button, Skeleton } from 'antd';
 import { HomeOutlined, TeamOutlined, DashboardOutlined, DollarOutlined, SettingOutlined, LogoutOutlined, DeleteOutlined, FileSearchOutlined, GlobalOutlined, TagsOutlined, ThunderboltOutlined, FundOutlined } from '@ant-design/icons';
 import DashboardPage from '../pages/Dashboard';
 import AccountsPage from '../pages/Accounts';
@@ -11,7 +11,8 @@ import AuditLogPage from '../pages/AuditLog';
 import SettingsPage from '../pages/Settings';
 import TagCompliancePage from '../pages/TagCompliance';
 import BulkQuotaPage from '../pages/BulkQuota';
-import OpsMonitorPage from '../pages/OpsMonitor';
+// 运维监控懒加载：recharts 只有 admin 用得到，非 admin 用户不用下载 charts 分包
+const OpsMonitorPage = React.lazy(() => import('../pages/OpsMonitor'));
 import { api } from '../api';
 import { APP_VERSION } from '../version';
 
@@ -223,7 +224,11 @@ const MainLayout: React.FC<MainLayoutProps> = ({ onLogout }) => {
       case 'accounts': return <AccountsPage />;
       case 'quotas': return <QuotasPage />;
       case BULK_QUOTA_PAGE_KEY: return <BulkQuotaPage />;
-      case OPS_PAGE_KEY: return <OpsMonitorPage />;
+      case OPS_PAGE_KEY: return (
+        <React.Suspense fallback={<div style={{ padding: 24 }}><Skeleton active paragraph={{ rows: 8 }} /></div>}>
+          <OpsMonitorPage />
+        </React.Suspense>
+      );
       case 'regions': return <RegionsPage />;
       case 'billing': return <BillingPage />;
       case 'cleanup': return <CleanupPage />;
