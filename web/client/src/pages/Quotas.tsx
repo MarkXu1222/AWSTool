@@ -343,7 +343,7 @@ const QuotasPage: React.FC = () => {
     setQuickSubmitting(true);
     try {
       const res = await api.requestQuotaIncrease(selectedAccount, quickQuota.ServiceCode, quickQuota.QuotaCode, quickTarget, quickQuota.QuotaName, quickRegion);
-      if (res.success) { message.success('配额提升请求已提交！'); loadDbRecords(); }
+      if (res.success) { message.success('配额提升请求已提交'); loadDbRecords(); }
       else message.error(res.error);
     } catch (e: any) { message.error(e.message); }
     finally { setQuickSubmitting(false); }
@@ -522,7 +522,7 @@ const QuotasPage: React.FC = () => {
     const values = await form.validateFields();
     try {
       const res = await api.requestQuotaIncrease(selectedAccount, selectedQuota.ServiceCode, selectedQuota.QuotaCode, values.desiredValue, selectedQuota.QuotaName, incRegionOverride || selectedRegion);
-      if (res.success) { message.success('配额提升请求已提交！'); setModalOpen(false); loadDbRecords(); }
+      if (res.success) { message.success('配额提升请求已提交'); setModalOpen(false); loadDbRecords(); }
       else message.error(res.error);
     } catch (e: any) { message.error(e.message); }
   };

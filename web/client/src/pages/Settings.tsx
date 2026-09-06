@@ -74,7 +74,7 @@ const SettingsPage: React.FC<SettingsPageProps> = ({ onLogout }) => {
   const confirmMFA = async () => {
     try {
       const res = await api.confirmMFA(mfaSecret, confirmCode);
-      if (res.success) { setMfaEnabled(true); setQrCode(''); message.success('MFA 已启用！'); }
+      if (res.success) { setMfaEnabled(true); setQrCode(''); message.success('MFA 已启用'); }
       else message.error(res.error);
     } catch (e: any) { message.error(e.message); }
   };

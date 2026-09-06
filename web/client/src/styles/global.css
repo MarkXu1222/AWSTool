@@ -48,6 +48,10 @@
   --shadow-pop: 0 8px 24px rgba(16, 24, 40, 0.12);
   /* 侧边栏宽度 */
   --sider-width: 224px;
+  /* z-index 刻度（新代码只准用这些，禁止魔法数） */
+  --z-sider: 100;       /* 桌面固定侧栏 */
+  --z-overlay: 900;     /* 移动端全屏覆盖层 */
+  --z-bottom-nav: 1000; /* 移动端底部导航，须压过 overlay */
 }
 
 /* === Reset === */
@@ -98,7 +102,7 @@ code, pre {
   height: 100vh;
   left: 0;
   top: 0;
-  z-index: 100;
+  z-index: var(--z-sider);
   overflow: hidden;
 }
 .desktop-sider .ant-layout-sider-children {
@@ -277,7 +281,8 @@ code, pre {
   border-bottom: 1px solid var(--color-border) !important;
   color: var(--color-text-secondary) !important;
   font-size: 14px !important;
-  font-weight: 600 !important;
+  /* 字重节奏：表头 500 < 卡片标题 600 < 页面标题 700。表头是辅助信息，不与内容抢重量 */
+  font-weight: 500 !important;
   padding: 12px 16px !important;
 }
 .ant-table-tbody > tr > td {
@@ -489,7 +494,7 @@ code, pre {
   justify-content: space-around;
   padding: 6px 0;
   padding-bottom: calc(6px + env(safe-area-inset-bottom, 0));
-  z-index: 1000;
+  z-index: var(--z-bottom-nav);
 }
 .bottom-nav-item {
   display: flex;
@@ -552,7 +557,7 @@ code, pre {
   height: 100vh;
   height: 100dvh;
   background: #fff;
-  z-index: 999;
+  z-index: var(--z-overlay);
   overflow-y: auto;
   -webkit-overflow-scrolling: touch;
 }

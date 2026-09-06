@@ -22,6 +22,15 @@
 - Prefer integration tests over unit tests for business logic
 - Mock external dependencies only
 
+## Frontend Style Rules (web/client)
+- Colors: only `var(--color-*)` tokens from global.css — never raw hex in components. Gray scale is exactly 3 levels: secondary `#4a5468` / muted `#8a94a6` / disabled `#b6bdca`.
+- z-index: only `var(--z-*)` tokens (sider 100 / overlay 900 / bottom-nav 1000) — no magic numbers.
+- Font weight rhythm: table headers 500, card/section titles 600, page titles 700.
+- Icons: AntD icons with semantic color tokens; never emoji as UI icons.
+- Inline `style={{}}`: acceptable for one-off layout tweaks; any pattern repeated 3+ times must become a class in global.css (existing debt in TagCompliance/Accounts/Quotas to be reduced opportunistically).
+- Success messages: no exclamation marks; be confident, not loud.
+- AntD theme: brand tokens live in main.tsx ConfigProvider AND :root CSS vars — change both together.
+
 ## AWS Specific
 - Use IAM least-privilege principle
 - Tag all resources appropriately
