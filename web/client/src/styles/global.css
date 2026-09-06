@@ -69,6 +69,12 @@ code, pre {
 }
 /* 数字/金额对齐更整齐 */
 .ant-statistic-content, .ant-table-cell, .ant-tag { font-variant-numeric: tabular-nums; }
+/* KPI 大数字：等宽数字（滚动动画不抖）+ 轻微负字距（大号数字更紧凑挺拔） */
+.kpi-value {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: 'tnum';
+  letter-spacing: -0.01em;
+}
 
 /* 尊重"减少动态效果"偏好 */
 @media (prefers-reduced-motion: reduce) {

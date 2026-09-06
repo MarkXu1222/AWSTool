@@ -64,18 +64,18 @@ const LoginPage: React.FC<LoginPageProps> = ({ onSuccess }) => {
 
         <Form form={form} layout="vertical" onFinish={handleLogin} requiredMark={false}>
           <Form.Item name="username" rules={[{ required: true, message: '请输入用户名' }]} style={{ marginBottom: 14 }}>
-            <Input prefix={<UserOutlined style={{ color: '#94a3b8' }} />} placeholder="用户名" size="large"
+            <Input prefix={<UserOutlined style={{ color: '#8a94a6' }} />} placeholder="用户名" size="large"
               aria-label="用户名" autoComplete="username" spellCheck={false} autoCapitalize="off" />
           </Form.Item>
 
           <Form.Item name="password" rules={[{ required: true, message: '请输入密码' }]} style={{ marginBottom: needMFA ? 14 : 20 }}>
-            <Input.Password prefix={<LockOutlined style={{ color: '#94a3b8' }} />} placeholder="密码" size="large"
+            <Input.Password prefix={<LockOutlined style={{ color: '#8a94a6' }} />} placeholder="密码" size="large"
               aria-label="密码" autoComplete="current-password" />
           </Form.Item>
 
           {needMFA && (
             <Form.Item name="totpCode" rules={[{ required: true, message: '请输入 6 位验证码' }]} style={{ marginBottom: 20 }}>
-              <Input prefix={<SafetyOutlined style={{ color: '#94a3b8' }} />} placeholder="6 位动态验证码" size="large"
+              <Input prefix={<SafetyOutlined style={{ color: '#8a94a6' }} />} placeholder="6 位动态验证码" size="large"
                 aria-label="动态验证码" maxLength={6} autoFocus inputMode="numeric" autoComplete="one-time-code" spellCheck={false} />
             </Form.Item>
           )}

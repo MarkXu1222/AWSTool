@@ -318,7 +318,7 @@ const CleanupPage: React.FC = () => {
                 </div>
               )}
               <Space style={{ marginTop: 12 }} wrap>
-                <span style={{ color: '#64748B', fontSize: 12 }}>扫描区域:</span>
+                <span style={{ color: '#4a5468', fontSize: 12 }}>扫描区域:</span>
                 <Select
                   aria-label="选择扫描区域"
                   style={{ width: 190 }}
@@ -332,7 +332,7 @@ const CleanupPage: React.FC = () => {
                   options={scanRegionOptions}
                 />
                 <Button type="primary" icon={<ArrowRightOutlined />} onClick={scanResources} loading={loading}>扫描最近 7 天资源</Button>
-                <span style={{ color: '#94a3b8', fontSize: 12 }}>IAM 用户和 S3 桶为全局资源，与所选区域一起返回</span>
+                <span style={{ color: '#8a94a6', fontSize: 12 }}>IAM 用户和 S3 桶为全局资源，与所选区域一起返回</span>
               </Space>
             </Card>
           )}
@@ -359,7 +359,7 @@ const CleanupPage: React.FC = () => {
                 <Button danger icon={<DeleteOutlined />} disabled={selectedKeys.length === 0} onClick={() => setConfirmOpen(true)}>
                   删除选中 ({selectedKeys.length})
                 </Button>
-                <span style={{ color: '#64748B', fontSize: 12 }}>
+                <span style={{ color: '#4a5468', fontSize: 12 }}>
                   共 {resources.length} 个资源。EC2 / EBS / Lambda 可删除；IAM 用户仅管理员可删除；S3 只能查看。
                 </span>
               </Space>
@@ -401,14 +401,14 @@ const CleanupPage: React.FC = () => {
                     render: (eventTime, record) => (
                       <div>
                         <div>{formatTime(eventTime)}</div>
-                        <span style={{ color: record.timeBasis === 'lastModified' ? '#d46b08' : '#94a3b8', fontSize: 11 }}>
+                        <span style={{ color: record.timeBasis === 'lastModified' ? '#d46b08' : '#8a94a6', fontSize: 11 }}>
                           {TIME_BASIS_LABELS[record.timeBasis]}
                         </span>
                       </div>
                     ),
                   },
                   { title: '范围', dataIndex: 'scope', width: 75, render: scope => scope === 'global' ? <Tag>全局</Tag> : <Tag color="blue">区域</Tag> },
-                  { title: '详情', dataIndex: 'details', ellipsis: true, render: details => <span style={{ color: '#64748B' }}>{details}</span> },
+                  { title: '详情', dataIndex: 'details', ellipsis: true, render: details => <span style={{ color: '#4a5468' }}>{details}</span> },
                 ]}
               />
             </>

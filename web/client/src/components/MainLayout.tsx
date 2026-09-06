@@ -162,7 +162,7 @@ const MainLayout: React.FC<MainLayoutProps> = ({ onLogout }) => {
     // 守卫：当前页不在允许列表中时显示无权限提示（比如通过历史 URL 或旧 state 进入）
     if (!isPageAllowed(currentPage)) {
       return (
-        <div style={{ padding: 48, textAlign: 'center', color: '#999' }}>
+        <div style={{ padding: 48, textAlign: 'center', color: '#8a94a6' }}>
           <h3 style={{ color: '#666' }}>无访问权限</h3>
           <p>你没有权限访问该页面，请联系管理员。</p>
         </div>

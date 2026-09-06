@@ -54,7 +54,7 @@ const KpiCard: React.FC<KpiCardProps> = ({ icon, label, value, tint, color, load
         {loading ? (
           <Skeleton.Button active size="small" style={{ width: 88, height: 26, minWidth: 88 }} />
         ) : (
-          <div style={{ fontSize: 24, fontWeight: 700, lineHeight: 1.2, fontVariantNumeric: 'tabular-nums', color: valueColor || '#1a2233' }}>{value}</div>
+          <div className="kpi-value" style={{ fontSize: 24, fontWeight: 700, lineHeight: 1.2, color: valueColor || '#1a2233' }}>{value}</div>
         )}
         {sub && !loading && <div style={{ fontSize: 12, color: '#8a94a6', marginTop: 3 }}>{sub}</div>}
       </div>

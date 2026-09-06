@@ -37,7 +37,7 @@ async function copy(text: string, label: string) {
 
 const CredRow: React.FC<{ label: string; value: string; secret?: boolean; reveal?: boolean }> = ({ label, value, secret, reveal }) => (
   <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
-    <span style={{ width: 128, flexShrink: 0, color: '#64748B', fontSize: 12 }}>{label}</span>
+    <span style={{ width: 128, flexShrink: 0, color: '#4a5468', fontSize: 12 }}>{label}</span>
     <code style={{ flex: 1, minWidth: 0, fontSize: 12, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', background: '#f6f8fa', padding: '2px 6px', borderRadius: 4 }}>
       {secret && !reveal ? '••••••••••••••••' : value}
     </code>
@@ -200,7 +200,7 @@ const RootCredentialsPanel: React.FC<Props> = ({ accountId, rootCredentials, can
     <div>
       {/* 根用户凭证状态 + 刷新 */}
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6, flexWrap: 'wrap', rowGap: 4 }}>
-        <span style={{ fontSize: 12, color: '#94a3b8' }}>
+        <span style={{ fontSize: 12, color: '#8a94a6' }}>
           {(fetchedStatus || rootCredentials)
             ? (status.liveStatus ? 'MFA / 密钥为实时状态，密码等来自凭证报告' : '状态来自凭证报告（AWS 缓存，最长约 4 小时）')
             : ''}
@@ -251,7 +251,7 @@ const RootCredentialsPanel: React.FC<Props> = ({ accountId, rootCredentials, can
                     <div key={k.id} style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, flexWrap: 'wrap', rowGap: 4 }}>
                       <Tag color={k.status === 'Active' ? 'red' : 'default'} style={{ margin: 0 }}>{k.status === 'Active' ? '存在 ⚠️' : k.status}</Tag>
                       <code style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{k.id}</code>
-                      {k.createDate && <span style={{ color: '#94a3b8', flexShrink: 0 }}>{new Date(k.createDate).toLocaleDateString()}</span>}
+                      {k.createDate && <span style={{ color: '#8a94a6', flexShrink: 0 }}>{new Date(k.createDate).toLocaleDateString()}</span>}
                       {canRoot && (
                         <Popconfirm
                           title="删除该访问密钥"
@@ -275,7 +275,7 @@ const RootCredentialsPanel: React.FC<Props> = ({ accountId, rootCredentials, can
           )}
           {status.passwordLastUsed && <Descriptions.Item label="密码最后使用">{status.passwordLastUsed}</Descriptions.Item>}
         </Descriptions>
-      ) : detailLoading ? <span style={{ color: '#999', fontSize: 12 }}>正在加载根用户状态…</span> : <span style={{ color: '#999', fontSize: 12 }}>根用户凭证状态不可用（凭证报告获取失败）</span>}
+      ) : detailLoading ? <span style={{ color: '#8a94a6', fontSize: 12 }}>正在加载根用户状态…</span> : <span style={{ color: '#8a94a6', fontSize: 12 }}>根用户凭证状态不可用（凭证报告获取失败）</span>}
 
       {canRoot && (
         <>
@@ -339,7 +339,7 @@ const RootCredentialsPanel: React.FC<Props> = ({ accountId, rootCredentials, can
           />
         </div>
       ) : (
-        <p style={{ color: '#999', fontSize: 12, margin: 0 }}>
+        <p style={{ color: '#8a94a6', fontSize: 12, margin: 0 }}>
           {isPayer
             ? 'payer 管理账户通过 role/tool 生成，固定有效期 1 小时。'
             : isAdmin

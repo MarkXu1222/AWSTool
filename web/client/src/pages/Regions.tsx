@@ -347,7 +347,7 @@ const RegionsPage: React.FC = () => {
 
       {accounts.length === 0 && regionData.length === 0 ? (
         <Card size="small">
-          <div style={{ textAlign: 'center', padding: 40, color: '#9CA3AF' }}>
+          <div style={{ textAlign: 'center', padding: 40, color: '#8a94a6' }}>
             <GlobalOutlined style={{ fontSize: 32, marginBottom: 8 }} />
             <p>暂无数据，请点击「扫描所有账户」获取区域状态</p>
           </div>
@@ -364,8 +364,8 @@ const RegionsPage: React.FC = () => {
                 { title: '区域', dataIndex: 'region', width: 150, render: (r: string) => <code style={{ fontSize: 12 }}>{r}</code> },
                 { title: '名称', dataIndex: 'region', key: 'cn', width: 150, render: (r: string) => <span style={{ fontSize: 13 }}>{REGION_CN[r] || '-'}</span> },
                 { title: '已开通', dataIndex: 'enabled', width: 80, align: 'center', render: (n: number) => <Tag color="green">{n}</Tag> },
-                { title: '启用中', dataIndex: 'enabling', width: 80, align: 'center', render: (n: number) => n > 0 ? <Tag color="blue">{n}</Tag> : <span style={{ color: '#D1D5DB' }}>0</span> },
-                { title: '未开通', dataIndex: 'disabled', width: 80, align: 'center', render: (n: number) => n > 0 ? <Tag color="red">{n}</Tag> : <span style={{ color: '#D1D5DB' }}>0</span> },
+                { title: '启用中', dataIndex: 'enabling', width: 80, align: 'center', render: (n: number) => n > 0 ? <Tag color="blue">{n}</Tag> : <span style={{ color: '#b6bdca' }}>0</span> },
+                { title: '未开通', dataIndex: 'disabled', width: 80, align: 'center', render: (n: number) => n > 0 ? <Tag color="red">{n}</Tag> : <span style={{ color: '#b6bdca' }}>0</span> },
                 { title: '开通率', key: 'rate', width: 120, render: (_: any, r: any) => r.total > 0 ? <Progress percent={Math.round((r.enabled / r.total) * 100)} size="small" strokeColor="#52c41a" /> : '-' },
                 { title: '操作', key: 'action', width: 100, render: (_: any, r: any) => r.disabled > 0 ? (
                   <Button size="small" type="link" onClick={() => setExpandedRegion(expandedRegion === r.region ? null : r.region)}>
@@ -373,7 +373,7 @@ const RegionsPage: React.FC = () => {
                   </Button>
                 ) : unscannedAccountCount > 0
                   ? <Tooltip title={`还有 ${unscannedAccountCount} 个账户尚未扫描`}><span style={{ color: '#d46b08' }}>等待扫描</span></Tooltip>
-                  : <span style={{ color: '#D1D5DB' }}>全部开通</span> },
+                  : <span style={{ color: '#b6bdca' }}>全部开通</span> },
               ]}
             />
           </Card>
@@ -471,8 +471,8 @@ const RegionsPage: React.FC = () => {
                   );
                 })}
 
-                {searchText && searchedAccounts.length === 0 && <p style={{ color: '#9CA3AF', padding: 20, textAlign: 'center' }}>未找到匹配的账户</p>}
-                {!searchText && <p style={{ color: '#9CA3AF', padding: 20, textAlign: 'center' }}>输入账户 ID 或名称搜索</p>}
+                {searchText && searchedAccounts.length === 0 && <p style={{ color: '#8a94a6', padding: 20, textAlign: 'center' }}>未找到匹配的账户</p>}
+                {!searchText && <p style={{ color: '#8a94a6', padding: 20, textAlign: 'center' }}>输入账户 ID 或名称搜索</p>}
               </>
             ),
           },
@@ -526,13 +526,13 @@ const RegionsPage: React.FC = () => {
                       },
                       {
                         title: '启用中', dataIndex: 'enabling', width: 80, align: 'center' as const,
-                        render: (n: number) => n > 0 ? <Tag color="blue" style={{ margin: 0 }}>{n}</Tag> : <span style={{ color: '#D1D5DB' }}>0</span>,
+                        render: (n: number) => n > 0 ? <Tag color="blue" style={{ margin: 0 }}>{n}</Tag> : <span style={{ color: '#b6bdca' }}>0</span>,
                       },
                       {
                         title: '未开通', dataIndex: 'disabled', width: 80, align: 'center' as const,
                         defaultSortOrder: 'descend' as const,
                         sorter: (a: any, b: any) => a.disabled - b.disabled,
-                        render: (n: number) => n > 0 ? <Tag color="red" style={{ margin: 0 }}>{n}</Tag> : <span style={{ color: '#D1D5DB' }}>0</span>,
+                        render: (n: number) => n > 0 ? <Tag color="red" style={{ margin: 0 }}>{n}</Tag> : <span style={{ color: '#b6bdca' }}>0</span>,
                       },
                       {
                         title: '开通率', key: 'rate', width: 130,
@@ -628,8 +628,8 @@ const RegionsPage: React.FC = () => {
                                 { title: '区域', dataIndex: 'region', width: 150, render: (r: string) => <code style={{ fontSize: 12 }}>{r}</code> },
                                 { title: '名称', dataIndex: 'region', key: 'cn', width: 160, render: (r: string) => <span style={{ fontSize: 12 }}>{REGION_CN[r] || '-'}</span> },
                                 { title: '已开通', dataIndex: 'enabled', width: 80, align: 'center' as const, render: (n: number) => <span style={{ color: '#389e0d' }}>{n}</span> },
-                                { title: '启用中', dataIndex: 'enabling', width: 80, align: 'center' as const, render: (n: number) => n > 0 ? <Tag color="blue" style={{ margin: 0 }}>{n}</Tag> : <span style={{ color: '#D1D5DB' }}>0</span> },
-                                { title: '未开通', dataIndex: 'disabled', width: 80, align: 'center' as const, render: (n: number) => n > 0 ? <Tag color="red" style={{ margin: 0 }}>{n}</Tag> : <span style={{ color: '#D1D5DB' }}>0</span> },
+                                { title: '启用中', dataIndex: 'enabling', width: 80, align: 'center' as const, render: (n: number) => n > 0 ? <Tag color="blue" style={{ margin: 0 }}>{n}</Tag> : <span style={{ color: '#b6bdca' }}>0</span> },
+                                { title: '未开通', dataIndex: 'disabled', width: 80, align: 'center' as const, render: (n: number) => n > 0 ? <Tag color="red" style={{ margin: 0 }}>{n}</Tag> : <span style={{ color: '#b6bdca' }}>0</span> },
                                 {
                                   title: '操作', key: 'act', width: 170,
                                   render: (_: any, r: any) => r.disabled > 0 ? (
@@ -643,7 +643,7 @@ const RegionsPage: React.FC = () => {
                                     </Popconfirm>
                                   ) : currentGroup.unscannedAccounts > 0
                                     ? <span style={{ color: '#d46b08', fontSize: 12 }}>统计不完整</span>
-                                    : <span style={{ color: '#D1D5DB', fontSize: 12 }}>全部开通</span>,
+                                    : <span style={{ color: '#b6bdca', fontSize: 12 }}>全部开通</span>,
                                 },
                               ]}
                             />
@@ -708,7 +708,7 @@ const RegionsPage: React.FC = () => {
                 )}
 
                 {!currentGroup && (
-                  <p style={{ color: '#9CA3AF', padding: 16, textAlign: 'center', fontSize: 12 }}>
+                  <p style={{ color: '#8a94a6', padding: 16, textAlign: 'center', fontSize: 12 }}>
                     点击上方任一组织展开明细，可看到该组织下哪些账户缺哪些区域，并支持为整个组织批量启用
                   </p>
                 )}
@@ -735,13 +735,13 @@ const RegionsPage: React.FC = () => {
                         { title: '名称', dataIndex: 'name', width: 140, render: (n: string) => <span style={{ fontSize: 12 }}>{n || '-'}</span> },
                         {
                           title: '原属组织', dataIndex: 'payer', width: 170,
-                          render: (p: string) => p ? <Tag style={{ margin: 0, fontSize: 11 }}>{p}</Tag> : <span style={{ color: '#9CA3AF', fontSize: 12 }}>未知</span>,
+                          render: (p: string) => p ? <Tag style={{ margin: 0, fontSize: 11 }}>{p}</Tag> : <span style={{ color: '#8a94a6', fontSize: 12 }}>未知</span>,
                         },
                         {
                           title: '移出时间', dataIndex: 'departed_at', width: 150,
                           render: (t: string, r: any) => t
                             ? <Tooltip title={r.actor ? `操作者：${r.actor}` : ''}><span style={{ fontSize: 12 }}>{new Date(t).toLocaleString('zh-CN')}</span></Tooltip>
-                            : <Tooltip title={r.note || '未查证到移出事件'}><span style={{ color: '#9CA3AF', fontSize: 12 }}>未查证</span></Tooltip>,
+                            : <Tooltip title={r.note || '未查证到移出事件'}><span style={{ color: '#8a94a6', fontSize: 12 }}>未查证</span></Tooltip>,
                         },
                         {
                           title: '遗留区域记录', key: 'rd', width: 130,

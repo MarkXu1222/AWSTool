@@ -327,20 +327,22 @@ const AccountsPage: React.FC = () => {
               <Table size="small" pagination={false} rowKey="name" dataSource={detail.services.slice(0, 10)}
                 columns={[{ title: '服务', dataIndex: 'name', ellipsis: true }, { title: '费用', dataIndex: 'cost', width: 80, render: (c: number) => `$${c.toFixed(2)}` }]} />
             </>
-          ) : <span style={{ color: '#999' }}>无数据</span> },
+          ) : <span style={{ color: '#8a94a6' }}>无数据</span> },
           { key: 'mfa', label: '安全', children: detailLoading ? <div style={{ textAlign: 'center', padding: 30 }}><Spin /></div> : detail?.mfa ? (
             <>
               <Card size="small" style={{ marginBottom: 8 }}>
-                <p style={{ fontWeight: 600 }}>Root MFA: {detail.mfa.root ? <Tag color="green">已启用</Tag> : <Tag color="red">未启用 ⚠️</Tag>}</p>
+                <p style={{ fontWeight: 600 }}>Root MFA: {detail.mfa.root ? <Tag color="green">已启用</Tag> : <Tag color="red">未启用</Tag>}</p>
               </Card>
               {detail.mfa.users.map((u: any) => (
                 <div key={u.user} style={{ display: 'flex', justifyContent: 'space-between', padding: '8px 0', borderBottom: '1px solid #f0f0f0' }}>
                   <code>{u.user}</code>
-                  <span>{u.hasMFA ? '✅' : '❌'}</span>
+                  <span>{u.hasMFA
+                    ? <CheckCircleOutlined style={{ color: 'var(--color-success)' }} aria-label="已绑定 MFA" />
+                    : <CloseCircleOutlined style={{ color: 'var(--color-error)' }} aria-label="未绑定 MFA" />}</span>
                 </div>
               ))}
             </>
-          ) : <span style={{ color: '#999' }}>无数据</span> },
+          ) : <span style={{ color: '#8a94a6' }}>无数据</span> },
           { key: 'root', label: '根用户', children: (
             <RootCredentialsPanel accountId={selectedAccount.Id} rootCredentials={detail?.rootCredentials} canRoot={canRoot} isAdmin={isAdmin} isPayer={!!selectedAccount._isPayer} loading={detailLoading} />
           ) },
@@ -510,7 +512,7 @@ const AccountsPage: React.FC = () => {
               render: (_: any, x: any) => (
                 <div>
                   <div style={{ fontWeight: 600, fontSize: 12 }}>
-                    {x.name || <span style={{ color: '#9CA3AF', fontWeight: 400 }}>（名称未留存）</span>}
+                    {x.name || <span style={{ color: '#8a94a6', fontWeight: 400 }}>（名称未留存）</span>}
                   </div>
                   <code style={{ fontSize: 11, color: '#8a94a6' }}>{x.account_id}</code>
                 </div>
@@ -522,7 +524,7 @@ const AccountsPage: React.FC = () => {
               onFilter: (v: any, r: any) => r.payer === v,
               render: (p: string) => p
                 ? <Tag style={{ margin: 0, fontSize: 11 }}>{p}</Tag>
-                : <span style={{ color: '#9CA3AF', fontSize: 12 }}>未知</span>,
+                : <span style={{ color: '#8a94a6', fontSize: 12 }}>未知</span>,
             },
             {
               title: '移出时间', dataIndex: 'departed_at', width: 155,
@@ -536,7 +538,7 @@ const AccountsPage: React.FC = () => {
                 )
                 : (
                   <Tooltip title={r.note || '未查证到移出事件'}>
-                    <span style={{ color: '#9CA3AF', fontSize: 12 }}>未查证</span>
+                    <span style={{ color: '#8a94a6', fontSize: 12 }}>未查证</span>
                   </Tooltip>
                 ),
             },
@@ -554,7 +556,7 @@ const AccountsPage: React.FC = () => {
               title: '遗留数据', dataIndex: 'had_region_data', width: 90, align: 'center' as const,
               render: (v: boolean) => v
                 ? <Tooltip title="库中仍存有该账户的区域扫描数据，可在区域管理页「按组织查看」底部看到"><Tag color="orange" style={{ margin: 0, fontSize: 11 }}>有</Tag></Tooltip>
-                : <span style={{ color: '#D1D5DB' }}>-</span>,
+                : <span style={{ color: '#b6bdca' }}>-</span>,
             },
             {
               title: '备注', dataIndex: 'note',
@@ -652,7 +654,7 @@ const AccountsPage: React.FC = () => {
           rowKey="account_id"
           dataSource={problems}
           pagination={{ pageSize: 8, size: 'small', showTotal: t => `共 ${t} 个异常账户` }}
-          locale={{ emptyText: checked === 0 ? '尚无检测记录，点下方「立即检测」' : '所有已检测账户权限正常 ✅' }}
+          locale={{ emptyText: checked === 0 ? '尚无检测记录，点下方「立即检测」' : '所有已检测账户权限正常' }}
           columns={[
             {
               title: '账户', key: 'acct', width: 220,
@@ -780,7 +782,7 @@ const AccountsPage: React.FC = () => {
         </div>
       ),
     },
-    { title: 'ID', dataIndex: 'Id', key: 'Id', width: 130, render: (id: string) => <code style={{ fontSize: 12, color: '#64748B' }}>{id}</code> },
+    { title: 'ID', dataIndex: 'Id', key: 'Id', width: 130, render: (id: string) => <code style={{ fontSize: 12, color: '#4a5468' }}>{id}</code> },
     { title: '组织', dataIndex: '_payer', key: '_payer', width: 180,
       filters: [...new Set(accounts.map(a => a._payer))].filter(Boolean).map(p => ({ text: p, value: p })),
       onFilter: (value: any, record: any) => record._payer === value,
@@ -895,7 +897,7 @@ const AccountsPage: React.FC = () => {
                 <Tag color={a.Status === 'ACTIVE' ? 'green' : 'red'}>{a.Status}</Tag>
               </div>
             ))}
-            {filtered.length > 50 && <p style={{ textAlign: 'center', color: '#999', padding: 8 }}>显示前 50 条，请搜索缩小范围</p>}
+            {filtered.length > 50 && <p style={{ textAlign: 'center', color: '#8a94a6', padding: 8 }}>显示前 50 条，请搜索缩小范围</p>}
           </div>
         ) : (
           /* Desktop: table + side panel */

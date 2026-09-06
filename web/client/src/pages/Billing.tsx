@@ -579,7 +579,7 @@ const BillingPage: React.FC = () => {
             />
             <div style={{ marginBottom: 12 }}>
               <label htmlFor="billing-export-account-select" style={{ display: 'block', marginBottom: 4, fontWeight: 500 }}>
-                账号 <span style={{ color: '#999', fontWeight: 400 }}>({selectedAccountIds.length}/{accounts.length})</span>
+                账号 <span style={{ color: '#8a94a6', fontWeight: 400 }}>({selectedAccountIds.length}/{accounts.length})</span>
               </label>
               <Space style={{ marginBottom: 6 }} size={4} wrap>
                 <Button size="small" onClick={() => { setSelectedAccountIds(accounts.map(a => a.Id)); setAccountImportSummary(null); }}>全选</Button>
@@ -614,7 +614,7 @@ const BillingPage: React.FC = () => {
                   value: account.Id,
                 }))}
               />
-              <div style={{ marginTop: 5, color: '#999', fontSize: 12 }}>
+              <div style={{ marginTop: 5, color: '#8a94a6', fontSize: 12 }}>
                 仅读取 .xlsx 的所有工作表并识别独立 12 位账户 ID；文件只在浏览器本地处理，不会上传。含前导零的 ID 请在 Excel 中设为文本。
               </div>
               {accountImportSummary && (
@@ -643,7 +643,7 @@ const BillingPage: React.FC = () => {
             </div>
             <div style={{ marginBottom: 12 }}>
               <label htmlFor="billing-export-month-select" style={{ display: 'block', marginBottom: 4, fontWeight: 500 }}>
-                月份 <span style={{ color: '#999', fontWeight: 400 }}>({selectedMonths.length} 个)</span>
+                月份 <span style={{ color: '#8a94a6', fontWeight: 400 }}>({selectedMonths.length} 个)</span>
               </label>
               <Space style={{ marginBottom: 6 }} size={4} wrap>
                 <Button size="small" onClick={() => setSelectedMonths(monthCandidates.slice(0, 3).map(month => month.value))}>近 3 个月</Button>

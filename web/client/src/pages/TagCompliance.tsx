@@ -1047,7 +1047,7 @@ const TagCompliancePage: React.FC = () => {
           : <Tag color="red">正式打标模式</Tag>)}
       </Space>
       {!report ? (
-        <Card size="small"><div style={{ textAlign: 'center', color: '#999', padding: 32 }}>暂无报告，触发一次扫描后生成</div></Card>
+        <Card size="small"><div style={{ textAlign: 'center', color: '#8a94a6', padding: 32 }}>暂无报告，触发一次扫描后生成</div></Card>
       ) : (
         <>
           <Row gutter={12} style={{ marginBottom: 12 }}>
@@ -1065,7 +1065,7 @@ const TagCompliancePage: React.FC = () => {
                     return (
                       <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
                         {meta?.payerName && <Tag color="geekblue" style={{ margin: 0 }}>{meta.payerName}</Tag>}
-                        {meta?.payerAccountId && <code style={{ fontSize: 12, color: '#64748B' }}>{meta.payerAccountId}</code>}
+                        {meta?.payerAccountId && <code style={{ fontSize: 12, color: '#4a5468' }}>{meta.payerAccountId}</code>}
                         <code style={{ fontSize: 12 }}>{v}</code>
                       </span>
                     );
@@ -1073,7 +1073,7 @@ const TagCompliancePage: React.FC = () => {
                 { title: '状态', dataIndex: 'status', width: 120, render: (s: string) => <Tag color={STATUS_COLOR[s] || 'default'}>{s}</Tag> },
                 { title: '发现', dataIndex: 'found', width: 80, align: 'right' as const },
                 { title: '打标', dataIndex: 'tagged', width: 80, align: 'right' as const, render: (n: number) => <span style={{ color: '#52c41a' }}>{n}</span> },
-                { title: '失败', dataIndex: 'failed', width: 80, align: 'right' as const, render: (n: number) => n > 0 ? <span style={{ color: '#ff4d4f' }}>{n}</span> : <span style={{ color: '#d1d5db' }}>0</span> },
+                { title: '失败', dataIndex: 'failed', width: 80, align: 'right' as const, render: (n: number) => n > 0 ? <span style={{ color: '#ff4d4f' }}>{n}</span> : <span style={{ color: '#b6bdca' }}>0</span> },
                 { title: '已过期', dataIndex: 'stale', width: 80, align: 'right' as const, render: (n: number) => n || 0 },
               ]} />
           </Card>
@@ -1083,7 +1083,7 @@ const TagCompliancePage: React.FC = () => {
               description={<ul style={{ margin: 0, paddingLeft: 18 }}>{report.failed_orgs.map((o: any, i: number) => (
                 <li key={i}>
                   {orgMeta[o.org_id]?.payerName && <strong>{orgMeta[o.org_id].payerName} </strong>}
-                  {orgMeta[o.org_id]?.payerAccountId && <code style={{ color: '#64748B' }}>{orgMeta[o.org_id].payerAccountId} </code>}
+                  {orgMeta[o.org_id]?.payerAccountId && <code style={{ color: '#4a5468' }}>{orgMeta[o.org_id].payerAccountId} </code>}
                   <code>{o.org_id}</code> — {o.status}: {String(o.error).slice(0, 200)}
                 </li>
               ))}</ul>} />

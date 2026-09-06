@@ -73,7 +73,7 @@ const SetupMFA: React.FC<SetupMFAProps> = ({ onComplete, onLogout }) => {
             <div style={{ textAlign: 'center', marginBottom: 12 }}>
               {qrCode && <Image src={qrCode} width={180} preview={false} />}
             </div>
-            <p style={{ fontSize: 12, color: '#999', wordBreak: 'break-all', textAlign: 'center', marginBottom: 16 }}>
+            <p style={{ fontSize: 12, color: '#8a94a6', wordBreak: 'break-all', textAlign: 'center', marginBottom: 16 }}>
               无法扫码？手动输入密钥：<br/><code>{secret}</code>
             </p>
             <div style={{ display: 'flex', gap: 8 }}>
@@ -89,7 +89,7 @@ const SetupMFA: React.FC<SetupMFAProps> = ({ onComplete, onLogout }) => {
         )}
 
         <div style={{ textAlign: 'center', marginTop: 16 }}>
-          <Button type="text" size="small" icon={<LogoutOutlined />} onClick={onLogout} style={{ color: '#999' }}>
+          <Button type="text" size="small" icon={<LogoutOutlined />} onClick={onLogout} style={{ color: '#8a94a6' }}>
             退出登录
           </Button>
         </div>
