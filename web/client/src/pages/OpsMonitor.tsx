@@ -1,6 +1,10 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { Card, Table, Row, Col, Progress, Tag, Button, Segmented, Tooltip, Skeleton, Empty } from 'antd';
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
+import { Card, Table, Row, Col, Progress, Tag, Button, Segmented, Skeleton, Empty } from 'antd';
 import { ReloadOutlined } from '@ant-design/icons';
+import {
+  ResponsiveContainer, LineChart, Line, BarChart, Bar, Cell,
+  XAxis, YAxis, CartesianGrid, Tooltip as ChartTooltip, Legend,
+} from 'recharts';
 import { api } from '../api';
 
 // ===== 格式化工具 =====
@@ -45,91 +49,69 @@ const HealthRing: React.FC<{ score: number; level: string }> = ({ score, level }
   );
 };
 
-// ===== 折线趋势图（纯 SVG 多序列）=====
-interface Series { name: string; color: string; values: number[]; max?: number }
-const TrendChart: React.FC<{ timestamps: number[]; series: Series[]; height?: number }> = ({ timestamps, series, height = 220 }) => {
-  const [hover, setHover] = useState<number | null>(null);
-  const width = 900;
-  const padL = 40; const padR = 16; const padT = 12; const padB = 26;
-  const iw = width - padL - padR; const ih = height - padT - padB;
-  if (timestamps.length < 2) {
+// ===== 折线趋势图（recharts）=====
+// 双 Y 轴：百分比序列走左轴（0-100），事件循环延迟 ms 走右轴
+const TREND_TOOLTIP_STYLE: React.CSSProperties = {
+  borderRadius: 8, border: '1px solid #eef0f4', boxShadow: '0 4px 16px rgba(26,34,51,0.08)', fontSize: 12,
+};
+const TrendChart: React.FC<{ trend: any[] }> = ({ trend }) => {
+  const data = useMemo(() => trend.map(t => ({
+    time: fmtTime(t.ts),
+    'CPU %': t.cpuPct,
+    '内存 %': t.memPct,
+    '磁盘 %': t.diskPct,
+    '延迟 ms': t.loopLagMs,
+  })), [trend]);
+  if (data.length < 2) {
     return <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="数据点不足，采集约每分钟一次，稍后刷新" />;
   }
-  const x = (i: number) => padL + (i / (timestamps.length - 1)) * iw;
-  const yFor = (v: number, max: number) => padT + ih - (Math.min(v, max) / max) * ih;
-  const gridYs = [0, 25, 50, 75, 100];
   return (
-    <div>
-      <svg
-        width="100%" height={height} viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="none"
-        style={{ display: 'block' }}
-        onMouseMove={(e) => {
-          const rect = (e.currentTarget as SVGSVGElement).getBoundingClientRect();
-          const px = ((e.clientX - rect.left) / rect.width) * width;
-          const idx = Math.round(((px - padL) / iw) * (timestamps.length - 1));
-          setHover(idx >= 0 && idx < timestamps.length ? idx : null);
-        }}
-        onMouseLeave={() => setHover(null)}
-      >
-        {gridYs.map(g => (
-          <g key={g}>
-            <line x1={padL} x2={width - padR} y1={padT + ih - (g / 100) * ih} y2={padT + ih - (g / 100) * ih} stroke="#f0f0f0" />
-            <text x={padL - 6} y={padT + ih - (g / 100) * ih + 4} textAnchor="end" fontSize={10} fill="#8a94a6">{g}</text>
-          </g>
-        ))}
-        {[0, Math.floor(timestamps.length / 2), timestamps.length - 1].map(i => (
-          <text key={i} x={x(i)} y={height - 8} textAnchor="middle" fontSize={10} fill="#8a94a6">{fmtTime(timestamps[i])}</text>
-        ))}
-        {series.map(s => {
-          const max = s.max || 100;
-          const d = s.values.map((v, i) => `${i === 0 ? 'M' : 'L'}${x(i).toFixed(1)},${yFor(v, max).toFixed(1)}`).join(' ');
-          return <path key={s.name} d={d} fill="none" stroke={s.color} strokeWidth={1.8} />;
-        })}
-        {hover !== null && (
-          <g>
-            <line x1={x(hover)} x2={x(hover)} y1={padT} y2={padT + ih} stroke="#c8cdd6" strokeDasharray="3 3" />
-            {series.map(s => (
-              <circle key={s.name} cx={x(hover)} cy={yFor(s.values[hover] || 0, s.max || 100)} r={3} fill={s.color} />
-            ))}
-          </g>
-        )}
-      </svg>
-      <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap', padding: '4px 8px', fontSize: 12, color: '#4a5468' }}>
-        {series.map(s => (
-          <span key={s.name}>
-            <span style={{ display: 'inline-block', width: 10, height: 10, borderRadius: 5, background: s.color, marginRight: 5 }} />
-            {s.name}{hover !== null ? `：${(s.values[hover] ?? 0).toFixed(1)}` : ''}
-          </span>
-        ))}
-        {hover !== null && <span style={{ color: '#8a94a6' }}>{fmtTime(timestamps[hover])}</span>}
-      </div>
-    </div>
+    <ResponsiveContainer width="100%" height={280}>
+      <LineChart data={data} margin={{ top: 8, right: 8, left: -12, bottom: 0 }}>
+        <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" vertical={false} />
+        <XAxis dataKey="time" tick={{ fontSize: 11, fill: '#8a94a6' }} tickLine={false} axisLine={{ stroke: '#eef0f4' }} minTickGap={48} />
+        <YAxis yAxisId="pct" domain={[0, 100]} tick={{ fontSize: 11, fill: '#8a94a6' }} tickLine={false} axisLine={false} unit="%" />
+        <YAxis yAxisId="ms" orientation="right" tick={{ fontSize: 11, fill: '#8a94a6' }} tickLine={false} axisLine={false} unit="ms" width={48} />
+        <ChartTooltip
+          contentStyle={TREND_TOOLTIP_STYLE}
+          formatter={(v: any, name: any) => [`${Number(v).toFixed(1)}${String(name).includes('ms') ? ' ms' : '%'}`, name]}
+        />
+        <Legend wrapperStyle={{ fontSize: 12 }} iconType="circle" iconSize={8} />
+        <Line yAxisId="pct" type="monotone" dataKey="CPU %" stroke="#2563eb" strokeWidth={2} dot={false} activeDot={{ r: 4 }} isAnimationActive={false} />
+        <Line yAxisId="pct" type="monotone" dataKey="内存 %" stroke="#16a34a" strokeWidth={2} dot={false} activeDot={{ r: 4 }} isAnimationActive={false} />
+        <Line yAxisId="pct" type="monotone" dataKey="磁盘 %" stroke="#f59e0b" strokeWidth={2} dot={false} activeDot={{ r: 4 }} isAnimationActive={false} />
+        <Line yAxisId="ms" type="monotone" dataKey="延迟 ms" stroke="#94a3b8" strokeWidth={1.6} strokeDasharray="4 3" dot={false} activeDot={{ r: 4 }} isAnimationActive={false} />
+      </LineChart>
+    </ResponsiveContainer>
   );
 };
 
-// ===== 延迟直方图（纯 SVG 柱状）=====
+// ===== 延迟直方图（recharts 柱状）=====
 const LatencyHistogram: React.FC<{ bounds: number[]; counts: number[] }> = ({ bounds, counts }) => {
   const total = counts.reduce((a, b) => a + b, 0);
+  const data = useMemo(() => {
+    const labels = [...bounds.map(b => b >= 1000 ? `≤${b / 1000}s` : `≤${b}ms`), bounds.length ? `>${bounds[bounds.length - 1] / 1000}s` : ''];
+    return counts.map((c, i) => ({ bucket: labels[i], 次数: c }));
+  }, [bounds, counts]);
   if (!total) return <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="窗口内暂无请求" />;
-  const labels = [...bounds.map(b => b >= 1000 ? `≤${b / 1000}s` : `≤${b}ms`), `>${bounds[bounds.length - 1] / 1000}s`];
-  const max = Math.max(...counts);
   return (
-    <div style={{ display: 'flex', alignItems: 'flex-end', gap: 8, height: 170, padding: '0 8px' }}>
-      {counts.map((c, i) => (
-        <Tooltip key={i} title={`${labels[i]}：${c} 次（${((c / total) * 100).toFixed(1)}%）`}>
-          <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'flex-end', gap: 4, minWidth: 0, height: '100%' }}>
-            <span style={{ fontSize: 11, color: '#4a5468' }}>{c > 0 ? c : ''}</span>
-            <div style={{
-              width: '100%', maxWidth: 56, borderRadius: '4px 4px 0 0',
-              height: Math.max(c > 0 ? 4 : 1, (c / max) * 110),
-              background: c > 0 ? '#4c6ef5' : '#eef0f4',
-              transition: 'height 0.4s ease',
-            }} />
-            <span style={{ fontSize: 10, color: '#8a94a6', whiteSpace: 'nowrap' }}>{labels[i]}</span>
-          </div>
-        </Tooltip>
-      ))}
-    </div>
+    <ResponsiveContainer width="100%" height={220}>
+      <BarChart data={data} margin={{ top: 16, right: 8, left: -20, bottom: 0 }}>
+        <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" vertical={false} />
+        <XAxis dataKey="bucket" tick={{ fontSize: 11, fill: '#8a94a6' }} tickLine={false} axisLine={{ stroke: '#eef0f4' }} interval={0} />
+        <YAxis allowDecimals={false} tick={{ fontSize: 11, fill: '#8a94a6' }} tickLine={false} axisLine={false} />
+        <ChartTooltip
+          cursor={{ fill: 'rgba(37,99,235,0.06)' }}
+          contentStyle={TREND_TOOLTIP_STYLE}
+          formatter={(v: any) => [`${v} 次（${((Number(v) / total) * 100).toFixed(1)}%）`, '请求']}
+        />
+        <Bar dataKey="次数" radius={[4, 4, 0, 0]} maxBarSize={56} isAnimationActive={false}>
+          {data.map((d, i) => (
+            <Cell key={i} fill={d['次数'] > 0 ? '#2563eb' : '#eef0f4'} />
+          ))}
+        </Bar>
+      </BarChart>
+    </ResponsiveContainer>
   );
 };
 
@@ -311,15 +293,7 @@ const OpsMonitor: React.FC = () => {
 
       {/* 资源趋势 */}
       <Card size="small" title="资源趋势（每分钟采样）" style={{ marginBottom: 16 }} bodyStyle={{ padding: 16 }}>
-        <TrendChart
-          timestamps={trend.map(t => t.ts)}
-          series={[
-            { name: 'CPU %', color: '#4c6ef5', values: trend.map(t => t.cpuPct) },
-            { name: '内存 %', color: '#40c057', values: trend.map(t => t.memPct) },
-            { name: '磁盘 %', color: '#fab005', values: trend.map(t => t.diskPct) },
-            { name: '事件循环延迟 ms（量程 200）', color: '#868e96', values: trend.map(t => t.loopLagMs), max: 200 },
-          ]}
-        />
+        <TrendChart trend={trend} />
       </Card>
 
       {/* 端点排行 */}
