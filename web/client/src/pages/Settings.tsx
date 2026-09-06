@@ -156,10 +156,20 @@ const SettingsPage: React.FC<SettingsPageProps> = ({ onLogout }) => {
                     : `${failed.length} 个组织异常（${okList.length}/${connection.length} 正常）`}
               </div>
 
-              {/* 异常置顶：唯一值得 Alert 级视觉重量的内容，完整展示错误 */}
+              {/* 异常置顶：唯一值得 Alert 级视觉重量的内容，错误原文 + 排障指引 */}
               {failed.map((c: any, i: number) => (
                 <Alert key={c.name || i} type="error" showIcon style={{ marginBottom: 6 }}
-                  message={<strong>{c.name}</strong>} description={c.error || '连接失败'} />
+                  message={<strong>{c.name}</strong>}
+                  description={
+                    <div>
+                      <div style={{ fontFamily: 'monospace', fontSize: 12, wordBreak: 'break-all' }}>{c.error || '连接失败'}</div>
+                      <div style={{ marginTop: 6, fontSize: 12, color: '#8a94a6' }}>
+                        {/AssumeRole/i.test(c.error || '')
+                          ? '排查：确认该 payer 管理账户存在 role/tool，且信任策略包含平台身份；修复后点右上角「重新检测」。'
+                          : '排查：确认 config.json 中该 payer 的 roleArn 配置正确、目标账户可访问；修复后点右上角「重新检测」。'}
+                      </div>
+                    </div>
+                  } />
               ))}
 
               {/* 正常组织默认折叠为紧凑标签流；ID 放 tooltip 不占版面 */}
@@ -170,10 +180,18 @@ const SettingsPage: React.FC<SettingsPageProps> = ({ onLogout }) => {
                     {normalExpanded ? '收起' : `展开正常组织 (${okList.length})`}
                   </Button>
                   {normalExpanded && (
+                    // 中性灰 chip + 绿点：正常状态不需要 44 个绿框强调，降噪
                     <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
                       {okList.map((c: any) => (
                         <Tooltip key={c.name} title={`账号 ${c.account}`}>
-                          <Tag color="success" style={{ margin: 0, cursor: 'default' }}>{c.name}</Tag>
+                          <span style={{
+                            display: 'inline-flex', alignItems: 'center', gap: 6,
+                            background: '#f5f6f8', borderRadius: 6, padding: '3px 10px',
+                            fontSize: 12, color: '#4b5563', cursor: 'default',
+                          }}>
+                            <span style={{ width: 6, height: 6, borderRadius: '50%', background: '#52c41a', flexShrink: 0 }} />
+                            {c.name}
+                          </span>
                         </Tooltip>
                       ))}
                     </div>
@@ -187,7 +205,8 @@ const SettingsPage: React.FC<SettingsPageProps> = ({ onLogout }) => {
           // 两卡并排（窄屏自动堆叠）：640px 容器内竖排显得零碎
           <Row gutter={[12, 12]}>
             <Col xs={24} md={12}>
-            <Card size="small" title="MFA 双因素认证" style={{ height: '100%' }}>
+            {/* 不设等高：MFA 已启用时只有一行内容，强行拉伸到与密码表单等高会产生大片空白 */}
+            <Card size="small" title="MFA 双因素认证">
               {mfaEnabled ? (
                 // 已启用态压缩为一行状态，不占大块面积
                 <div style={{ display: 'flex', alignItems: 'center', gap: 8, color: '#52c41a' }}>
@@ -213,7 +232,7 @@ const SettingsPage: React.FC<SettingsPageProps> = ({ onLogout }) => {
             </Card>
             </Col>
             <Col xs={24} md={12}>
-            <Card size="small" title="修改密码" style={{ height: '100%' }}>
+            <Card size="small" title="修改密码">
               {/* 成功后必须清空表单：明文密码留在输入框里是安全隐患 */}
               <Form layout="vertical" onFinish={async (values: any) => {
                 if (values.newPassword !== values.confirmPassword) { message.error('两次密码不一致'); return; }
@@ -242,8 +261,10 @@ const SettingsPage: React.FC<SettingsPageProps> = ({ onLogout }) => {
                 { title: 'MFA', dataIndex: 'mfa_enabled', width: 80, align: 'center' as const, render: (m: boolean) => (
                   m ? <Tag color="success" style={{ margin: 0 }}>已绑定</Tag> : <Tag color="warning" style={{ margin: 0 }}>未绑定</Tag>
                 )},
-                { title: '页面权限', width: 300, render: (_: any, record: any) => {
-                  if (record.role === 'admin') return <Tag color="red" style={{ margin: 0 }}>全部</Tag>;
+                // admin 恒有全部权限：三列都刷红色「全部」标签是重复强调，
+                // 角色列的红 admin 标签已表达该语义，权限列用弱化文字即可
+                { title: '页面权限', render: (_: any, record: any) => {
+                  if (record.role === 'admin') return <span style={{ color: '#8a94a6', fontSize: 12 }}>全部（管理员）</span>;
                   const pages: string[] = Array.isArray(record.allowed_pages) ? record.allowed_pages : ALL_PAGE_KEYS;
                   if (pages.length === ALL_PAGE_KEYS.length) return <Tag color="green" style={{ margin: 0 }}>全部</Tag>;
                   if (pages.length === 0) return <Tag style={{ margin: 0 }}>无</Tag>;
@@ -262,15 +283,15 @@ const SettingsPage: React.FC<SettingsPageProps> = ({ onLogout }) => {
                     </div>
                   );
                 }},
-                { title: '根用户权限', dataIndex: 'root_access', width: 110, align: 'center' as const, render: (v: boolean, record: any) => (
+                { title: '根用户权限', dataIndex: 'root_access', width: 100, align: 'center' as const, render: (v: boolean, record: any) => (
                   record.role === 'admin'
-                    ? <Tag color="red" style={{ margin: 0 }}>全部</Tag>
-                    : (v ? <Tag color="purple" style={{ margin: 0 }}>已授权</Tag> : <Tag style={{ margin: 0 }}>—</Tag>)
+                    ? <span style={{ color: '#8a94a6', fontSize: 12 }}>恒有</span>
+                    : (v ? <Tag color="purple" style={{ margin: 0 }}>已授权</Tag> : <span style={{ color: '#d9d9d9' }}>—</span>)
                 )},
-                { title: '批量提额', dataIndex: 'bulk_quota_access', width: 110, align: 'center' as const, render: (v: boolean, record: any) => (
+                { title: '批量提额', dataIndex: 'bulk_quota_access', width: 100, align: 'center' as const, render: (v: boolean, record: any) => (
                   record.role === 'admin'
-                    ? <Tag color="red" style={{ margin: 0 }}>全部</Tag>
-                    : (v ? <Tag color="volcano" style={{ margin: 0 }}>已授权</Tag> : <Tag style={{ margin: 0 }}>—</Tag>)
+                    ? <span style={{ color: '#8a94a6', fontSize: 12 }}>恒有</span>
+                    : (v ? <Tag color="volcano" style={{ margin: 0 }}>已授权</Tag> : <span style={{ color: '#d9d9d9' }}>—</span>)
                 )},
                 { title: '操作', width: 150, fixed: 'right' as const, render: (_: any, record: any) => (
                   // 高频动作（编辑）直出，低频（重置密码/删除）收进下拉，降低视觉重量
