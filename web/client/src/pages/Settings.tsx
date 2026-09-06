@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
-import { Card, Button, message, Alert, Image, Input, Form, Table, Tag, Modal, Select, Space, Popconfirm, Tabs, Checkbox, Tooltip } from 'antd';
-import { SafetyOutlined, CheckCircleOutlined, LockOutlined, UserAddOutlined, DeleteOutlined, EditOutlined, ReloadOutlined } from '@ant-design/icons';
+import { Card, Button, message, Alert, Image, Input, Form, Table, Tag, Modal, Select, Space, Tabs, Checkbox, Tooltip, Row, Col, Dropdown } from 'antd';
+import { SafetyOutlined, CheckCircleOutlined, LockOutlined, UserAddOutlined, EditOutlined, ReloadOutlined, MoreOutlined } from '@ant-design/icons';
 import { api } from '../api';
 import { PAGE_META } from '../components/MainLayout';
 
@@ -132,8 +132,8 @@ const SettingsPage: React.FC<SettingsPageProps> = ({ onLogout }) => {
           <p className="page-header-subtitle">管理连接、安全策略和用户</p>
         </div>
       </div>
-      {/* 表单类 tab 限宽更易读；用户管理是宽表格，放开占满整宽 */}
-      <div style={{ maxWidth: settingsTab === 'users' ? undefined : 640 }}>
+      {/* 表单类 tab 限宽更易读；用户管理是宽表格放开整宽；安全 tab 两卡并排需要更宽 */}
+      <div style={{ maxWidth: settingsTab === 'users' ? undefined : settingsTab === 'security' ? 920 : 720 }}>
       <Tabs activeKey={settingsTab} onChange={setSettingsTab} items={[
         { key: 'connection', label: '连接', children: (() => {
           const failed = connection.filter((c: any) => !c.ok);
@@ -184,10 +184,16 @@ const SettingsPage: React.FC<SettingsPageProps> = ({ onLogout }) => {
           );
         })()},
         { key: 'security', label: '安全', children: (
-          <>
-            <Card size="small" title="MFA 双因素认证" style={{ marginBottom: 12 }}>
+          // 两卡并排（窄屏自动堆叠）：640px 容器内竖排显得零碎
+          <Row gutter={[12, 12]}>
+            <Col xs={24} md={12}>
+            <Card size="small" title="MFA 双因素认证" style={{ height: '100%' }}>
               {mfaEnabled ? (
-                <Alert type="success" showIcon icon={<CheckCircleOutlined />} message="MFA 已启用 ✅" description="每次登录需要动态验证码" />
+                // 已启用态压缩为一行状态，不占大块面积
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, color: '#52c41a' }}>
+                  <CheckCircleOutlined /> <strong>已启用</strong>
+                  <span style={{ color: '#8a94a6', fontSize: 12 }}>每次登录需要动态验证码</span>
+                </div>
               ) : qrCode ? (
                 <div>
                   <p style={{ marginBottom: 8 }}>用 Authenticator 扫码：</p>
@@ -205,7 +211,9 @@ const SettingsPage: React.FC<SettingsPageProps> = ({ onLogout }) => {
                 </div>
               )}
             </Card>
-            <Card size="small" title="修改密码">
+            </Col>
+            <Col xs={24} md={12}>
+            <Card size="small" title="修改密码" style={{ height: '100%' }}>
               {/* 成功后必须清空表单：明文密码留在输入框里是安全隐患 */}
               <Form layout="vertical" onFinish={async (values: any) => {
                 if (values.newPassword !== values.confirmPassword) { message.error('两次密码不一致'); return; }
@@ -218,7 +226,8 @@ const SettingsPage: React.FC<SettingsPageProps> = ({ onLogout }) => {
                 <Button type="primary" htmlType="submit" block>修改密码</Button>
               </Form>
             </Card>
-          </>
+            </Col>
+          </Row>
         )},
         { key: 'users', label: '用户', children: (
           <Card size="small" title="用户管理"
@@ -230,18 +239,26 @@ const SettingsPage: React.FC<SettingsPageProps> = ({ onLogout }) => {
                 { title: '角色', dataIndex: 'role', width: 100, render: (r: string) => (
                   <Tag color={r === 'admin' ? 'red' : r === 'partadmin' ? 'orange' : 'blue'} style={{ margin: 0 }}>{r}</Tag>
                 )},
-                { title: 'MFA', dataIndex: 'mfa_enabled', width: 60, align: 'center' as const, render: (m: boolean) => m ? '✅' : '❌' },
-                { title: '页面权限', width: 340, render: (_: any, record: any) => {
+                { title: 'MFA', dataIndex: 'mfa_enabled', width: 80, align: 'center' as const, render: (m: boolean) => (
+                  m ? <Tag color="success" style={{ margin: 0 }}>已绑定</Tag> : <Tag color="warning" style={{ margin: 0 }}>未绑定</Tag>
+                )},
+                { title: '页面权限', width: 300, render: (_: any, record: any) => {
                   if (record.role === 'admin') return <Tag color="red" style={{ margin: 0 }}>全部</Tag>;
                   const pages: string[] = Array.isArray(record.allowed_pages) ? record.allowed_pages : ALL_PAGE_KEYS;
                   if (pages.length === ALL_PAGE_KEYS.length) return <Tag color="green" style={{ margin: 0 }}>全部</Tag>;
                   if (pages.length === 0) return <Tag style={{ margin: 0 }}>无</Tag>;
+                  const labels = pages.map(k => PAGE_META.find(p => p.key === k)?.label || k);
+                  // 超过 3 个折叠为 +N，完整清单挂 tooltip，避免标签流撑高行
+                  const shown = labels.slice(0, 3);
+                  const rest = labels.slice(3);
                   return (
                     <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
-                      {pages.map(k => {
-                        const meta = PAGE_META.find(p => p.key === k);
-                        return <Tag key={k} style={{ margin: 0 }}>{meta?.label || k}</Tag>;
-                      })}
+                      {shown.map(l => <Tag key={l} style={{ margin: 0 }}>{l}</Tag>)}
+                      {rest.length > 0 && (
+                        <Tooltip title={rest.join('、')}>
+                          <Tag style={{ margin: 0, cursor: 'default' }}>+{rest.length}</Tag>
+                        </Tooltip>
+                      )}
                     </div>
                   );
                 }},
@@ -255,13 +272,18 @@ const SettingsPage: React.FC<SettingsPageProps> = ({ onLogout }) => {
                     ? <Tag color="red" style={{ margin: 0 }}>全部</Tag>
                     : (v ? <Tag color="volcano" style={{ margin: 0 }}>已授权</Tag> : <Tag style={{ margin: 0 }}>—</Tag>)
                 )},
-                { title: '操作', width: 190, fixed: 'right' as const, render: (_: any, record: any) => (
+                { title: '操作', width: 150, fixed: 'right' as const, render: (_: any, record: any) => (
+                  // 高频动作（编辑）直出，低频（重置密码/删除）收进下拉，降低视觉重量
                   <Space size="small">
                     <Button size="small" icon={<EditOutlined />} onClick={() => openEditUser(record)}>编辑</Button>
-                    <Button size="small" onClick={() => { setResetPwdOpen(record); resetForm.resetFields(); }}>重置</Button>
-                    <Popconfirm title="确定删除？" onConfirm={() => handleDeleteUser(record.id)} okText="删除" cancelText="取消">
-                      <Button size="small" danger aria-label="删除用户" icon={<DeleteOutlined />} />
-                    </Popconfirm>
+                    <Dropdown menu={{ items: [
+                      { key: 'reset', label: '重置密码', onClick: () => { setResetPwdOpen(record); resetForm.resetFields(); } },
+                      { key: 'delete', label: <span style={{ color: '#ff4d4f' }}>删除用户</span>, onClick: () => {
+                        Modal.confirm({ title: `确定删除用户 ${record.username}？`, okText: '删除', okType: 'danger', cancelText: '取消', onOk: () => handleDeleteUser(record.id) });
+                      } },
+                    ] }}>
+                      <Button size="small" icon={<MoreOutlined />} aria-label="更多操作" />
+                    </Dropdown>
                   </Space>
                 )},
               ]} />
