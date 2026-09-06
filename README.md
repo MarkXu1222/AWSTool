@@ -3,7 +3,7 @@
 企业级 AWS 多账户（多 Organizations）管理平台。带强制 MFA 登录、页面级权限与全量操作审计。
 
 **线上**：https://markxu.co（EC2 Singapore，PM2 进程 `aws-toolbox`）
-**当前版本**：`0.14.1`（见 `web/client/src/version.ts`，左下角展示）
+**当前版本**：`0.20.0`（见 `web/client/src/version.ts`，左下角展示）
 
 **生产接入规模**（配置快照 2026-08-27；账户数快照 2026-08-13）
 
@@ -53,7 +53,7 @@
 ## 技术栈
 
 - **后端**：Node.js + Express 4 + TypeScript，用 `tsx` 直接运行 `.ts`，**不编译**（改 `.ts` 后 `pm2 restart` 即生效）
-- **前端**：React 18 + Vite 6 + Ant Design 5 + TypeScript。**无 react-router**，`MainLayout` 用 `useState(currentPage)` 切页；单 bundle 不分包，避免跨境网络分包超时
+- **前端**：React 18 + Vite 6 + Ant Design 5 + recharts + TypeScript。**无 react-router**，`MainLayout` 用 `useState(currentPage)` 切页，另以原生 `pushState`/`popstate` 做 URL 同步（`/billing` 等路径可刷新/直链/前进后退）；按稳定性分三包（vendor/charts/业务代码，并行加载非路由懒加载）+ hash 资源 immutable 缓存一年，运维监控页 `React.lazy` 懒加载；dashboard/accounts/quotas/regions/billing 五个高频页 keep-alive（`display:none` 保活，切回不重新请求）
 - **存储**：`data/db.json`，自研 JSON 文件存储 + 内存缓存 + 每日备份（非数据库）
 - **认证**：JWT（2h 过期）+ 强制 TOTP MFA（otplib），密码 bcrypt，MFA secret AES-256-CBC 加密落盘
 - **AWS**：`@aws-sdk/*` v3，跨账户 STS AssumeRole
@@ -65,7 +65,7 @@
 
 ## 功能模块
 
-左侧导航九项（`MainLayout.tsx` 的 `navItems`）加一个独立权限页。页面 key 必须三处一致：`navItems`、`PAGE_META`（`MainLayout.tsx`）与后端 `ALL_PAGE_KEYS`（`auth.ts`）。
+左侧导航九项（`MainLayout.tsx` 的 `navItems`）加两个独立权限页（批量提额、运维监控）。页面 key 必须三处一致：`navItems`、`PAGE_META`（`MainLayout.tsx`）与后端 `ALL_PAGE_KEYS`（`auth.ts`）。页面 key 同时就是 URL 路径（`/accounts` 等，dashboard 归 `/`），由 `navigate()`/`popstate` 同步。
 
 | 页面 key | 页面文件 | 主要后端前缀 | 说明 |
 |----------|----------|--------------|------|
@@ -78,6 +78,7 @@
 | `cleanup` | `Cleanup.tsx` | `/api/aws/resources/*` | 扫描最近 7 天的 EC2/EBS/S3/Lambda/IAM 用户，展示 IAM 非敏感详情并手动勾选删除；S3 只读 |
 | `tagcompliance` | `TagCompliance.tsx` | `/api/aws/tag-compliance/*` | MAP 标签合规扫描与报告 |
 | `audit` | `AuditLog.tsx` | `/api/aws/audit*` | 审计日志查询与 CSV 导出 |
+| `ops` | `OpsMonitor.tsx` | `/api/ops/overview` | 运维监控（健康评分/资源趋势/请求延迟/端点排行/后台任务）。**不在 `ALL_PAGE_KEYS` 里**，仅 `role === 'admin'` 可见；后端同样严格 admin 校验且不写审计日志（30s 轮询）。指标存进程内存，重启清零 |
 | `settings` | `Settings.tsx` | `/api/auth/*` | 改密码、MFA、用户管理 |
 | —（登录流程） | `Login.tsx`、`SetupMFA.tsx` | `/api/auth/login`、`/api/auth/mfa/*` | 登录、强制绑定 MFA |
 
@@ -99,7 +100,8 @@ AWS/
 ├── src/                            # 桌面版前端（冻结）
 └── web/
     ├── server/                     # 后端（Express，tsx 直跑）
-    │   ├── index.ts                # 入口：中间件、CORS 白名单、限速、挂载路由、静态服务、启动 scheduler
+    │   ├── index.ts                # 入口：中间件、CORS 白名单、限速（GET/写分离）、挂载路由、API 兜底 404、静态服务（immutable 缓存）、启动 scheduler
+    │   ├── ops-monitor.ts          # 运维监控：请求/系统指标进程内采集（24h 环形缓冲）+ 健康评分 + /api/ops 路由（严格 admin）
     │   ├── auth.ts                 # authRouter（登录/MFA/用户CRUD）+ authMiddleware + 页面权限模型
     │   ├── audit.ts                # auditMiddleware：记录所有已认证 API 调用
     │   ├── audit-presentation.ts   # 审计日志展示增强 + CSV 导出
@@ -110,8 +112,12 @@ AWS/
     │   ├── doc-templates.ts        # ★公司模板 + 账户→公司 / payer→公司 映射 + 区域显示名
     │   ├── notify.ts               # 飞书通知（配额变动/达成）
     │   ├── tag-compliance.ts       # MAP 标签合规（编排中央工具账户的 Step Functions + S3 报告）
+    │   ├── tag-onboarding.ts       # MAP 全自动接入持久化 runner（资源、索引、StackSet、S3 配置与校验）
     │   ├── account-roles.ts        # ★账户角色自愈：探测 → 缺失则触发 StackSet 补齐 → 超限告警
-    │   ├── billing-exporter.ts     # 批量导出 AWS 控制台账单 PDF → zip
+    │   ├── account-lifecycle.ts    # 离场账户追踪：快照 diff（防 payer 同步失败误判）+ 重新加入 + 历史补录
+    │   ├── restricted-accounts.ts  # ★敏感权限客户：账户级权限收窄 + ExternalId（StackSet 下发必须排除）
+    │   ├── billing-export-jobs.ts  # 账单导出持久化 job、全局队列、永久历史、重复下载与重启恢复
+    │   ├── billing-exporter.ts     # 严格只读抓取 AWS 官方账单 PDF + 可取消 zip 打包
     │   └── routes/
     │       ├── aws.ts              # ★awsRouter：主业务端点（50+），含权限守卫
     │       └── regions.ts          # regionsRouter：区域 opt-in 状态/扫描/开通
@@ -142,16 +148,16 @@ AWS/
 | 角色 | 位置 | 用途 | 信任 |
 |------|------|------|------|
 | `tool` | 各 payer 管理账户 | 平台管理 payer 的入口（Organizations/STS/ServiceQuotas/CE/Account） | `509399618054:user/mark` |
-| `support-quota` | 各成员账户 | 平台一级跳，读配额/成本/只读 | `134103550877:root` + `509399618054:user/mark` |
-| `admin-console` | 各成员账户 | 平台一级跳拿 **admin** 凭证 | 直接信任平台身份 |
+| `support-quota` | 各成员账户 | 平台一级跳，读配额/成本/只读 | `509399618054:user/mark`（当前模板） |
+| `admin-console` | 各成员账户 | 平台一级跳拿 **admin** 凭证 | `509399618054:user/mark`（当前模板） |
 | `OrganizationAccountAccessRole` | 各成员账户 | 二级跳兜底 | 各自 payer root |
 | `cur-collector` | 各 payer | CUR 账单采集接入 | `509399618054:user/winston` |
 
-成员账户角色通过组织级 `SERVICE_MANAGED` StackSet 下发到根 OU，`AutoDeployment` 自动覆盖未来新增账户（含 INVITED）。管理账户本身不在 SERVICE_MANAGED 覆盖内，靠 `role/tool` 兜底。
+成员账户角色通过组织级 `SERVICE_MANAGED` StackSet 下发到根 OU，`AutoDeployment=true` 自动覆盖未来新增账户（含 INVITED），账户退出组织时 `RetainStacksOnAccountRemoval=false`。**管理账户本身不会获得 SERVICE_MANAGED StackSet 实例**，所以仅含管理账户的新组织显示 0 个实例是正常现象，管理账户由 `role/tool` 承担入口。
 
-**配置现状（生产核验快照 2026-08-27）**：平台已配置 44 个 payer，`consoleAdminPayers` 包含 43 个组织。该白名单只控制前端是否显示「只读 / 管理员」双入口，不能替代 StackSet 实例回读。
+**配置现状（生产核验快照 2026-08-27）**：平台已配置 44 个 payer，`consoleAdminPayers` 包含 43 个组织。该白名单只控制前端是否显示「只读 / 管理员」双入口，**不能证明角色已成功部署**。新 payer 必须运行 `scripts/setup-org-stacksets.ts` 并回读两个 StackSet 的状态、自动部署设置与失败实例；否则未来成员账户可能没有可用角色。
 
-已有 StackSet 默认不会自动改写模板。只有明确审查模板差异后，才可执行 `npx tsx scripts/setup-org-stacksets.ts admin <payerName> --refresh-template`；该模式强制指定单个 payer，操作异常、非 `SUCCEEDED` 或残留失败实例都会返回非零。
+`yottahub-cma-1`（管理账户 `346133363520`，Organization `o-go486nwkzx`，Root OU `r-3u07`）已完成接入验收：组织共 152 个账户（151 个成员账户）；`support-quota-role-orgwide` 与 `admin-console-role-orgwide` 均为 `ACTIVE`、`SERVICE_MANAGED`、`AutoDeployment=true`，各 151 个 StackInstance 全部 `SUCCEEDED`；平台全量角色复检结果为 `ok=151`、`pending=0`、`unreachable=0`，并已加入 `consoleAdminPayers`。
 
 **新组织的两个前置开关**（缺任一都会让 SERVICE_MANAGED StackSet 创建失败，报 `You must enable organizations access to operate a service managed stack set`）：
 
@@ -181,7 +187,7 @@ aws cloudformation describe-organizations-access --profile <payer> --region us-e
 
 第 2 步不只是性能优化：**INVITED（邀请加入）的账户没有 `OrganizationAccountAccessRole`**，payer 二级跳根本进不去，而 `admin-console` 由 StackSet 下发并直接信任平台身份，对这类账户同样有效。
 
-Admin 临时凭证默认 1 小时。数据库当前角色为 `admin` 的平台用户可选择 1–12 个整数小时；其他仅有 `root_access` 的用户固定为 1 小时。超过 1 小时只走平台长期身份 → 成员账户 `admin-console` 的直接一级跳，并要求角色 `MaxSessionDuration=43200`；payer 管理账户与 OAAR 二级链仍最多 1 小时。完整 AK/SK/SessionToken 仅保留在 React 内存中，响应禁止缓存，不写入 `sessionStorage`。
+Admin 临时凭证时长默认 1 小时。数据库当前角色为 `admin` 的平台用户可按整数小时选择 1–12 小时；其他仅有 `root_access` 的用户仍固定为 1 小时。超过 1 小时的请求只允许走长期平台身份 → 成员账户 `admin-console` 的直接一级跳，并要求角色 `MaxSessionDuration=43200`；payer 管理账户以及 payer → `OrganizationAccountAccessRole` 二级链受 AWS role chaining 限制，最多 1 小时且不会静默回退。完整 AK/SK/SessionToken 仅保留在当前 React 内存中，不写入 `sessionStorage`，刷新或切换账户后需重新生成。
 
 `config.consoleAdminPayers` 列出已部署 `support-quota` + `admin-console` 的组织，账户列表据此带上 `_consoleDual` 标记，前端才给出「只读 / 管理员」双选项。
 
@@ -202,6 +208,8 @@ Admin 临时凭证默认 1 小时。数据库当前角色为 `admin` 的平台�
 |------|------|
 | 账户 | `GET /accounts`、`POST /accounts/refresh`、`GET /accounts/:id/detail`、`GET /connection` |
 | 账户角色自愈 | `GET /accounts/roles-status`、`POST /accounts/roles-check`（均 `requireStrictAdmin`） |
+| 离场账户 | `GET /accounts/departed`、`POST /accounts/departed/backfill`（后者 `requireStrictAdmin`） |
+| 敏感权限客户账户 | `GET /accounts/restricted`（不返回 ExternalId 明文）、`POST /accounts/restricted`、`DELETE /accounts/restricted/:accountId`、`GET /accounts/restricted/:accountId/external-id`（后三个均 `requireStrictAdmin` 且单独写审计） |
 | 仪表盘 | `GET /dashboard/summary` |
 | 账单 | `GET /billing/by-account`、`GET /billing/by-service/:accountId`、`GET /billing/breakdown/:accountId`；PDF job：`POST/GET /billing/export-jobs`、`GET /billing/export-jobs/:jobId`、`POST .../:jobId/cancel`、`GET .../:jobId/download`（均 `requireBillingAccess`，单任务再校验 owner/admin） |
 | 配额 | `GET /quotas/:accountId/:serviceCode`、`POST /quotas/increase`(admin)、`GET /quotas/requests`、`GET /quotas/stats`、`GET /quotas/companies`、`GET /quotas/company/:accountId`、`POST /quotas/generate-doc`、`POST /quotas/sync`、`POST /quotas/sync-account/:accountId`、`GET /quotas/sync-status`、`GET /quotas/sync-stream`(SSE) |
@@ -211,7 +219,7 @@ Admin 临时凭证默认 1 小时。数据库当前角色为 `admin` 的平台�
 | 资源清理 | `GET /resources/:accountId/:region`（最近 7 天；Lambda 按最近修改；IAM/S3 为全局；失败服务通过 warnings 返回）、`POST /resources/:accountId/delete`（服务端重新读取时间并复验；EC2/EBS/Lambda 兼容 admin/partadmin，IAM 用户仅实时 strict admin 且级联清理依赖；S3 不可删除） |
 | 审计 | `GET /audit`、`GET /audit/export`（均 `requireAuditAccess`） |
 | 控制台 | `GET /console-url/:accountId` |
-| MAP 标签 | `GET /tag-compliance/status\|config\|executions\|report\|precheck\|notify-emails\|re-indexes/status`；`PUT /config`、`POST /scan`、`POST /notify-emails`、`DELETE /notify-emails`、`POST /re-indexes`、`POST /provision`（写操作均 admin） |
+| MAP 标签 | `GET /tag-compliance/status\|config\|executions\|report\|precheck\|notify-emails\|re-indexes/status`；`PUT /config`、`POST /scan`、`POST /notify-emails`、`DELETE /notify-emails`、`POST /re-indexes`、`POST /provision`（写操作均 admin）；全自动接入：`POST /tag-compliance/onboarding`、`GET /tag-compliance/onboarding?payer=...`、`GET /tag-compliance/onboarding/:jobId`、`POST /tag-compliance/onboarding/:jobId/retry` |
 
 **Bedrock 路径特意不放在 `/quotas/` 下**，否则会被 `/quotas/:accountId/:serviceCode` 通配吃掉。
 
@@ -222,6 +230,10 @@ Admin 临时凭证默认 1 小时。数据库当前角色为 `admin` 的平台�
 ### 其它
 
 `GET /api/scheduler/status`
+
+### `/api/ops`（opsRouter，严格 admin，不写审计）
+
+`GET /overview?range=1h|6h|24h` — 运维监控聚合：健康评分（阈值扣分 + 原因）、系统资源（CPU/内存/磁盘/事件循环延迟）、请求统计（p50/p95/p99、错误率、延迟直方图、端点排行 Top 50）、资源趋势（每分钟采样）、scheduler 与后台任务状态、db.json 大小与备份时间。指标存进程内存（24h 环形缓冲），重启清零。
 
 **权限守卫**（`routes/aws.ts`）：
 
@@ -258,10 +270,10 @@ Admin 临时凭证默认 1 小时。数据库当前角色为 `admin` 的平台�
 
 admin 恒有，其他角色必须显式授予，且**都不受 `allowed_pages` 影响**：
 
-- `root_access` → 账户页「根用户」敏感操作（Admin 临时凭证 / 删 Root MFA / 恢复根密码）、Admin 控制台登录；非 admin 即使有此权限也只能签发 1 小时凭证
+- `root_access` → 账户页「根用户」敏感操作（Admin 临时凭证 / 删除 Root MFA / 恢复根密码 / 删除 Root Access Key）以及 Admin 控制台登录；`GET /root-credentials/:accountId` 的状态读取当前不经过该守卫
 - `bulk_quota_access` → 「批量提额」页；未授予时菜单完全不可见，后端 `requireBulkQuotaAccess` 也会拒绝
 
-后端从数据库实时校验，不信任 JWT 里的旧角色/权限。
+`requireRootAccess` 和 Admin 控制台门禁都会用 `db.getUser(username)` 实时读取数据库，严格要求字段为 `true`（admin 恒有），不信任旧 JWT 中缓存的权限。
 
 ### 新增独立权限要改的地方
 
@@ -310,6 +322,12 @@ admin 恒有，其他角色必须显式授予，且**都不受 `allowed_pages` �
 - `region_data` — 各账户区域 opt-in 状态
 - `accounts_cache` + `accounts_cache_time` — 账户列表缓存（调度器每 30min 刷新）
 - `dashboard_cache` — 成本概览缓存
+- `tag_onboarding_jobs` — MAP 全自动接入任务、阶段产物、重试与恢复状态
+- `billing_export_jobs` — 账单导出队列、进度、结果、取消/中断状态与下载元数据
+- `restricted_accounts` — 敏感权限客户账户（加密的 `external_id_enc`、state、last_error）。**同时是 `setup-org-stacksets.ts` 的 StackSet 排除名单来源**
+- `departed_accounts` — 已移出组织的账户记录（含 `rejoined_at` 轨迹）
+
+账单 ZIP 存在 `data/exports/billing/<jobId>/` 并在服务器长期保留；只通过鉴权下载端点访问，不写入 Git，也不会由 job runner 自动删除。历史记录通过分页接口查询，可重复下载。
 
 启动时：`migrateEncryptMFASecrets()` 迁移明文 MFA 密钥、`backupDB()` 备份到 `data/backups/db-YYYY-MM-DD.json`（保留 7 天）。
 
@@ -319,15 +337,25 @@ admin 恒有，其他角色必须显式授予，且**都不受 `allowed_pages` �
 
 ### 免登录进入 AWS 控制台 / Support Case
 
-STS Federation。后端用 AssumeRole 的临时凭证调 `signin.aws.amazon.com/federation` 换 signin token，拼成一次性登录 URL。点账户的「控制台」按钮或提升记录的 Case ID，新标签直接进对应子账户，可直接上传材料。完全免费，不需要 Business Support。
+STS Federation。后端先取得目标账户临时凭证，再请求 `signin.aws.amazon.com/federation?Action=getSigninToken` 换取 signin token，最后拼出一次性 login URL。浏览器只收到登录 URL，不接触服务端长期凭证；账户「控制台」按钮和提升记录 Case ID 都复用这条链路。
 
-`access` 参数三档：`support`（只读专用角色）、`admin`（管理员）、`auto`（沿用回退链，兼容未部署专用角色的账户）。
+`access` 参数分为 `support`、`admin`、`auto`，不同账户类型的实际会话如下：
+
+| 目标 | access | AssumeRole 与会话 |
+|------|--------|-------------------|
+| payer 管理账户 | `admin` | 直接进入 `role/tool`，session name 为 `console-payer-admin`，**不附加 session policy** |
+| payer 管理账户 | `support` / `auto` | 仍进入 `role/tool`，但附加 AWS 托管的 `ReadOnlyAccess` managed session policy，session name 为 `console-payer-readonly` |
+| 成员账户 | `support` | 一级跳 `support-quota`，session name 为 `console-support-<accountId>` |
+| 成员账户 | `admin` | 优先一级跳 `admin-console`，session name 为 `console-admin-<accountId>`；失败才回退 payer `role/tool` → `OrganizationAccountAccessRole` |
+| 成员账户 | `auto` | 按兼容回退链选择可用角色，供尚未完成专用角色部署的旧账户使用 |
+
+payer 只读会话的有效权限是 `role/tool` identity policy 与 `ReadOnlyAccess` session policy 的**交集**；session policy 只能收窄，不能增加权限。`admin` 控制台入口必须通过 `root_access` 实时门禁，并记录 `CONSOLE_ADMIN_LOGIN` 审计动作。排查实际会话类型时以 CloudTrail 的 `userIdentity.sessionContext.sessionIssuer`、session name 和请求错误为准，不要只看前端按钮文案。
 
 ### 提额文档自动生成（PDF）
 
 HTML 模板 + Puppeteer 渲染。公司背景库在 `doc-templates.ts`（12 家公司，从历史 SOW 总结），架构图在 `doc-templates/architectures/`。
 
-公司解析顺序：账户缓存的 `_payer` → `PAYER_TO_COMPANY` → `ACCOUNT_TO_COMPANY`。**36 个 payer 里只有 11 个有内置映射**，其余识别不出时前端弹出公司挑选，选过的按 payer 记在 localStorage，下次自动预选但仍需确认（刻意不静默套用，避免悄悄用错公司）。
+公司解析顺序：账户缓存的 `_payer` → `PAYER_TO_COMPANY` → `ACCOUNT_TO_COMPANY`。**截至 2026-08-27 的 44 个配置 payer 中，只有 11 个有内置映射**，其余识别不出时前端弹出公司挑选，选过的按 payer 记在 localStorage，下次自动预选但仍需确认（刻意不静默套用，避免悄悄用错公司）。
 
 `companyFromPayer` 的后缀兜底做的是「公司部分完全相等」比较，不能用 `endsWith` —— 单字符后缀会命中短名 key（`webby-2` → `malatrading`），静默生成挂着别家公司资料的文档。
 
@@ -366,23 +394,57 @@ HTML 模板 + Puppeteer 渲染。公司背景库在 `doc-templates.ts`（12 家�
 
 另有两道产出校验：页面显示的 12 位账号必须是目标账户；PDF 只有 1 页视为废纸并丢弃。
 
+#### Billing Console 权限前置与排障
+
+后端 Cost Explorer API 与浏览器 Billing Console 是两条独立授权路径。后端能读取费用，**不代表**同一账户的联邦控制台一定能打开账单页。目标账户还必须由 root 用户在 Billing 首选项中开启 **Activate IAM Access**；该开关只允许 IAM/联合身份参与 Billing 授权，不会替角色补充任何 IAM 权限。
+
+开关启用后可能有数分钟传播窗口，而且旧 Federation/browser session 会保留启用前的结果。遇到账单页提示无权限时按以下顺序处理：
+
+1. 退出旧 AWS Console 会话，关闭原有 Billing 标签页/窗口
+2. 从 AWSTool **重新生成**控制台 URL；必要时在全新隐私窗口打开，避免复用 `.amazon.com` cookie
+3. 用 CloudTrail 核对真实会话：payer Admin 应为 `console-payer-admin` 且没有 `ReadOnlyAccess` session policy；payer 只读应为 `console-payer-readonly`
+4. 记录拒绝事件的 `eventSource`、`eventName`、`errorCode`、`errorMessage`、`recipientAccountId` 与 `sessionIssuer`，再判断是账户开关、会话类型还是 IAM/SCP 拒绝
+
+`IAM user access not activated` 明确指向账户级开关尚未传播、访问了错误账户或仍在使用旧会话，不应通过扩大 `role/tool` 权限解决；普通 `AccessDenied` 才继续检查具体 action、角色 identity policy、session policy、permissions boundary 与 SCP。近期生产诊断已验证：重新生成的 `console-payer-admin` 会话可成功调用 `ce:GetCostAndUsage` 与 `billing:ListBillingViews`。
+
 ### MAP 标签合规
 
-平台不重写扫描/打标逻辑，而是 assume 中央工具账户的 `tag-compliance-console-role`（最小权限：只能操作那一个状态机 + 读写那一个报告桶），去读写 `orgs.json`、触发 Step Functions 扫描、查执行状态、读最新报告。打标本身仍由中央系统用最小权限的 `auto-tagger-role` 执行，安全模型不变。
+平台不重写扫描/打标逻辑，而是 assume 中央工具账户的 `tag-compliance-console-role`（最小权限：只能操作指定状态机与报告桶），去读写 `orgs.json`、触发 Step Functions 扫描、查执行状态、读最新报告。打标本身仍由中央系统用最小权限的 `auto-tagger-role` 执行，安全模型不变。
 
-### 根用户凭证操作
+「全自动接入」由 `tag-onboarding.ts` 的持久化 runner 实现，任务保存在 `data/db.json` 的 `tag_onboarding_jobs`，状态为 `queued` / `running` / `waiting_retry` / `completed` / `failed`。同一 payer + 相同 payload 会复用已有任务，不同标签参数会报告冲突；服务重启后 runner 会恢复未完成任务，并对 AWS 最终一致性场景自动等待/重试。
 
-账户页「根用户」tab 的三个敏感操作，均受 `root_access` 控制，全部记入审计。
+执行阶段固定为：
 
-| 功能 | 机制 | 说明 |
-|------|------|------|
-| 生成 Admin 临时凭证 | 优先直接 AssumeRole 到成员账户 `admin-console`，**不**走 `support-quota` | 默认 1 小时；仅平台 admin 可选 1–12 小时，超过 1 小时不回退 OAAR；支持复制 AK/SK/Token、导出环境变量、倒计时与重新生成 |
-| 删除 Root MFA | `sts:AssumeRoot`（任务策略 `IAMDeleteRootUserCredentials`）→ `DeactivateMFADevice` + `DeleteVirtualMFADevice` | 先用管理员凭证 `ListVirtualMFADevices` 定位 root 设备；仅虚拟 MFA |
-| 恢复根用户密码 | `sts:AssumeRoot`（任务策略 `IAMCreateRootUserPassword`）→ `CreateLoginProfile`（省略 UserName/Password） | 触发 AWS 密码恢复流程，向根邮箱发重置邮件 |
+1. `provision_org` — 创建或核验组织级前置资源
+2. `wait_management_index` — 等待管理账户 Resource Explorer 聚合索引与 OrgView
+3. `deploy_re_indexes` — 按各成员账户实际启用区域下发多区域索引
+4. `wait_stacksets` — 用账户 × 区域矩阵核验 StackSet 覆盖
+5. `upsert_org_config` — 原子更新 S3 `orgs.json` 并回读
+6. `verify` — 重新执行前置条件检查
+7. `done` — 标记完成
 
-**前提**：删 MFA / 恢复密码依赖 AWS 集中式根访问（`sts:AssumeRoot`），需组织已启用，且平台身份具备该权限。AssumeRoot 会话上限 15 分钟，且必须用区域性 STS 端点（不支持全球端点）。
+因此 API 返回提交成功只表示任务已入队；运维验收必须看到最终 `completed`，并检查阶段产物和回读结果。
 
-审计动作：`TEMP_CREDENTIALS`、`ROOT_MFA_DELETE`、`ROOT_PASSWORD_RECOVER`。
+### 根用户凭证状态与敏感操作
+
+账户页「根用户」tab 会读取状态，并提供四类敏感操作。敏感操作均受 `root_access` 实时门禁控制并写入审计；状态接口 `GET /root-credentials/:accountId` 当前不经过 `requireRootAccess`。
+
+| 功能 | 当前实现 | 说明 |
+|------|----------|------|
+| 读取 Root 凭证状态 | 优先 `AssumeRoot(IAMAuditRootUserCredentials)`，在目标 root 会话内调用 `ListAccessKeys`、`ListMFADevices`、`GetLoginProfile` | AssumeRoot 失败时回退管理员权限的 `GetAccountSummary` + Credential Report；Credential Report 最长可能约 4 小时才刷新 |
+| 生成 Admin 临时凭证 | 优先直接 AssumeRole 到成员账户 `admin-console`，**不**走 `support-quota` | 默认 1 小时；仅平台 admin 可选 1–12 小时。超过 1 小时不允许回退 OAAR；可复制 AK/SK/Token、导出环境变量、倒计时与重新生成 |
+| 删除 Root MFA | `AssumeRoot(IAMDeleteRootUserCredentials)` → root 会话内 `ListMFADevices({})` → `DeactivateMFADevice`；虚拟设备再尝试 `DeleteVirtualMFADevice` | 不依赖管理员会话枚举 root 设备 |
+| 恢复根用户密码 | `AssumeRoot(IAMCreateRootUserPassword)` → root 会话内 `CreateLoginProfile({})`（省略 `UserName` / `Password`） | 与 AWS Organizations“允许恢复密码”一致；不会删除、读取、生成或保存现有 root 密码；已有登录密码时返回冲突 |
+| 删除 Root Access Key | `AssumeRoot(IAMDeleteRootUserCredentials)` → `DeleteAccessKey({ AccessKeyId })` | 只删除用户二次确认的目标 key |
+
+**AWS 前提与边界**：
+
+- 组织必须启用集中式根访问，调用身份必须具备 `sts:AssumeRoot`
+- `AssumeRoot` 使用区域性 STS 端点，会话固定 900 秒；全球 STS 端点不支持
+- `TargetPrincipal` 只能是该组织的**成员账户**。payer/management account 自身不能对自己执行 `AssumeRoot`；即使 `role/tool` 已有 `sts:AssumeRoot` 权限也仍会被 AWS 拒绝
+- 当前前后端尚未在点击前显式排除 payer，因此在管理账户打开 Root 操作会看到 AWS `AccessDenied`；这是已知产品边界，不应通过继续扩大 IAM 权限规避
+
+审计动作：`TEMP_CREDENTIALS`、`ROOT_MFA_DELETE`、`ROOT_PASSWORD_RECOVER`、`ROOT_ACCESSKEY_DELETE`；Admin 控制台另记 `CONSOLE_ADMIN_LOGIN`。
 
 ### 账户角色自愈
 
@@ -399,6 +461,42 @@ HTML 模板 + Puppeteer 渲染。公司背景库在 `doc-templates.ts`（12 家�
 结果在账户页「权限状态」面板（仅 admin），列出异常账户、缺哪个角色、尝试次数、原因说明，可导出 CSV。账户列表里异常账户名旁会有「权限缺失 / 补齐中」标记。
 
 **已知无解情形**：零账单 + `OptInRequired` 的账户，StackSet 进不去，自愈也补不上，必须先处理账户本身的激活问题。截至 2026-08 有 7 个这类账户（yanhuang5-global 5 个、yanhuang13 2 个）。
+
+### 敏感权限客户账户（权限收窄 + ExternalId）
+
+默认下发的 `support-quota` 附带 `ReadOnlyAccess` 托管策略（2900+ action），有客户会审出来并要求收窄。`restricted-accounts.ts` 把收窄**精确到账户级**：同组织其他账户不受影响，平台自己的 StackSet 也不会把宽权限再盖回来。
+
+收窄后保留的权限只够查配额与区域状态：`servicequotas:Get*/List*`、`account:GetRegionOptStatus`、`account:ListRegions`、`sts:GetCallerIdentity`。信任策略额外要求 `sts:ExternalId`，**每账户一套 ExternalId**，一个泄露不牵连其它账户。
+
+隔离手段三步：
+
+1. 从组织级 StackSet `support-quota-role-orgwide` 移除该账户实例，`DeleteStackInstances` 带 **`RetainStacks=true`** —— 只脱离管理、不删账户内角色，过程中平台访问不中断
+2. 角色本身是**就地改造 IAM**（`UpdateAssumeRolePolicy` 加 ExternalId 条件 + `DetachRolePolicy` 摘掉 ReadOnlyAccess + 挂内联策略 `SupportQuotaRestricted`），不是靠 StackSet 部署。改 IAM 需要写权限，只读的 `support-quota` 改不了自己，所以要用 payer 二级跳拿成员账户 admin
+3. `AutoDeployment` 只在账户「加入 OU」时触发，已移除的实例不会被自动重建
+
+⚠️ **最容易漏的一环**：手工跑 `scripts/setup-org-stacksets.ts` 会重新覆盖，因此该脚本必须读取 `data/db.json` 的 `restricted_accounts` 排除名单（已实现，见脚本第 59 行）。这也是 README 部署章节强调「必须在 EC2 权威数据环境执行、不能用空白或陈旧本地 DB」的原因。
+
+`getExcludedAccountIds()` **刻意不按 state 过滤**：只要账户被标记过（记录未删）就一律排除。`state=failed` 表示收窄执行失败，但账户很可能已从组织级 StackSet 摘除，若因 failed 漏掉排除，下次全量下发就会把宽权限重新盖回客户账户，直接违反对客户的承诺。取消标记走 `unmarkRestricted()`，它会删除记录。
+
+复验（`verifyRestricted`）要同时满足三条，缺一即判失败：带 ExternalId 能 AssumeRole、**不带 ExternalId 必须被拒**（否则条件没生效）、`iam:GetRole` 必须被拒（否则收窄没生效）。IAM 最终一致，改完信任策略要轮询重试（6 次 × 5 秒）。
+
+取消标记的**顺序不能反**：先装回默认权限（去掉 ExternalId 条件 + 删内联策略），再删受限 StackSet 让组织级 StackSet 重新托管。反过来会有一段时间完全无法访问该账户。
+
+调用侧：`aws-service.ts` 在 AssumeRole 时对 `support-quota` 自动带上 `getExternalId(accountId)`（admin 类角色不受此约束）。受限账户会失去**账单成本分析、资源清理扫描、账户详情的 IAM 安全状态**，属预期取舍 —— 调用方应据 `isRestricted()` 给出明确提示，而不是抛裸 `AccessDenied`。ExternalId 加密存储（`external_id_enc`），列表接口不返回明文，只有严格 admin 可单独调 `/external-id` 取用于交付客户，并记 `ACCOUNT_EXTERNALID_VIEW` 审计。
+
+审计动作：`ACCOUNT_RESTRICT`、`ACCOUNT_UNRESTRICT`、`ACCOUNT_EXTERNALID_VIEW`。
+
+### 离场账户追踪
+
+账户被移出组织后，`ListAccounts` 立即不再返回它，平台账户缓存下一轮就没了，但遗留数据（`region_data` 等）仍在库里，表现为「未知组织」的孤儿记录，也无从追溯这个账户曾经是谁、什么时候走的。`account-lifecycle.ts` 补这个缺口，挂在 `scheduler.ts` 账户同步里（缓存被覆盖写入**之前**调用 `recordDepartures`）。
+
+**核心难点是避免误判**。`listAccounts()` 对 assume 失败的 payer 是静默 skip 的，所以「从缓存消失」有两种完全不同的原因：账户真的被移出组织（应记录），或该 payer 这一轮同步失败（该组织所有账户都会消失，**绝不能记录**）。判据：只有当同组织仍有其他账户存活时，才认为消失的那些是真的离开了；一个组织的账户整体归零一律判为同步失败并跳过（日志里会列出 `skippedPayers`）。
+
+- **重新加入**：此前记为离开、现在又出现在列表里的，写 `rejoined_at` 而**不删记录**，保留完整轨迹
+- **历史补录**：`backfillDepartures()` 把「有遗留数据但已不在缓存里」的账户登记进来 —— 模块上线前就已离开的账户不会再触发 diff 检测。目前唯一的遗留数据来源是 `region_data`
+- **已查证记录**：`KNOWN_DEPARTURES` 常量硬编码了一批上线前离开的账户，`departedAt` / `actor` 来自各原组织管理账户的 CloudTrail `RemoveAccountFromOrganization` 事件；查不到确切离开方式的（如 `ConstraintViolationException`）在 `note` 里如实说明
+
+前端在账户管理页的「已离开」入口展示，汇总按 payer 分组。
 
 ### 飞书通知
 
@@ -452,8 +550,9 @@ pm2 restart aws-toolbox
 ### 验证部署生效
 
 ```bash
+EXPECTED_VERSION=$(awk -F"'" '/export const APP_VERSION/{print $2}' web/client/src/version.ts)
 BUNDLE=$(curl -s https://markxu.co/ | grep -oE 'assets/index-[A-Za-z0-9]+\.js' | head -1)
-curl -s "https://markxu.co/$BUNDLE" | grep -oE '0\.4\.7'
+curl -s "https://markxu.co/$BUNDLE" | grep -F "$EXPECTED_VERSION"
 ```
 
 ### HTTPS
@@ -467,10 +566,35 @@ Nginx 反代 + Let's Encrypt（`markxu.co`，自动续期），80 强制跳 443�
 | 需求 | 改动点 |
 |------|--------|
 | 新增业务接口 | `routes/aws.ts` 加路由（按需加守卫）→ `aws-service.ts` 加函数复用 `assumeToAccount()` → `api.ts` 加方法 → 页面调用 |
-| 新增页面 | `pages/Xxx.tsx` → `MainLayout.tsx` 的 `navItems`/`PAGE_META`/`renderPage()` switch 各加一项（同一 key）→ `auth.ts` 的 `ALL_PAGE_KEYS` 加同名 key；要移动端入口再加 `mobileNavItems` |
-| 加 payer | ① 在该 payer 建 `role/tool` 信任平台身份 ② `config.json.payers[]` 加 `{name, roleArn}` 并把组织名加入 `consoleAdminPayers`（本地 + EC2 各一份，勿提交）→ 重启 → `POST /api/aws/accounts/refresh` ③ **跑两次 `npx tsx scripts/setup-org-stacksets.ts support\|admin <payerName>`**，否则该组织新账户拿不到角色 |
+| 新增页面 | `pages/Xxx.tsx` → `MainLayout.tsx` 的 `navItems`/`PAGE_META`/`pageComponent()` switch 各加一项（同一 key）→ `auth.ts` 的 `ALL_PAGE_KEYS` 加同名 key；要移动端入口再加 `mobileNavItems`。key 会自动成为 URL 路径（`VALID_PAGE_KEYS` 由 PAGE_META + 独立权限页推导）。高频页可加进 `KEEP_ALIVE_PAGES` 保活，但有轮询定时器的页面别加（隐藏时白轮询） |
+| 加 payer | 按下方「新增 payer 安全 Runbook」执行；角色、双 StackSet、生产配置和验收缺一不可，不能只改 `config.json` |
 | 新增公司模板 | `doc-templates.ts` 的 `COMPANY_PROFILES` 加资料 + `ACCOUNT_TO_COMPANY`/`PAYER_TO_COMPANY` 加映射 → 架构图放 `doc-templates/architectures/` |
 | 调同步频率 | `scheduler.ts` |
+| 客户要求收窄平台权限 | 账户页标记为「敏感权限客户」（`POST /accounts/restricted`）→ 收窄逻辑在 `restricted-accounts.ts`；改收窄范围要同步改 `RESTRICTED_POLICY_DOC` 与 `RESTRICTED_UNAVAILABLE` 提示 |
+
+### 新增 payer 安全 Runbook
+
+新增 payer 会创建高权限入口并向整个组织自动部署角色，必须按以下顺序执行。**禁止跳过验证后直接把组织加入 `consoleAdminPayers`。**
+
+1. **核实身份与组织**：用独立 AWS Profile 查询 `sts get-caller-identity`、`organizations describe-organization`、`list-roots`、`list-accounts`，记录 management account、Organization ID、Root ID、成员数量和账户状态，确认没有连错组织。
+2. **创建或核验管理账户 `role/tool`**：新建信任策略只允许 `arn:aws:iam::509399618054:user/mark`。当前平台模型依赖该角色管理 Organizations、StackSets、STS、配额、费用与账户能力，因此要求 `AdministratorAccess`；这是高权限入口，必须同时核验信任策略、permissions boundary 和实际 AssumeRole。
+3. **启用 SERVICE_MANAGED 前置**：执行上文的 `enable-aws-service-access` 与 `activate-organizations-access`，并确认 `describe-organizations-access` 返回 `ENABLED`。
+4. **先只登记 payer**：备份本地与 EC2 的 `config.json`，在两边 `payers[]` 加 `{ "name": "<payerName>", "roleArn": "arn:aws:iam::<managementAccountId>:role/tool" }`。此时不要加入 `consoleAdminPayers`；`config.json` 含密钥且被 gitignore，绝不能提交。
+5. **在 EC2 权威数据环境部署双 StackSet**：脚本会读取 `data/db.json.restricted_accounts`，所以必须在生产 `web/` 目录执行，不能用空白或陈旧的本地 DB 替代：
+
+   ```bash
+   cd ~/AWSTool/web
+   npx tsx scripts/setup-org-stacksets.ts support <payerName>
+   npx tsx scripts/setup-org-stacksets.ts admin <payerName>
+   npx tsx scripts/setup-org-stacksets.ts support <payerName> --dry-run
+   npx tsx scripts/setup-org-stacksets.ts admin <payerName> --dry-run
+   ```
+
+6. **检查脚本结果**：任一组织异常会汇总为非零退出码；同时必须检查输出中的 `❌` 以及 `ok` / `susp` / `fail` 汇总，确保没有失败或异常挂起账户。
+7. **回读 CloudFormation**：两个 StackSet 应分别为 `support-quota-role-orgwide` 与 `admin-console-role-orgwide`，状态 `ACTIVE`、`PermissionModel=SERVICE_MANAGED`、`AutoDeployment.Enabled=true`、`RetainStacksOnAccountRemoval=false`，最近操作 `SUCCEEDED` 且失败实例为 0。仅有 management account 的组织显示实例数 0 是正常现象。
+8. **注意模板漂移**：默认模式遇到已存在 StackSet 时仍使用 `UsePreviousTemplate=true`，不会自动改写角色定义。只有明确审查过模板差异后，才可执行 `npx tsx scripts/setup-org-stacksets.ts admin <payerName> --refresh-template`；该模式强制指定单个 payer，会更新 StackSet 模板并对 Root OU 的已有实例执行 `UpdateStackInstances`。脚本会在刷新异常、operation 非 `SUCCEEDED` 或残留失败实例时返回非零，但仍须按第 6、7 步独立回读。
+9. **通过后再开放 Admin UI**：本地与 EC2 的 `consoleAdminPayers` 唯一加入 `<payerName>`，`pm2 restart aws-toolbox`，然后刷新账户缓存。
+10. **完整验收**：确认 payer 账户带 `_isPayer=true`、`_consoleDual=true`；分别实测 payer `role/tool`、成员 `support-quota` / `admin-console` 与必要的 OAAR 回退；再检查区域扫描、Billing Console、PM2 online 和 HTTPS 200。只有这些检查通过才算接入完成。
 
 ---
 
@@ -500,9 +624,10 @@ Nginx 反代 + Let's Encrypt（`markxu.co`，自动续期），80 强制跳 443�
 - `data/db.json`、`config.json` 已移出 git 跟踪
 - 启动时自动备份 db.json 到 `data/backups/`，保留 7 天
 - MFA secret AES-256-CBC 加密存储，密码 bcrypt
-- 凭证只在服务端，绝不下发前端
+- 平台长期凭证只在服务端；具备 `root_access` 的用户可显式请求 1 小时 Admin 临时凭证，只有数据库当前角色为 admin 才可选择 2–12 小时。长时请求仅走成员账户 `admin-console` 直接一级跳；所有签发均实时鉴权、记录实际时长/到期时间且不落盘
 - 密码 + TOTP MFA（window=2，150 秒容差），JWT 2 小时过期
-- 登录限流 5 次/15 分钟，API 限流 100 次/分钟
+- 登录限流 5 次/15 分钟；API 限流读写分离：GET 300 次/分钟（监控轮询 + 多标签页），写操作 100 次/分钟
+- 未匹配的 `/api/*` 一律返回 404 JSON（不掉进 SPA fallback 返回 200 + index.html，避免鼓励扫描器探测）
 - Helmet 安全头 + CORS 白名单（未列入的来源用 `callback(null, false)` 优雅拒绝，**绝不 throw** —— 抛错会被 Express 当 500，导致带 `crossorigin` 的静态资源请求失败、整站白屏）
 
 ---
@@ -511,11 +636,11 @@ Nginx 反代 + Let's Encrypt（`markxu.co`，自动续期），80 强制跳 443�
 
 ### 其它
 
-- 前端单 bundle 已 1.47MB（gzip 458KB），暂时为跨境网络稳定性接受不分包
-- EC2 上 Node v20，AWS SDK v3 在 2027 年 1 月后要求 Node ≥ 22
+- ~~前端单 bundle 不分包~~ 已改为三包分割（vendor 1.36MB / charts 398KB / 业务 252KB）+ immutable 缓存，日常发版用户只需重下业务包（gzip 76KB）
+- ~~EC2 上 Node v20~~ 已于 2026-09-06 升级到 v22.23.2（nodesource 源，`dnf install nodejs-2:22.23.2`），AWS SDK 2027 年 1 月的 Node ≥ 22 要求已满足；回退备份在 `~/node_modules-pre-node22.tar.gz` 与 `~/AWSTool/data/db-pre-node22-upgrade.json`，观察数日无异常后可删
 - `doc-templates.ts` 的 `taiping` 有完整模板和架构图，但没有任何 payer / 账户映射指向它，只能靠手选或手动生成入口用到
 - 7 个账户零账单 + CloudFormation `OptInRequired`，StackSet 与自愈都进不去，需人工先处理账户激活
-- `config.consoleAdminPayers` 是静态白名单（现已含全部 36 个组织）。更合理的做法是直接用 `account_roles` 的真实探测结果决定 `_consoleDual`，等检测覆盖率上来后可以替换
+- `config.consoleAdminPayers` 是静态白名单（生产核验快照 2026-08-27：44 个 payer 中已开放 43 个组织）。更合理的做法是直接用 `account_roles` 的真实探测结果决定 `_consoleDual`，等检测覆盖率上来后可以替换
 - 早先建的 `support-quota` / `admin-console` 角色信任主体里仍有历史身份 `134103550877`，新建的已去掉；是否统一清理待定
 - `account_roles` 覆盖率需要时间铺开（增量每轮 60 个）。想立刻建立基线可在账户页点一次「全量复检」
 
