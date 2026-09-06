@@ -124,7 +124,7 @@ AWS/
     │       ├── aws.ts              # ★awsRouter：主业务端点（50+），含权限守卫
     │       └── regions.ts          # regionsRouter：区域 opt-in 状态/扫描/开通
     ├── client/
-    │   ├── vite.config.ts          # dev 端口 5174
+    │   ├── vite.config.ts          # dev 端口 5174；manualChunks 三包分割（vendor/charts/业务）
     │   └── src/
     │       ├── App.tsx             # 认证门禁：Login →（未绑 MFA）SetupMFA → MainLayout
     │       ├── api.ts              # ★统一 HTTP 客户端，token 存 localStorage
@@ -519,6 +519,8 @@ HTML 模板 + Puppeteer 渲染。公司背景库在 `doc-templates.ts`（12 家�
 | 账户角色自愈（增量） | 跟随账户同步 | — | 只查新账户和待重试，单轮 ≤60 |
 | 账户角色自愈（全量） | 24 小时 | — | 最久未检查优先轮转，单轮 ≤400 |
 
+另有 `ops-monitor.ts` 独立于 scheduler：每 60 秒采样 CPU/内存/磁盘/事件循环延迟（进程内存环形缓冲，保留 24h），请求指标由 `index.ts` 日志中间件实时打点。
+
 ---
 
 ## 部署与运维
@@ -538,7 +540,7 @@ npm run dev        # 前端 5174 + 后端 3000 并行
 git add <具体代码文件> && git commit -m "..." && git push
 
 # EC2
-ssh -i /Users/mark/mark-sg-key.pem ec2-user@54.255.131.45
+ssh -i server-access/mark-sg-key.pem ec2-user@54.255.131.45   # 密钥在项目 server-access/（gitignore）
 cd ~/AWSTool && git pull -q
 cd web && npm install                                    # 仅依赖变化时
 npx vite build --config client/vite.config.ts
@@ -553,7 +555,8 @@ pm2 restart aws-toolbox
 
 ```bash
 EXPECTED_VERSION=$(awk -F"'" '/export const APP_VERSION/{print $2}' web/client/src/version.ts)
-BUNDLE=$(curl -s https://markxu.co/ | grep -oE 'assets/index-[A-Za-z0-9]+\.js' | head -1)
+# 注意：分包后版本号在业务包 index-*.js 里（不在 vendor/charts）；vite hash 含 - 和 _
+BUNDLE=$(curl -s https://markxu.co/ | grep -oE 'assets/index-[A-Za-z0-9_-]+\.js' | head -1)
 curl -s "https://markxu.co/$BUNDLE" | grep -F "$EXPECTED_VERSION"
 ```
 
