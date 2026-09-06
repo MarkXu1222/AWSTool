@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
-import { Card, Button, message, Alert, Image, Input, Form, Table, Tag, Modal, Select, Space, Popconfirm, Tabs, Checkbox } from 'antd';
-import { SafetyOutlined, CheckCircleOutlined, LogoutOutlined, LockOutlined, UserAddOutlined, DeleteOutlined, EditOutlined } from '@ant-design/icons';
+import { Card, Button, message, Alert, Image, Input, Form, Table, Tag, Modal, Select, Space, Popconfirm, Tabs, Checkbox, Tooltip } from 'antd';
+import { SafetyOutlined, CheckCircleOutlined, LockOutlined, UserAddOutlined, DeleteOutlined, EditOutlined, ReloadOutlined } from '@ant-design/icons';
 import { api } from '../api';
 import { PAGE_META } from '../components/MainLayout';
 
@@ -16,6 +16,8 @@ const SettingsPage: React.FC<SettingsPageProps> = ({ onLogout }) => {
   const [loading, setLoading] = useState(false);
   const [connection, setConnection] = useState<any[]>([]);
   const [checking, setChecking] = useState(true);
+  const [lastChecked, setLastChecked] = useState<Date | null>(null);
+  const [normalExpanded, setNormalExpanded] = useState(false);
   const [settingsTab, setSettingsTab] = useState('connection');
   const [users, setUsers] = useState<any[]>([]);
   const [addUserOpen, setAddUserOpen] = useState(false);
@@ -24,6 +26,7 @@ const SettingsPage: React.FC<SettingsPageProps> = ({ onLogout }) => {
   const [addForm] = Form.useForm();
   const [resetForm] = Form.useForm();
   const [editForm] = Form.useForm();
+  const [pwdForm] = Form.useForm();
   const ALL_PAGE_KEYS = PAGE_META.map(p => p.key);
   const ROLE_OPTIONS = [
     { label: '管理员 (admin) — 全部权限', value: 'admin' },
@@ -37,8 +40,16 @@ const SettingsPage: React.FC<SettingsPageProps> = ({ onLogout }) => {
     try {
       const meRes = await api.me();
       if (meRes.mfaEnabled) setMfaEnabled(true);
+    } catch {}
+    await runConnectionTest();
+  };
+
+  // 连接测试单独抽出，支持手动重测（排障时需要复测而不是刷新整页）
+  const runConnectionTest = async () => {
+    setChecking(true);
+    try {
       const connRes = await api.testConnection();
-      if (connRes.success) setConnection(connRes.data);
+      if (connRes.success) { setConnection(connRes.data || []); setLastChecked(new Date()); }
     } catch {}
     setChecking(false);
   };
@@ -124,15 +135,54 @@ const SettingsPage: React.FC<SettingsPageProps> = ({ onLogout }) => {
       {/* 表单类 tab 限宽更易读；用户管理是宽表格，放开占满整宽 */}
       <div style={{ maxWidth: settingsTab === 'users' ? undefined : 640 }}>
       <Tabs activeKey={settingsTab} onChange={setSettingsTab} items={[
-        { key: 'connection', label: '连接', children: (
-          <Card size="small" title="连接状态">
-            {connection.length === 0 && checking && <span style={{ color: '#999' }}>检查中...</span>}
-            {connection.map((c, i) => (
-              <Alert key={i} type={c.ok ? 'success' : 'error'} showIcon
-                message={`${c.name}: ${c.ok ? '✅ ' + c.account : '❌ ' + c.error}`} style={{ marginBottom: 4 }} />
-            ))}
-          </Card>
-        )},
+        { key: 'connection', label: '连接', children: (() => {
+          const failed = connection.filter((c: any) => !c.ok);
+          const okList = connection.filter((c: any) => c.ok);
+          const summaryColor = connection.length === 0 ? '#8a94a6' : failed.length === 0 ? '#52c41a' : failed.length / connection.length > 1 / 3 ? '#ff4d4f' : '#d48806';
+          return (
+            <Card size="small" title="连接状态"
+              extra={
+                <Space size="middle">
+                  {lastChecked && <span style={{ fontSize: 12, color: '#8a94a6' }}>检查于 {lastChecked.toLocaleTimeString()}</span>}
+                  <Button size="small" icon={<ReloadOutlined />} loading={checking} onClick={runConnectionTest}>重新检测</Button>
+                </Space>
+              }>
+              {/* 汇总行：3 秒回答「有没有挂的」 */}
+              <div style={{ fontSize: 15, fontWeight: 600, color: summaryColor, marginBottom: 12 }}>
+                {connection.length === 0
+                  ? (checking ? '检查中…' : '暂无连接数据')
+                  : failed.length === 0
+                    ? `✓ 全部正常（${okList.length}/${connection.length} 组织）`
+                    : `${failed.length} 个组织异常（${okList.length}/${connection.length} 正常）`}
+              </div>
+
+              {/* 异常置顶：唯一值得 Alert 级视觉重量的内容，完整展示错误 */}
+              {failed.map((c: any, i: number) => (
+                <Alert key={c.name || i} type="error" showIcon style={{ marginBottom: 6 }}
+                  message={<strong>{c.name}</strong>} description={c.error || '连接失败'} />
+              ))}
+
+              {/* 正常组织默认折叠为紧凑标签流；ID 放 tooltip 不占版面 */}
+              {okList.length > 0 && (
+                <div style={{ marginTop: failed.length > 0 ? 12 : 0 }}>
+                  <Button type="link" size="small" style={{ padding: 0, marginBottom: 6 }}
+                    onClick={() => setNormalExpanded(v => !v)}>
+                    {normalExpanded ? '收起' : `展开正常组织 (${okList.length})`}
+                  </Button>
+                  {normalExpanded && (
+                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                      {okList.map((c: any) => (
+                        <Tooltip key={c.name} title={`账号 ${c.account}`}>
+                          <Tag color="success" style={{ margin: 0, cursor: 'default' }}>{c.name}</Tag>
+                        </Tooltip>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+            </Card>
+          );
+        })()},
         { key: 'security', label: '安全', children: (
           <>
             <Card size="small" title="MFA 双因素认证" style={{ marginBottom: 12 }}>
@@ -156,11 +206,12 @@ const SettingsPage: React.FC<SettingsPageProps> = ({ onLogout }) => {
               )}
             </Card>
             <Card size="small" title="修改密码">
+              {/* 成功后必须清空表单：明文密码留在输入框里是安全隐患 */}
               <Form layout="vertical" onFinish={async (values: any) => {
                 if (values.newPassword !== values.confirmPassword) { message.error('两次密码不一致'); return; }
                 const res = await api.changePassword(values.currentPassword, values.newPassword);
-                if (res.success) message.success('密码已修改'); else message.error(res.error);
-              }}>
+                if (res.success) { message.success('密码已修改'); pwdForm.resetFields(); } else message.error(res.error);
+              }} form={pwdForm}>
                 <Form.Item name="currentPassword" label="当前密码" rules={[{ required: true }]}><Input.Password prefix={<LockOutlined />} /></Form.Item>
                 <Form.Item name="newPassword" label="新密码" rules={[{ required: true }, { min: 6, message: '至少 6 位' }]}><Input.Password prefix={<LockOutlined />} /></Form.Item>
                 <Form.Item name="confirmPassword" label="确认新密码" rules={[{ required: true }]}><Input.Password prefix={<LockOutlined />} /></Form.Item>
@@ -216,11 +267,7 @@ const SettingsPage: React.FC<SettingsPageProps> = ({ onLogout }) => {
               ]} />
           </Card>
         )},
-        { key: 'account', label: '账号', children: (
-          <Card size="small">
-            <Button danger icon={<LogoutOutlined />} onClick={onLogout} block size="large">退出登录</Button>
-          </Card>
-        )},
+        // 「账号」tab 已删除：整个 tab 只有一个退出登录按钮，而侧栏底部本来就有同一按钮，纯冗余导航
       ]} />
 
       {/* Add user modal */}
