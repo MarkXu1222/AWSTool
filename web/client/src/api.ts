@@ -240,6 +240,8 @@ export const api = {
     return res;
   },
   me: () => request('/auth/me'),
+  // 运维监控（仅 admin）。range: '1h' | '6h' | '24h'
+  getOpsOverview: (range: '1h' | '6h' | '24h' = '1h') => request(`/ops/overview?range=${range}`),
   setupMFA: () => request('/auth/mfa/setup', { method: 'POST' }),
   confirmMFA: (secret: string, code: string) =>
     request('/auth/mfa/confirm', { method: 'POST', body: JSON.stringify({ secret, code }) }),

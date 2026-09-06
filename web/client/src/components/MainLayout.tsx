@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useLayoutEffect, useRef } from 'react';
 import { Layout, Menu, Button } from 'antd';
-import { HomeOutlined, TeamOutlined, DashboardOutlined, DollarOutlined, SettingOutlined, LogoutOutlined, DeleteOutlined, FileSearchOutlined, GlobalOutlined, TagsOutlined, ThunderboltOutlined } from '@ant-design/icons';
+import { HomeOutlined, TeamOutlined, DashboardOutlined, DollarOutlined, SettingOutlined, LogoutOutlined, DeleteOutlined, FileSearchOutlined, GlobalOutlined, TagsOutlined, ThunderboltOutlined, FundOutlined } from '@ant-design/icons';
 import DashboardPage from '../pages/Dashboard';
 import AccountsPage from '../pages/Accounts';
 import QuotasPage from '../pages/Quotas';
@@ -11,6 +11,7 @@ import AuditLogPage from '../pages/AuditLog';
 import SettingsPage from '../pages/Settings';
 import TagCompliancePage from '../pages/TagCompliance';
 import BulkQuotaPage from '../pages/BulkQuota';
+import OpsMonitorPage from '../pages/OpsMonitor';
 import { api } from '../api';
 import { APP_VERSION } from '../version';
 
@@ -37,6 +38,10 @@ export const PAGE_META: { key: string; label: string }[] = [
 // 可见性完全由独立权限 bulkQuotaAccess 决定，不能通过「页面权限」勾选获得。
 export const BULK_QUOTA_PAGE_KEY = 'bulkquota';
 
+// 运维监控页 key。同样不在 PAGE_META / 后端 ALL_PAGE_KEYS 里，
+// 只有 role === 'admin' 可见（后端 /api/ops 也按严格 admin 校验）。
+export const OPS_PAGE_KEY = 'ops';
+
 const navItems = [
   { key: 'dashboard', icon: <HomeOutlined />, label: '概览' },
   { key: 'accounts', icon: <TeamOutlined />, label: '账户管理' },
@@ -47,6 +52,7 @@ const navItems = [
   { key: 'cleanup', icon: <DeleteOutlined />, label: '资源清理' },
   { key: 'tagcompliance', icon: <TagsOutlined />, label: 'MAP 标签' },
   { key: 'audit', icon: <FileSearchOutlined />, label: '审计日志' },
+  { key: OPS_PAGE_KEY, icon: <FundOutlined />, label: '运维监控' },
   { key: 'settings', icon: <SettingOutlined />, label: '系统设置' },
 ];
 
@@ -65,6 +71,8 @@ const MainLayout: React.FC<MainLayoutProps> = ({ onLogout }) => {
   const [allowedPages, setAllowedPages] = useState<string[] | null>(null);
   // 批量提额独立权限；未加载完前按无权限处理，避免菜单闪现
   const [bulkQuotaAccess, setBulkQuotaAccess] = useState(false);
+  // 运维监控仅 admin 可见；未加载完前按无权限处理
+  const [isAdmin, setIsAdmin] = useState(false);
   const appContainerRef = useRef<HTMLElement | null>(null);
 
   useLayoutEffect(() => {
@@ -137,6 +145,7 @@ const MainLayout: React.FC<MainLayoutProps> = ({ onLogout }) => {
     api.me().then(r => {
       setUsername(r.username || '');
       setBulkQuotaAccess(!!r.bulkQuotaAccess);
+      setIsAdmin(r.role === 'admin');
       if (Array.isArray(r.allowedPages)) {
         setAllowedPages(r.allowedPages);
         // 如果当前页不在允许列表里，回退到第一个允许的页面
@@ -151,12 +160,45 @@ const MainLayout: React.FC<MainLayoutProps> = ({ onLogout }) => {
   const isPageAllowed = (key: string) => {
     // 批量提额只看独立权限，与页面权限无关
     if (key === BULK_QUOTA_PAGE_KEY) return bulkQuotaAccess;
+    // 运维监控只看 admin 角色，与页面权限无关
+    if (key === OPS_PAGE_KEY) return isAdmin;
     if (allowedPages === null) return true;
     return allowedPages.includes(key);
   };
 
   const visibleNavItems = navItems.filter(item => isPageAllowed(item.key));
   const visibleMobileNavItems = mobileNavItems.filter(item => isPageAllowed(item.key));
+
+  // keep-alive：高频切换、数据重的页面保持挂载（display:none 隐藏），
+  // 切回时不重新请求/重建，明显更流畅。
+  // 不保活的页面：ops（有 30s 轮询定时器，隐藏时会白轮询）、
+  // settings/audit/cleanup 等低频页（重新加载反而保证数据新鲜）。
+  const KEEP_ALIVE_PAGES = ['dashboard', 'accounts', 'quotas', 'regions', 'billing'];
+  // 记录访问过的保活页，只挂载访问过的，避免登录后立刻全量请求
+  const [visitedPages, setVisitedPages] = useState<string[]>([]);
+  useEffect(() => {
+    if (KEEP_ALIVE_PAGES.includes(currentPage) && isPageAllowed(currentPage)) {
+      setVisitedPages(prev => prev.includes(currentPage) ? prev : [...prev, currentPage]);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentPage, allowedPages]);
+
+  const pageComponent = (key: string): React.ReactNode => {
+    switch (key) {
+      case 'dashboard': return <DashboardPage onNavigate={setCurrentPage} />;
+      case 'accounts': return <AccountsPage />;
+      case 'quotas': return <QuotasPage />;
+      case BULK_QUOTA_PAGE_KEY: return <BulkQuotaPage />;
+      case OPS_PAGE_KEY: return <OpsMonitorPage />;
+      case 'regions': return <RegionsPage />;
+      case 'billing': return <BillingPage />;
+      case 'cleanup': return <CleanupPage />;
+      case 'tagcompliance': return <TagCompliancePage />;
+      case 'audit': return <AuditLogPage />;
+      case 'settings': return <SettingsPage onLogout={onLogout} />;
+      default: return <DashboardPage />;
+    }
+  };
 
   const renderPage = () => {
     // 守卫：当前页不在允许列表中时显示无权限提示（比如通过历史 URL 或旧 state 进入）
@@ -168,19 +210,23 @@ const MainLayout: React.FC<MainLayoutProps> = ({ onLogout }) => {
         </div>
       );
     }
-    switch (currentPage) {
-      case 'dashboard': return <DashboardPage onNavigate={setCurrentPage} />;
-      case 'accounts': return <AccountsPage />;
-      case 'quotas': return <QuotasPage />;
-      case BULK_QUOTA_PAGE_KEY: return <BulkQuotaPage />;
-      case 'regions': return <RegionsPage />;
-      case 'billing': return <BillingPage />;
-      case 'cleanup': return <CleanupPage />;
-      case 'tagcompliance': return <TagCompliancePage />;
-      case 'audit': return <AuditLogPage />;
-      case 'settings': return <SettingsPage onLogout={onLogout} />;
-      default: return <DashboardPage />;
-    }
+    const isKeepAlive = KEEP_ALIVE_PAGES.includes(currentPage);
+    return (
+      <>
+        {/* 保活页：访问过的都保持挂载，仅当前页显示。首次挂载有 page-fade 动画，切回瞬时显示 */}
+        {visitedPages.map(key => (
+          <div key={key} className="page-fade" style={{ display: key === currentPage ? undefined : 'none' }}>
+            {pageComponent(key)}
+          </div>
+        ))}
+        {/* 非保活页：按旧逻辑每次重建（key 变化触发 fade 动画与数据刷新） */}
+        {!isKeepAlive && (
+          <div key={currentPage} className="page-fade">
+            {pageComponent(currentPage)}
+          </div>
+        )}
+      </>
+    );
   };
 
   return (
@@ -221,9 +267,9 @@ const MainLayout: React.FC<MainLayoutProps> = ({ onLogout }) => {
         {/* Content area */}
         <Layout>
           <Content className="main-content">
-            <div key={currentPage} className="page-fade">
-              {renderPage()}
-            </div>
+            {/* 注意：这里不能再套 key={currentPage} 的包装（会强制整树重建，破坏 keep-alive）。
+                fade 动画已由 renderPage 内部每个页面的包装 div 承担。 */}
+            {renderPage()}
           </Content>
         </Layout>
       </Layout>

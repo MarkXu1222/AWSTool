@@ -12,6 +12,7 @@ import { migrateEncryptMFASecrets, backupDB } from './db';
 import { startScheduler, getSchedulerStatus } from './scheduler';
 import { startTagOnboardingRunner } from './tag-onboarding';
 import { startBillingExportRunner, stopBillingExportRunner } from './billing-export-jobs';
+import { opsRouter, requireOpsAdmin, recordRequest, startOpsMonitor, stopOpsMonitor } from './ops-monitor';
 
 const app = express();
 app.set('trust proxy', 1);
@@ -64,15 +65,26 @@ app.use((req, res, next) => {
     const duration = Date.now() - start;
     if (req.path.startsWith('/api/')) {
       console.log(`${req.method} ${req.path} ${res.statusCode} ${duration}ms`);
+      // 运维监控：记录请求指标（/api/ops 自身会在内部被排除）
+      try { recordRequest(req.method, req.path, res.statusCode, duration); } catch {}
     }
   });
   next();
 });
 
-// Rate limiting
+// Rate limiting — 读写分离：
+// GET（读多、含监控 30s 轮询与多标签页并用）放宽到 300/min；
+// 写操作维持 100/min 不变，防止误操作/滥用批量写。
+app.use('/api/', rateLimit({
+  windowMs: 1 * 60 * 1000, // 1 minute
+  max: 300,
+  skip: (req) => req.method !== 'GET',
+  message: { error: 'Too many requests, try again later' },
+}));
 app.use('/api/', rateLimit({
   windowMs: 1 * 60 * 1000, // 1 minute
   max: 100,
+  skip: (req) => req.method === 'GET',
   message: { error: 'Too many requests, try again later' },
 }));
 
@@ -94,6 +106,9 @@ app.use('/api/regions', authMiddleware, auditMiddleware, regionsRouter);
 app.get('/api/scheduler/status', authMiddleware, (_req, res) => {
   res.json({ success: true, data: getSchedulerStatus() });
 });
+
+// 运维监控（仅严格 admin；不走 auditMiddleware，避免高频轮询刷爆审计日志）
+app.use('/api/ops', authMiddleware, requireOpsAdmin, opsRouter);
 
 // Serve static frontend
 import fs from 'fs';
@@ -129,6 +144,7 @@ const server = app.listen(Number(PORT), '127.0.0.1', async () => {
     await startBillingExportRunner();
     startScheduler();
     startTagOnboardingRunner();
+    startOpsMonitor();
   } catch (error) {
     console.error('[Startup] 后台 runner 启动失败，服务将退出:', error);
     server.close(() => process.exit(1));
@@ -140,6 +156,7 @@ function shutdown(signal: NodeJS.Signals): Promise<void> {
   if (shutdownPromise) return shutdownPromise;
   shutdownPromise = (async () => {
     console.log(`[Shutdown] 收到 ${signal}，停止接收请求并清理账单导出进程`);
+    try { stopOpsMonitor(); } catch {}
     const closeServer = new Promise<void>((resolve, reject) => {
       server.close(error => error ? reject(error) : resolve());
     });
