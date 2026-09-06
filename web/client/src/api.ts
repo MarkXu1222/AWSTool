@@ -24,7 +24,7 @@ async function request(path: string, options: RequestInit = {}) {
   // Only redirect on 401 for non-auth routes
   if (res.status === 401 && !path.startsWith('/auth/')) {
     localStorage.removeItem('token');
-    window.location.href = '/';
+    window.location.reload();
     throw new Error('Session expired');
   }
 
@@ -152,7 +152,7 @@ async function billingJobRequest<T>(path: string, options: RequestInit = {}): Pr
     const payload = await res.json().catch(() => ({}));
     if (res.status === 401) {
       localStorage.removeItem('token');
-      window.location.href = '/';
+      window.location.reload();
       throw new BillingJobRequestError(payload.error || '登录已过期', 401);
     }
     if (!res.ok) {
@@ -360,7 +360,7 @@ export const api = {
       window.clearTimeout(headerTimeout);
       if (res.status === 401) {
         localStorage.removeItem('token');
-        window.location.href = '/';
+        window.location.reload();
         throw new BillingJobRequestError('登录已过期', 401);
       }
       if (!res.ok) {
@@ -509,7 +509,7 @@ export const api = {
     });
     if (res.status === 401) {
       localStorage.removeItem('token');
-      window.location.href = '/';
+      window.location.reload();
       throw new Error('登录已过期');
     }
     if (!res.ok) {

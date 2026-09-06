@@ -64,8 +64,24 @@ const mobileNavItems = [
   { key: 'settings', icon: <SettingOutlined />, label: '设置' },
 ];
 
+// ===== URL 同步（轻量实现，不引入 react-router）=====
+// 规则：/accounts → accounts 页；/ 或未知路径 → dashboard。
+// 刷新/直链可用（后端 SPA fallback 已把所有路径指向 index.html），
+// 浏览器前进/后退通过 popstate 生效。
+const VALID_PAGE_KEYS = new Set([
+  ...PAGE_META.map(p => p.key),
+  BULK_QUOTA_PAGE_KEY,
+  OPS_PAGE_KEY,
+]);
+
+function pageFromLocation(): string {
+  const seg = window.location.pathname.split('/').filter(Boolean)[0] || '';
+  return VALID_PAGE_KEYS.has(seg) ? seg : 'dashboard';
+}
+
 const MainLayout: React.FC<MainLayoutProps> = ({ onLogout }) => {
-  const [currentPage, setCurrentPage] = useState('dashboard');
+  // 初始页从 URL 读取：刷新或直接打开 /billing 等链接时落到对应页面
+  const [currentPage, setCurrentPage] = useState(pageFromLocation);
   const [username, setUsername] = useState('');
   // 空数组 = 尚未加载完毕，此时不做过滤；加载后仅显示允许的页面
   const [allowedPages, setAllowedPages] = useState<string[] | null>(null);
@@ -74,6 +90,24 @@ const MainLayout: React.FC<MainLayoutProps> = ({ onLogout }) => {
   // 运维监控仅 admin 可见；未加载完前按无权限处理
   const [isAdmin, setIsAdmin] = useState(false);
   const appContainerRef = useRef<HTMLElement | null>(null);
+
+  // 导航：更新 state 并把页面 key 写入 URL（pushState 不触发刷新）
+  const navigate = (key: string) => {
+    setCurrentPage(key);
+    const path = key === 'dashboard' ? '/' : `/${key}`;
+    if (window.location.pathname !== path) {
+      window.history.pushState({ page: key }, '', path);
+    }
+  };
+
+  // 浏览器前进/后退：从 URL 恢复页面（不再 pushState，避免历史循环）
+  useEffect(() => {
+    const onPopState = () => setCurrentPage(pageFromLocation());
+    window.addEventListener('popstate', onPopState);
+    // 首次进入时把当前页写进 history state，保证后退行为一致
+    window.history.replaceState({ page: pageFromLocation() }, '', window.location.pathname);
+    return () => window.removeEventListener('popstate', onPopState);
+  }, []);
 
   useLayoutEffect(() => {
     const navigatorWithStandalone = navigator as Navigator & { standalone?: boolean };
@@ -150,7 +184,7 @@ const MainLayout: React.FC<MainLayoutProps> = ({ onLogout }) => {
         setAllowedPages(r.allowedPages);
         // 如果当前页不在允许列表里，回退到第一个允许的页面
         if (r.allowedPages.length > 0 && !r.allowedPages.includes('dashboard')) {
-          setCurrentPage(r.allowedPages[0]);
+          navigate(r.allowedPages[0]);
         }
       }
     }).catch(() => {});
@@ -185,7 +219,7 @@ const MainLayout: React.FC<MainLayoutProps> = ({ onLogout }) => {
 
   const pageComponent = (key: string): React.ReactNode => {
     switch (key) {
-      case 'dashboard': return <DashboardPage onNavigate={setCurrentPage} />;
+      case 'dashboard': return <DashboardPage onNavigate={navigate} />;
       case 'accounts': return <AccountsPage />;
       case 'quotas': return <QuotasPage />;
       case BULK_QUOTA_PAGE_KEY: return <BulkQuotaPage />;
@@ -243,7 +277,7 @@ const MainLayout: React.FC<MainLayoutProps> = ({ onLogout }) => {
             theme="dark"
             selectedKeys={[currentPage]}
             items={visibleNavItems}
-            onClick={({ key }) => setCurrentPage(key)}
+            onClick={({ key }) => navigate(key)}
           />
           <div className="sider-footer">
             <div className="sider-footer-user">{username}</div>
@@ -280,7 +314,7 @@ const MainLayout: React.FC<MainLayoutProps> = ({ onLogout }) => {
           <div
             key={item.key}
             className={`bottom-nav-item ${currentPage === item.key ? 'active' : ''}`}
-            onClick={() => setCurrentPage(item.key)}
+            onClick={() => navigate(item.key)}
           >
             <span className="nav-icon">{item.icon}</span>
             <span className="nav-label">{item.label}</span>
