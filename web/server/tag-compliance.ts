@@ -1047,7 +1047,9 @@ export async function deployReIndexes(
       Description: desc,
       TemplateBody: template,
       PermissionModel: 'SERVICE_MANAGED',
-      AutoDeployment: { Enabled: autoDeployment, RetainStacksOnAccountRemoval: false },
+      AutoDeployment: autoDeployment
+        ? { Enabled: true, RetainStacksOnAccountRemoval: false }
+        : { Enabled: false },
       ManagedExecution: { Active: true },
       CallAs: 'SELF',
       Tags: [{ Key: 'ManagedBy', Value: 'AWSTool' }, { Key: 'Purpose', Value: 'ResourceExplorer' }],
@@ -2009,7 +2011,9 @@ export async function repairOnboardingStackSetCoverage(
         Description: definition.description,
         TemplateBody: definition.template,
         PermissionModel: 'SERVICE_MANAGED',
-        AutoDeployment: { Enabled: definition.autoDeployment, RetainStacksOnAccountRemoval: false },
+        AutoDeployment: definition.autoDeployment
+          ? { Enabled: true, RetainStacksOnAccountRemoval: false }
+          : { Enabled: false },
         ManagedExecution: { Active: true },
         CallAs: 'SELF',
         Tags: [{ Key: 'ManagedBy', Value: 'AWSTool' }, { Key: 'Purpose', Value: 'ResourceExplorer' }],

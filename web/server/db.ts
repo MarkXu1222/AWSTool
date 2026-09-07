@@ -333,7 +333,9 @@ export function updateTagOnboardingJob(jobId: string, updates: Partial<TagOnboar
 export function retryTagOnboardingJob(jobId: string): TagOnboardingJob {
   const current = getTagOnboardingJob(jobId);
   if (!current) throw new Error('MAP 接入任务不存在');
-  if (current.status !== 'failed') throw new Error('只有失败的 MAP 接入任务可以重试');
+  if (!['failed', 'waiting_retry'].includes(current.status)) {
+    throw new Error('只有失败或等待自动重试的 MAP 接入任务可以重试');
+  }
   const now = new Date().toISOString();
   const steps = current.steps.map(step => step.key === current.phase
     ? { ...step, status: 'pending' as const, detail: '已请求重试', updatedAt: now }

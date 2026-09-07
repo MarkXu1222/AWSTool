@@ -651,7 +651,7 @@ const AutomatedAddOrgModal: React.FC<{
       if (response.success) {
         completedNotifiedRef.current = '';
         setJob(response.data);
-        message.success('已请求后台从失败阶段继续重试');
+        message.success('已请求后台立即重试当前阶段');
       } else message.error(response.error || '重试失败');
     } catch (error: any) { message.error(error.message || '重试失败'); }
     finally { setRetrying(false); }
@@ -764,7 +764,12 @@ const AutomatedAddOrgModal: React.FC<{
           </div>
           {job.status === 'waiting_retry' && (
             <Alert type="warning" showIcon style={{ marginTop: 12 }} message="后台正在等待 AWS 完成或准备自动重试"
-              description={job.nextRunAt ? `下次检查：${fmtTime(job.nextRunAt)}` : undefined} />
+              description={(
+                <Space direction="vertical" size={6}>
+                  <span>{job.nextRunAt ? `下次检查：${fmtTime(job.nextRunAt)}` : '后台将按计划自动重试'}</span>
+                  <Button size="small" loading={retrying} onClick={handleRetry}>立即重试当前阶段</Button>
+                </Space>
+              )} />
           )}
           {job.status === 'failed' && (
             <Alert type="error" showIcon style={{ marginTop: 12 }} message="接入任务失败"
