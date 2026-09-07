@@ -1931,6 +1931,12 @@ export async function getOnboardingStackSetStatus(
 
     const operationStatus = entry.latestOperation?.status || '';
     const operationActive = ['RUNNING', 'QUEUED', 'STOPPING'].includes(operationStatus);
+    if (operationActive) {
+      // StackSet 操作进行中时实例分页结果不是原子快照；待操作收敛后再判定缺失或失败。
+      entry.pendingInstanceCount += entry.missingInstanceCount + entry.failedInstanceCount;
+      entry.missingInstanceCount = 0;
+      entry.failedInstanceCount = 0;
+    }
     entry.complete = definition.requiredRegions.length === 0
       ? entry.extraRootRegions.length === 0
       : (
