@@ -1833,6 +1833,28 @@ export async function getOnboardingStackSetStatus(
     } while (instanceToken);
     entry.regions = [...regions].sort();
 
+    let operationActive = false;
+    try {
+      const operations = await cfn.send(new ListStackSetOperationsCommand({
+        StackSetName: definition.name,
+        CallAs: 'SELF',
+        MaxResults: 20,
+      }));
+      const operationSummaries = operations.Summaries || [];
+      const operation = operationSummaries[0];
+      operationActive = operationSummaries.some(item => (
+        ['RUNNING', 'QUEUED', 'STOPPING'].includes(item.Status || '')
+      ));
+      if (operation) {
+        entry.latestOperation = {
+          operationId: operation.OperationId,
+          action: operation.Action,
+          status: operation.Status,
+          timestamp: operation.CreationTimestamp,
+        };
+      }
+    } catch { /* 操作列表不可用时仍以实例覆盖为准 */ }
+
     const supportCredentialsByAccount = new Map<string, ReturnType<typeof assumeSupportRoleStrict>>();
     function strictSupportCredentials(accountId: string) {
       let credentials = supportCredentialsByAccount.get(accountId);
@@ -1891,46 +1913,32 @@ export async function getOnboardingStackSetStatus(
     }
 
     const verificationConcurrency = 5;
-    for (let index = 0; index < existingIndexCandidates.length; index += verificationConcurrency) {
-      const batch = existingIndexCandidates.slice(index, index + verificationConcurrency);
-      const verified = await Promise.all(batch.map(async target => ({
-        target,
-        active: await hasActiveExistingLocalIndex(target.accountId, target.region),
-      })));
-      for (const result of verified) {
-        if (result.active) {
-          const status = result.target.status || 'FAILED';
-          entry.statusCounts[status] = Math.max(0, (entry.statusCounts[status] || 0) - 1);
-          entry.statusCounts.ACTIVE_EXISTING_INDEX = (entry.statusCounts.ACTIVE_EXISTING_INDEX || 0) + 1;
-        } else if (result.target.status === 'MISSING') {
-          entry.missingTargets.push({ accountId: result.target.accountId, region: result.target.region });
-        } else {
-          entry.failedTargets.push(result.target);
+    if (operationActive) {
+      // 活跃 operation 的实例分页快照尚未收敛，结束后下一轮再逐账户验证已有索引。
+      entry.pendingInstanceCount += existingIndexCandidates.length;
+    } else {
+      for (let index = 0; index < existingIndexCandidates.length; index += verificationConcurrency) {
+        const batch = existingIndexCandidates.slice(index, index + verificationConcurrency);
+        const verified = await Promise.all(batch.map(async target => ({
+          target,
+          active: await hasActiveExistingLocalIndex(target.accountId, target.region),
+        })));
+        for (const result of verified) {
+          if (result.active) {
+            const status = result.target.status || 'FAILED';
+            entry.statusCounts[status] = Math.max(0, (entry.statusCounts[status] || 0) - 1);
+            entry.statusCounts.ACTIVE_EXISTING_INDEX = (entry.statusCounts.ACTIVE_EXISTING_INDEX || 0) + 1;
+          } else if (result.target.status === 'MISSING') {
+            entry.missingTargets.push({ accountId: result.target.accountId, region: result.target.region });
+          } else {
+            entry.failedTargets.push(result.target);
+          }
         }
       }
     }
     entry.missingInstanceCount = entry.missingTargets.length;
     entry.failedInstanceCount = entry.failedTargets.length;
 
-    try {
-      const operations = await cfn.send(new ListStackSetOperationsCommand({
-        StackSetName: definition.name,
-        CallAs: 'SELF',
-        MaxResults: 1,
-      }));
-      const operation = operations.Summaries?.[0];
-      if (operation) {
-        entry.latestOperation = {
-          operationId: operation.OperationId,
-          action: operation.Action,
-          status: operation.Status,
-          timestamp: operation.CreationTimestamp,
-        };
-      }
-    } catch { /* 操作列表不可用时仍以实例覆盖为准 */ }
-
-    const operationStatus = entry.latestOperation?.status || '';
-    const operationActive = ['RUNNING', 'QUEUED', 'STOPPING'].includes(operationStatus);
     if (operationActive) {
       // StackSet 操作进行中时实例分页结果不是原子快照；待操作收敛后再判定缺失或失败。
       entry.pendingInstanceCount += entry.missingInstanceCount + entry.failedInstanceCount;
