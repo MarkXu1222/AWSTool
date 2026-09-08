@@ -629,6 +629,11 @@ export const db = {
     data.audit_log.push(entry);
     if (data.audit_log.length > 5000) data.audit_log = data.audit_log.slice(-5000);
     writeDB(data);
+    // 安全告警钩子：敏感动作实时飞书通知（异步 fire-and-forget，失败不影响审计写入）
+    try {
+      const { onAuditAction } = require('./security-alerts');
+      onAuditAction(action, username, cleanIp, detail);
+    } catch {}
   },
 
   getAuditLog(limit = 100) {

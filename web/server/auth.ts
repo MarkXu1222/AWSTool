@@ -5,6 +5,7 @@ import { authenticator } from 'otplib';
 import QRCode from 'qrcode';
 import { db } from './db';
 import { encryptField, decryptField } from './db';
+import { recordLoginFailure, recordLoginSuccess } from './security-alerts';
 import path from 'path';
 import fs from 'fs';
 
@@ -89,20 +90,28 @@ authRouter.post('/login', (req: Request, res: Response) => {
   const { username, password, totpCode } = req.body;
 
   const user = db.getUser(username);
-  if (!user) return res.status(401).json({ error: '用户名或密码错误' });
-  if (!bcrypt.compareSync(password, user.password_hash)) return res.status(401).json({ error: '用户名或密码错误' });
+  if (!user) {
+    recordLoginFailure(String(username || ''), req.ip, 'password');
+    return res.status(401).json({ error: '用户名或密码错误' });
+  }
+  if (!bcrypt.compareSync(password, user.password_hash)) {
+    recordLoginFailure(user.username, req.ip, 'password');
+    return res.status(401).json({ error: '用户名或密码错误' });
+  }
 
   // MFA check
   if (user.mfa_enabled && user.mfa_secret) {
     if (!totpCode) return res.json({ requireMFA: true, message: '请输入 MFA 验证码' });
     const decryptedSecret = decryptField(user.mfa_secret);
     if (!authenticator.verify({ token: totpCode, secret: decryptedSecret })) {
+      recordLoginFailure(user.username, req.ip, 'mfa');
       return res.status(401).json({ error: 'MFA 验证码错误' });
     }
   }
 
   const token = jwt.sign({ userId: user.id, username: user.username, role: user.role }, JWT_SECRET, { expiresIn: TOKEN_EXPIRY });
   db.addAuditLog(user.id, 'LOGIN', `IP: ${req.ip}`, user.username, req.ip);
+  recordLoginSuccess(user.username, req.ip);
   res.json({ token, username: user.username, role: user.role, mfaEnabled: !!user.mfa_enabled });
 });
 

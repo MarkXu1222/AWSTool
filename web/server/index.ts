@@ -13,6 +13,7 @@ import { startScheduler, getSchedulerStatus } from './scheduler';
 import { startTagOnboardingRunner } from './tag-onboarding';
 import { startBillingExportRunner, stopBillingExportRunner } from './billing-export-jobs';
 import { opsRouter, requireOpsAdmin, recordRequest, startOpsMonitor, stopOpsMonitor } from './ops-monitor';
+import { recordHttpStatus } from './security-alerts';
 
 const app = express();
 app.set('trust proxy', 1);
@@ -67,6 +68,8 @@ app.use((req, res, next) => {
       console.log(`${req.method} ${req.path} ${res.statusCode} ${duration}ms`);
       // 运维监控：记录请求指标（/api/ops 自身会在内部被排除）
       try { recordRequest(req.method, req.path, res.statusCode, duration); } catch {}
+      // 安全告警：429 滥用 / 5xx 突增阈值检测
+      try { recordHttpStatus(res.statusCode, req.path, req.ip); } catch {}
     }
   });
   next();
