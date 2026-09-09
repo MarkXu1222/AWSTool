@@ -42,6 +42,28 @@ const SUPPORT_ROLE: string = CONFIG.supportRoleName || 'support-quota';
 const ADMIN_ROLE: string = CONFIG.adminRoleName || 'admin-console';
 const PAYERS: { name: string; roleArn: string }[] = CONFIG.payers || [];
 
+function parseAdminRoleExcludedAccounts(value: unknown): Set<string> {
+  if (value == null) return new Set();
+  if (!Array.isArray(value)) throw new Error('config.adminRoleExcludedAccounts 必须是数组');
+  const knownPayers = new Set(PAYERS.map(payer => payer.name));
+  const accountIds = new Set<string>();
+  value.forEach((item: any, index) => {
+    const accountId = String(item?.accountId || '');
+    const payer = String(item?.payer || '');
+    if (!/^\d{12}$/.test(accountId)) {
+      throw new Error(`config.adminRoleExcludedAccounts[${index}].accountId 无效`);
+    }
+    if (!knownPayers.has(payer)) {
+      throw new Error(`config.adminRoleExcludedAccounts[${index}].payer 未配置`);
+    }
+    accountIds.add(accountId);
+  });
+  return accountIds;
+}
+
+const ADMIN_ROLE_EXCLUDED_ACCOUNT_IDS = parseAdminRoleExcludedAccounts(CONFIG.adminRoleExcludedAccounts);
+const isAdminRoleExcluded = (accountId: string) => ADMIN_ROLE_EXCLUDED_ACCOUNT_IDS.has(accountId);
+
 // StackSet 名称与角色的对应关系（与已部署的组织级 StackSet 保持一致）
 const STACKSET_FOR: Record<'support' | 'admin', string> = {
   support: 'support-quota-role-orgwide',
@@ -61,6 +83,7 @@ export interface AccountRoleRecord {
   payer?: string;
   support: boolean;
   admin: boolean;
+  admin_excluded?: boolean;
   state: 'ok' | 'partial' | 'pending' | 'unreachable';
   attempts: number;
   last_error?: string | null;
@@ -249,8 +272,9 @@ export async function syncAccountRoles(opts: SyncOptions = {}): Promise<SyncResu
     probed.push({ acct, ...r });
   });
 
-  const needFix = probed.filter(p => !p.support || !p.admin);
-  console.log(`[AccountRoles] 探测完成：正常 ${probed.length - needFix.length}，缺角色 ${needFix.length}`);
+  const needFix = probed.filter(p => !p.support || (!p.admin && !isAdminRoleExcluded(p.acct.Id)));
+  const adminExcluded = probed.filter(p => isAdminRoleExcluded(p.acct.Id)).length;
+  console.log(`[AccountRoles] 探测完成：正常 ${probed.length - needFix.length}，缺角色 ${needFix.length}，Admin 排除 ${adminExcluded}`);
 
   // 2) 补齐 —— 按 payer + 角色种类分组批量部署
   const remediatedIds = new Set<string>();
@@ -269,7 +293,7 @@ export async function syncAccountRoles(opts: SyncOptions = {}): Promise<SyncResu
         const k = `${payer}|support`;
         groups.set(k, [...(groups.get(k) || []), p.acct.Id]);
       }
-      if (!p.admin) {
+      if (!p.admin && !isAdminRoleExcluded(p.acct.Id)) {
         const k = `${payer}|admin`;
         groups.set(k, [...(groups.get(k) || []), p.acct.Id]);
       }
@@ -306,14 +330,20 @@ export async function syncAccountRoles(opts: SyncOptions = {}): Promise<SyncResu
   for (const p of probed) {
     const st = finalState.get(p.acct.Id)!;
     const prev = knownMap.get(p.acct.Id);
-    const wasBroken = !p.support || !p.admin;
-    const nowGood = st.support && st.admin;
+    const adminExcluded = isAdminRoleExcluded(p.acct.Id);
+    const adminPolicyViolation = adminExcluded && st.admin;
+    const wasBroken = !p.support || (adminExcluded ? p.admin : !p.admin);
+    const nowGood = st.support && (adminExcluded ? !st.admin : st.admin);
     const fixed = wasBroken && nowGood;
 
     let state: AccountRoleRecord['state'];
     let attempts = prev?.attempts || 0;
     if (nowGood) {
       state = 'ok';
+      attempts = 0;
+    } else if (adminPolicyViolation && st.support) {
+      // 排除策略只负责阻止补建，不自动删除高权限角色；残留/重建必须持续暴露为异常。
+      state = 'partial';
       attempts = 0;
     } else {
       attempts = wasBroken ? attempts + 1 : attempts;
@@ -327,9 +357,14 @@ export async function syncAccountRoles(opts: SyncOptions = {}): Promise<SyncResu
       payer: p.acct._payer,
       support: st.support,
       admin: st.admin,
+      admin_excluded: adminExcluded,
       state,
       attempts,
-      last_error: nowGood ? null : (prev?.last_error || null),
+      last_error: nowGood
+        ? null
+        : adminPolicyViolation
+          ? `排除账户仍存在 ${ADMIN_ROLE}，需通过 Admin StackSet 删除实例`
+          : (prev?.last_error || null),
       checked_at: nowIso,
       remediated_at: fixed ? nowIso : (prev?.remediated_at || null),
     };

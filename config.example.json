@@ -9,7 +9,15 @@
     { "name": "org-name-2", "roleArn": "arn:aws:iam::ACCOUNT_ID:role/tool" }
   ],
   "childRoleName": "OrganizationAccountAccessRole",
+  "adminRoleName": "admin-console",
   "supportRoleName": "support-quota",
+  "adminRoleExcludedAccounts": [
+    {
+      "accountId": "123456789012",
+      "payer": "org-name-1",
+      "reason": "Customer requested support-only access"
+    }
+  ],
   "consoleAdminPayers": ["org-name-1"],
   "web": {
     "port": 3000,

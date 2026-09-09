@@ -254,6 +254,12 @@ const AccountsPage: React.FC = () => {
         </Dropdown.Button>
       );
     }
+    if (account?._adminRoleExcluded) {
+      return (
+        <Button type="primary" size="small" icon={<SafetyOutlined />} loading={consoleLoading} style={style}
+          onClick={() => openConsole(account.Id, 'support')}>只读控制台</Button>
+      );
+    }
     if (!account?._consoleDual) {
       return (
         <Button type="primary" size="small" icon={<LoginOutlined />} loading={consoleLoading} style={style}
@@ -344,7 +350,7 @@ const AccountsPage: React.FC = () => {
             </>
           ) : <span style={{ color: '#8a94a6' }}>无数据</span> },
           { key: 'root', label: '根用户', children: (
-            <RootCredentialsPanel accountId={selectedAccount.Id} rootCredentials={detail?.rootCredentials} canRoot={canRoot} isAdmin={isAdmin} isPayer={!!selectedAccount._isPayer} loading={detailLoading} />
+            <RootCredentialsPanel accountId={selectedAccount.Id} rootCredentials={detail?.rootCredentials} canRoot={canRoot} isAdmin={isAdmin} isPayer={!!selectedAccount._isPayer} adminExcluded={!!selectedAccount._adminRoleExcluded} loading={detailLoading} />
           ) },
         ]} />
       </div>
@@ -944,7 +950,7 @@ const AccountsPage: React.FC = () => {
                       </>
                     ) : '无数据' },
                     { key: 'root', label: '根用户', children: (
-                      <RootCredentialsPanel accountId={selectedAccount.Id} rootCredentials={detail?.rootCredentials} canRoot={canRoot} isAdmin={isAdmin} isPayer={!!selectedAccount._isPayer} loading={detailLoading} />
+                      <RootCredentialsPanel accountId={selectedAccount.Id} rootCredentials={detail?.rootCredentials} canRoot={canRoot} isAdmin={isAdmin} isPayer={!!selectedAccount._isPayer} adminExcluded={!!selectedAccount._adminRoleExcluded} loading={detailLoading} />
                     ) },
                   ]} />
                 </Card>

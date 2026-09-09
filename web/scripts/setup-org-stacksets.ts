@@ -31,7 +31,7 @@
 import fs from 'fs';
 import path from 'path';
 import { STSClient, AssumeRoleCommand } from '@aws-sdk/client-sts';
-import { OrganizationsClient, ListRootsCommand } from '@aws-sdk/client-organizations';
+import { OrganizationsClient, ListAccountsCommand, ListRootsCommand } from '@aws-sdk/client-organizations';
 import {
   CloudFormationClient, CreateStackSetCommand, UpdateStackSetCommand, DescribeStackSetCommand,
   CreateStackInstancesCommand, UpdateStackInstancesCommand, ListStackInstancesCommand, DescribeStackSetOperationCommand,
@@ -80,6 +80,52 @@ function readRestrictedAccountIds(payerName: string): string[] {
       .map((r: any) => String(r.account_id));
   } catch (error: any) {
     throw new Error(`无法读取受限账户数据，拒绝部署: ${dbPath} (${error?.message || 'unknown error'})`);
+  }
+}
+
+/** 读取仅排除管理员角色的账户；support-quota 仍由原 StackSet/角色保留。 */
+function readAdminRoleExcludedAccountIds(payerName: string): string[] {
+  const records = CONFIG.adminRoleExcludedAccounts;
+  if (records == null) return [];
+  if (!Array.isArray(records)) {
+    throw new Error('config.adminRoleExcludedAccounts 必须是数组');
+  }
+  const knownPayers = new Set(PAYERS.map(payer => payer.name));
+  records.forEach((record: any, index: number) => {
+    const accountId = String(record?.accountId || '');
+    const recordPayer = String(record?.payer || '');
+    if (!/^\d{12}$/.test(accountId)) {
+      throw new Error(`adminRoleExcludedAccounts[${index}].accountId 无效`);
+    }
+    if (!knownPayers.has(recordPayer)) {
+      throw new Error(`adminRoleExcludedAccounts[${index}].payer 未配置`);
+    }
+  });
+  return [...new Set(records
+    .filter((record: any) => record.payer === payerName)
+    .map((record: any) => String(record.accountId)))];
+}
+
+/** 校验 admin-only 排除账户确实属于当前 payer，防止配置写错后真实组织继续补建 Admin。 */
+async function validateAdminRoleExcludedAccounts(
+  org: OrganizationsClient,
+  payerName: string,
+  accountIds: string[],
+): Promise<void> {
+  if (accountIds.length === 0) return;
+  const organizationAccountIds = new Set<string>();
+  let nextToken: string | undefined;
+  do {
+    const response = await org.send(new ListAccountsCommand({ NextToken: nextToken }));
+    for (const account of response.Accounts || []) {
+      if (account.Id) organizationAccountIds.add(account.Id);
+    }
+    nextToken = response.NextToken;
+  } while (nextToken);
+
+  const mismatched = accountIds.filter(accountId => !organizationAccountIds.has(accountId));
+  if (mismatched.length > 0) {
+    throw new Error(`${payerName}: adminRoleExcludedAccounts 账户不属于该组织: ${mismatched.join(', ')}`);
   }
 }
 
@@ -224,19 +270,24 @@ async function handle(
       if (e?.name !== 'StackSetNotFoundException') throw e;
     }
 
+    // 在任何部署操作前读取权威排除名单；读取失败必须 fail-closed。
+    // restricted 同时排除 support/admin；adminRoleExcludedAccounts 只排除 admin。
+    const restricted = readRestrictedAccountIds(payer.name);
+    const adminOnlyExcluded = kind === 'admin' ? readAdminRoleExcludedAccountIds(payer.name) : [];
+    await validateAdminRoleExcludedAccounts(org, payer.name, adminOnlyExcluded);
+    const excluded = [...new Set([...restricted, ...adminOnlyExcluded])];
+
     if (dryRun) {
       const c = existing ? await countInstances(cf, tpl.stackSetName) : null;
       const maxSession = existing?.TemplateBody?.match(/MaxSessionDuration:\s*(\d+)/)?.[1];
       log(`${payer.name}: ${existing
         ? `存在 auto=${!!existing.AutoDeployment?.Enabled}${maxSession ? ` maxSession=${maxSession}s` : ''} 实例 ${c!.total}(ok${c!.ok}/susp${c!.susp}/fail${c!.fail})`
-        : '不存在'}`);
+        : '不存在'} | 排除 ${excluded.length}（受限 ${restricted.length}/仅Admin ${adminOnlyExcluded.length}）`);
       return true;
     }
 
-    // 在任何写操作前读取权威排除名单；读取失败必须 fail-closed，避免先改模板再发现无法安全定向。
-    const excluded = readRestrictedAccountIds(payer.name);
     if (excluded.length) {
-      log(`${payer.name}: 排除 ${excluded.length} 个受限账户 → ${excluded.join(', ')}`);
+      log(`${payer.name}: ${kind} 排除 ${excluded.length} 个账户（受限 ${restricted.length}/仅Admin ${adminOnlyExcluded.length}）→ ${excluded.join(', ')}`);
     }
 
     let action = 'ALREADY-AUTO';
@@ -283,7 +334,7 @@ async function handle(
       action = `AUTO-ENABLED(${await waitOp(cf, tpl.stackSetName, up.OperationId!)})`;
     }
 
-    // 敏感权限客户账户由独立受限 StackSet 管理，组织级下发必须使用 DIFFERENCE 排除。
+    // 按角色种类应用排除：restricted 排除两类角色，admin-only 只影响管理员 StackSet。
     const deploymentTargets = excluded.length
       ? { OrganizationalUnitIds: [rootId], Accounts: excluded, AccountFilterType: 'DIFFERENCE' as const }
       : { OrganizationalUnitIds: [rootId] };

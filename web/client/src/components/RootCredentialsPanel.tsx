@@ -22,6 +22,8 @@ interface Props {
   isAdmin?: boolean;
   // payer 管理账户受 role/tool 会话上限约束，前端固定为 1 小时。
   isPayer?: boolean;
+  // 该成员账户仅保留 support-quota；隐藏 Admin 凭证入口，其它 Root 特权操作不受影响。
+  adminExcluded?: boolean;
   // 父组件是否仍在拉取账户详情（含根凭证状态）。为 true 时状态区显示加载中，但操作按钮始终可见。
   loading?: boolean;
 }
@@ -47,7 +49,7 @@ const CredRow: React.FC<{ label: string; value: string; secret?: boolean; reveal
   </div>
 );
 
-const RootCredentialsPanel: React.FC<Props> = ({ accountId, rootCredentials, canRoot, isAdmin, isPayer, loading: detailLoading }) => {
+const RootCredentialsPanel: React.FC<Props> = ({ accountId, rootCredentials, canRoot, isAdmin, isPayer, adminExcluded, loading: detailLoading }) => {
   const isMobile = typeof window !== 'undefined' && window.innerWidth < 769;
   const [creds, setCreds] = useState<TempCreds | null>(null);
   const [durationHours, setDurationHours] = useState(1);
@@ -73,7 +75,7 @@ const RootCredentialsPanel: React.FC<Props> = ({ accountId, rootCredentials, can
         .filter(key => key.startsWith('awstool:tempCreds:'))
         .forEach(key => sessionStorage.removeItem(key));
     } catch { /* 浏览器禁用存储时无需处理 */ }
-  }, [accountId, isAdmin, isPayer]);
+  }, [accountId, isAdmin, isPayer, adminExcluded]);
 
   const status = { ...(fetchedStatus ?? rootCredentials), ...statusOverride };
 
@@ -277,7 +279,19 @@ const RootCredentialsPanel: React.FC<Props> = ({ accountId, rootCredentials, can
         </Descriptions>
       ) : detailLoading ? <span style={{ color: '#8a94a6', fontSize: 12 }}>正在加载根用户状态…</span> : <span style={{ color: '#8a94a6', fontSize: 12 }}>根用户凭证状态不可用（凭证报告获取失败）</span>}
 
-      {canRoot && (
+      {canRoot && adminExcluded && (
+        <>
+          <Divider style={{ margin: '12px 0' }} />
+          <Alert
+            type="info"
+            showIcon
+            message="该账户仅保留 support-quota"
+            description="Admin 角色已永久排除，不提供管理员临时凭证；Root 特权操作仍按独立权限执行。"
+          />
+        </>
+      )}
+
+      {canRoot && !adminExcluded && (
         <>
       <Divider style={{ margin: '12px 0' }} />
 

@@ -80,6 +80,28 @@ if (PAYERS.length === 0) {
   }).filter(p => p.name && p.roleArn);
 }
 
+function parseAdminRoleExcludedAccounts(value: unknown): Set<string> {
+  if (value == null) return new Set();
+  if (!Array.isArray(value)) throw new Error('config.adminRoleExcludedAccounts 必须是数组');
+  const knownPayers = new Set(PAYERS.map(payer => payer.name));
+  const accountIds = new Set<string>();
+  value.forEach((item: any, index) => {
+    const accountId = String(item?.accountId || '');
+    const payer = String(item?.payer || '');
+    if (!/^\d{12}$/.test(accountId)) {
+      throw new Error(`config.adminRoleExcludedAccounts[${index}].accountId 无效`);
+    }
+    if (!knownPayers.has(payer)) {
+      throw new Error(`config.adminRoleExcludedAccounts[${index}].payer 未配置`);
+    }
+    accountIds.add(accountId);
+  });
+  return accountIds;
+}
+
+const ADMIN_ROLE_EXCLUDED_ACCOUNT_IDS = parseAdminRoleExcludedAccounts(config.adminRoleExcludedAccounts);
+const isAdminRoleExcluded = (accountId: string) => ADMIN_ROLE_EXCLUDED_ACCOUNT_IDS.has(accountId);
+
 // Credential cache
 const adminCredsCache: Map<string, { creds: any; expiry: number }> = new Map();
 const accountPayerMap: Map<string, string> = new Map();
@@ -328,6 +350,10 @@ export async function getTempAdminCredentials(accountId: string, durationHours =
       }
       throw new TempCredentialError(`无法通过 payer 管理角色生成临时凭证（${e?.name || 'AssumeRoleFailed'}）`, 409);
     }
+  }
+
+  if (isAdminRoleExcluded(accountId)) {
+    throw new TempCredentialError('该账户已配置为仅保留 support-quota，不提供 Admin 临时凭证', 409);
   }
 
   let retryableFailure: any;
@@ -617,7 +643,14 @@ export async function listAccounts() {
       do {
         const resp = await client.send(new ListAccountsCommand({ NextToken: nextToken }));
         for (const a of resp.Accounts || []) {
-          allAccounts.push({ ...a, _payer: payer.name, _isPayer: payerAccountId != null && a.Id === payerAccountId, _consoleDual: consoleDual });
+          const adminRoleExcluded = Boolean(a.Id && isAdminRoleExcluded(a.Id));
+          allAccounts.push({
+            ...a,
+            _payer: payer.name,
+            _isPayer: payerAccountId != null && a.Id === payerAccountId,
+            _consoleDual: consoleDual && !adminRoleExcluded,
+            _adminRoleExcluded: adminRoleExcluded,
+          });
           if (a.Id) accountPayerMap.set(a.Id, payer.roleArn);
         }
         nextToken = resp.NextToken;
@@ -1810,6 +1843,9 @@ async function assumeAdminViaOAAR(accountId: string) {
   if (selfPayer) {
     return await getAdminCredsForPayer(selfPayer.roleArn);
   }
+  if (isAdminRoleExcluded(accountId)) {
+    throw new Error(`账户 ${accountId} 已配置为仅保留 support-quota，Admin 控制台不可用`);
+  }
 
   // 优先一级跳专用 admin-console（INVITED 账户没有 OrganizationAccountAccessRole）
   try {
@@ -1914,6 +1950,12 @@ export async function getConsoleSigninUrl(
     const m = /arn:aws:iam::(\d+):role\//.exec(p.roleArn);
     return m && m[1] === accountId;
   });
+
+  // admin-only 排除的成员账户必须显式走 support，禁止 auto 在 support 失败后回退 OAAR Admin。
+  // payer 管理账户不属于成员 StackSet 范围，保持原有 role/tool 行为。
+  if (!selfPayer && isAdminRoleExcluded(accountId) && access !== 'support') {
+    throw new Error(`账户 ${accountId} 已配置为仅保留 support-quota，控制台仅允许只读模式`);
+  }
 
   // Get temporary credentials for the target account
   let creds;

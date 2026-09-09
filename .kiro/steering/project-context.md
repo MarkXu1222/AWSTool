@@ -11,7 +11,7 @@ AWS 多账户管理平台。用于跨组织管理成员账户：配额提升、�
 
 | 应用 | 位置 | 包名 / 版本 | 状态 | 说明 |
 |------|------|-------------|------|------|
-| **Web 版（生产）** | `web/` | `aws-toolbox-web` / `APP_VERSION 0.14.1` | ✅ **在维护** | 部署在 EC2（https://markxu.co）。日常改动几乎都在这里。 |
+| **Web 版（生产）** | `web/` | `aws-toolbox-web` / `APP_VERSION 0.21.1` | ✅ **在维护** | 部署在 EC2（https://markxu.co）。日常改动几乎都在这里。 |
 | 桌面版（旧） | 根 `src/` + `electron/` | `aws-toolbox` / `0.1.0` | ⚠️ 旧版/基本冻结 | 早期 Electron macOS 版，`main: dist/main/index.js`。除非专门维护桌面版，否则**不要动**。 |
 
 **结论：接到"平台/网站"相关的需求，一律在 `web/` 下操作。**
@@ -48,6 +48,7 @@ web/
 │   ├── doc-templates.ts        # ★公司模板 + 账户→公司 / payer→公司 映射 + 区域显示名
 │   ├── notify.ts               # 飞书通知（配额变动/达成）
 │   ├── tag-compliance.ts       # MAP 标签合规（Step Functions 扫描 + S3 报告）
+│   ├── tag-onboarding.ts       # MAP 全自动接入持久化 runner
 │   ├── account-roles.ts        # ★账户角色自愈：探测成员账户角色 → 缺失则触发 StackSet 补齐 → 超限告警
 │   ├── billing-export-jobs.ts  # 账单导出持久化 job、全局队列、永久历史、重复下载与重启恢复
 │   ├── billing-exporter.ts     # 严格只读抓取 AWS 官方账单 PDF + 可取消 zip 打包
@@ -71,7 +72,7 @@ web/
 │       │   ├── EmptyState.tsx / ErrorBoundary.tsx
 │       ├── pages/              # 每个业务页面一个文件（见下表）
 │       ├── styles/global.css
-│       └── utils/              # cache/color/export；account-import*.ts（本地 Excel 识别、ZIP 限制、Worker）
+│       └── utils/              # cache.ts（前端缓存）、color.ts、export.ts
 │
 ├── package.json                # Web 版依赖与脚本
 ├── Dockerfile / docker-compose.yml
@@ -139,8 +140,8 @@ doc-templates/architectures/    # 公司架构图（静态资源，可提交）
 | `requireStrictAdmin` | 仅 admin | MAP 标签全部写操作、账户权限检测（`roles-status` / `roles-check`）、IAM 用户删除。从数据库实时读取并核对用户 ID，不信任 JWT 中可能过期的角色 |
 | `requireRootAccess` | root_access 或 admin | 根用户敏感操作 |
 | `requireAuditAccess` | 审计页可见者 | 审计日志查询/导出 |
-| `requireBulkQuotaAccess` | bulk_quota_access 或 admin | 批量提额 |
 | `requireBillingAccess` | billing 页可见者 | 账单 PDF job；状态/取消/下载另校验 owner/admin |
+| `requireBulkQuotaAccess` | bulk_quota_access 或 admin | 批量提额 |
 
 注意 `authMiddleware` 是直接把 JWT payload 挂到 `req.user`，所以 `req.user.role` 是签发时的角色。需要严格判断的守卫（`requireStrictAdmin` / `requireRootAccess` / `requireAuditAccess` / `requireBillingAccess`）都改为从 `db.getUser()` 实时读，避免降权用户在 token 过期前继续按旧角色通过。
 
@@ -177,7 +178,9 @@ credentials { accessKeyId, secretAccessKey }   # 平台基础身份
 region
 payers[] { name, roleArn }                     # 各 payer 的 role/tool ARN
 childRoleName        # OrganizationAccountAccessRole
+adminRoleName        # admin-console
 supportRoleName      # support-quota
+adminRoleExcludedAccounts[] { accountId, payer, reason } # 逐账户仅排除 Admin，保留 support-quota
 web { port, adminPassword, jwtSecret, encryptionKey, feishuWebhook }
 ```
 
@@ -189,6 +192,10 @@ web { port, adminPassword, jwtSecret, encryptionKey, feishuWebhook }
 - `accounts_cache` + `accounts_cache_time`：账户列表缓存（调度器每 30min 刷新）
 - `dashboard_cache`：成本概览缓存
 - `account_roles`：各账户的 support-quota / admin-console 可用性与自愈状态（`ok` / `partial` / `pending` / `unreachable` + 尝试次数）
+- `tag_onboarding_jobs`：MAP 全自动接入持久化任务
+- `billing_export_jobs`：账单 PDF job 的队列、进度、结果、取消/中断与下载元数据
+
+账单 ZIP 位于 `data/exports/billing/<jobId>/`（gitignore）并在服务器长期保留，只能通过鉴权端点下载；历史记录通过分页接口查询。禁止提交，且需单独监控磁盘与规划备份。
 
 启动时：`migrateEncryptMFASecrets()` 迁移明文 MFA 密钥、`backupDB()` 备份到 `data/backups/db-YYYY-MM-DD.json`（保留 7 天）。
 
@@ -254,9 +261,11 @@ web { port, adminPassword, jwtSecret, encryptionKey, feishuWebhook }
    脚本幂等，会把 StackSet 建成「整 Root OU + AutoDeployment」，此后该组织新加入的账户由 CloudFormation 自动建角色。
 5. EC2 `pm2 restart aws-toolbox`（config 是模块加载时读的，不重启不生效），等约 10 秒的账户同步，再确认新组织的账户已进入缓存。
 
-成员账户角色快照（2026-08-27）：生产配置共 44 个 payer，`consoleAdminPayers` 已验收并开放 43 个组织；该数量仅表示配置/前端开放口径，不等同于每个 StackSet 实例都成功，迁移后仍须回读操作状态与失败实例。
+成员账户角色快照（2026-08-27）：生产配置共 44 个 payer，`consoleAdminPayers` 已验收并开放 43 个组织；该数量仅表示配置/前端开放口径，不等同于每个 StackSet 实例都成功，迁移或新增 payer 后仍须回读操作状态与失败实例。已验收组织的 `support-quota-role-orgwide` 与 `admin-console-role-orgwide` 均采用 SERVICE_MANAGED + AutoDeployment=true，部署目标为各组织 Root OU。
 
-`admin-console` 为什么必须有：INVITED（邀请加入）的账户不自带 `OrganizationAccountAccessRole`，payer 二级跳进不去，只有直接信任平台身份的 `admin-console` 能拿到 admin 临时凭证。模板 `MaxSessionDuration=43200`；平台默认签发 1 小时，仅数据库当前角色为 admin 的用户可选 2–12 小时。超过 1 小时只走平台长期身份到成员 `admin-console` 的直接一级跳；payer 管理账户和 OAAR 二级链仍限 1 小时。已有模板只通过显式 `--refresh-template` 按单 payer 迁移。
+`admin-console` 为什么必须有：INVITED（邀请加入）的账户不自带 `OrganizationAccountAccessRole`，payer 二级跳进不去，只有直接信任平台身份的 `admin-console` 能拿到 admin 临时凭证。其模板 `MaxSessionDuration=43200`；平台默认签发 1 小时，仅数据库当前角色为 admin 的用户可选 2–12 小时。超过 1 小时的请求只走平台长期身份到成员 `admin-console` 的直接一级跳；payer 管理账户和 OAAR 二级链仍限 1 小时。
+
+个别客户要求永久移除 Admin 时，使用独立的 `config.adminRoleExcludedAccounts`，不要复用 `restricted_accounts`（后者还会改变 `support-quota`）。排除项按 `{ accountId, payer, reason }` 配置：Admin StackSet 使用 `DIFFERENCE` 跳过，自愈将 `support=true + admin=false + admin_excluded=true` 视为健康，Admin 临时凭证/控制台入口被拒绝；support StackSet、现有 support 权限和独立 Root 特权操作不变。已有 Admin 角色必须再用对应 StackSet 的 `DeleteStackInstances`（`RetainStacks=false`）删除；恢复时移除配置并重新部署 Admin StackSet。配置变更后必须重启 PM2。
 
 补不上的账户：账户未完成激活时 CloudFormation 返回 `OptInRequired`(403)，StackSet 无论如何都进不去，`account-roles.ts` 会重试 3 次后标记 `unreachable` 并飞书告警，需人工先处理账户本身（这类账户通常零账单）。
 
@@ -286,7 +295,8 @@ web { port, adminPassword, jwtSecret, encryptionKey, feishuWebhook }
 - 存储用 **JSON 文件 + 内存缓存 + 每日备份**，而非数据库（体量可控、零运维）。
 - 平台基础身份从 `134103550877` 迁移到 `509399618054:user/mark`（最小权限、精确主体信任），134 观察期兜底暂留。
 - 成员账户角色用**组织级 SERVICE_MANAGED StackSet** 统一下发，自动覆盖未来新账户，避免逐账户手工创建。
-- 强制 **MFA + 审计日志 + 限速**，凭证只在服务端，绝不下发前端。
+- 账单 PDF 使用**持久化后台 job + 单 job 全局队列**；服务器控制并发，严格只读 support 会话，可取消，历史和 ZIP 在服务器长期保留并分页鉴权下载，重启中的活动任务明确标为 interrupted。
+- 强制 **MFA + 审计日志 + 限速**。平台长期凭证只在服务端；仅 `root_access` 显式操作可返回短期 Admin 临时凭证。
 
 ## References
 - AWS Documentation: https://docs.aws.amazon.com/

@@ -193,6 +193,8 @@ Admin 临时凭证时长默认 1 小时。数据库当前角色为 `admin` 的�
 
 `config.consoleAdminPayers` 列出已部署 `support-quota` + `admin-console` 的组织，账户列表据此带上 `_consoleDual` 标记，前端才给出「只读 / 管理员」双选项。
 
+`config.adminRoleExcludedAccounts` 是逐账户的 **admin-only 永久排除**：每项必须包含 12 位 `accountId` 和已配置的 `payer`（`reason` 用于运维记录）。排除后，Admin StackSet 部署使用 `DIFFERENCE` 跳过该账户，角色自愈把 `support=true + admin=false + admin_excluded=true` 视为健康，后端拒绝 Admin 临时凭证和 Admin 控制台，前端隐藏 Admin 入口；`support-quota` StackSet、只读/Support 权限以及独立的 Root 特权操作均不受影响。配置变更后必须重启服务；若账户已有 `admin-console`，还需通过 Admin StackSet 删除该账户实例（`RetainStacks=false`）。恢复时移除排除项并重新运行 Admin StackSet 部署。
+
 根用户特权操作走 `sts:AssumeRoot`（集中式根访问），见下文。
 
 ---
@@ -297,6 +299,9 @@ admin 恒有，其他角色必须显式授予，且**都不受 `allowed_pages` �
   "childRoleName": "OrganizationAccountAccessRole",  // 二级跳角色
   "adminRoleName": "admin-console",                  // 成员账户 admin 角色，默认 admin-console
   "supportRoleName": "support-quota",                // 只读一级跳角色，默认 support-quota
+  "adminRoleExcludedAccounts": [                      // 仅排除 Admin；support-quota 保留
+    { "accountId": "123456789012", "payer": "org-name-1", "reason": "Customer requested support-only access" }
+  ],
   "consoleAdminPayers": ["..."],                     // 提供控制台双选项的组织
   "tagCompliance": {
     "roleArn": "...", "region": "...", "stateMachineArn": "...",
