@@ -163,7 +163,6 @@ Resources:
                 Action:
                   - sts:GetCallerIdentity
                   - ec2:Describe*
-                  - ce:GetCostAndUsage
                   - servicequotas:*
                   - iam:GetAccountSummary
                   - iam:ListMFADevices

@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { Alert, Button, Card, Descriptions, Input, Select, Space, Steps, Table, Tag, message } from 'antd';
-import { ArrowRightOutlined, DeleteOutlined, DollarOutlined, ExclamationCircleOutlined, SearchOutlined } from '@ant-design/icons';
+import { Alert, Button, Card, Descriptions, Input, Select, Space, Table, Tag, message } from 'antd';
+import { ArrowRightOutlined, DeleteOutlined, ExclamationCircleOutlined, SearchOutlined } from '@ant-design/icons';
 import {
   api,
   CleanupDeleteInput,
@@ -11,9 +11,21 @@ import {
   CleanupTimeBasis,
 } from '../api';
 import DangerConfirm from '../components/DangerConfirm';
-import EmptyState from '../components/EmptyState';
 
-const REGIONS = ['us-east-1', 'us-east-2', 'us-west-1', 'us-west-2', 'eu-west-1', 'eu-central-1', 'ap-southeast-1', 'ap-northeast-1'];
+const DEFAULT_REGIONS = [
+  'us-east-1', 'us-east-2', 'us-west-1', 'us-west-2',
+  'ap-south-1', 'ap-northeast-3', 'ap-northeast-2', 'ap-southeast-1', 'ap-southeast-2', 'ap-northeast-1',
+  'ca-central-1',
+  'eu-central-1', 'eu-west-1', 'eu-west-2', 'eu-west-3', 'eu-north-1',
+  'sa-east-1',
+];
+const OPT_IN_REGIONS = [
+  'af-south-1', 'ap-east-1', 'ap-east-2', 'ap-south-2', 'ap-southeast-3',
+  'ap-southeast-4', 'ap-southeast-5', 'ap-southeast-6', 'ap-southeast-7',
+  'ca-west-1', 'eu-central-2', 'eu-south-1', 'eu-south-2',
+  'il-central-1', 'me-central-1', 'me-south-1', 'mx-central-1',
+];
+const ALL_KNOWN_REGIONS = [...DEFAULT_REGIONS, ...OPT_IN_REGIONS];
 const ALL_REGIONS = '__all__';
 
 // ===== 预估月费（删除决策的核心依据）=====
@@ -65,9 +77,6 @@ function riskOf(resource: CleanupResource): { label: string; color: string } | n
 function fmtUsd(v: number): string {
   return `$${v.toFixed(2)}`;
 }
-
-type CostRow = { name: string; cost: number };
-type RegionCostRow = { region: string; cost: number };
 
 const TIME_BASIS_LABELS: Record<CleanupTimeBasis, string> = {
   launchTime: '启动时间',
@@ -144,11 +153,10 @@ function IamUserDetails({ details }: { details: CleanupIamDetails }) {
 
 const CleanupPage: React.FC = () => {
   const [accounts, setAccounts] = useState<any[]>([]);
+  const [regionData, setRegionData] = useState<any[]>([]);
   const [selectedAccount, setSelectedAccount] = useState('');
   const [selectedRegion, setSelectedRegion] = useState('us-east-1');
-  const [step, setStep] = useState(0);
-  const [costByService, setCostByService] = useState<CostRow[]>([]);
-  const [costByRegion, setCostByRegion] = useState<RegionCostRow[]>([]);
+  const [step, setStep] = useState<0 | 1>(0);
   const [resources, setResources] = useState<CleanupResource[]>([]);
   const [warnings, setWarnings] = useState<string[]>([]);
   const [scanMeta, setScanMeta] = useState<Pick<CleanupScanResult, 'cutoff' | 'windowDays'> | null>(null);
@@ -161,6 +169,7 @@ const CleanupPage: React.FC = () => {
 
   useEffect(() => {
     api.listAccounts().then(res => { if (res.success) setAccounts(res.data); }).catch(() => {});
+    api.getRegionStatus().then(res => { if (res.success && Array.isArray(res.data)) setRegionData(res.data); }).catch(() => {});
     api.me().then(res => setIsAdmin(res.role === 'admin')).catch(() => {});
   }, []);
 
@@ -172,46 +181,30 @@ const CleanupPage: React.FC = () => {
     setSearchText('');
   };
 
-  const analyzeCost = async () => {
-    if (!selectedAccount) {
-      message.warning('请选择账户');
-      return;
-    }
-    setLoading(true);
-    try {
-      const now = new Date();
-      const start = new Date(now.getFullYear(), now.getMonth() - 1, now.getDate()).toISOString().split('T')[0];
-      const end = now.toISOString().split('T')[0];
-      const res = await api.getBillingBreakdown(selectedAccount, start, end);
-      if (res.success) {
-        setCostByService(res.data.byService || []);
-        setCostByRegion(res.data.byRegion || []);
-        const billed = (res.data.byRegion || [])
-          .map((row: RegionCostRow) => row.region)
-          .filter((region: string) => /^[a-z]{2}(?:-gov)?-[a-z0-9-]+-\d$/.test(region));
-        if (billed.length) setSelectedRegion(billed[0]);
-        resetScan();
-        setStep(1);
-      } else {
-        message.error(res.error);
-      }
-    } catch (error: any) {
-      message.error(error.message);
-    } finally {
-      setLoading(false);
-    }
-  };
-
   const [scanProgress, setScanProgress] = useState('');
+
+  // 默认区域始终可用；opt-in 区域按该账户最近一次区域扫描结果加入。
+  // 如果尚无缓存，则宁可扫描全部已知 opt-in 区域并报告单区错误，也不把不完整结果伪装成“全部区域”。
+  const availableRegions = useMemo(() => {
+    if (!selectedAccount) return ALL_KNOWN_REGIONS;
+    const accountRegions = regionData.find(item => String(item.account_id) === selectedAccount);
+    if (!accountRegions) return ALL_KNOWN_REGIONS;
+    const enabledOptIn = (accountRegions.regions || [])
+      .filter((item: any) => item.status === 'ENABLED')
+      .map((item: any) => String(item.region))
+      .filter(Boolean);
+    return Array.from(new Set([...DEFAULT_REGIONS, ...enabledOptIn]));
+  }, [regionData, selectedAccount]);
 
   const scanResources = async () => {
     if (!selectedAccount) return;
     setLoading(true);
     resetScan();
+    setStep(0);
     try {
       // 全区域模式：逐区域串行扫描（后端单次只支持一个区域），聚合结果。
       // IAM/S3 是全局资源、每个区域都会返回，用 key 去重。
-      const regionsToScan = selectedRegion === ALL_REGIONS ? REGIONS : [selectedRegion];
+      const regionsToScan = selectedRegion === ALL_REGIONS ? availableRegions : [selectedRegion];
       const merged = new Map<string, CleanupResource>();
       const allWarnings: string[] = [];
       let meta: Pick<CleanupScanResult, 'cutoff' | 'windowDays'> | null = null;
@@ -226,8 +219,12 @@ const CleanupPage: React.FC = () => {
             allWarnings.push(`${region}: 扫描接口返回格式无效`);
             continue;
           }
-          // 标注来源区域：全区域模式下删除时要按区域分组调用后端
-          data.resources.forEach(r => merged.set(r.key, { ...r, _region: region } as CleanupResource & { _region: string }));
+          // 区域资源必须带 region 参与唯一标识，避免不同区域同名 Lambda 或同 ID 资源互相覆盖；
+          // IAM/S3 等全局资源仍按原 key 去重，避免每个区域重复展示。
+          data.resources.forEach(resource => {
+            const key = resource.scope === 'global' ? resource.key : `${region}:${resource.key}`;
+            merged.set(key, { ...resource, key, _region: region } as CleanupResource & { _region: string });
+          });
           data.warnings.forEach(w => allWarnings.push(regionsToScan.length > 1 ? `${region}: ${w}` : w));
           meta = { cutoff: data.cutoff, windowDays: data.windowDays };
         } catch (error: any) {
@@ -240,7 +237,7 @@ const CleanupPage: React.FC = () => {
       setResources(list);
       setWarnings(allWarnings);
       setScanMeta(meta);
-      setStep(2);
+      setStep(1);
       message.success(`发现 ${list.length} 个最近 ${meta.windowDays} 天的资源`);
     } catch (error: any) {
       setScanProgress('');
@@ -273,7 +270,7 @@ const CleanupPage: React.FC = () => {
       selectedResources
         .filter((resource): resource is CleanupResource & { type: CleanupDeleteInput['type']; _region?: string } => resource.deletable && resource.type !== 'S3')
         .forEach(resource => {
-          const region = (resource as any)._region || (selectedRegion === ALL_REGIONS ? REGIONS[0] : selectedRegion);
+          const region = (resource as any)._region || (selectedRegion === ALL_REGIONS ? DEFAULT_REGIONS[0] : selectedRegion);
           if (!byRegion.has(region)) byRegion.set(region, []);
           byRegion.get(region)!.push({ type: resource.type, id: resource.id, name: resource.name });
         });
@@ -313,12 +310,9 @@ const CleanupPage: React.FC = () => {
     ));
   }, [resources, searchText]);
 
-  const billedRegions = costByRegion
-    .map(row => row.region)
-    .filter(region => /^[a-z]{2}(?:-gov)?-[a-z0-9-]+-\d$/.test(region));
   const scanRegionOptions = [
-    { label: `全部区域（${REGIONS.length} 个，逐个扫描）`, value: ALL_REGIONS },
-    ...(billedRegions.length ? billedRegions : REGIONS).map(region => ({ label: region, value: region })),
+    { label: `全部可用区域（${availableRegions.length} 个，逐个扫描）`, value: ALL_REGIONS },
+    ...availableRegions.map(region => ({ label: region, value: region })),
   ];
 
   // 选中项的预估月费合计（仅统计能估价的项）
@@ -336,19 +330,12 @@ const CleanupPage: React.FC = () => {
       <div className="page-header">
         <div>
           <h2 className="page-header-title">资源清理</h2>
-          <p className="page-header-subtitle">分析费用分布，扫描最近 7 天创建或修改的资源；所有删除均需手动勾选</p>
+          <p className="page-header-subtitle">选择账户和区域，扫描最近 7 天创建或修改的资源；所有删除均需手动勾选</p>
         </div>
       </div>
 
       <div style={{ maxWidth: 1100 }}>
         <Card size="small">
-          <Steps
-            current={step}
-            size="small"
-            style={{ marginBottom: 16, maxWidth: 440 }}
-            items={[{ title: '选账户' }, { title: '查账单' }, { title: '扫描最近 7 天' }]}
-          />
-
           <Space wrap style={{ marginBottom: 12 }}>
             <Select
               aria-label="选择 AWS 账户"
@@ -357,8 +344,7 @@ const CleanupPage: React.FC = () => {
               value={selectedAccount || undefined}
               onChange={value => {
                 setSelectedAccount(value);
-                setCostByService([]);
-                setCostByRegion([]);
+                setSelectedRegion(DEFAULT_REGIONS[0]);
                 resetScan();
                 setStep(0);
               }}
@@ -366,76 +352,25 @@ const CleanupPage: React.FC = () => {
               optionFilterProp="label"
               options={accounts.map(account => ({ label: `${account.Name} (${account.Id})`, value: account.Id }))}
             />
-            {step === 0 && selectedAccount && (
-              <Button type="primary" icon={<DollarOutlined />} onClick={analyzeCost} loading={loading}>分析账单</Button>
-            )}
+            <Select
+              aria-label="选择扫描区域"
+              style={{ width: 210 }}
+              value={selectedRegion}
+              onChange={value => {
+                setSelectedRegion(value);
+                resetScan();
+                setStep(0);
+              }}
+              showSearch
+              options={scanRegionOptions}
+            />
+            <Button type="primary" icon={<ArrowRightOutlined />} onClick={scanResources} loading={loading} disabled={!selectedAccount}>
+              {loading && scanProgress ? `扫描中 ${scanProgress}` : '扫描最近 7 天资源'}
+            </Button>
+            <span style={{ color: '#8a94a6', fontSize: 12 }}>IAM 用户和 S3 桶为全局资源，与所选区域一起返回</span>
           </Space>
 
-          {step === 0 && !selectedAccount && (
-            <EmptyState
-              icon={<DollarOutlined />}
-              description="选择一个账户开始分析资源"
-              hint="基于真实账单分析费用分布，并扫描最近 7 天资源；不会自动删除"
-            />
-          )}
-
           {step >= 1 && (
-            <Card size="small" style={{ marginBottom: 12 }} title="账单分析（近 30 天，基于 Cost Explorer）">
-              {costByService.length === 0 && costByRegion.length === 0 ? (
-                <Alert type="info" showIcon message="该账户近 30 天没有产生费用" />
-              ) : (
-                <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap' }}>
-                  <div style={{ flex: 1, minWidth: 260 }}>
-                    <div style={{ fontWeight: 600, marginBottom: 6 }}>按服务（{costByService.length}）</div>
-                    <Table<CostRow>
-                      size="small"
-                      pagination={costByService.length > 8 ? { pageSize: 8, size: 'small' } : false}
-                      dataSource={costByService}
-                      rowKey="name"
-                      columns={[
-                        { title: '服务', dataIndex: 'name', ellipsis: true },
-                        { title: '费用', dataIndex: 'cost', width: 96, align: 'right', render: cost => `$${cost.toFixed(2)}` },
-                      ]}
-                    />
-                  </div>
-                  <div style={{ flex: 1, minWidth: 220 }}>
-                    <div style={{ fontWeight: 600, marginBottom: 6 }}>按区域（{costByRegion.length}）</div>
-                    <Table<RegionCostRow>
-                      size="small"
-                      pagination={costByRegion.length > 8 ? { pageSize: 8, size: 'small' } : false}
-                      dataSource={costByRegion}
-                      rowKey="region"
-                      columns={[
-                        { title: '区域', dataIndex: 'region', render: region => region === 'global' ? <Tag>全局/无区域</Tag> : <code style={{ fontSize: 12 }}>{region}</code> },
-                        { title: '费用', dataIndex: 'cost', width: 96, align: 'right', render: cost => `$${cost.toFixed(2)}` },
-                      ]}
-                    />
-                  </div>
-                </div>
-              )}
-              <Space style={{ marginTop: 12 }} wrap>
-                <span style={{ color: '#4a5468', fontSize: 12 }}>扫描区域:</span>
-                <Select
-                  aria-label="选择扫描区域"
-                  style={{ width: 190 }}
-                  value={selectedRegion}
-                  onChange={value => {
-                    setSelectedRegion(value);
-                    resetScan();
-                    setStep(1);
-                  }}
-                  showSearch
-                  options={scanRegionOptions}
-                />
-                <Button type="primary" icon={<ArrowRightOutlined />} onClick={scanResources} loading={loading}>
-                  {loading && scanProgress ? `扫描中 ${scanProgress}` : '扫描最近 7 天资源'}
-                </Button>
-                <span style={{ color: '#8a94a6', fontSize: 12 }}>IAM 用户和 S3 桶为全局资源，与所选区域一起返回</span>
-              </Space>
-            </Card>
-          )}
-
-          {step >= 2 && (
             <>
               <Alert
                 type="info"

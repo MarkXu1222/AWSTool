@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
-import { Card, Table, Tag, Button, Space, message, Input, Spin, Descriptions, Tabs, Statistic, Row, Col, Badge, Dropdown, Switch, Tooltip, Modal, Select, Popconfirm } from 'antd';
-import { ReloadOutlined, SearchOutlined, DollarOutlined, SafetyOutlined, CheckCircleOutlined, CloseCircleOutlined, LeftOutlined, LoginOutlined, DownOutlined } from '@ant-design/icons';
+import { Card, Table, Tag, Button, Space, message, Input, Spin, Descriptions, Tabs, Badge, Dropdown, Switch, Tooltip, Modal, Select, Popconfirm } from 'antd';
+import { ReloadOutlined, SearchOutlined, SafetyOutlined, CheckCircleOutlined, CloseCircleOutlined, LeftOutlined, LoginOutlined, DownOutlined } from '@ant-design/icons';
 import { api } from '../api';
 import { exportToCSV } from '../utils/export';
 import RootCredentialsPanel from '../components/RootCredentialsPanel';
@@ -324,16 +324,6 @@ const AccountsPage: React.FC = () => {
               <Descriptions.Item label="状态"><Tag color={selectedAccount.Status === 'ACTIVE' ? 'green' : 'red'}>{selectedAccount.Status}</Tag></Descriptions.Item>
             </Descriptions>
           )},
-          { key: 'cost', label: '费用', children: detailLoading ? <div style={{ textAlign: 'center', padding: 30 }}><Spin /></div> : detail?.cost ? (
-            <>
-              <Row gutter={8} style={{ marginBottom: 12 }}>
-                <Col span={12}><Card size="small"><Statistic title="30天费用" value={detail.cost.total} precision={2} prefix="$" /></Card></Col>
-                <Col span={12}><Card size="small"><Statistic title="服务数" value={detail.services.length} /></Card></Col>
-              </Row>
-              <Table size="small" pagination={false} rowKey="name" dataSource={detail.services.slice(0, 10)}
-                columns={[{ title: '服务', dataIndex: 'name', ellipsis: true }, { title: '费用', dataIndex: 'cost', width: 80, render: (c: number) => `$${c.toFixed(2)}` }]} />
-            </>
-          ) : <span style={{ color: '#8a94a6' }}>无数据</span> },
           { key: 'mfa', label: '安全', children: detailLoading ? <div style={{ textAlign: 'center', padding: 30 }}><Spin /></div> : detail?.mfa ? (
             <>
               <Card size="small" style={{ marginBottom: 8 }}>
@@ -932,16 +922,6 @@ const AccountsPage: React.FC = () => {
                         <Descriptions.Item label="状态"><Tag color={selectedAccount.Status === 'ACTIVE' ? 'green' : 'red'}>{selectedAccount.Status}</Tag></Descriptions.Item>
                       </Descriptions>
                     )},
-                    { key: 'cost', label: '费用', children: detailLoading ? <Spin /> : detail?.cost ? (
-                      <>
-                        <Row gutter={8} style={{ marginBottom: 8 }}>
-                          <Col span={12}><Statistic title="30天" value={detail.cost.total} precision={2} prefix="$" valueStyle={{ fontSize: 16 }} /></Col>
-                          <Col span={12}><Statistic title="服务" value={detail.services.length} valueStyle={{ fontSize: 16 }} /></Col>
-                        </Row>
-                        <Table size="small" pagination={{ pageSize: 5 }} rowKey="name" dataSource={detail.services}
-                          columns={[{ title: '服务', dataIndex: 'name', ellipsis: true }, { title: '$', dataIndex: 'cost', width: 60, render: (c: number) => c.toFixed(2) }]} />
-                      </>
-                    ) : '无数据' },
                     { key: 'mfa', label: '安全', children: detailLoading ? <Spin /> : detail?.mfa ? (
                       <>
                         <p>Root MFA: {detail.mfa.root ? <Tag color="green">✓</Tag> : <Tag color="red">✗</Tag>}</p>

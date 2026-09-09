@@ -15,7 +15,7 @@
  *      但手工跑 scripts/setup-org-stacksets.ts 会重新覆盖，故该脚本必须读取
  *      本模块的排除名单。这是最容易漏的一环。
  *
- * 收窄后这些账户会失去账单分析、资源清理扫描、IAM 安全状态展示等功能，
+ * 收窄后这些账户会失去资源清理扫描、IAM 安全状态展示等功能，
  * 属预期取舍，调用方应据 isRestricted() 给出明确提示而非裸 AccessDenied。
  */
 import { randomBytes } from 'crypto';
@@ -134,7 +134,6 @@ export function getExcludedAccountIds(payerName?: string): string[] {
 
 /** 受限账户不可用的功能，供接口与前端给出明确原因 */
 export const RESTRICTED_UNAVAILABLE = [
-  '账单成本分析（需 ce:GetCostAndUsage）',
   '资源清理扫描（需 ec2/rds/s3/lambda 的 Describe 与 List）',
   '账户详情的 IAM 安全状态（需 iam 的 List 与 Get）',
 ];

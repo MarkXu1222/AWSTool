@@ -271,10 +271,6 @@ export const api = {
   getAccountRolesStatus: () => request('/aws/accounts/roles-status'),
   checkAccountRoles: (params?: { full?: boolean; accountIds?: string[]; probeOnly?: boolean }) =>
     request('/aws/accounts/roles-check', { method: 'POST', body: JSON.stringify(params || {}) }),
-  getCostByAccount: (start: string, end: string) => request(`/aws/billing/by-account?start=${start}&end=${end}`),
-  getCostByService: (accountId: string, start: string, end: string) => request(`/aws/billing/by-service/${accountId}?start=${start}&end=${end}`),
-  // 账单分析：按服务 + 区域两个维度汇总（资源清理第一步）
-  getBillingBreakdown: (accountId: string, start: string, end: string) => request(`/aws/billing/breakdown/${accountId}?start=${start}&end=${end}`),
   listServiceQuotas: (accountId: string, serviceCode: string, region?: string) =>
     request(`/aws/quotas/${accountId}/${serviceCode}?region=${region || ''}`),
   // 批量 payer 提额（需独立的批量提额权限）

@@ -3,7 +3,6 @@
  */
 import { STSClient, AssumeRoleCommand, GetCallerIdentityCommand, AssumeRootCommand } from '@aws-sdk/client-sts';
 import { OrganizationsClient, ListAccountsCommand } from '@aws-sdk/client-organizations';
-import { CostExplorerClient, GetCostAndUsageCommand } from '@aws-sdk/client-cost-explorer';
 import { ServiceQuotasClient, ListServiceQuotasCommand, RequestServiceQuotaIncreaseCommand, ListRequestedServiceQuotaChangeHistoryCommand, GetServiceQuotaCommand } from '@aws-sdk/client-service-quotas';
 import {
   IAMClient,
@@ -662,81 +661,6 @@ export async function listAccounts() {
   return allAccounts.filter(a => { if (seen.has(a.Id)) return false; seen.add(a.Id); return true; });
 }
 
-export async function getCostByAccount(startDate: string, endDate: string) {
-  const allResults: any[] = [];
-  for (const payer of PAYERS) {
-    try {
-      const admin = await getAdminCredsForPayer(payer.roleArn);
-      const ce = new CostExplorerClient({ region: 'us-east-1', credentials: admin });
-      const resp = await ce.send(new GetCostAndUsageCommand({
-        TimePeriod: { Start: startDate, End: endDate }, Granularity: 'MONTHLY',
-        Metrics: ['UnblendedCost'], GroupBy: [{ Type: 'DIMENSION', Key: 'LINKED_ACCOUNT' }],
-      }));
-      if (resp.ResultsByTime) allResults.push(...resp.ResultsByTime);
-    } catch { /* skip */ }
-  }
-  return allResults;
-}
-
-export async function getCostByService(accountId: string, startDate: string, endDate: string) {
-  const payerRole = accountPayerMap.get(accountId) || PAYERS[0]?.roleArn;
-  if (!payerRole) throw new Error('No payer');
-  const admin = await getAdminCredsForPayer(payerRole);
-  const ce = new CostExplorerClient({ region: 'us-east-1', credentials: admin });
-  const resp = await ce.send(new GetCostAndUsageCommand({
-    TimePeriod: { Start: startDate, End: endDate }, Granularity: 'MONTHLY',
-    Metrics: ['UnblendedCost'], GroupBy: [{ Type: 'DIMENSION', Key: 'SERVICE' }],
-    Filter: { Dimensions: { Key: 'LINKED_ACCOUNT', Values: [accountId] } },
-  }));
-  return resp.ResultsByTime || [];
-}
-
-/**
- * 账单分析（资源清理第一步）：基于 Cost Explorer 真实账单，同时按「服务」和「区域」两个维度汇总。
- * - 用 getPayerRoleArnForAccount 精确定位账户所属 payer（管理账户），避免用错 payer 导致查不到数据。
- * - GroupBy SERVICE + REGION 一次取回，聚合出 byService / byRegion；分页取全。
- * - 全局/无区域服务归到 "global"（Route53/CloudFront/税费等）。
- */
-export async function getBillingBreakdown(accountId: string, startDate: string, endDate: string) {
-  const payerRole = getPayerRoleArnForAccount(accountId) || PAYERS[0]?.roleArn;
-  if (!payerRole) throw new Error('未找到该账户所属 payer');
-  const admin = await getAdminCredsForPayer(payerRole);
-  const ce = new CostExplorerClient({ region: 'us-east-1', credentials: admin });
-
-  const byService: Record<string, number> = {};
-  const byRegion: Record<string, number> = {};
-  let total = 0;
-  let nextToken: string | undefined;
-  do {
-    const resp = await ce.send(new GetCostAndUsageCommand({
-      TimePeriod: { Start: startDate, End: endDate },
-      Granularity: 'MONTHLY',
-      Metrics: ['UnblendedCost'],
-      GroupBy: [{ Type: 'DIMENSION', Key: 'SERVICE' }, { Type: 'DIMENSION', Key: 'REGION' }],
-      Filter: { Dimensions: { Key: 'LINKED_ACCOUNT', Values: [accountId] } },
-      NextPageToken: nextToken,
-    }));
-    (resp.ResultsByTime || []).forEach(p => (p.Groups || []).forEach(g => {
-      const cost = parseFloat(g.Metrics?.UnblendedCost?.Amount || '0');
-      if (cost <= 0) return;
-      const service = g.Keys?.[0] || '(unknown)';
-      let region = g.Keys?.[1] || '';
-      if (!region || region === 'NoRegion' || region === 'global') region = 'global';
-      byService[service] = (byService[service] || 0) + cost;
-      byRegion[region] = (byRegion[region] || 0) + cost;
-      total += cost;
-    }));
-    nextToken = (resp as any).NextPageToken;
-  } while (nextToken);
-
-  return {
-    total,
-    period: `${startDate} ~ ${endDate}`,
-    byService: Object.entries(byService).map(([name, cost]) => ({ name, cost })).sort((a, b) => b.cost - a.cost),
-    byRegion: Object.entries(byRegion).map(([region, cost]) => ({ region, cost })).sort((a, b) => b.cost - a.cost),
-  };
-}
-
 /** 平台已配置的 payer 列表（名称 + 账户 ID），供批量提额等按组织操作的功能使用 */
 export function listConfiguredPayers(): { name: string; accountId: string; roleArn: string }[] {
   return PAYERS.map(p => {
@@ -1130,31 +1054,7 @@ export async function getAccountDetail(accountId: string) {
   let iamCreds: any;
   try { iamCreds = await assumeToAccount(accountId); } catch { iamCreds = await getAdminCredsForPayer(PAYERS[0]?.roleArn); }
 
-  const detail: any = { cost: null, services: [], mfa: null, iamSummary: null };
-
-  // Cost
-  try {
-    const payerRole = accountPayerMap.get(accountId) || PAYERS[0]?.roleArn;
-    const admin = await getAdminCredsForPayer(payerRole);
-    const ce = new CostExplorerClient({ region: 'us-east-1', credentials: admin });
-    const now = new Date();
-    const startDate = new Date(now.getFullYear(), now.getMonth() - 1, now.getDate()).toISOString().split('T')[0];
-    const endDate = now.toISOString().split('T')[0];
-    const resp = await ce.send(new GetCostAndUsageCommand({
-      TimePeriod: { Start: startDate, End: endDate }, Granularity: 'MONTHLY', Metrics: ['UnblendedCost'],
-      GroupBy: [{ Type: 'DIMENSION', Key: 'SERVICE' }],
-      Filter: { Dimensions: { Key: 'LINKED_ACCOUNT', Values: [accountId] } },
-    }));
-    let total = 0;
-    const services: { name: string; cost: number }[] = [];
-    (resp.ResultsByTime || []).forEach(p => (p.Groups || []).forEach(g => {
-      const cost = parseFloat(g.Metrics?.UnblendedCost?.Amount || '0');
-      if (cost > 0) { services.push({ name: g.Keys?.[0] || '', cost }); total += cost; }
-    }));
-    services.sort((a, b) => b.cost - a.cost);
-    detail.cost = { total, period: `${startDate} ~ ${endDate}` };
-    detail.services = services;
-  } catch {}
+  const detail: any = { mfa: null, iamSummary: null };
 
   // IAM
   try {

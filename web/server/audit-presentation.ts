@@ -33,10 +33,10 @@ const explicitActions: Record<string, Omit<AuditDisplay, 'target' | 'result' | '
   REGION_ENABLE: { category: '区域管理', operation: '启用区域' },
   REGION_BATCH_ENABLE: { category: '区域管理', operation: '批量启用区域' },
   REGION_DISABLE: { category: '区域管理', operation: '禁用区域' },
-  BILLING_EXPORT_SUBMIT: { category: '账单分析', operation: '提交账单 PDF 导出' },
-  BILLING_EXPORT_CANCEL: { category: '账单分析', operation: '取消账单 PDF 导出' },
-  BILLING_EXPORT_DOWNLOAD_START: { category: '账单分析', operation: '开始下载账单 PDF' },
-  BILLING_EXPORT_DOWNLOAD: { category: '账单分析', operation: '完成下载账单 PDF' },
+  BILLING_EXPORT_SUBMIT: { category: '账单导出', operation: '提交账单 PDF 导出' },
+  BILLING_EXPORT_CANCEL: { category: '账单导出', operation: '取消账单 PDF 导出' },
+  BILLING_EXPORT_DOWNLOAD_START: { category: '账单导出', operation: '开始下载账单 PDF' },
+  BILLING_EXPORT_DOWNLOAD: { category: '账单导出', operation: '完成下载账单 PDF' },
 };
 
 function parseTechnicalFields(log: any): TechnicalFields {
@@ -91,7 +91,7 @@ function describeApiCall(method: string, path: string, params: any): Omit<AuditD
   let match: RegExpMatchArray | null;
 
   if (path === '/api/aws/dashboard/summary') {
-    return { category: '系统概览', operation: '查看概览数据', target: '成本与账户汇总' };
+    return { category: '系统概览', operation: '查看概览数据', target: '运营状态汇总' };
   }
   if (path === '/api/aws/accounts') {
     return { category: '账户管理', operation: '查看账户列表', target: '全部 AWS 账户' };
@@ -108,6 +108,7 @@ function describeApiCall(method: string, path: string, params: any): Omit<AuditD
     return { category: '账户管理', operation: '打开 AWS 控制台', target: accountTarget(match[1]) };
   }
 
+  // 仅用于展示历史审计记录；这些 CE 查询路由已下线，不会恢复运行时调用。
   if (path === '/api/aws/billing/by-account') {
     return { category: '账单分析', operation: '查询账户账单', target: dateRangeTarget(query) || '全部账户' };
   }
@@ -116,11 +117,17 @@ function describeApiCall(method: string, path: string, params: any): Omit<AuditD
     const range = dateRangeTarget(query);
     return { category: '账单分析', operation: '查询服务账单', target: [accountTarget(match[1]), range].filter(Boolean).join(' · ') };
   }
+  match = path.match(/^\/api\/aws\/billing\/breakdown\/(\d{12})$/);
+  if (match) {
+    const range = dateRangeTarget(query);
+    return { category: '账单分析', operation: '查询账单服务与区域明细', target: [accountTarget(match[1]), range].filter(Boolean).join(' · ') };
+  }
+
   if (path === '/api/aws/billing/export-jobs') {
     const accountCount = Array.isArray(body.accountIds) ? body.accountIds.length : 0;
     const monthCount = Array.isArray(body.months) ? body.months.length : 0;
     return {
-      category: '账单分析',
+      category: '账单导出',
       operation: method === 'POST' ? '提交账单 PDF 导出' : '查看账单导出任务',
       target: accountCount || monthCount ? `${accountCount} 个账户 · ${monthCount} 个月份` : '账单导出任务',
     };
@@ -128,7 +135,7 @@ function describeApiCall(method: string, path: string, params: any): Omit<AuditD
   match = path.match(/^\/api\/aws\/billing\/export-jobs\/([^/]+)\/(cancel|download)$/);
   if (match) {
     return {
-      category: '账单分析',
+      category: '账单导出',
       operation: match[2] === 'cancel' ? '取消账单 PDF 导出' : '下载账单 PDF',
       target: `任务 ${match[1]}`,
     };
@@ -238,7 +245,7 @@ function describeApiCall(method: string, path: string, params: any): Omit<AuditD
   }
 
   const category = path.startsWith('/api/regions') ? '区域管理'
-    : path.includes('/billing/') ? '账单分析'
+    : path.includes('/billing/') ? '账单导出'
     : path.includes('/quotas/') ? '配额管理'
     : path.includes('/accounts') ? '账户管理'
     : path.includes('/resources/') ? '资源清理'

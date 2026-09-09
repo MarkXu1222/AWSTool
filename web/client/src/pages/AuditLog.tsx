@@ -74,6 +74,7 @@ const categoryColors: Record<string, string> = {
   账户管理: 'geekblue',
   配额管理: 'orange',
   区域管理: 'cyan',
+  账单导出: 'gold',
   账单分析: 'gold',
   资源清理: 'volcano',
   安全检查: 'red',

@@ -17,7 +17,7 @@
 | 已有角色探测记录的账户 | 3068 |
 | 已记录离场账户 | 26 |
 
-覆盖账户管理、配额提升（单个 / 批量 / Bedrock）、区域开通、账单分析与官方账单 PDF 导出、资源清理、提额文档自动生成、MAP 标签合规、根用户凭证操作、审计与飞书通知。
+覆盖账户管理、配额提升（单个 / 批量 / Bedrock）、区域开通、官方账单 PDF 导出、资源清理、提额文档自动生成、MAP 标签合规、根用户凭证操作、审计与飞书通知。
 
 ---
 
@@ -215,7 +215,7 @@ Admin 临时凭证时长默认 1 小时。数据库当前角色为 `admin` 的�
 | 离场账户 | `GET /accounts/departed`、`POST /accounts/departed/backfill`（后者 `requireStrictAdmin`） |
 | 敏感权限客户账户 | `GET /accounts/restricted`（不返回 ExternalId 明文）、`POST /accounts/restricted`、`DELETE /accounts/restricted/:accountId`、`GET /accounts/restricted/:accountId/external-id`（后三个均 `requireStrictAdmin` 且单独写审计） |
 | 仪表盘 | `GET /dashboard/summary` |
-| 账单 | `GET /billing/by-account`、`GET /billing/by-service/:accountId`、`GET /billing/breakdown/:accountId`；PDF job：`POST/GET /billing/export-jobs`、`GET /billing/export-jobs/:jobId`、`POST .../:jobId/cancel`、`GET .../:jobId/download`（均 `requireBillingAccess`，单任务再校验 owner/admin） |
+| 账单 | PDF job：`POST/GET /billing/export-jobs`、`GET /billing/export-jobs/:jobId`、`POST .../:jobId/cancel`、`GET .../:jobId/download`（均 `requireBillingAccess`，单任务再校验 owner/admin） |
 | 配额 | `GET /quotas/:accountId/:serviceCode`、`POST /quotas/increase`(admin)、`GET /quotas/requests`、`GET /quotas/stats`、`GET /quotas/companies`、`GET /quotas/company/:accountId`、`POST /quotas/generate-doc`、`POST /quotas/sync`、`POST /quotas/sync-account/:accountId`、`GET /quotas/sync-status`、`GET /quotas/sync-stream`(SSE) |
 | Bedrock 配额 | `GET /bedrock/quotas/:accountId?regions=a,b` |
 | 批量提额 | `GET /bulk-quota/payers`、`GET /bulk-quota/accounts/:payerAccountId`、`POST /bulk-quota/submit`、`GET /bulk-quota/job/:jobId`（全部 `requireBulkQuotaAccess`） |
@@ -328,11 +328,12 @@ admin 恒有，其他角色必须显式授予，且**都不受 `allowed_pages` �
 - `audit_log` — 审计日志，**上限 5000 条滚动**
 - `region_data` — 各账户区域 opt-in 状态
 - `accounts_cache` + `accounts_cache_time` — 账户列表缓存（调度器每 30min 刷新）
-- `dashboard_cache` — 成本概览缓存
 - `tag_onboarding_jobs` — MAP 全自动接入任务、阶段产物、重试与恢复状态
 - `billing_export_jobs` — 账单导出队列、进度、结果、取消/中断状态与下载元数据
 - `restricted_accounts` — 敏感权限客户账户（加密的 `external_id_enc`、state、last_error）。**同时是 `setup-org-stacksets.ts` 的 StackSet 排除名单来源**
 - `departed_accounts` — 已移出组织的账户记录（含 `rejoined_at` 轨迹）
+
+旧数据库可能仍有 `dashboard_cache` 字段；从 0.21.2 起应用不再读取或写入该字段，保留旧值仅为避免直接修改生产运行时数据。
 
 账单 ZIP 存在 `data/exports/billing/<jobId>/` 并在服务器长期保留；只通过鉴权下载端点访问，不写入 Git，也不会由 job runner 自动删除。历史记录通过分页接口查询，可重复下载。
 
@@ -403,7 +404,7 @@ HTML 模板 + Puppeteer 渲染。公司背景库在 `doc-templates.ts`（12 家�
 
 #### Billing Console 权限前置与排障
 
-后端 Cost Explorer API 与浏览器 Billing Console 是两条独立授权路径。后端能读取费用，**不代表**同一账户的联邦控制台一定能打开账单页。目标账户还必须由 root 用户在 Billing 首选项中开启 **Activate IAM Access**；该开关只允许 IAM/联合身份参与 Billing 授权，不会替角色补充任何 IAM 权限。
+账单 PDF 导出只通过浏览器 Billing Console，不调用 Cost Explorer API。目标账户必须由 root 用户在 Billing 首选项中开启 **Activate IAM Access**；该开关只允许 IAM/联合身份参与 Billing 授权，不会替角色补充任何 IAM 权限。
 
 开关启用后可能有数分钟传播窗口，而且旧 Federation/browser session 会保留启用前的结果。遇到账单页提示无权限时按以下顺序处理：
 
@@ -412,7 +413,7 @@ HTML 模板 + Puppeteer 渲染。公司背景库在 `doc-templates.ts`（12 家�
 3. 用 CloudTrail 核对真实会话：payer Admin 应为 `console-payer-admin` 且没有 `ReadOnlyAccess` session policy；payer 只读应为 `console-payer-readonly`
 4. 记录拒绝事件的 `eventSource`、`eventName`、`errorCode`、`errorMessage`、`recipientAccountId` 与 `sessionIssuer`，再判断是账户开关、会话类型还是 IAM/SCP 拒绝
 
-`IAM user access not activated` 明确指向账户级开关尚未传播、访问了错误账户或仍在使用旧会话，不应通过扩大 `role/tool` 权限解决；普通 `AccessDenied` 才继续检查具体 action、角色 identity policy、session policy、permissions boundary 与 SCP。近期生产诊断已验证：重新生成的 `console-payer-admin` 会话可成功调用 `ce:GetCostAndUsage` 与 `billing:ListBillingViews`。
+`IAM user access not activated` 明确指向账户级开关尚未传播、访问了错误账户或仍在使用旧会话，不应通过扩大 `role/tool` 权限解决；普通 `AccessDenied` 才继续检查具体 action、角色 identity policy、session policy、permissions boundary 与 SCP。近期生产诊断已验证：重新生成的 `console-payer-admin` 会话可成功访问 Billing Console 并调用 `billing:ListBillingViews`。
 
 ### MAP 标签合规
 
@@ -520,7 +521,6 @@ HTML 模板 + Puppeteer 渲染。公司背景库在 `doc-templates.ts`（12 家�
 | 账户列表 | 30 分钟 | 10 秒 | 写入缓存，页面秒级加载 |
 | 配额记录 + 当前值 | 4 小时 | 2 分钟 | 分批防限流 |
 | 区域状态 | 24 小时 | 5 分钟 | opt-in 区域扫描 |
-| 概览费用缓存 | 2 小时 | 30 秒 | Cost Explorer 结果缓存 |
 | 账户角色自愈（增量） | 跟随账户同步 | — | 只查新账户和待重试，单轮 ≤60 |
 | 账户角色自愈（全量） | 24 小时 | — | 最久未检查优先轮转，单轮 ≤400 |
 

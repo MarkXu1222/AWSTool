@@ -561,16 +561,7 @@ awsRouter.get('/accounts/:id/detail', async (req: Request, res: Response) => {
   } catch (e: any) { res.status(500).json({ error: e.message }); }
 });
 
-// Billing by account
-awsRouter.get('/billing/by-account', async (req: Request, res: Response) => {
-  try {
-    const { start, end } = req.query;
-    const data = await aws.getCostByAccount(start as string, end as string);
-    res.json({ success: true, data });
-  } catch (e: any) { res.status(500).json({ error: e.message }); }
-});
-
-// 实时运营计数（读内存 DB，轻量，不进费用缓存 —— 保证永远新鲜）：
+// 实时运营计数（读内存 DB，轻量）：
 // - roleIssues: 账户角色自愈的异常计数。刻意只返回计数不返回 problems 明细，
 //   明细仍走 requireStrictAdmin 的 /accounts/roles-status，权限模型不被破坏。
 // - quotaPending: 配额待达标数（Case 未关闭且当前值未到目标值）。
@@ -586,7 +577,7 @@ function getDashboardLiveCounters() {
         pending: (roles.byState['pending'] || 0) + (roles.byState['retrying'] || 0),
       };
     }
-  } catch { /* 角色数据不可用时静默降级，不影响费用展示 */ }
+  } catch { /* 角色数据不可用时静默降级，不影响概览展示 */ }
   let quotaPending = 0;
   try {
     quotaPending = db.getQuotaRequests().filter((r: any) =>
@@ -598,65 +589,10 @@ function getDashboardLiveCounters() {
   return { roleIssues, quotaPending, departed };
 }
 
-// Dashboard summary — cached, instant
-awsRouter.get('/dashboard/summary', async (_req: Request, res: Response) => {
-  try {
-    const cached = db.getDashboardCache();
-    if (cached) {
-      res.json({ success: true, data: { ...cached, ...getDashboardLiveCounters() } });
-      // Refresh in background if older than 1 hour
-      const age = cached.cachedAt ? Date.now() - new Date(cached.cachedAt).getTime() : Infinity;
-      if (age > 60 * 60 * 1000) {
-        refreshDashboardCache().catch(() => {});
-      }
-      return;
-    }
-    // No cache — compute now
-    const summary = await refreshDashboardCache();
-    res.json({ success: true, data: { ...summary, ...getDashboardLiveCounters() } });
-  } catch (e: any) { res.status(500).json({ error: e.message }); }
+// Dashboard summary — 仅返回不产生 AWS API 费用的实时运营计数
+awsRouter.get('/dashboard/summary', (_req: Request, res: Response) => {
+  res.json({ success: true, data: getDashboardLiveCounters() });
 });
-
-// Helper: compute and cache dashboard summary
-export async function refreshDashboardCache() {
-  const dayjs = require('dayjs');
-  const start = dayjs().startOf('month').format('YYYY-MM-DD');
-  const end = dayjs().format('YYYY-MM-DD');
-  const data = await aws.getCostByAccount(start, end);
-  let totalCost = 0;
-  const accountCostMap: Record<string, number> = {};
-  (data || []).forEach((period: any) => {
-    (period.Groups || []).forEach((g: any) => {
-      const amount = parseFloat(g.Metrics?.UnblendedCost?.Amount || '0');
-      totalCost += amount;
-      const acctId = g.Keys[0];
-      accountCostMap[acctId] = (accountCostMap[acctId] || 0) + amount;
-    });
-  });
-  const topAccounts = Object.entries(accountCostMap)
-    .map(([accountId, cost]) => ({ key: accountId, accountId, cost }))
-    .sort((a, b) => b.cost - a.cost)
-    .slice(0, 10);
-  // 组织（payer）维度聚合：账户级 Top 只反映单账户，这里回答「哪个组织整体在烧钱」。
-  // 账户→payer 映射来自账户缓存的 _payer；缓存缺失的账户归入「未知」而不是丢弃，
-  // 保证 topPayers 各项之和与 totalCost 口径一致。
-  const cachedAccounts: any[] = db.getAccountsCache().accounts || [];
-  const payerOf = new Map<string, string>(cachedAccounts.map((a: any) => [a.Id, a._payer || '未知']));
-  const payerCostMap: Record<string, { cost: number; accounts: number }> = {};
-  for (const [acctId, cost] of Object.entries(accountCostMap)) {
-    const p = payerOf.get(acctId) || '未知';
-    if (!payerCostMap[p]) payerCostMap[p] = { cost: 0, accounts: 0 };
-    payerCostMap[p].cost += cost;
-    payerCostMap[p].accounts += 1;
-  }
-  const topPayers = Object.entries(payerCostMap)
-    .map(([payer, v]) => ({ key: payer, payer, cost: v.cost, accounts: v.accounts }))
-    .sort((a, b) => b.cost - a.cost)
-    .slice(0, 10);
-  const summary = { totalCost, topAccounts, topPayers };
-  db.setDashboardCache(summary);
-  return { ...summary, cachedAt: new Date().toISOString() };
-}
 
 
 // Federated console sign-in URL — open a child account's console without login.
@@ -892,24 +828,6 @@ awsRouter.get('/quotas/companies', async (_req: Request, res: Response) => {
     // 按名字排序，便于下拉查找
     list.sort((a, b) => a.displayName.localeCompare(b.displayName));
     res.json({ success: true, data: list });
-  } catch (e: any) { res.status(500).json({ error: e.message }); }
-});
-
-// Billing by service
-awsRouter.get('/billing/by-service/:accountId', async (req: Request, res: Response) => {
-  try {
-    const { start, end } = req.query;
-    const data = await aws.getCostByService(String(req.params.accountId), start as string, end as string);
-    res.json({ success: true, data });
-  } catch (e: any) { res.status(500).json({ error: e.message }); }
-});
-
-// Billing breakdown by service AND region (资源清理第一步：基于真实账单)
-awsRouter.get('/billing/breakdown/:accountId', async (req: Request, res: Response) => {
-  try {
-    const { start, end } = req.query;
-    const data = await aws.getBillingBreakdown(String(req.params.accountId), String(start || ''), String(end || ''));
-    res.json({ success: true, data });
   } catch (e: any) { res.status(500).json({ error: e.message }); }
 });
 

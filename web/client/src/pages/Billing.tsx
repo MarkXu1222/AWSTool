@@ -1,12 +1,10 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { Card, Table, Tag, Button, message, DatePicker, Input, Modal, Select, Space, Alert, Progress, Upload } from 'antd';
-import { ReloadOutlined, SearchOutlined, FilePdfOutlined, DownloadOutlined, StopOutlined, PlusOutlined, UploadOutlined, HistoryOutlined, EyeOutlined } from '@ant-design/icons';
+import { Card, Table, Tag, Button, message, Modal, Select, Space, Alert, Progress, Upload } from 'antd';
+import { ReloadOutlined, FilePdfOutlined, DownloadOutlined, StopOutlined, PlusOutlined, UploadOutlined, HistoryOutlined, EyeOutlined } from '@ant-design/icons';
 import dayjs from 'dayjs';
 import { api, BillingExportJobView, BillingJobRequestError } from '../api';
-import { exportToCSV } from '../utils/export';
 import { scanAccountIdsFromXlsx } from '../utils/account-import';
 
-const { RangePicker } = DatePicker;
 const HISTORY_PAGE_SIZE = 10;
 
 interface AccountImportSummary {
@@ -20,12 +18,6 @@ interface AccountImportSummary {
 }
 
 const BillingPage: React.FC = () => {
-  const [costData, setCostData] = useState<any[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [dateRange, setDateRange] = useState<[dayjs.Dayjs, dayjs.Dayjs]>([dayjs().subtract(1, 'month').startOf('month'), dayjs()]);
-  const [totalCost, setTotalCost] = useState(0);
-  const [searchText, setSearchText] = useState('');
-
   // 批量导出账单相关状态
   const [accounts, setAccounts] = useState<any[]>([]);
   const [exportModalOpen, setExportModalOpen] = useState(false);
@@ -59,7 +51,7 @@ const BillingPage: React.FC = () => {
     return arr;
   }, []);
 
-  useEffect(() => { fetchCosts(); loadAccounts(); void loadRecentExportJob(); }, []);
+  useEffect(() => { loadAccounts(); void loadRecentExportJob(); }, []);
 
   const loadAccounts = async () => {
     try {
@@ -175,29 +167,6 @@ const BillingPage: React.FC = () => {
       if (timer !== undefined) window.clearTimeout(timer);
     };
   }, [exportJobId]);
-
-  const fetchCosts = async () => {
-    setLoading(true);
-    try {
-      const start = dateRange[0].format('YYYY-MM-DD');
-      const end = dateRange[1].format('YYYY-MM-DD');
-      const res = await api.getCostByAccount(start, end);
-      if (res.success) {
-        setCostData(res.data);
-        let total = 0;
-        (res.data || []).forEach((p: any) => (p.Groups || []).forEach((g: any) => { total += parseFloat(g.Metrics?.UnblendedCost?.Amount || '0'); }));
-        setTotalCost(total);
-      } else message.error(res.error);
-    } catch (e: any) { message.error(e.message); }
-    finally { setLoading(false); }
-  };
-
-  const tableData = costData.flatMap((p: any) => (p.Groups || []).map((g: any) => ({
-    key: `${p.TimePeriod.Start}-${g.Keys[0]}`, period: `${p.TimePeriod.Start} ~ ${p.TimePeriod.End}`,
-    accountId: g.Keys[0], cost: parseFloat(g.Metrics.UnblendedCost.Amount || '0'),
-  }))).sort((a, b) => b.cost - a.cost);
-
-  const filtered = tableData.filter(d => !searchText || d.accountId.includes(searchText));
 
   // 批量导出账单
   const openExportModal = () => {
@@ -425,36 +394,24 @@ const BillingPage: React.FC = () => {
     <div>
       <div className="page-header">
         <div>
-          <h2 className="page-header-title">账单分析</h2>
-          <p className="page-header-subtitle">按账户查看 AWS 费用分布</p>
-        </div>
-        <div className="stat-chips" style={{ margin: 0 }}>
-          <span className="stat-chip">总费用 <strong>${totalCost.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</strong></span>
-          <span className="stat-chip">账户数 <strong>{new Set(tableData.map(d => d.accountId)).size}</strong></span>
+          <h2 className="page-header-title">账单导出</h2>
+          <p className="page-header-subtitle">批量抓取 AWS 官方账单 PDF，并管理历史导出与 ZIP 下载</p>
         </div>
       </div>
-      <Card size="small" title="账单分析">
-        <div className="filter-bar" style={{ justifyContent: 'space-between' }}>
-          <Space size={8} wrap>
-            <RangePicker value={dateRange} onChange={(d) => { if (d?.[0] && d?.[1]) setDateRange([d[0], d[1]]); }} picker="month" size="small" />
-            <Button icon={<ReloadOutlined />} onClick={fetchCosts} loading={loading} type="primary" size="small">查询</Button>
-          </Space>
-          <Space size={8} wrap>
-            <Input placeholder="搜索账户ID..." prefix={<SearchOutlined />} value={searchText} onChange={e => setSearchText(e.target.value)} allowClear size="small" style={{ width: 200 }} />
-            <Button size="small" icon={<HistoryOutlined />} onClick={openExportHistory}>导出记录</Button>
-            <Button size="small" type="primary" icon={<FilePdfOutlined />} onClick={openExportModal}>
-              {exportActive ? '查看导出进度' : exportJob ? '查看最近导出' : '批量导出账单 PDF'}
-            </Button>
-            <Button size="small" onClick={() => exportToCSV(filtered.map(d => ({ 账期: d.period, 账户: d.accountId, '费用(USD)': d.cost.toFixed(4) })), 'billing')}>导出 CSV</Button>
-          </Space>
-        </div>
-        <Table size="small" dataSource={filtered} loading={loading} pagination={{ pageSize: 20 }} rowKey="key"
-          columns={[
-            { title: '账期', dataIndex: 'period' },
-            { title: '账户 ID', dataIndex: 'accountId', render: (id: string) => <code>{id}</code> },
-            { title: '费用', dataIndex: 'cost', sorter: (a: any, b: any) => a.cost - b.cost, render: (c: number) => <span style={{ fontWeight: 600, fontVariantNumeric: 'tabular-nums', color: 'var(--color-text-primary)' }}>${c.toFixed(2)}</span> },
-            { title: '占比', key: 'pct', render: (_: any, r: any) => <Tag color="blue">{totalCost > 0 ? ((r.cost / totalCost) * 100).toFixed(1) : 0}%</Tag> },
-          ]} />
+      <Card size="small" title="官方账单 PDF">
+        <Alert
+          type="info"
+          showIcon
+          style={{ marginBottom: 16 }}
+          message="按账户和月份从 AWS Billing Console 抓取官方账单 PDF"
+          description="导出任务在服务器后台执行，可随时查看历史进度并重复下载已完成的 ZIP。"
+        />
+        <Space size={8} wrap>
+          <Button icon={<HistoryOutlined />} onClick={openExportHistory}>导出记录</Button>
+          <Button type="primary" icon={<FilePdfOutlined />} onClick={openExportModal}>
+            {exportActive ? '查看导出进度' : exportJob ? '查看最近导出' : '批量导出账单 PDF'}
+          </Button>
+        </Space>
       </Card>
 
       {/* 批量导出账单 PDF Modal */}

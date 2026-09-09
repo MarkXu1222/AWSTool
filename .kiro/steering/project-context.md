@@ -1,6 +1,6 @@
 # Project Context — AWSTool
 
-AWS 多账户管理平台。用于跨组织管理成员账户：配额提升、账单分析、区域开通、资源清理、根用户凭证操作、MAP 标签合规，带 MFA 登录与操作审计。
+AWS 多账户管理平台。用于跨组织管理成员账户：配额提升、账单 PDF 导出、区域开通、资源清理、根用户凭证操作、MAP 标签合规，带 MFA 登录与操作审计。
 
 > 维护须知：本文件是项目的"结构地图 + 改哪里"指南。新增或调整功能后，请同步更新对应章节。
 > 部署与数据安全规则见 `deployment.md`；编码规范见 `coding-standards.md`；开发流程见 `development-methodology.md`（本文件不重复这些内容）。
@@ -11,7 +11,7 @@ AWS 多账户管理平台。用于跨组织管理成员账户：配额提升、�
 
 | 应用 | 位置 | 包名 / 版本 | 状态 | 说明 |
 |------|------|-------------|------|------|
-| **Web 版（生产）** | `web/` | `aws-toolbox-web` / `APP_VERSION 0.21.1` | ✅ **在维护** | 部署在 EC2（https://markxu.co）。日常改动几乎都在这里。 |
+| **Web 版（生产）** | `web/` | `aws-toolbox-web` / `APP_VERSION 0.21.2` | ✅ **在维护** | 部署在 EC2（https://markxu.co）。日常改动几乎都在这里。 |
 | 桌面版（旧） | 根 `src/` + `electron/` | `aws-toolbox` / `0.1.0` | ⚠️ 旧版/基本冻结 | 早期 Electron macOS 版，`main: dist/main/index.js`。除非专门维护桌面版，否则**不要动**。 |
 
 **结论：接到"平台/网站"相关的需求，一律在 `web/` 下操作。**
@@ -41,9 +41,9 @@ web/
 │   ├── auth.ts                 # authRouter（登录/MFA/用户CRUD）+ authMiddleware + 页面权限模型
 │   ├── audit.ts                # auditMiddleware：记录所有已认证 API 调用
 │   ├── audit-presentation.ts   # 审计日志展示增强 + CSV 导出
-│   ├── aws-service.ts          # ★AWS 核心：AssumeRole 链、成本、配额、资源、根凭证、控制台URL
+│   ├── aws-service.ts          # ★AWS 核心：AssumeRole 链、配额、资源、根凭证、控制台URL
 │   ├── db.ts                   # ★数据层：data/db.json 读写、字段加密、每日备份
-│   ├── scheduler.ts            # 后台定时同步（账户/配额/区域/仪表盘）
+│   ├── scheduler.ts            # 后台定时同步（账户/配额/区域/角色自愈）
 │   ├── doc-generator.ts        # 生成配额提升申请 PDF（puppeteer）
 │   ├── doc-templates.ts        # ★公司模板 + 账户→公司 / payer→公司 映射 + 区域显示名
 │   ├── notify.ts               # 飞书通知（配额变动/达成）
@@ -94,12 +94,12 @@ doc-templates/architectures/    # 公司架构图（静态资源，可提交）
 
 | 页面 key | 页面文件 | 主要后端前缀 | 说明 |
 |----------|----------|--------------|------|
-| `dashboard` | `pages/Dashboard.tsx` | `/api/aws/dashboard/summary` | 概览、成本汇总 |
+| `dashboard` | `pages/Dashboard.tsx` | `/api/aws/dashboard/summary` | 账户、Case、连接、角色异常、配额和账户生命周期运营计数 |
 | `accounts` | `pages/Accounts.tsx` | `/api/aws/accounts*`、`/api/aws/root-credentials*`、`/api/aws/temp-credentials` | 账户列表、账户详情、根用户凭证操作 |
 | `quotas` | `pages/Quotas.tsx` | `/api/aws/quotas/*`、`/api/aws/bedrock/quotas/*` | 配额查询、一键提额、同步、生成申请文档；Tab 顺序：当前配额 / Bedrock 配额 / 当前账户请求 / 在线查询 / 提升记录 |
 | `bulkquota` | `pages/BulkQuota.tsx` | `/api/aws/bulk-quota/*` | 批量提额（按 payer 组织 × 多区域）。**不在 `ALL_PAGE_KEYS` 里**，可见性只由独立权限 `bulk_quota_access` 决定 |
 | `regions` | `pages/Regions.tsx` | `/api/regions/*` | 区域 opt-in 状态与开通 |
-| `billing` | `pages/Billing.tsx` | `/api/aws/billing/*` | 按账户/服务成本、账单拆分、批量导出发票 |
+| `billing` | `pages/Billing.tsx` | `/api/aws/billing/*` | AWS 官方账单 PDF 批量导出、历史任务、进度、取消与 ZIP 下载 |
 | `cleanup` | `pages/Cleanup.tsx` | `/api/aws/resources/*` | 最近 7 天 EC2/EBS/S3/Lambda/IAM 用户扫描；IAM 非敏感详情与手动勾选安全删除，S3 只读 |
 | `tagcompliance` | `pages/TagCompliance.tsx` | `/api/aws/tag-compliance/*` | MAP 标签合规扫描与报告 |
 | `audit` | `pages/AuditLog.tsx` | `/api/aws/audit*` | 审计日志查询与导出 |
@@ -118,7 +118,7 @@ doc-templates/architectures/    # 公司架构图（静态资源，可提交）
 - 账户：`GET /accounts`、`POST /accounts/refresh`、`GET /accounts/:id/detail`、`GET /connection`
 - 账户角色自愈：`GET /accounts/roles-status`、`POST /accounts/roles-check`（均 requireStrictAdmin）。注意这两条必须定义在 `/accounts/:id/detail` 之前，否则被通配吃掉
 - 仪表盘：`GET /dashboard/summary`
-- 账单：`GET /billing/by-account`、`GET /billing/by-service/:accountId`、`GET /billing/breakdown/:accountId`；PDF job：`POST/GET /billing/export-jobs`、`GET /billing/export-jobs/:jobId`、`POST /billing/export-jobs/:jobId/cancel`、`GET /billing/export-jobs/:jobId/download`（全部 `requireBillingAccess`，单 job 再校验 owner/admin）
+- 账单 PDF job：`POST/GET /billing/export-jobs`、`GET /billing/export-jobs/:jobId`、`POST /billing/export-jobs/:jobId/cancel`、`GET /billing/export-jobs/:jobId/download`（全部 `requireBillingAccess`，单 job 再校验 owner/admin）
 - 配额：`GET /quotas/:accountId/:serviceCode`、`POST /quotas/increase`(admin)、`GET /quotas/requests`、`GET /quotas/stats`、`GET /quotas/companies`、`GET /quotas/company/:accountId`、`POST /quotas/generate-doc`、`POST /quotas/sync`、`POST /quotas/sync-account/:accountId`、`GET /quotas/sync-status`、`GET /quotas/sync-stream`(SSE)
 - Bedrock 配额：`GET /bedrock/quotas/:accountId?regions=a,b`（TPM/RPM/TPD，多区域并发；路径特意不放在 `/quotas/` 下，避免被 `/quotas/:accountId/:serviceCode` 通配吃掉）
 - 根凭证：`GET /root-credentials/:accountId`、`GET /temp-credentials/:accountId?durationHours=1`（rootAccess；仅 admin 可请求 2–12 小时）、`POST /root-credentials/:accountId/delete-mfa`(rootAccess)、`.../recover-password`(rootAccess)、`.../delete-access-key`(rootAccess)
@@ -190,10 +190,11 @@ web { port, adminPassword, jwtSecret, encryptionKey, feishuWebhook }
 - `audit_log`：审计日志（上限 5000 条滚动）
 - `region_data`：各账户区域 opt-in 状态
 - `accounts_cache` + `accounts_cache_time`：账户列表缓存（调度器每 30min 刷新）
-- `dashboard_cache`：成本概览缓存
 - `account_roles`：各账户的 support-quota / admin-console 可用性与自愈状态（`ok` / `partial` / `pending` / `unreachable` + 尝试次数）
 - `tag_onboarding_jobs`：MAP 全自动接入持久化任务
 - `billing_export_jobs`：账单 PDF job 的队列、进度、结果、取消/中断与下载元数据
+
+旧数据库可能仍残留 `dashboard_cache`；0.21.2 起代码不再读写，部署时不直接修改 `data/db.json`。
 
 账单 ZIP 位于 `data/exports/billing/<jobId>/`（gitignore）并在服务器长期保留，只能通过鉴权端点下载；历史记录通过分页接口查询。禁止提交，且需单独监控磁盘与规划备份。
 
@@ -281,7 +282,7 @@ web { port, adminPassword, jwtSecret, encryptionKey, feishuWebhook }
 - `web/server/doc-templates.ts`：`COMPANY_PROFILES` 加公司资料；`ACCOUNT_TO_COMPANY` / `PAYER_TO_COMPANY` 加映射；架构图放 `doc-templates/architectures/`。
 
 ### 调整定时同步频率
-- `web/server/scheduler.ts`：账户 30min、配额 4h、区域 24h、仪表盘 2h、账户角色自愈（增量跟在账户同步之后，全量复检 24h）。
+- `web/server/scheduler.ts`：账户 30min、配额 4h、区域 24h、账户角色自愈（增量跟在账户同步之后，全量复检 24h）。
 
 ### 发布新版本
 - 改 `web/client/src/version.ts` 的 `APP_VERSION`（小改递增 patch，大改递增 minor）。左下角展示，也用于确认部署是否生效。
