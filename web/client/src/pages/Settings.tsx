@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { Card, Button, message, Alert, Image, Input, Form, Table, Tag, Modal, Select, Space, Tabs, Checkbox, Tooltip, Row, Col, Dropdown } from 'antd';
 import { SafetyOutlined, CheckCircleOutlined, LockOutlined, UserAddOutlined, EditOutlined, ReloadOutlined, MoreOutlined } from '@ant-design/icons';
 import { api } from '../api';
-import { PAGE_META } from '../components/MainLayout';
+import { PAGE_META, OPS_PAGE_KEY } from '../components/MainLayout';
 
 interface SettingsPageProps {
   onLogout?: () => void;
@@ -28,6 +28,8 @@ const SettingsPage: React.FC<SettingsPageProps> = ({ onLogout }) => {
   const [editForm] = Form.useForm();
   const [pwdForm] = Form.useForm();
   const ALL_PAGE_KEYS = PAGE_META.map(p => p.key);
+  // 运维监控包含系统和请求指标，non-admin 必须由管理员显式勾选；旧用户和新用户默认均不授予。
+  const DEFAULT_PAGE_KEYS = PAGE_META.filter(p => p.key !== OPS_PAGE_KEY).map(p => p.key);
   const ROLE_OPTIONS = [
     { label: '管理员 (admin) — 全部权限', value: 'admin' },
     { label: '部分管理员 (partadmin) — 能操作但仅限勾选页面', value: 'partadmin' },
@@ -91,8 +93,8 @@ const SettingsPage: React.FC<SettingsPageProps> = ({ onLogout }) => {
   };
 
   const openEditUser = (record: any) => {
-    // 未设置 allowed_pages (旧数据/admin) 时默认勾全
-    const initialPages = Array.isArray(record.allowed_pages) ? record.allowed_pages : ALL_PAGE_KEYS;
+    // 未设置 allowed_pages 的旧 non-admin 只默认勾选常规页面，不自动授予运维监控
+    const initialPages = Array.isArray(record.allowed_pages) ? record.allowed_pages : DEFAULT_PAGE_KEYS;
     editForm.setFieldsValue({ role: record.role, allowedPages: initialPages, rootAccess: !!record.root_access, bulkQuotaAccess: !!record.bulk_quota_access });
     setEditUserOpen(record);
   };
@@ -265,8 +267,11 @@ const SettingsPage: React.FC<SettingsPageProps> = ({ onLogout }) => {
                 // 角色列的红 admin 标签已表达该语义，权限列用弱化文字即可
                 { title: '页面权限', width: 320, render: (_: any, record: any) => {
                   if (record.role === 'admin') return <span style={{ color: '#8a94a6', fontSize: 12 }}>全部（管理员）</span>;
-                  const pages: string[] = Array.isArray(record.allowed_pages) ? record.allowed_pages : ALL_PAGE_KEYS;
+                  const pages: string[] = Array.isArray(record.allowed_pages) ? record.allowed_pages : DEFAULT_PAGE_KEYS;
                   if (pages.length === ALL_PAGE_KEYS.length) return <Tag color="green" style={{ margin: 0 }}>全部</Tag>;
+                  if (pages.length === DEFAULT_PAGE_KEYS.length && DEFAULT_PAGE_KEYS.every(key => pages.includes(key))) {
+                    return <Tag color="blue" style={{ margin: 0 }}>全部常规页面</Tag>;
+                  }
                   if (pages.length === 0) return <Tag style={{ margin: 0 }}>无</Tag>;
                   const labels = pages.map(k => PAGE_META.find(p => p.key === k)?.label || k);
                   // 超过 3 个折叠为 +N，完整清单挂 tooltip，避免标签流撑高行
@@ -315,7 +320,7 @@ const SettingsPage: React.FC<SettingsPageProps> = ({ onLogout }) => {
 
       {/* Add user modal */}
       <Modal title="添加用户" open={addUserOpen} onOk={handleAddUser} onCancel={() => setAddUserOpen(false)} okText="创建" destroyOnClose>
-        <Form form={addForm} layout="vertical" initialValues={{ role: 'viewer', allowedPages: ALL_PAGE_KEYS, rootAccess: false, bulkQuotaAccess: false }}>
+        <Form form={addForm} layout="vertical" initialValues={{ role: 'viewer', allowedPages: DEFAULT_PAGE_KEYS, rootAccess: false, bulkQuotaAccess: false }}>
           <Form.Item name="username" label="用户名" rules={[{ required: true }]}><Input /></Form.Item>
           <Form.Item name="password" label="密码" rules={[{ required: true }, { min: 6, message: '至少 6 位' }]}><Input.Password /></Form.Item>
           <Form.Item name="role" label="角色" extra="admin: 全权限 · partadmin: 能操作但页面受限 · viewer: 只读">
@@ -327,7 +332,7 @@ const SettingsPage: React.FC<SettingsPageProps> = ({ onLogout }) => {
             ) : (
               <>
                 <Form.Item name="allowedPages" label="页面权限"
-                  extra="勾选该用户可见的左侧菜单页面">
+                  extra="勾选该用户可见的左侧菜单页面；运维监控包含系统指标，默认不授权">
                   <Checkbox.Group options={PAGE_META.map(p => ({ label: p.label, value: p.key }))} />
                 </Form.Item>
                 <Form.Item name="rootAccess" valuePropName="checked" label="根用户凭证权限"
@@ -357,7 +362,7 @@ const SettingsPage: React.FC<SettingsPageProps> = ({ onLogout }) => {
             ) : (
               <>
                 <Form.Item name="allowedPages" label="页面权限"
-                  extra="勾选该用户可见的左侧菜单页面">
+                  extra="勾选该用户可见的左侧菜单页面；运维监控包含系统指标，默认不授权">
                   <Checkbox.Group options={PAGE_META.map(p => ({ label: p.label, value: p.key }))} />
                 </Form.Item>
                 <Form.Item name="rootAccess" valuePropName="checked" label="根用户凭证权限"

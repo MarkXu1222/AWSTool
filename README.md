@@ -67,20 +67,20 @@
 
 ## 功能模块
 
-左侧导航九项（`MainLayout.tsx` 的 `navItems`）加两个独立权限页（批量提额、运维监控）。页面 key 必须三处一致：`navItems`、`PAGE_META`（`MainLayout.tsx`）与后端 `ALL_PAGE_KEYS`（`auth.ts`）。页面 key 同时就是 URL 路径（`/accounts` 等，dashboard 归 `/`），由 `navigate()`/`popstate` 同步。
+左侧导航包含十个可分配页面和一个独立权限页（批量提额）。页面 key 必须三处一致：`navItems`、`PAGE_META`（`MainLayout.tsx`）与后端 `ALL_PAGE_KEYS`（`auth.ts`）。页面 key 同时就是 URL 路径（`/accounts` 等，dashboard 归 `/`），由 `navigate()`/`popstate` 同步。运维监控属于敏感页面：admin 恒有，其他角色需在用户的页面权限中显式授权。
 
 | 页面 key | 页面文件 | 主要后端前缀 | 说明 |
 |----------|----------|--------------|------|
-| `dashboard` | `Dashboard.tsx` | `/api/aws/dashboard/summary` | 费用/账户数/进行中 Case，走缓存秒级加载 |
+| `dashboard` | `Dashboard.tsx` | `/api/aws/dashboard/summary` | 无 CE 运营 KPI、账户结构与组织分布、可跳转的待处理事项 |
 | `accounts` | `Accounts.tsx` | `/api/aws/accounts*`、`/api/aws/root-credentials*`、`/api/aws/temp-credentials` | 账户列表与详情、免登录进控制台、根用户凭证操作 |
 | `quotas` | `Quotas.tsx` | `/api/aws/quotas/*`、`/api/aws/bedrock/quotas/*` | 配额查询、一键提额、流式同步、生成提额 PDF。Tab：当前配额 / Bedrock 配额 / 当前账户请求 / 在线查询 / 提升记录 |
 | `bulkquota` | `BulkQuota.tsx` | `/api/aws/bulk-quota/*` | 批量提额（按 payer 组织 × 多区域）。**不在 `ALL_PAGE_KEYS` 里**，可见性只由独立权限 `bulk_quota_access` 决定 |
 | `regions` | `Regions.tsx` | `/api/regions/*` | opt-in 区域开通状态扫描与单个/批量开通 |
-| `billing` | `Billing.tsx` | `/api/aws/billing/*` | 按账户/服务成本、账单拆分、批量导出官方账单 PDF |
+| `billing` | `Billing.tsx` | `/api/aws/billing/*` | AWS 官方账单 PDF 批量导出、历史任务、取消与 ZIP 下载 |
 | `cleanup` | `Cleanup.tsx` | `/api/aws/resources/*` | 扫描最近 7 天的 EC2/EBS/S3/Lambda/IAM 用户，展示 IAM 非敏感详情并手动勾选删除；S3 只读 |
 | `tagcompliance` | `TagCompliance.tsx` | `/api/aws/tag-compliance/*` | MAP 标签合规扫描与报告 |
 | `audit` | `AuditLog.tsx` | `/api/aws/audit*` | 审计日志查询与 CSV 导出 |
-| `ops` | `OpsMonitor.tsx` | `/api/ops/overview` | 运维监控（健康评分/资源趋势/请求延迟/端点排行/后台任务）。**不在 `ALL_PAGE_KEYS` 里**，仅 `role === 'admin'` 可见；后端同样严格 admin 校验且不写审计日志（30s 轮询）。指标存进程内存，重启清零 |
+| `ops` | `OpsMonitor.tsx` | `/api/ops/overview` | 运维监控（健康评分/资源趋势/请求延迟/端点排行/后台任务）。admin 恒有；其他角色需在页面权限中显式授权，旧用户默认不授予；后端实时校验数据库权限且不写审计日志（30s 轮询）。指标存进程内存，重启清零 |
 | `settings` | `Settings.tsx` | `/api/auth/*` | 改密码、MFA、用户管理 |
 | —（登录流程） | `Login.tsx`、`SetupMFA.tsx` | `/api/auth/login`、`/api/auth/mfa/*` | 登录、强制绑定 MFA |
 
@@ -103,7 +103,7 @@ AWS/
 └── web/
     ├── server/                     # 后端（Express，tsx 直跑）
     │   ├── index.ts                # 入口：中间件、CORS 白名单、限速（GET/写分离）、挂载路由、API 兜底 404、静态服务（immutable 缓存）、启动 scheduler
-    │   ├── ops-monitor.ts          # 运维监控：请求/系统指标进程内采集（24h 环形缓冲）+ 健康评分 + /api/ops 路由（严格 admin）
+    │   ├── ops-monitor.ts          # 运维监控：请求/系统指标进程内采集（24h 环形缓冲）+ 健康评分 + /api/ops 页面权限守卫
     │   ├── auth.ts                 # authRouter（登录/MFA/用户CRUD）+ authMiddleware + 页面权限模型
     │   ├── audit.ts                # auditMiddleware：记录所有已认证 API 调用
     │   ├── audit-presentation.ts   # 审计日志展示增强 + CSV 导出
@@ -235,7 +235,7 @@ Admin 临时凭证时长默认 1 小时。数据库当前角色为 `admin` 的�
 
 `GET /api/scheduler/status`
 
-### `/api/ops`（opsRouter，严格 admin，不写审计）
+### `/api/ops`（opsRouter，admin 或显式页面授权，不写审计）
 
 `GET /overview?range=1h|6h|24h` — 运维监控聚合：健康评分（阈值扣分 + 原因）、系统资源（CPU/内存/磁盘/事件循环延迟）、请求统计（p50/p95/p99、错误率、延迟直方图、端点排行 Top 50）、资源趋势（每分钟采样）、scheduler 与后台任务状态、db.json 大小与备份时间。指标存进程内存（24h 环形缓冲），重启清零。
 
@@ -245,6 +245,7 @@ Admin 临时凭证时长默认 1 小时。数据库当前角色为 `admin` 的�
 |------|--------------|------|
 | `requireAdmin` | **admin + partadmin**（只拦 viewer） | 提额、资源删除、MAP 标签写操作、删 access key |
 | `requireStrictAdmin` | 仅 admin | 账户权限检测 |
+| `requireOpsAccess` | admin 或 `allowed_pages` 显式包含 `ops` | 运维监控；实时读取数据库，旧用户默认拒绝 |
 | `requireRootAccess` | root_access 或 admin | 根用户敏感操作 |
 | `requireAuditAccess` | 审计页可见者 | 审计日志 |
 | `requireBillingAccess` | billing 页可见者 | 账单 PDF job；任务状态、取消和下载另校验创建者或 admin |
@@ -268,7 +269,7 @@ Admin 临时凭证时长默认 1 小时。数据库当前角色为 `admin` 的�
 | `partadmin` | 仅勾选页面 + 业务操作（配额提升 / 删 key 等），不能管理用户 |
 | `viewer` | 仅勾选页面，只读（写操作被 `requireAdmin` 拦截） |
 
-`allowed_pages` 控制可见页面（admin 视为全部）。`authMiddleware` 会拦住未绑 MFA 用户访问业务接口。
+`allowed_pages` 控制可见页面（admin 视为全部）。`ops` 包含敏感系统指标，non-admin 只有被显式勾选后才能显示菜单并调用接口；旧用户和新用户默认都不授予。`authMiddleware` 会拦住未绑 MFA 用户访问业务接口。
 
 ### 两个独立权限开关
 

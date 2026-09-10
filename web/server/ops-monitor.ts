@@ -17,8 +17,9 @@ import { Router, Request, Response } from 'express';
 import { getSchedulerStatus } from './scheduler';
 import { db, listBillingExportJobs, listActiveTagOnboardingJobs } from './db';
 
-// 仅严格 admin 可看运维监控（与 routes/aws.ts 的 requireStrictAdmin 同逻辑：从数据库读当前角色，不信任 JWT 里可能过期的角色）
-export function requireOpsAdmin(req: Request, res: Response, next: any) {
+// 运维监控包含系统、进程和请求指标：admin 恒有；其他角色必须由管理员在 allowed_pages 中显式授予。
+// 每次请求都从数据库读取当前权限，不信任 JWT 中可能过期的角色或前端菜单状态。
+export function requireOpsAccess(req: Request, res: Response, next: any) {
   const tokenUser = (req as any).user;
   const currentUser = tokenUser?.username ? db.getUser(tokenUser.username) : null;
   if (!currentUser
@@ -26,8 +27,10 @@ export function requireOpsAdmin(req: Request, res: Response, next: any) {
     || currentUser.username !== tokenUser?.username) {
     return res.status(401).json({ error: '用户身份已变更，请重新登录' });
   }
-  if (currentUser.role !== 'admin') {
-    return res.status(403).json({ error: '仅管理员可访问运维监控' });
+  const explicitlyAllowed = Array.isArray((currentUser as any).allowed_pages)
+    && (currentUser as any).allowed_pages.includes('ops');
+  if (currentUser.role !== 'admin' && !explicitlyAllowed) {
+    return res.status(403).json({ error: '无权访问运维监控，请联系管理员授权' });
   }
   next();
 }

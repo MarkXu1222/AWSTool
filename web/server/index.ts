@@ -12,7 +12,7 @@ import { migrateEncryptMFASecrets, backupDB } from './db';
 import { startScheduler, getSchedulerStatus } from './scheduler';
 import { startTagOnboardingRunner } from './tag-onboarding';
 import { startBillingExportRunner, stopBillingExportRunner } from './billing-export-jobs';
-import { opsRouter, requireOpsAdmin, recordRequest, startOpsMonitor, stopOpsMonitor } from './ops-monitor';
+import { opsRouter, requireOpsAccess, recordRequest, startOpsMonitor, stopOpsMonitor } from './ops-monitor';
 import { recordHttpStatus } from './security-alerts';
 
 const app = express();
@@ -110,8 +110,8 @@ app.get('/api/scheduler/status', authMiddleware, (_req, res) => {
   res.json({ success: true, data: getSchedulerStatus() });
 });
 
-// 运维监控（仅严格 admin；不走 auditMiddleware，避免高频轮询刷爆审计日志）
-app.use('/api/ops', authMiddleware, requireOpsAdmin, opsRouter);
+// 运维监控（admin 恒有，其他角色需显式页面授权；不走 auditMiddleware，避免高频轮询刷爆审计日志）
+app.use('/api/ops', authMiddleware, requireOpsAccess, opsRouter);
 
 // API 兜底 404 —— 必须在 SPA fallback 之前。
 // 否则未匹配的 /api/* （扫描器探测 /api/v1/.env 之类）会掉进 app.get('*')

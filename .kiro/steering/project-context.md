@@ -94,7 +94,7 @@ doc-templates/architectures/    # 公司架构图（静态资源，可提交）
 
 | 页面 key | 页面文件 | 主要后端前缀 | 说明 |
 |----------|----------|--------------|------|
-| `dashboard` | `pages/Dashboard.tsx` | `/api/aws/dashboard/summary` | 账户、Case、连接、角色异常、配额和账户生命周期运营计数 |
+| `dashboard` | `pages/Dashboard.tsx` | `/api/aws/dashboard/summary` | 运营 KPI、账户结构/组织分布、权限/连接/配额/离场待处理事项；仅复用平台数据，不调用 CE |
 | `accounts` | `pages/Accounts.tsx` | `/api/aws/accounts*`、`/api/aws/root-credentials*`、`/api/aws/temp-credentials` | 账户列表、账户详情、根用户凭证操作 |
 | `quotas` | `pages/Quotas.tsx` | `/api/aws/quotas/*`、`/api/aws/bedrock/quotas/*` | 配额查询、一键提额、同步、生成申请文档；Tab 顺序：当前配额 / Bedrock 配额 / 当前账户请求 / 在线查询 / 提升记录 |
 | `bulkquota` | `pages/BulkQuota.tsx` | `/api/aws/bulk-quota/*` | 批量提额（按 payer 组织 × 多区域）。**不在 `ALL_PAGE_KEYS` 里**，可见性只由独立权限 `bulk_quota_access` 决定 |
@@ -103,6 +103,7 @@ doc-templates/architectures/    # 公司架构图（静态资源，可提交）
 | `cleanup` | `pages/Cleanup.tsx` | `/api/aws/resources/*` | 最近 7 天 EC2/EBS/S3/Lambda/IAM 用户扫描；IAM 非敏感详情与手动勾选安全删除，S3 只读 |
 | `tagcompliance` | `pages/TagCompliance.tsx` | `/api/aws/tag-compliance/*` | MAP 标签合规扫描与报告 |
 | `audit` | `pages/AuditLog.tsx` | `/api/aws/audit*` | 审计日志查询与导出 |
+| `ops` | `pages/OpsMonitor.tsx` | `/api/ops/overview` | 运维健康、资源趋势、请求延迟与后台任务；admin 恒有，其他角色需在页面权限中显式授权，旧用户默认不授予 |
 | `settings` | `pages/Settings.tsx` | `/api/auth/*` | 修改密码、MFA、用户管理 |
 | —（登录流程） | `pages/Login.tsx`、`pages/SetupMFA.tsx` | `/api/auth/login`、`/api/auth/mfa/*` | 登录、强制绑定 MFA |
 
@@ -138,12 +139,13 @@ doc-templates/architectures/    # 公司架构图（静态资源，可提交）
 |------|--------------|------|
 | `requireAdmin` | **admin + partadmin**（只拦 viewer） | 提额、普通资源删除、删 access key。名字容易误解，但保留既有 partadmin 行为 |
 | `requireStrictAdmin` | 仅 admin | MAP 标签全部写操作、账户权限检测（`roles-status` / `roles-check`）、IAM 用户删除。从数据库实时读取并核对用户 ID，不信任 JWT 中可能过期的角色 |
+| `requireOpsAccess` | admin 或 `allowed_pages` 显式包含 `ops` | 运维监控；从数据库实时读取，legacy non-admin 默认拒绝 |
 | `requireRootAccess` | root_access 或 admin | 根用户敏感操作 |
 | `requireAuditAccess` | 审计页可见者 | 审计日志查询/导出 |
 | `requireBillingAccess` | billing 页可见者 | 账单 PDF job；状态/取消/下载另校验 owner/admin |
 | `requireBulkQuotaAccess` | bulk_quota_access 或 admin | 批量提额 |
 
-注意 `authMiddleware` 是直接把 JWT payload 挂到 `req.user`，所以 `req.user.role` 是签发时的角色。需要严格判断的守卫（`requireStrictAdmin` / `requireRootAccess` / `requireAuditAccess` / `requireBillingAccess`）都改为从 `db.getUser()` 实时读，避免降权用户在 token 过期前继续按旧角色通过。
+注意 `authMiddleware` 是直接把 JWT payload 挂到 `req.user`，所以 `req.user.role` 是签发时的角色。需要严格判断的守卫（`requireStrictAdmin` / `requireOpsAccess` / `requireRootAccess` / `requireAuditAccess` / `requireBillingAccess`）都改为从 `db.getUser()` 实时读，避免降权用户在 token 过期前继续按旧角色通过。
 
 ---
 
@@ -200,7 +202,7 @@ web { port, adminPassword, jwtSecret, encryptionKey, feishuWebhook }
 
 启动时：`migrateEncryptMFASecrets()` 迁移明文 MFA 密钥、`backupDB()` 备份到 `data/backups/db-YYYY-MM-DD.json`（保留 7 天）。
 
-**权限模型（auth.ts）**：角色 `admin` / `partadmin` / `viewer`；`allowed_pages` 控制可见页面（admin=全部）；`authMiddleware` 强制未绑 MFA 用户不能访问业务接口。
+**权限模型（auth.ts）**：角色 `admin` / `partadmin` / `viewer`；`allowed_pages` 控制可见页面（admin=全部）；`authMiddleware` 强制未绑 MFA 用户不能访问业务接口。`ops` 属于敏感页面：admin 恒有，其他角色只有 `allowed_pages` 显式包含 `ops` 才能显示菜单并访问 `/api/ops`；旧用户缺少 `allowed_pages` 时只继承原有常规页面，不自动获得运维监控。
 
 两个**独立权限开关**（admin 恒有，其他角色必须显式授予，且都不受 `allowed_pages` 影响）：
 - `root_access` → 账户页「根用户」敏感操作（Admin 临时凭证 / 删 Root MFA / 恢复根密码）、Admin 控制台登录；非 admin 即使有此权限也只能签发 1 小时凭证，2–12 小时仅限数据库当前角色为 admin

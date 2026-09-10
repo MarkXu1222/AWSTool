@@ -13,10 +13,14 @@ import fs from 'fs';
 authenticator.options = { window: 2 };
 
 // === 页面访问权限：所有可分配的页面 key（需与前端 MainLayout.navItems.key 保持一致）===
-export const ALL_PAGE_KEYS = [
+// 旧版可分配页面集合。新增敏感页面时，legacy non-admin 仍只继承这些常规页面，避免自动扩权。
+const DEFAULT_PAGE_KEYS = [
   'dashboard', 'accounts', 'quotas', 'regions',
   'billing', 'cleanup', 'tagcompliance', 'audit', 'settings',
 ];
+
+// 所有可分配页面；ops 对 non-admin 必须在 allowed_pages 中显式出现。
+export const ALL_PAGE_KEYS = [...DEFAULT_PAGE_KEYS, 'ops'];
 
 // 规范化前端传来的 allowedPages：过滤非法 key，去重
 function normalizeAllowedPages(input: any): string[] | null {
@@ -29,13 +33,14 @@ function normalizeAllowedPages(input: any): string[] | null {
   return Array.from(set);
 }
 
-// 计算用户的最终可见页面列表：admin 拥有全部；viewer/partadmin 按 allowed_pages（旧数据无值视为全部）
+// 计算用户的最终可见页面列表：admin 拥有全部；viewer/partadmin 按 allowed_pages。
+// 旧数据无值时只兼容为常规页面，绝不自动获得 ops。
 function resolveAllowedPages(user: any): string[] {
   if (!user) return [];
   if (user.role === 'admin') return [...ALL_PAGE_KEYS];
   const stored = (user as any).allowed_pages;
   if (Array.isArray(stored)) return stored.filter((k: any) => typeof k === 'string' && ALL_PAGE_KEYS.includes(k));
-  return [...ALL_PAGE_KEYS]; // 旧数据兼容：未设置视为全部
+  return [...DEFAULT_PAGE_KEYS];
 }
 
 // 根用户凭证操作权限（独立于页面权限）：admin 恒有；其他角色按 root_access 显式授予。
@@ -58,6 +63,15 @@ export function resolveBulkQuotaAccess(user: any): boolean {
 
 // 允许的用户角色
 const VALID_ROLES = ['admin', 'partadmin', 'viewer'] as const;
+
+// 用户管理属于高权限入口：每次都以数据库当前身份为准，避免已降权用户用旧 JWT 自授予权限。
+function isCurrentAdmin(decoded: any): boolean {
+  const currentUser = decoded?.username ? db.getUser(decoded.username) : null;
+  return !!currentUser
+    && String(currentUser.id) === String(decoded?.userId)
+    && currentUser.username === decoded?.username
+    && currentUser.role === 'admin';
+}
 
 // Load shared config for JWT secret and admin password
 const CONFIG_PATH = path.join(__dirname, '../../config.json');
@@ -194,7 +208,7 @@ authRouter.get('/users', (req: Request, res: Response) => {
   if (!authHeader) return res.status(401).json({ error: 'Unauthorized' });
   try {
     const decoded = jwt.verify(authHeader.replace('Bearer ', ''), JWT_SECRET) as any;
-    if (decoded.role !== 'admin') return res.status(403).json({ error: '无权限' });
+    if (!isCurrentAdmin(decoded)) return res.status(403).json({ error: '无权限或管理员身份已变更' });
     res.json({ success: true, data: db.getAllUsers() });
   } catch { res.status(401).json({ error: 'Invalid token' }); }
 });
@@ -205,7 +219,7 @@ authRouter.post('/users', (req: Request, res: Response) => {
   if (!authHeader) return res.status(401).json({ error: 'Unauthorized' });
   try {
     const decoded = jwt.verify(authHeader.replace('Bearer ', ''), JWT_SECRET) as any;
-    if (decoded.role !== 'admin') return res.status(403).json({ error: '无权限' });
+    if (!isCurrentAdmin(decoded)) return res.status(403).json({ error: '无权限或管理员身份已变更' });
     const { username, password, role, allowedPages, rootAccess, bulkQuotaAccess } = req.body;
     if (!username || !password) return res.status(400).json({ error: '用户名和密码必填' });
     if (db.getUser(username)) return res.status(400).json({ error: '用户已存在' });
@@ -237,7 +251,7 @@ authRouter.put('/users/:id', (req: Request, res: Response) => {
   if (!authHeader) return res.status(401).json({ error: 'Unauthorized' });
   try {
     const decoded = jwt.verify(authHeader.replace('Bearer ', ''), JWT_SECRET) as any;
-    if (decoded.role !== 'admin') return res.status(403).json({ error: '无权限' });
+    if (!isCurrentAdmin(decoded)) return res.status(403).json({ error: '无权限或管理员身份已变更' });
     const userId = parseInt(String(req.params.id), 10);
     if (Number.isNaN(userId)) return res.status(400).json({ error: 'ID 无效' });
     const data = (db as any).getAllUsers().find((u: any) => u.id === userId);
@@ -290,7 +304,7 @@ authRouter.delete('/users/:id', (req: Request, res: Response) => {
   if (!authHeader) return res.status(401).json({ error: 'Unauthorized' });
   try {
     const decoded = jwt.verify(authHeader.replace('Bearer ', ''), JWT_SECRET) as any;
-    if (decoded.role !== 'admin') return res.status(403).json({ error: '无权限' });
+    if (!isCurrentAdmin(decoded)) return res.status(403).json({ error: '无权限或管理员身份已变更' });
     const userId = parseInt(String(req.params.id), 10);
     if (userId === decoded.userId) return res.status(400).json({ error: '不能删除自己' });
     db.deleteUser(userId);
@@ -305,7 +319,7 @@ authRouter.post('/users/:id/reset-password', (req: Request, res: Response) => {
   if (!authHeader) return res.status(401).json({ error: 'Unauthorized' });
   try {
     const decoded = jwt.verify(authHeader.replace('Bearer ', ''), JWT_SECRET) as any;
-    if (decoded.role !== 'admin') return res.status(403).json({ error: '无权限' });
+    if (!isCurrentAdmin(decoded)) return res.status(403).json({ error: '无权限或管理员身份已变更' });
     const { newPassword } = req.body;
     if (!newPassword || newPassword.length < 6) return res.status(400).json({ error: '密码至少 6 位' });
     const userId = parseInt(String(req.params.id), 10);

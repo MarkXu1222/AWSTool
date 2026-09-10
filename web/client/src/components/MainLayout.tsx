@@ -11,7 +11,7 @@ import AuditLogPage from '../pages/AuditLog';
 import SettingsPage from '../pages/Settings';
 import TagCompliancePage from '../pages/TagCompliance';
 import BulkQuotaPage from '../pages/BulkQuota';
-// 运维监控懒加载：recharts 只有 admin 用得到，非 admin 用户不用下载 charts 分包
+// 运维监控懒加载：只有实际进入该授权页面时才下载 recharts 分包
 const OpsMonitorPage = React.lazy(() => import('../pages/OpsMonitor'));
 import { api } from '../api';
 import { APP_VERSION } from '../version';
@@ -32,6 +32,7 @@ export const PAGE_META: { key: string; label: string }[] = [
   { key: 'cleanup', label: '资源清理' },
   { key: 'tagcompliance', label: 'MAP 标签' },
   { key: 'audit', label: '审计日志' },
+  { key: 'ops', label: '运维监控' },
   { key: 'settings', label: '系统设置' },
 ];
 
@@ -39,8 +40,7 @@ export const PAGE_META: { key: string; label: string }[] = [
 // 可见性完全由独立权限 bulkQuotaAccess 决定，不能通过「页面权限」勾选获得。
 export const BULK_QUOTA_PAGE_KEY = 'bulkquota';
 
-// 运维监控页 key。同样不在 PAGE_META / 后端 ALL_PAGE_KEYS 里，
-// 只有 role === 'admin' 可见（后端 /api/ops 也按严格 admin 校验）。
+// 运维监控属于可分配页面；admin 恒有，其他角色必须在 allowed_pages 中显式授权。
 export const OPS_PAGE_KEY = 'ops';
 
 const navItems = [
@@ -88,7 +88,7 @@ const MainLayout: React.FC<MainLayoutProps> = ({ onLogout }) => {
   const [allowedPages, setAllowedPages] = useState<string[] | null>(null);
   // 批量提额独立权限；未加载完前按无权限处理，避免菜单闪现
   const [bulkQuotaAccess, setBulkQuotaAccess] = useState(false);
-  // 运维监控仅 admin 可见；未加载完前按无权限处理
+  // admin 恒有运维监控权限；未加载完前按无权限处理，避免敏感菜单闪现
   const [isAdmin, setIsAdmin] = useState(false);
   const appContainerRef = useRef<HTMLElement | null>(null);
 
@@ -195,8 +195,8 @@ const MainLayout: React.FC<MainLayoutProps> = ({ onLogout }) => {
   const isPageAllowed = (key: string) => {
     // 批量提额只看独立权限，与页面权限无关
     if (key === BULK_QUOTA_PAGE_KEY) return bulkQuotaAccess;
-    // 运维监控只看 admin 角色，与页面权限无关
-    if (key === OPS_PAGE_KEY) return isAdmin;
+    // 运维监控：admin 恒有；其他角色仅在页面权限中显式授予后可见
+    if (key === OPS_PAGE_KEY) return isAdmin || allowedPages?.includes(OPS_PAGE_KEY) === true;
     if (allowedPages === null) return true;
     return allowedPages.includes(key);
   };
