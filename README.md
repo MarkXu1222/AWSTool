@@ -3,7 +3,7 @@
 企业级 AWS 多账户（多 Organizations）管理平台。带强制 MFA 登录、页面级权限与全量操作审计。
 
 **线上**：https://markxu.co（EC2 Singapore，PM2 进程 `aws-toolbox`）
-**当前版本**：`0.20.0`（见 `web/client/src/version.ts`，左下角展示）
+**当前版本**：`0.22.3`（见 `web/client/src/version.ts`，左下角展示）
 
 **生产接入规模**（快照 2026-09-06，取自线上 db.json）
 
@@ -73,7 +73,7 @@
 |----------|----------|--------------|------|
 | `dashboard` | `Dashboard.tsx` | `/api/aws/dashboard/summary` | 无 CE 运营 KPI、账户结构与组织分布、可跳转的待处理事项 |
 | `accounts` | `Accounts.tsx` | `/api/aws/accounts*`、`/api/aws/root-credentials*`、`/api/aws/temp-credentials` | 账户列表与详情、免登录进控制台、根用户凭证操作 |
-| `quotas` | `Quotas.tsx` | `/api/aws/quotas/*`、`/api/aws/bedrock/quotas/*` | 配额查询、一键提额、流式同步、生成提额 PDF。Tab：当前配额 / Bedrock 配额 / 当前账户请求 / 在线查询 / 提升记录 |
+| `quotas` | `Quotas.tsx` | `/api/aws/quotas/*`、`/api/aws/bedrock/quotas/*` | 配额查询、一键提额、流式同步、生成提额 PDF、一键提交文档到 Support Case。Tab：当前配额 / Bedrock 配额 / 当前账户请求 / 在线查询 / 提升记录 |
 | `bulkquota` | `BulkQuota.tsx` | `/api/aws/bulk-quota/*` | 批量提额（按 payer 组织 × 多区域）。**不在 `ALL_PAGE_KEYS` 里**，可见性只由独立权限 `bulk_quota_access` 决定 |
 | `regions` | `Regions.tsx` | `/api/regions/*` | opt-in 区域开通状态扫描与单个/批量开通 |
 | `billing` | `Billing.tsx` | `/api/aws/billing/*` | AWS 官方账单 PDF 批量导出、历史任务、取消与 ZIP 下载 |
@@ -120,6 +120,8 @@ AWS/
     │   ├── restricted-accounts.ts  # ★敏感权限客户：账户级权限收窄 + ExternalId（StackSet 下发必须排除）
     │   ├── billing-export-jobs.ts  # 账单导出持久化 job、全局队列、永久历史、重复下载与重启恢复
     │   ├── billing-exporter.ts     # 严格只读抓取 AWS 官方账单 PDF + 可取消 zip 打包
+    │   ├── case-doc-submitter.ts   # ★一键提交提额文档到 Support Case（生成 PDF → 联邦登录 → Reply → 传附件 → Submit）
+    │   ├── security-alerts.ts      # 安全告警：登录爆破/新 IP 登录/敏感操作/429、5xx 突增 → 飞书
     │   └── routes/
     │       ├── aws.ts              # ★awsRouter：主业务端点（50+），含权限守卫
     │       └── regions.ts          # regionsRouter：区域 opt-in 状态/扫描/开通
@@ -216,7 +218,7 @@ Admin 临时凭证时长默认 1 小时。数据库当前角色为 `admin` 的�
 | 敏感权限客户账户 | `GET /accounts/restricted`（不返回 ExternalId 明文）、`POST /accounts/restricted`、`DELETE /accounts/restricted/:accountId`、`GET /accounts/restricted/:accountId/external-id`（后三个均 `requireStrictAdmin` 且单独写审计） |
 | 仪表盘 | `GET /dashboard/summary` |
 | 账单 | PDF job：`POST/GET /billing/export-jobs`、`GET /billing/export-jobs/:jobId`、`POST .../:jobId/cancel`、`GET .../:jobId/download`（均 `requireBillingAccess`，单任务再校验 owner/admin） |
-| 配额 | `GET /quotas/:accountId/:serviceCode`、`POST /quotas/increase`(admin)、`GET /quotas/requests`、`GET /quotas/stats`、`GET /quotas/companies`、`GET /quotas/company/:accountId`、`POST /quotas/generate-doc`、`POST /quotas/sync`、`POST /quotas/sync-account/:accountId`、`GET /quotas/sync-status`、`GET /quotas/sync-stream`(SSE) |
+| 配额 | `GET /quotas/:accountId/:serviceCode`、`POST /quotas/increase`(admin)、`GET /quotas/requests`、`GET /quotas/stats`、`GET /quotas/companies`、`GET /quotas/company/:accountId`、`POST /quotas/generate-doc`、`POST /quotas/case-doc-submit`(admin)、`GET /quotas/case-doc-submit/:jobId`（轮询不写审计；**必须注册在 `/quotas/:accountId/:serviceCode` 通配之前**）、`POST /quotas/sync`、`POST /quotas/sync-account/:accountId`、`GET /quotas/sync-status`、`GET /quotas/sync-stream`(SSE) |
 | Bedrock 配额 | `GET /bedrock/quotas/:accountId?regions=a,b` |
 | 批量提额 | `GET /bulk-quota/payers`、`GET /bulk-quota/accounts/:payerAccountId`、`POST /bulk-quota/submit`、`GET /bulk-quota/job/:jobId`（全部 `requireBulkQuotaAccess`） |
 | 根凭证 | `GET /root-credentials/:accountId`、`GET /temp-credentials/:accountId?durationHours=1`（rootAccess；仅 admin 可请求 2–12 小时）、`POST /root-credentials/:accountId/delete-mfa`(rootAccess)、`.../recover-password`(rootAccess)、`.../delete-access-key`(rootAccess)、`.../delete-key`(admin) |
@@ -369,6 +371,20 @@ HTML 模板 + Puppeteer 渲染。公司背景库在 `doc-templates.ts`（12 家�
 `companyFromPayer` 的后缀兜底做的是「公司部分完全相等」比较，不能用 `endsWith` —— 单字符后缀会命中短名 key（`webby-2` → `malatrading`），静默生成挂着别家公司资料的文档。
 
 动态生成：申请值自动拆解成资源组件表（合计=申请值）；配额类型自动识别 AWS 官方名称（vCPU/EIP/Lightsail/Mac/WorkSpaces 等）；预测值约申请值的 1.5 倍。
+
+### 一键提交提额文档到 Support Case（case-doc-submitter.ts）
+
+配额页对提额请求可一键把文档提交到对应 Support Case：后台 job（内存态、单并发）执行 生成 PDF → 联邦登录直达 Case 页 → 点 Reply → 填 use cases 正文 → 传附件 → Submit → 确认生效。前端 `caseDocSubmit` 提交后轮询 `caseDocJob`；识别不到公司时弹公司选择器（`companyKey` 随请求传入）。`requireAdmin`（会真实回帖客户 Case）。
+
+浏览器自动化的硬性经验（0.22.3 调试实录，改动前必读）：
+
+1. **文件名回显 ≠ 上传完成**。文件一选中就出现在附件表格，但后台 `GetAttachmentUploadLinks → PUT → CompleteAttachmentUpload` 还没走完；此时点 Submit 会被 AWS 前端**静默忽略**（`AddCommunicationToCase` 根本不发出，无任何报错）。必须等附件状态列变为 "Upload completed" 再提交。
+2. **成功判定唯一可靠信号是 Reply 表单（textarea）收起**。绝不能用页面文案 `Correspondence` 判断——那是 Case 页固有标题，恒为 true，曾导致假成功。
+3. awsui/React 按钮对 JS `el.click()` 不可靠，Reply/Submit 用 `page.mouse` 真实坐标点击 + `elementFromPoint` 命中测试 + 遮罩剥离（控制台引导 tour 带全屏遮罩）+ Enter 兜底。
+4. 排障看网络层：监听 `support.us-east-1.amazonaws.com` 的 `x-amz-target`（`AddCommunicationToCase` 200 = 真提交成功）。响应中的 `DryRunOperationException: Request validated successfully` 是 AWS 前端自身的预检请求，不是错误。
+5. server tsconfig 无 DOM lib，所有 `page.evaluate`/`waitForFunction` 载荷必须是字符串脚本（与 `billing-exporter.ts` 同约定）。
+
+失败时截图到 `/tmp/case-doc-*.png` 并随 job 状态返回路径。job 存进程内存，重启即失；轮询端点不写审计。
 
 ### 配额管理
 
@@ -640,6 +656,7 @@ Nginx 反代 + Let's Encrypt（`markxu.co`，自动续期），80 强制跳 443�
 - 登录限流 5 次/15 分钟；API 限流读写分离：GET 300 次/分钟（监控轮询 + 多标签页），写操作 100 次/分钟
 - 未匹配的 `/api/*` 一律返回 404 JSON（不掉进 SPA fallback 返回 200 + index.html，避免鼓励扫描器探测）
 - Helmet 安全头 + CORS 白名单（未列入的来源用 `callback(null, false)` 优雅拒绝，**绝不 throw** —— 抛错会被 Express 当 500，导致带 `crossorigin` 的静态资源请求失败、整站白屏）
+- 安全告警（`security-alerts.ts`）：登录爆破、新 IP 登录、敏感操作（审计钩子）、429/5xx 突增均实时推飞书；已在生产验证触发
 
 ---
 
