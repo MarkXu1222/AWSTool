@@ -346,7 +346,31 @@ const QuotasPage: React.FC = () => {
     setQuickSubmitting(true);
     try {
       const res = await api.requestQuotaIncrease(selectedAccount, quickQuota.ServiceCode, quickQuota.QuotaCode, quickTarget, quickQuota.QuotaName, quickRegion);
-      if (res.success) { message.success('配额提升请求已提交'); loadDbRecords(); }
+      if (res.success) {
+        message.success('配额提升请求已提交');
+        loadDbRecords();
+        // AWS 开了 Case 的话，顺手提供一键提交文档（复用记录表的同一条链路）
+        const caseId = (res.data as any)?.CaseId;
+        if (caseId) {
+          const pseudoRecord = {
+            id: `quick-${Date.now()}`,
+            account_id: selectedAccount,
+            case_id: caseId,
+            service_code: quickQuota.ServiceCode,
+            quota_name: quickQuota.QuotaName,
+            region: quickRegion,
+            desired_value: quickTarget,
+            current_value: (quickQuota.Value != null && quickQuota.Value !== Infinity) ? quickQuota.Value : undefined,
+          };
+          Modal.confirm({
+            title: '已开 Case，要一键提交提额文档吗？',
+            content: <div style={{ fontSize: 13 }}>Case <code>{caseId}</code> 已创建。可以现在自动生成文档并回帖上传（Reply + 附件 + Submit）。</div>,
+            okText: '一键提交文档',
+            cancelText: '稍后再说',
+            onOk: () => { void handleCaseDocSubmit(pseudoRecord); },
+          });
+        }
+      }
       else message.error(res.error);
     } catch (e: any) { message.error(e.message); }
     finally { setQuickSubmitting(false); }
@@ -384,8 +408,68 @@ const QuotasPage: React.FC = () => {
     }
   };
 
-  // 一键提交文档到 Support Case：确认 → 提交后台 job → 轮询进度直到完成/失败
-  const handleCaseDocSubmit = (record: any) => {
+  // 一键提交文档到 Support Case：先预检公司归属（识别不到先弹公司选择器），
+  // 确认后提交后台 job 并轮询进度直到完成/失败
+  const handleCaseDocSubmit = async (record: any) => {
+    // 预检：账户能否识别公司；识别不到时先让用户选（与生成文档同一套选择器与记忆逻辑）
+    let companyKey: string | undefined;
+    try {
+      const cr = await api.getAccountCompany(record.account_id);
+      if (!cr?.data) {
+        const remembered = readDocCompanyMemo()[docMemoKey(record.account_id)] || '';
+        const valid = remembered && companies.some(c => c.key === remembered);
+        companyKey = await pickCompanyFor(record, valid ? remembered : undefined);
+        if (!companyKey) return; // 用户取消
+      }
+    } catch { /* 预检失败按未识别处理，继续走选择器 */
+      const picked = await pickCompanyFor(record, undefined);
+      if (!picked) return;
+      companyKey = picked;
+    }
+    confirmCaseDocSubmit(record, companyKey);
+  };
+
+  // 弹出公司选择器（Promise 化，选定 resolve companyKey，取消 resolve undefined）
+  const pickCompanyFor = (record: any, preset?: string): Promise<string | undefined> => {
+    return new Promise((resolve) => {
+      let chosen: string | undefined = preset;
+      Modal.confirm({
+        title: '选择所属公司',
+        icon: null,
+        width: 480,
+        content: (
+          <div style={{ fontSize: 13 }}>
+            <p style={{ color: 'rgba(0,0,0,0.55)', fontSize: 12 }}>
+              未能自动识别账户 <code>{record.account_id}</code> 所属公司，请选择用于生成文档的公司。
+            </p>
+            <Select
+              style={{ width: '100%' }}
+              placeholder="选择公司"
+              defaultValue={preset}
+              onChange={(v) => { chosen = v; }}
+              showSearch optionFilterProp="label"
+              options={companies.map(c => ({ label: `${c.displayName} — ${c.industry}`, value: c.key }))}
+            />
+            {preset && (
+              <div style={{ marginTop: 8, background: '#f6ffed', border: '1px solid #b7eb8f', borderRadius: 6, padding: '6px 10px', fontSize: 12, color: '#389e0d' }}>
+                已预选上次为该组织选择的公司，确认无误即可继续。
+              </div>
+            )}
+          </div>
+        ),
+        okText: '继续',
+        cancelText: '取消',
+        onOk: () => {
+          if (!chosen) { message.warning('请选择公司'); return Promise.reject(); }
+          writeDocCompanyMemo(docMemoKey(record.account_id), chosen);
+          resolve(chosen);
+        },
+        onCancel: () => resolve(undefined),
+      });
+    });
+  };
+
+  const confirmCaseDocSubmit = (record: any, companyKey?: string) => {
     Modal.confirm({
       title: '一键提交提额文档到 Case',
       content: (
@@ -404,6 +488,7 @@ const QuotasPage: React.FC = () => {
             accountId: record.account_id,
             accountName: accounts.find(a => a.Id === record.account_id)?.Name,
             caseId: record.case_id,
+            companyKey,
             serviceCode: record.service_code,
             quotaName: record.quota_name,
             region: record.region || 'us-east-1',

@@ -289,6 +289,8 @@ export const api = {
   caseDocSubmit: (params: { accountId: string; accountName?: string; caseId: string; companyKey?: string; serviceCode: string; quotaName: string; region: string; requestedValue: number; currentValue?: number; message?: string }) =>
     request('/aws/quotas/case-doc-submit', { method: 'POST', body: JSON.stringify(params) }),
   caseDocJob: (jobId: string) => request(`/aws/quotas/case-doc-submit/${encodeURIComponent(jobId)}`),
+  // 查询账户能否自动识别所属公司（生成文档/一键提交前预检，识别不到则前端弹公司选择器）
+  getAccountCompany: (accountId: string) => request(`/aws/quotas/company/${encodeURIComponent(accountId)}`),
   requestQuotaIncrease: (accountId: string, serviceCode: string, quotaCode: string, desiredValue: number, quotaName?: string, region?: string) =>
     request('/aws/quotas/increase', { method: 'POST', body: JSON.stringify({ accountId, serviceCode, quotaCode, desiredValue, quotaName, region }) }),
   listQuotaRequests: () => request('/aws/quotas/requests'),
