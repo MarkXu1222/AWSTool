@@ -14,6 +14,10 @@ config.json.*.bak
 *.ppk
 server-access/
 
-# 运行时数据备份
+# 运行时数据备份与临时导出产物
 data/backups/
 data/exports/
+
+# 客户沟通材料：含 ExternalId 等敏感值，绝不入库
+客户沟通/
+.agents/
