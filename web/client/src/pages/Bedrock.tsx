@@ -181,6 +181,8 @@ const CreateTab: React.FC<{ accountId: string }> = ({ accountId }) => {
   const [models, setModels] = useState<any[]>([]);
   const [loading, setLoading] = useState(false);
   const [provider, setProvider] = useState('All');
+  // Scope 多选筛选（Checkbox 按钮组）；空数组 = 不过滤（显示全部）
+  const [scopeFilter, setScopeFilter] = useState<string[]>([]);
   const [kw, setKw] = useState('');
   const [selectedKeys, setSelectedKeys] = useState<React.Key[]>([]);
   const [prefix, setPrefix] = useState('');
@@ -200,8 +202,13 @@ const CreateTab: React.FC<{ accountId: string }> = ({ accountId }) => {
 
   // 未加载模型时也有完整 Provider 可选；加载后与实际数据合并去重
   const providers = ['All', ...new Set([...KNOWN_PROVIDERS, ...models.map(m => m.provider)])];
+  // Scope 选项按实际数据出（Global / US / EU / APAC...），保持稳定排序
+  const scopeOrder = ['Global', 'US', 'EU', 'APAC', 'AP'];
+  const scopes = [...new Set(models.map(m => m.scope).filter(Boolean))]
+    .sort((a, b) => (scopeOrder.indexOf(a) + 99 * +(scopeOrder.indexOf(a) < 0)) - (scopeOrder.indexOf(b) + 99 * +(scopeOrder.indexOf(b) < 0)));
   const filtered = models.filter(m =>
     (provider === 'All' || m.provider === provider) &&
+    (scopeFilter.length === 0 || scopeFilter.includes(m.scope)) &&
     (!kw.trim() || `${m.name} ${m.modelId} ${m.scope}`.toLowerCase().includes(kw.toLowerCase())));
 
   const buildName = (m: any) => {
@@ -245,6 +252,19 @@ const CreateTab: React.FC<{ accountId: string }> = ({ accountId }) => {
           options={providers.map(p => ({ label: p, value: p }))} />
         <Input size="small" placeholder="筛选模型名" allowClear style={{ width: 180 }} value={kw} onChange={e => setKw(e.target.value)} />
         <Input size="small" placeholder="命名前缀（留空用模型原名）" style={{ width: 240 }} value={prefix} onChange={e => setPrefix(e.target.value)} />
+        {scopes.length > 0 && (
+          <Space size={4}>
+            <span style={{ fontSize: 12, color: '#8a94a6' }}>Scope:</span>
+            {scopes.map(s => (
+              <Button key={s} size="small"
+                type={scopeFilter.includes(s) ? 'primary' : 'default'}
+                onClick={() => setScopeFilter(prev => prev.includes(s) ? prev.filter(x => x !== s) : [...prev, s])}>
+                {s}
+              </Button>
+            ))}
+            {scopeFilter.length > 0 && <Button size="small" type="text" onClick={() => setScopeFilter([])}>清除</Button>}
+          </Space>
+        )}
       </Space>
       <Alert type="warning" showIcon style={{ marginBottom: 8 }}
         message="Tag Key 固定为 map-migrated，Value 每次必须手动输入（migXXXXXXX）。平台不记忆、不提供默认值——请核对与该账户所属 MAP 协议一致后再创建。" />
