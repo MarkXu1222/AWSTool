@@ -2,6 +2,7 @@ import { Router, Request, Response } from 'express';
 import * as aws from '../aws-service';
 import { db, BillingExportJob, TagOnboardingConflictError } from '../db';
 import { generateQuotaDoc, getCompanyForAccount } from '../doc-generator';
+import { submitCaseDoc, getCaseDocJob } from '../case-doc-submitter';
 import { COMPANY_PROFILES } from '../doc-templates';
 import {
   cancelBillingExport,
@@ -659,6 +660,51 @@ awsRouter.post('/quotas/generate-doc', async (req: Request, res: Response) => {
   } catch (e: any) {
     res.status(500).json({ error: e.message });
   }
+});
+
+// 一键提交提额文档到 Support Case：生成 PDF → 联邦登录 → Reply → 传附件 → Submit。
+// requireAdmin（拦 viewer）：会真实回帖到客户 Case，viewer 不可用。
+awsRouter.post('/quotas/case-doc-submit', requireAdmin, async (req: Request, res: Response) => {
+  try {
+    const user = (req as any).user;
+    const { accountId, accountName, caseId, companyKey, serviceCode, quotaName, region, requestedValue, currentValue, message } = req.body;
+    if (!accountId || !caseId || !quotaName || !region || !requestedValue) {
+      return res.status(400).json({ error: '缺少必要参数（accountId / caseId / quotaName / region / requestedValue）' });
+    }
+    const job = submitCaseDoc({
+      accountId: String(accountId),
+      accountName,
+      caseId: String(caseId),
+      companyKey,
+      serviceCode,
+      quotaName,
+      region,
+      requestedValue: Number(requestedValue),
+      currentValue: currentValue != null ? Number(currentValue) : undefined,
+      message,
+      createdBy: user?.username || 'unknown',
+    });
+    db.addAuditLog(
+      user?.userId,
+      'CASE_DOC_SUBMIT',
+      `一键提交提额文档 · 账户 ${accountId} · Case ${caseId} · ${quotaName} → ${requestedValue} (${region})`,
+      user?.username,
+      req.ip,
+    );
+    (res.locals as any).audited = true;
+    res.status(202).json({ success: true, data: job });
+  } catch (e: any) {
+    if (e?.code === 'CASE_DOC_BUSY') return res.status(409).json({ error: e.message });
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// 一键提交任务状态轮询（不写审计——轮询噪音）
+awsRouter.get('/quotas/case-doc-submit/:jobId', (req: Request, res: Response) => {
+  const job = getCaseDocJob(String(req.params.jobId));
+  if (!job) return res.status(404).json({ error: '任务不存在（服务可能已重启）' });
+  (res.locals as any).audited = true;
+  res.json({ success: true, data: job });
 });
 
 // Get company profile for an account (for doc generation UI)

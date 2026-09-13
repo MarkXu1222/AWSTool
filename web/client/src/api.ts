@@ -285,6 +285,10 @@ export const api = {
   getBedrockQuotas: (accountId: string, regions: string[]) =>
     request(`/aws/bedrock/quotas/${accountId}?regions=${encodeURIComponent(regions.join(','))}`),
 
+  // 一键提交提额文档到 Support Case（后台 job：生成 PDF → 联邦登录 → Reply → 传附件 → Submit）
+  caseDocSubmit: (params: { accountId: string; accountName?: string; caseId: string; companyKey?: string; serviceCode: string; quotaName: string; region: string; requestedValue: number; currentValue?: number; message?: string }) =>
+    request('/aws/quotas/case-doc-submit', { method: 'POST', body: JSON.stringify(params) }),
+  caseDocJob: (jobId: string) => request(`/aws/quotas/case-doc-submit/${encodeURIComponent(jobId)}`),
   requestQuotaIncrease: (accountId: string, serviceCode: string, quotaCode: string, desiredValue: number, quotaName?: string, region?: string) =>
     request('/aws/quotas/increase', { method: 'POST', body: JSON.stringify({ accountId, serviceCode, quotaCode, desiredValue, quotaName, region }) }),
   listQuotaRequests: () => request('/aws/quotas/requests'),

@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { Card, Table, Tag, Button, Space, message, Input, Select, Tabs, Modal, Form, InputNumber, Tooltip } from 'antd';
-import { ReloadOutlined, SearchOutlined, DownloadOutlined, FileTextOutlined, FilePdfOutlined, CheckCircleOutlined, CheckCircleFilled, ClockCircleOutlined, CloseCircleOutlined, MinusCircleOutlined, ThunderboltOutlined } from '@ant-design/icons';
+import { ReloadOutlined, SearchOutlined, DownloadOutlined, FileTextOutlined, FilePdfOutlined, CheckCircleOutlined, CheckCircleFilled, ClockCircleOutlined, CloseCircleOutlined, MinusCircleOutlined, ThunderboltOutlined, CloudUploadOutlined } from '@ant-design/icons';
 import { api } from '../api';
 import { exportToCSV, exportQuotaPivotTable, exportQuotaRecords } from '../utils/export';
 import { openAwsConsole } from '../utils/console-launch';
@@ -207,6 +207,9 @@ const QuotasPage: React.FC = () => {
   const [activeTab, setActiveTab] = useState('db-records');
   const [refreshingId, setRefreshingId] = useState<string | null>(null);
   const [docLoadingId, setDocLoadingId] = useState<string | null>(null);
+  // 一键提交文档到 Case：进行中的记录 id + 当前步骤文案（轮询后台 job 更新）
+  const [caseDocLoadingId, setCaseDocLoadingId] = useState<string | null>(null);
+  const [caseDocStep, setCaseDocStep] = useState<string>('');
   const [form] = Form.useForm();
 
   // 手动生成文档相关状态
@@ -379,6 +382,65 @@ const QuotasPage: React.FC = () => {
       }
       return false;
     }
+  };
+
+  // 一键提交文档到 Support Case：确认 → 提交后台 job → 轮询进度直到完成/失败
+  const handleCaseDocSubmit = (record: any) => {
+    Modal.confirm({
+      title: '一键提交提额文档到 Case',
+      content: (
+        <div style={{ fontSize: 13 }}>
+          <p style={{ marginBottom: 8 }}>将自动执行：生成文档 → 打开 Case <code>{record.case_id}</code> → Reply → 填写 use cases → 上传 PDF → 等待上传 → Submit。</p>
+          <p style={{ color: '#8a94a6', margin: 0 }}>账户 {record.account_id} · {record.quota_name} → {record.desired_value}（{record.region || 'us-east-1'}）。提交后会真实回帖到该 Case，请确认无误。</p>
+        </div>
+      ),
+      okText: '开始提交',
+      cancelText: '取消',
+      onOk: async () => {
+        setCaseDocLoadingId(record.id);
+        setCaseDocStep('提交任务...');
+        try {
+          const res = await api.caseDocSubmit({
+            accountId: record.account_id,
+            accountName: accounts.find(a => a.Id === record.account_id)?.Name,
+            caseId: record.case_id,
+            serviceCode: record.service_code,
+            quotaName: record.quota_name,
+            region: record.region || 'us-east-1',
+            requestedValue: record.desired_value,
+            currentValue: record.current_value,
+          });
+          if (!res.success) { message.error(res.error || '提交失败'); setCaseDocLoadingId(null); return; }
+          const jobId = res.data.id;
+          // 轮询直到完成/失败（后台整体超时 180s，这里最多轮 200s 兜底）
+          const deadline = Date.now() + 200_000;
+          while (Date.now() < deadline) {
+            await new Promise(r => setTimeout(r, 2500));
+            const jr = await api.caseDocJob(jobId).catch(() => null);
+            if (!jr?.success) continue;
+            setCaseDocStep(jr.data.step || '');
+            if (jr.data.status === 'completed') {
+              message.success(`文档已提交到 Case ${record.case_id}`);
+              setCaseDocLoadingId(null);
+              return;
+            }
+            if (jr.data.status === 'failed') {
+              Modal.error({
+                title: '提交失败',
+                content: <div style={{ fontSize: 13 }}><p>卡在步骤：{jr.data.step}</p><p style={{ color: '#f5222d' }}>{jr.data.error}</p><p style={{ color: '#8a94a6' }}>请打开 Case 人工确认状态后重试或手动提交。</p></div>,
+              });
+              setCaseDocLoadingId(null);
+              return;
+            }
+          }
+          message.warning('等待超时，请稍后在 Case 中确认是否已提交');
+        } catch (e: any) {
+          message.error(e.message || '提交失败');
+        } finally {
+          setCaseDocLoadingId(null);
+        }
+      },
+    });
   };
 
   const handleQuickDoc = async () => {
@@ -708,6 +770,14 @@ const QuotasPage: React.FC = () => {
                   setDocLoadingId(null);
                 }} />
             </Tooltip>
+            {record.case_id && (
+              <Tooltip title={caseDocLoadingId === record.id ? (caseDocStep || '提交中...') : '一键提交文档到 Case（Reply + 传附件 + Submit）'}>
+                <Button type="text" size="small" shape="circle" icon={<CloudUploadOutlined />} aria-label="一键提交文档到 Case"
+                  loading={caseDocLoadingId === record.id}
+                  disabled={caseDocLoadingId !== null && caseDocLoadingId !== record.id}
+                  onClick={(e) => { e.stopPropagation(); handleCaseDocSubmit(record); }} />
+              </Tooltip>
+            )}
             <Tooltip title="刷新此账户记录">
               <Button type="text" size="small" shape="circle" icon={<ReloadOutlined />} aria-label="刷新此账户记录"
                 loading={refreshingId === record.id}
