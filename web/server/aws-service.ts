@@ -917,8 +917,13 @@ export async function getServiceQuotaValue(accountId: string, serviceCode: strin
 export async function resolveQuotaCodeByName(accountId: string, serviceCode: string, quotaName: string, region?: string) {
   const quotas = await listServiceQuotas(accountId, serviceCode, region);
   const target = quotaName.trim().toLowerCase();
+  // 精确 → 配额名包含目标 → 目标包含配额名（如传 "Lightsail Instances" 匹配实际名 "Instances"）
   const found = quotas.find((q: any) => String(q.QuotaName || '').toLowerCase() === target)
-    || quotas.find((q: any) => String(q.QuotaName || '').toLowerCase().includes(target));
+    || quotas.find((q: any) => String(q.QuotaName || '').toLowerCase().includes(target))
+    || quotas.find((q: any) => {
+      const n = String(q.QuotaName || '').toLowerCase();
+      return n.length >= 4 && target.includes(n);
+    });
   if (!found) return null;
   return { quotaCode: found.QuotaCode as string, quotaName: found.QuotaName as string, value: Number(found.Value ?? 0), adjustable: !!found.Adjustable };
 }

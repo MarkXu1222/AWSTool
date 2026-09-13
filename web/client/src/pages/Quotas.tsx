@@ -31,10 +31,12 @@ export const QUOTA_PRESETS = [
   { label: 'EC2 Elastic IPs (EIP)', serviceCode: 'ec2', quotaName: 'EC2-VPC Elastic IPs', unit: 'EIPs' },
   { label: 'EC2 Mac Dedicated Hosts (mac.m2)', serviceCode: 'ec2', quotaName: 'Running Dedicated mac.m2 Hosts', unit: 'Hosts' },
   { label: 'EC2 Mac Dedicated Hosts (mac.m4)', serviceCode: 'ec2', quotaName: 'Running Dedicated mac.m4 Hosts', unit: 'Hosts' },
-  { label: 'Lightsail Instances', serviceCode: 'lightsail', quotaName: 'Lightsail Instances', unit: 'Instances' },
+  // 注意：AWS 实际配额名就叫 "Instances"（L-4259AF9B），不是 "Lightsail Instances"
+  { label: 'Lightsail Instances', serviceCode: 'lightsail', quotaName: 'Instances', unit: 'Instances' },
   { label: 'WorkSpaces 数量 (WorkSpaces 上限)', serviceCode: 'workspaces', quotaName: 'WorkSpaces', unit: 'WorkSpaces' },
   { label: 'WorkSpaces Images (镜像)', serviceCode: 'workspaces', quotaName: 'Images', unit: 'Images' },
-  { label: 'Fargate On-Demand Tasks', serviceCode: 'fargate', quotaName: 'Fargate On-Demand resource count', unit: 'Tasks' },
+  // AWS 已把 Fargate 配额改为按 vCPU 计（原 "Fargate On-Demand resource count" 已不存在）
+  { label: 'Fargate On-Demand vCPU', serviceCode: 'fargate', quotaName: 'Fargate On-Demand vCPU resource count', unit: 'vCPUs' },
   { label: 'Route 53 Domains', serviceCode: 'route53', quotaName: 'Domain count limit', unit: 'Domains' },
   { label: 'Global Accelerator - Standard Accelerators', serviceCode: 'globalaccelerator', quotaName: 'Standard accelerators per AWS account', unit: 'Accelerators' },
   { label: 'Global Accelerator - Custom Routing Accelerators', serviceCode: 'globalaccelerator', quotaName: 'Custom routing accelerators per AWS account', unit: 'Accelerators' },
@@ -324,8 +326,13 @@ const QuotasPage: React.FC = () => {
       if (res.success) {
         const list = res.data || [];
         const nameLc = preset.quotaName.toLowerCase();
+        // 精确 → 忽略大小写 → 互相包含（AWS 偶有改名/带服务前缀，模糊兜底避免死匹配）
         const q = list.find((x: any) => x.QuotaName === preset.quotaName)
-          || list.find((x: any) => (x.QuotaName || '').toLowerCase() === nameLc);
+          || list.find((x: any) => (x.QuotaName || '').toLowerCase() === nameLc)
+          || list.find((x: any) => {
+            const n = (x.QuotaName || '').toLowerCase();
+            return n && (n.includes(nameLc) || nameLc.includes(n));
+          });
         if (q) {
           setQuickQuota(q);
           const base = (q.Value && q.Value !== Infinity) ? q.Value : 0;
