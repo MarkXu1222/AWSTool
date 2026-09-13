@@ -492,6 +492,91 @@ const DataShareTab: React.FC<{ accountId: string }> = ({ accountId }) => {
   );
 };
 
+// ===== Tab: Bedrock 配额查询（TPM/RPM/TPD，与配额管理页 Bedrock Tab 同一后端接口） =====
+const BEDROCK_QUOTA_SCOPES = ['Global Cross-Region', 'Cross-Region', 'On-Demand', 'Latency-Optimized', 'Other'];
+const SCOPE_COLOR: Record<string, string> = {
+  'Global Cross-Region': 'blue', 'Cross-Region': 'green', 'On-Demand': 'orange', 'Latency-Optimized': 'purple',
+};
+const fmtNum = (v: number) => v >= 1_000_000 ? `${(v / 1_000_000).toLocaleString(undefined, { maximumFractionDigits: 1 })}M` : v.toLocaleString();
+
+const QuotaQueryTab: React.FC<{ accountId: string }> = ({ accountId }) => {
+  const [regions, setRegions] = useState<string[]>(['us-east-1']);
+  const [rows, setRows] = useState<any[]>([]);
+  const [errors, setErrors] = useState<any[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [provider, setProvider] = useState('');
+  const [scopes, setScopes] = useState<string[]>(BEDROCK_QUOTA_SCOPES);
+  const [search, setSearch] = useState('');
+
+  const load = async () => {
+    if (!accountId) { message.warning('请先选择账户'); return; }
+    if (!regions.length) { message.warning('请至少选择一个区域'); return; }
+    setLoading(true);
+    try {
+      const res = await api.getBedrockQuotas(accountId, regions);
+      if (res.success) {
+        setRows(res.data.rows || []);
+        setErrors(res.data.errors || []);
+        const n = (res.data.rows || []).length;
+        n ? message.success(`已查询到 ${n} 条 Bedrock 配额`) : message.info('未查询到配额（该账户/区域可能未开通 Bedrock）');
+      } else message.error(res.error);
+    } catch (e: any) { message.error(e.message); } finally { setLoading(false); }
+  };
+
+  const providers = [...new Set(rows.map(r => r.provider))].sort();
+  const filtered = rows.filter(r =>
+    (!provider || r.provider === provider) &&
+    scopes.includes(r.scope) &&
+    (!search.trim() || `${r.model} ${r.region} ${r.scope} ${r.provider}`.toLowerCase().includes(search.toLowerCase())));
+
+  return (
+    <div style={{ paddingTop: 12 }}>
+      <Space wrap style={{ marginBottom: 8 }}>
+        <Select mode="multiple" allowClear size="small" style={{ minWidth: 340 }} placeholder="选择区域（可多选）"
+          value={regions} onChange={setRegions} maxTagCount="responsive" options={REGION_OPTS} />
+        <Button type="primary" size="small" icon={<ReloadOutlined />} loading={loading} onClick={load}>一键查询</Button>
+        <Button size="small" onClick={() => setRegions(['us-east-1'])}>仅 us-east-1</Button>
+        <Button size="small" onClick={() => setRegions(BEDROCK_REGIONS)}>全选区域</Button>
+      </Space>
+      <Space wrap style={{ marginBottom: 12 }}>
+        <Select size="small" style={{ width: 150 }} value={provider} onChange={setProvider} showSearch optionFilterProp="label"
+          options={[{ label: '全部 Provider', value: '' }, ...providers.map(p => ({ label: p, value: p }))]} />
+        <Select mode="multiple" size="small" style={{ width: 300 }} allowClear placeholder="推理范围"
+          value={scopes} onChange={setScopes} maxTagCount="responsive"
+          options={BEDROCK_QUOTA_SCOPES.map(s => ({ label: s, value: s }))} />
+        <Input.Search size="small" placeholder="搜索模型 / 区域 / 范围" allowClear style={{ width: 220 }}
+          onChange={e => setSearch(e.target.value)} />
+        <span style={{ fontSize: 12, color: '#8a94a6' }}>{filtered.length} / {rows.length} 条</span>
+      </Space>
+      {errors.length > 0 && (
+        <Alert type="warning" showIcon style={{ marginBottom: 8 }}
+          message={`部分区域查询失败（多为未开通 Bedrock）：${errors.map((e: any) => e.region).join(', ')}`} />
+      )}
+      <Table size="small" dataSource={filtered} loading={loading}
+        rowKey={(r: any) => `${r.region}|${r.provider}|${r.model}|${r.scope}`}
+        pagination={{ pageSize: 15, showTotal: t => `共 ${t} 条`, showSizeChanger: true }}
+        scroll={{ x: 900 }}
+        locale={{ emptyText: accountId ? '选择区域后点击「一键查询」获取 TPM / RPM / TPD 配额' : '请先选择账户' }}
+        columns={[
+          { title: '区域', dataIndex: 'region', width: 120, sorter: (a: any, b: any) => a.region.localeCompare(b.region) },
+          { title: 'Provider', dataIndex: 'provider', width: 110, render: (p: string) => <Tag style={{ margin: 0 }}>{p}</Tag> },
+          { title: '模型', dataIndex: 'model', ellipsis: true, sorter: (a: any, b: any) => a.model.localeCompare(b.model) },
+          { title: '推理范围', dataIndex: 'scope', width: 150,
+            render: (s: string) => <Tag color={SCOPE_COLOR[s] || 'default'} style={{ margin: 0, fontSize: 11 }}>{s}</Tag> },
+          ...(['TPM', 'RPM', 'TPD'] as const).map(metric => ({
+            title: metric === 'TPM' ? 'TPM (令牌/分)' : metric === 'RPM' ? 'RPM (请求/分)' : 'TPD (令牌/天)',
+            key: metric, width: 140, align: 'right' as const,
+            sorter: (a: any, b: any) => (a.metrics?.[metric]?.value ?? -1) - (b.metrics?.[metric]?.value ?? -1),
+            render: (_: any, r: any) => {
+              const m = r.metrics?.[metric];
+              return m ? <span style={{ fontWeight: 500 }}>{fmtNum(m.value)}</span> : <span style={{ color: 'rgba(0,0,0,0.25)' }}>-</span>;
+            },
+          })),
+        ]} />
+    </div>
+  );
+};
+
 // ===== Tab 7: IAM 用户 =====
 const IamTab: React.FC<{ accountId: string }> = ({ accountId }) => {
   const [rows, setRows] = useState<any[]>([]);
@@ -714,6 +799,7 @@ const BedrockPage: React.FC = () => {
           { key: 'invoke', label: '模型测试', children: <InvokeTab accountId={selectedAccount} /> },
           { key: 'models', label: '模型列表', children: <ModelsTab accountId={selectedAccount} /> },
           { key: 'ftu', label: '模型开通', children: <FtuTab accountId={selectedAccount} /> },
+          { key: 'quotas', label: '配额查询', children: <QuotaQueryTab accountId={selectedAccount} /> },
           { key: 'datashare', label: '数据共享', children: <DataShareTab accountId={selectedAccount} /> },
           { key: 'iam', label: 'IAM 用户', children: <IamTab accountId={selectedAccount} /> },
           { key: 'delivery', label: '交付表格', children: <DeliveryTab accountId={selectedAccount} /> },
