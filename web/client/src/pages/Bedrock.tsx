@@ -152,7 +152,11 @@ const ProfilesTabView: React.FC<any> = ({
         message={`部分区域查询失败：${errors.map((e: any) => `${e.region}(${e.message})`).join('；')}`} />
     )}
     <Table size="small" rowKey="arn" dataSource={filtered} loading={loading}
-      rowSelection={{ selectedRowKeys: selectedKeys, onChange: setSelectedKeys }}
+      rowSelection={{
+        selectedRowKeys: selectedKeys, onChange: setSelectedKeys,
+        // 下拉里提供跨页全选/清空/反选（表头 checkbox 只管当前页）
+        selections: [Table.SELECTION_ALL, Table.SELECTION_NONE, Table.SELECTION_INVERT],
+      }}
       pagination={{ pageSize: 20, showSizeChanger: true, showTotal: (t: number) => `共 ${t} 条` }}
       columns={[
         { title: 'Region', dataIndex: 'region', width: 110, sorter: (a: any, b: any) => a.region.localeCompare(b.region) },
@@ -291,10 +295,16 @@ const CreateTab: React.FC<{ accountId: string }> = ({ accountId }) => {
           disabled={!visibleSelected.length || !regions.length || !validTags(tagInputs)} onClick={doCreate}>
           创建勾选（{visibleSelected.length} 个模型 × {regions.length} 区域）
         </Button>
+        {/* 表头 checkbox 只作用于当前页（antd 默认），这两个按钮跨全部页 */}
+        <Button size="small" onClick={() => setSelectedKeys(filtered.map(m => m.modelId))}>全选（{filtered.length}）</Button>
+        <Button size="small" onClick={() => setSelectedKeys([])}>清空选择</Button>
         {!validTags(tagInputs) && <span style={{ fontSize: 12, color: '#cf1322' }}>请先填写完整 Tag</span>}
       </Space>
       <Table size="small" rowKey="modelId" dataSource={filtered} loading={loading}
-        rowSelection={{ selectedRowKeys: selectedKeys, onChange: setSelectedKeys }}
+        rowSelection={{
+          selectedRowKeys: selectedKeys, onChange: setSelectedKeys,
+          selections: [Table.SELECTION_ALL, Table.SELECTION_NONE, Table.SELECTION_INVERT],
+        }}
         pagination={{ pageSize: 20, showTotal: t => `共 ${t} 条` }}
         columns={[
           { title: 'Provider', dataIndex: 'provider', width: 110 },
