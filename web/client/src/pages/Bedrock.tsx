@@ -608,20 +608,31 @@ const DeliveryTab: React.FC<{ accountId: string }> = ({ accountId }) => {
     } catch (e: any) { message.error(e.message); } finally { setLoading(false); }
   };
 
-  const doExport = async () => {
+  const doExport = async (v2 = false) => {
     if (!rows.length) { message.warning('请先加载 Profiles'); return; }
     if (!iamUser.trim() || !iamPassword) { message.warning('请填写 IAM 用户名和密码'); return; }
     setExporting(true);
     try {
-      const blob = await api.bedrockDeliveryExport({
-        rows: rows.map(r => ({ name: r.name, arn: r.arn, region: r.region, tags: r.tags || [] })),
-        iamUser: iamUser.trim(), iamPassword,
-      });
+      let blob: Blob;
+      if (v2) {
+        // 李浩版：带 backendModels/scope 供服务端做 Profile↔配额（TPM/TPD）匹配，
+        // 服务端会实时查 Service Quotas，耗时约 10-30s
+        blob = await api.bedrockDeliveryExportV2({
+          accountId,
+          rows: rows.map(r => ({ name: r.name, arn: r.arn, region: r.region, tags: r.tags || [], backendModels: r.backendModels, scope: r.scope })),
+          iamUser: iamUser.trim(), iamPassword,
+        });
+      } else {
+        blob = await api.bedrockDeliveryExport({
+          rows: rows.map(r => ({ name: r.name, arn: r.arn, region: r.region, tags: r.tags || [] })),
+          iamUser: iamUser.trim(), iamPassword,
+        });
+      }
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
-      a.href = url; a.download = `${accountId}-delivery.xlsx`; a.click();
+      a.href = url; a.download = `${accountId}-delivery${v2 ? '-v2' : ''}.xlsx`; a.click();
       URL.revokeObjectURL(url);
-      message.success('交付表格已下载');
+      message.success(`交付表格${v2 ? '（带 TPM 版）' : ''}已下载`);
     } catch (e: any) { message.error(e.message); } finally { setExporting(false); }
   };
 
@@ -640,7 +651,11 @@ const DeliveryTab: React.FC<{ accountId: string }> = ({ accountId }) => {
         </Popconfirm>
         <Input.Password size="small" placeholder="交付 IAM 密码（可一键生成）" style={{ width: 220 }} value={iamPassword} onChange={e => setIamPassword(e.target.value)} />
         <Button size="small" type="primary" icon={<DownloadOutlined />} loading={exporting}
-          disabled={!rows.length || !iamUser.trim() || !iamPassword} onClick={doExport}>生成交付表格</Button>
+          disabled={!rows.length || !iamUser.trim() || !iamPassword} onClick={() => doExport(false)}>生成交付表格</Button>
+        <Tooltip title="李浩版五列格式：Profile Name / ARN / TPM / TPD / Region。服务端实时查 Service Quotas 匹配 TPM/TPD（约 10-30s），提额未生效如实写 0">
+          <Button size="small" icon={<DownloadOutlined />} loading={exporting}
+            disabled={!rows.length || !iamUser.trim() || !iamPassword} onClick={() => doExport(true)}>交付表格-带TPM版</Button>
+        </Tooltip>
       </Space>
       <Table size="small" rowKey="arn" dataSource={rows} loading={loading}
         pagination={{ pageSize: 15, showTotal: t => `共 ${t} 条` }}

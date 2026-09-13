@@ -139,3 +139,91 @@ export async function buildDeliveryXlsx(
   const buffer = Buffer.from(await wb.xlsx.writeBuffer());
   return { buffer, accountId, tagValue };
 }
+
+// ===== 李浩版（v2 五列格式）：Profile Name | Profile ARN | TPM | TPD | Region =====
+// 规范：/Users/mark/Claude账户交付/交付表格规范-李浩版.md
+// 列宽 A=33.65 B=79.64 C=18 D=20 E=59.77；TPM/TPD 整数、格式 #,##0、实测值（为 0 如实写 0）
+
+export interface DeliveryProfileRowV2 extends DeliveryProfileRow {
+  tpm: number;   // 实测 TPM（Service Quotas），未匹配到写 0
+  tpd: number;   // 实测 TPD
+}
+
+export async function buildDeliveryXlsxV2(
+  rows: DeliveryProfileRowV2[], iamUser: string, iamPassword: string,
+): Promise<{ buffer: Buffer; accountId: string; tagValue: string }> {
+  const { grouped, tagValue, accountId } = prepareDelivery(rows);
+  const notice = DELIVERY_NOTICE(tagValue);
+
+  const wb = new ExcelJS.Workbook();
+  // 工作表名固定（李浩版规范：不随日期变）
+  const ws = wb.addWorksheet('inference_profiles_20260320_184');
+  ws.columns = [{ width: 33.65 }, { width: 79.64 }, { width: 18 }, { width: 20 }, { width: 59.77 }];
+
+  const fontTitle = { name: '宋体', size: 16, bold: true };
+  const fontBody = { name: '宋体', size: 11 };
+  const fontBlue = { name: '宋体', size: 11, color: { argb: 'FF0000FF' } };
+  const fontNotice = { name: '宋体', size: 11, color: { argb: 'FFFF0000' } };
+  const border: any = { top: { style: 'thin' }, left: { style: 'thin' }, bottom: { style: 'thin' }, right: { style: 'thin' } };
+  const center: any = { horizontal: 'center', vertical: 'middle' };
+  const body: any = { vertical: 'middle' };
+
+  const setCell = (row: number, col: number, value: any, font: any, align: any, numFmt?: string) => {
+    const cell = ws.getCell(row, col);
+    cell.value = value;
+    cell.font = font;
+    cell.alignment = align;
+    cell.border = border;
+    if (numFmt) cell.numFmt = numFmt;
+  };
+
+  // 区块一：AWS 账户信息（A1:E1 标题；Password 占 B:D 合并）
+  ws.mergeCells(1, 1, 1, 5);
+  setCell(1, 1, 'AWS 账户信息', fontTitle, center);
+  ws.getRow(1).height = 23.2;
+  setCell(2, 1, 'User name', fontBody, body);
+  ws.mergeCells(2, 2, 2, 4);
+  setCell(2, 2, 'Password', fontBody, body);
+  setCell(2, 5, 'Console sign-in URL', fontBody, body);
+  setCell(3, 1, iamUser.trim(), fontBody, body);
+  ws.mergeCells(3, 2, 3, 4);
+  setCell(3, 2, iamPassword.trim(), fontBlue, body);
+  setCell(3, 5, `https://${accountId}.signin.aws.amazon.com/console`, fontBlue, body);
+
+  // 区块二：ARN 列表（第 4 行空）
+  ws.mergeCells(5, 1, 5, 5);
+  setCell(5, 1, 'AWS 模型推理配置文件ARN List', fontTitle, center);
+  ws.getRow(5).height = 23.2;
+  ['Profile Name', 'Profile ARN', 'TPM', 'TPD', 'Region'].forEach((h, i) => setCell(6, i + 1, h, fontBody, body));
+
+  let row = 7;
+  for (const [region, items] of grouped) {
+    const start = row;
+    for (const item of items as DeliveryProfileRowV2[]) {
+      setCell(row, 1, item.name.trim(), fontBody, body);
+      setCell(row, 2, item.arn.trim(), fontBody, body);
+      setCell(row, 3, Math.round(item.tpm || 0), fontBody, body, '#,##0');
+      setCell(row, 4, Math.round(item.tpd || 0), fontBody, body, '#,##0');
+      setCell(row, 5, null, fontBody, center);
+      row += 1;
+    }
+    ws.mergeCells(start, 5, row - 1, 5);
+    setCell(start, 5, region, fontBody, center);
+  }
+  ws.getRow(row - 1).height = 23.2;
+
+  // 区块三：使用须知（紧接 ARN，无空行；正文无边框、红字、左上对齐、wrap）
+  const titleRow = row;
+  ws.mergeCells(titleRow, 1, titleRow, 5);
+  setCell(titleRow, 1, 'Amazon Bedrock 账户使用须知', fontTitle, center);
+  ws.getRow(titleRow).height = 23.2;
+  const noticeRow = titleRow + 1;
+  ws.mergeCells(noticeRow, 1, noticeRow + 24, 5);
+  const noticeCell = ws.getCell(noticeRow, 1);
+  noticeCell.value = notice;
+  noticeCell.font = fontNotice;
+  noticeCell.alignment = { horizontal: 'left', vertical: 'top', wrapText: true };
+
+  const buffer = Buffer.from(await wb.xlsx.writeBuffer());
+  return { buffer, accountId, tagValue };
+}

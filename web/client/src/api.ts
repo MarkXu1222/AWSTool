@@ -230,6 +230,21 @@ export interface CleanupDeleteResult {
   iamCleanup?: Record<string, number>;
 }
 
+/** Bedrock 交付表格公共下载器：POST → 二进制 xlsx blob（失败解析 JSON error） */
+async function bedrockDeliveryFetch(path: string, body: any): Promise<Blob> {
+  const token = getToken();
+  const res = await fetch(`${BASE}${path}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: '交付表格生成失败' }));
+    throw new Error(err.error || '交付表格生成失败');
+  }
+  return res.blob();
+}
+
 export const api = {
   // Auth
   login: async (username: string, password: string, totpCode?: string) => {
@@ -286,6 +301,7 @@ export const api = {
     request(`/aws/bedrock/quotas/${accountId}?regions=${encodeURIComponent(regions.join(','))}`),
 
   // ===== Bedrock 工具（/api/bedrock/*）=====
+  // （交付表格二进制下载的公共实现见文件底部 bedrockDeliveryFetch）
   bedrockListProfiles: (accountId: string, regions: string[]) =>
     request(`/bedrock/profiles/${accountId}?regions=${encodeURIComponent(regions.join(','))}`),
   bedrockListModels: (accountId: string, region: string) =>
@@ -317,19 +333,11 @@ export const api = {
   bedrockCreateAdminUser: (body: { accountId: string; userName: string; createConsoleLogin?: boolean; createAccessKey?: boolean; passwordResetRequired?: boolean }) =>
     request('/bedrock/iam-users/create', { method: 'POST', body: JSON.stringify(body) }),
   // 交付表格：返回二进制 xlsx，用原生 fetch 下载
-  bedrockDeliveryExport: async (body: { rows: any[]; iamUser: string; iamPassword: string }) => {
-    const token = getToken();
-    const res = await fetch(`${BASE}/bedrock/delivery`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
-      body: JSON.stringify(body),
-    });
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({ error: '交付表格生成失败' }));
-      throw new Error(err.error || '交付表格生成失败');
-    }
-    return res.blob();
-  },
+  bedrockDeliveryExport: async (body: { rows: any[]; iamUser: string; iamPassword: string }) =>
+    bedrockDeliveryFetch('/bedrock/delivery', body),
+  // 交付表格 v2（李浩版，五列带 TPM/TPD，服务端实时查配额匹配）
+  bedrockDeliveryExportV2: async (body: { accountId: string; rows: any[]; iamUser: string; iamPassword: string }) =>
+    bedrockDeliveryFetch('/bedrock/delivery-v2', body),
 
   // 一键提交提额文档到 Support Case（后台 job：生成 PDF → 联邦登录 → Reply → 传附件 → Submit）
   caseDocSubmit: (params: { accountId: string; accountName?: string; caseId: string; companyKey?: string; serviceCode: string; quotaName: string; region: string; requestedValue: number; currentValue?: number; message?: string }) =>

@@ -8,7 +8,8 @@
 import { Router, Request, Response, NextFunction } from 'express';
 import { db } from '../db';
 import * as bt from '../bedrock-tools';
-import { buildDeliveryXlsx } from '../bedrock-delivery';
+import { buildDeliveryXlsx, buildDeliveryXlsxV2 } from '../bedrock-delivery';
+import { listBedrockQuotas } from '../aws-service';
 
 export const bedrockRouter = Router();
 
@@ -278,6 +279,41 @@ bedrockRouter.post('/delivery', requireAdmin, async (req: Request, res: Response
     (res.locals as any).audited = true;
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
     res.setHeader('Content-Disposition', `attachment; filename="${accountId}-delivery.xlsx"`);
+    res.send(buffer);
+  } catch (e: any) { res.status(400).json({ error: e.message }); }
+});
+
+// 交付表格 v2（李浩版，五列带 TPM/TPD）：
+// 服务端实时查 Service Quotas（listBedrockQuotas，与配额页同一条链路）做 Profile↔配额匹配，
+// 匹配不到/提额未生效如实写 0（规范红线：TPM/TPD 必须实测，不盲套公式）。
+bedrockRouter.post('/delivery-v2', requireAdmin, async (req: Request, res: Response) => {
+  try {
+    const accountId = String(req.body.accountId || '');
+    if (!ACCOUNT_RE.test(accountId)) return res.status(400).json({ error: '无效的账户 ID' });
+    const rows = Array.isArray(req.body.rows) ? req.body.rows : [];
+    const iamUser = String(req.body.iamUser || '').trim();
+    const iamPassword = String(req.body.iamPassword || '');
+    if (!rows.length) return res.status(400).json({ error: '没有 Profile 数据' });
+    if (!iamUser || !iamPassword) return res.status(400).json({ error: 'IAM 用户名和密码必填' });
+
+    // 实时拉配额（覆盖 rows 涉及的全部区域）
+    const regions: string[] = [...new Set<string>(rows.map((r: any) => String(r.region)))].filter(r => REGION_RE.test(r));
+    const quota = await listBedrockQuotas(accountId, regions);
+    const rowsV2 = rows.map((r: any) => ({
+      name: String(r.name || ''), arn: String(r.arn || ''), region: String(r.region || ''),
+      tags: Array.isArray(r.tags) ? r.tags : [],
+      ...bt.matchProfileTpmTpd(
+        { backendModels: r.backendModels, name: r.name, scope: r.scope, region: r.region },
+        quota.rows,
+      ),
+    }));
+    const { buffer, accountId: acc, tagValue } = await buildDeliveryXlsxV2(rowsV2, iamUser, iamPassword);
+    const user = (req as any).user;
+    db.addAuditLog(user?.userId, 'BEDROCK_DELIVERY_EXPORT',
+      `账户 ${acc} | 交付表格 v2（李浩版，含 TPM/TPD，${rows.length} 个 Profile，tag=${tagValue}）`, user?.username, req.ip);
+    (res.locals as any).audited = true;
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', `attachment; filename="${acc}-delivery-v2.xlsx"`);
     res.send(buffer);
   } catch (e: any) { res.status(400).json({ error: e.message }); }
 });

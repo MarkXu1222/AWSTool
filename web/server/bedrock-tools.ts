@@ -251,6 +251,53 @@ export async function invokeModel(accountId: string, region: string, modelId: st
   } finally { rt.destroy(); }
 }
 
+// ===== 李浩版交付：Profile ↔ Bedrock 配额（TPM/TPD）匹配 =====
+
+/**
+ * 从后端模型 ID 提取匹配键：`anthropic.claude-sonnet-4-5-20250929-v1:0` →
+ * { family: 'sonnet', version: '4.5', v: '' }；`claude-opus-4-6-v1` → { family:'opus', version:'4.6', v:'v1' }。
+ */
+export function extractClaudeKey(modelId: string): { family: string; version: string; v: string } | null {
+  const m = /claude-([a-z]+)-(\d+)(?:-(\d+))?(?:-\d{8})?(?:-v(\d+))?/.exec(String(modelId).toLowerCase());
+  if (!m) return null;
+  return { family: m[1], version: m[3] ? `${m[2]}.${m[3]}` : m[2], v: m[4] ? `v${m[4]}` : '' };
+}
+
+/**
+ * 在 listBedrockQuotas 的结果行里找该 Profile 的 TPM/TPD。
+ * scope：Global → 'Global Cross-Region'；US → 'Cross-Region'（李浩版规范的两档）。
+ * 匹配不到如实返回 0（规范：提额未生效写 0，不盲套公式）。
+ */
+export function matchProfileTpmTpd(
+  profile: { backendModels?: string; name?: string; scope: string; region: string },
+  quotaRows: any[],
+): { tpm: number; tpd: number } {
+  const key = extractClaudeKey(profile.backendModels || profile.name || '');
+  if (!key) return { tpm: 0, tpd: 0 };
+  const wantScope = profile.scope === 'Global' ? 'Global Cross-Region' : 'Cross-Region';
+  for (const q of quotaRows) {
+    if (q.region !== profile.region || q.scope !== wantScope) continue;
+    const model = String(q.model || '').toLowerCase();
+    if (!model.includes(key.family) || !model.includes(key.version)) continue;
+    if (key.v && !model.includes(key.v)) continue;
+    // 无 v 后缀时避免匹配到 "4.6 V1" 这类带版本的行（除非只有它）
+    if (!key.v && /v\d/.test(model)) continue;
+    return {
+      tpm: Math.round(q.metrics?.TPM?.value || 0),
+      tpd: Math.round(q.metrics?.TPD?.value || 0),
+    };
+  }
+  // 放宽一轮：允许 v 后缀不严格（应对配额命名差异）
+  for (const q of quotaRows) {
+    if (q.region !== profile.region || q.scope !== wantScope) continue;
+    const model = String(q.model || '').toLowerCase();
+    if (model.includes(key.family) && model.includes(key.version)) {
+      return { tpm: Math.round(q.metrics?.TPM?.value || 0), tpd: Math.round(q.metrics?.TPD?.value || 0) };
+    }
+  }
+  return { tpm: 0, tpd: 0 };
+}
+
 // ===== FTU 模型开通（Claude 首次使用表单） =====
 
 export interface FtuForm {
