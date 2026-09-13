@@ -126,13 +126,13 @@ const ProfilesTab: React.FC<{ accountId: string }> = ({ accountId }) => {
   };
 
   return (
-    <ProfilesTabView {...{ regions, setRegions, load, loading, search, setSearch, filtered, selectedKeys, setSelectedKeys, errors, doDelete, doTag, acting, tagModalOpen, setTagModalOpen, tagInputs, setTagInputs }} />
+    <ProfilesTabView {...{ regions, setRegions, load, loading, search, setSearch, filtered, selectedKeys, setSelectedKeys, errors, doDelete, doTag, acting, tagModalOpen, setTagModalOpen, tagInputs, setTagInputs, visibleSelectedCount: selectedRows.length }} />
   );
 };
 
 const ProfilesTabView: React.FC<any> = ({
   regions, setRegions, load, loading, search: _s, setSearch, filtered, selectedKeys, setSelectedKeys,
-  errors, doDelete, doTag, acting, tagModalOpen, setTagModalOpen, tagInputs, setTagInputs,
+  errors, doDelete, doTag, acting, tagModalOpen, setTagModalOpen, tagInputs, setTagInputs, visibleSelectedCount,
 }) => (
   <div style={{ paddingTop: 12 }}>
     <Space wrap style={{ marginBottom: 12 }}>
@@ -141,10 +141,10 @@ const ProfilesTabView: React.FC<any> = ({
       <Button size="small" type="primary" icon={<ReloadOutlined />} loading={loading} onClick={load}>加载 Profiles</Button>
       <Input.Search size="small" placeholder="筛选：名称 / ARN / Tag / 模型" allowClear style={{ width: 260 }}
         onChange={e => setSearch(e.target.value)} />
-      <span style={{ fontSize: 12, color: '#8a94a6' }}>已选 {selectedKeys.length} / {filtered.length}</span>
-      <Button size="small" icon={<TagsOutlined />} disabled={!selectedKeys.length} onClick={() => setTagModalOpen(true)}>批量打 Tag</Button>
-      <Popconfirm title={`确认删除选中的 ${selectedKeys.length} 个 Profile？`} okText="删除" okButtonProps={{ danger: true }} onConfirm={doDelete}>
-        <Button size="small" danger icon={<DeleteOutlined />} disabled={!selectedKeys.length} loading={acting}>批量删除</Button>
+      <span style={{ fontSize: 12, color: '#8a94a6' }}>已选 {visibleSelectedCount} / {filtered.length}</span>
+      <Button size="small" icon={<TagsOutlined />} disabled={!visibleSelectedCount} onClick={() => setTagModalOpen(true)}>批量打 Tag</Button>
+      <Popconfirm title={`确认删除选中的 ${visibleSelectedCount} 个 Profile？`} okText="删除" okButtonProps={{ danger: true }} onConfirm={doDelete}>
+        <Button size="small" danger icon={<DeleteOutlined />} disabled={!visibleSelectedCount} loading={acting}>批量删除</Button>
       </Popconfirm>
     </Space>
     {errors.length > 0 && (
@@ -166,7 +166,7 @@ const ProfilesTabView: React.FC<any> = ({
         },
         { title: 'ARN', dataIndex: 'arn', ellipsis: true, render: (a: string) => <Typography.Text copyable={{ text: a }} style={{ fontSize: 12 }}>{a}</Typography.Text> },
       ]} />
-    <Modal title={`批量打 Tag（${selectedKeys.length} 个 Profile）`} open={tagModalOpen}
+    <Modal title={`批量打 Tag（${visibleSelectedCount} 个 Profile）`} open={tagModalOpen}
       onCancel={() => setTagModalOpen(false)} onOk={doTag} okText="打 Tag" confirmLoading={acting}
       okButtonProps={{ disabled: !validTags(tagInputs) }}>
       <Alert type="info" showIcon style={{ marginBottom: 12 }} message="Tag 必须每次显式输入，平台不提供默认值，请确认与该账户所属 MAP 协议一致。" />
@@ -177,7 +177,9 @@ const ProfilesTabView: React.FC<any> = ({
 
 // ===== Tab 2: 批量创建 =====
 const CreateTab: React.FC<{ accountId: string }> = ({ accountId }) => {
-  const [region, setRegion] = useState('us-east-1');
+  // 支持多区域：模型列表从第一个区域加载（SYSTEM_DEFINED profiles 各商业区域基本一致），
+  // 创建时对每个选中区域分别执行
+  const [regions, setRegions] = useState<string[]>(['us-east-1']);
   const [models, setModels] = useState<any[]>([]);
   const [loading, setLoading] = useState(false);
   const [provider, setProvider] = useState('All');
@@ -192,9 +194,10 @@ const CreateTab: React.FC<{ accountId: string }> = ({ accountId }) => {
 
   const loadModels = async () => {
     if (!accountId) { message.warning('请先选择账户'); return; }
+    if (!regions.length) { message.warning('请至少选择一个区域'); return; }
     setLoading(true);
     try {
-      const res = await api.bedrockListModels(accountId, region);
+      const res = await api.bedrockListModels(accountId, regions[0]);
       if (res.success) { setModels(res.data || []); setSelectedKeys((res.data || []).map((m: any) => m.modelId)); }
       else message.error(res.error || '加载失败');
     } catch (e: any) { message.error(e.message); } finally { setLoading(false); }
@@ -219,34 +222,46 @@ const CreateTab: React.FC<{ accountId: string }> = ({ accountId }) => {
     return scopeTag ? `${prefix.trim()}-${scopeTag}-${short}` : `${prefix.trim()}-${short}`;
   };
 
+  // ⚠️ 勾选计数必须只算「当前筛选可见」的选中行——selectedKeys 里可能残留被
+  // Provider/Scope/关键词过滤隐藏的 key（默认全选后再筛选就会出现），
+  // 之前直接用 selectedKeys.length 导致「只选 1 个却显示 8 个」。
+  const visibleSelected = filtered.filter(m => selectedKeys.includes(m.modelId));
+
   const doCreate = async () => {
-    const sel = filtered.filter(m => selectedKeys.includes(m.modelId));
+    const sel = visibleSelected;
     if (!sel.length) { message.warning('请勾选模型'); return; }
     if (!validTags(tagInputs)) { message.warning('必须填写 Tag（key/value 均必填，平台不提供默认值）'); return; }
     setCreating(true);
-    setLog([`开始创建 ${sel.length} 个 Profile...`]);
+    setLog([`开始创建：${sel.length} 个模型 × ${regions.length} 个区域...`]);
     try {
-      const res = await api.bedrockCreateProfiles({
-        accountId, region,
-        items: sel.map(m => ({ modelId: m.modelId, name: buildName(m) })),
-        tags: tagInputs.map(t => ({ key: t.key.trim(), value: t.value.trim() })),
-      });
-      if (res.success) {
-        const lines = res.data.map((r: any) => r.ok ? `[OK] ${r.name}` : `[ERR] ${r.name}: ${r.error}`);
-        const ok = res.data.filter((r: any) => r.ok).length;
-        setLog(prev => [...prev, ...lines, `完成：成功 ${ok} / 失败 ${res.data.length - ok}`]);
-        message[ok === res.data.length ? 'success' : 'warning'](`创建完成：成功 ${ok}/${res.data.length}`);
-      } else {
-        setLog(prev => [...prev, `[ERR] ${res.error}`]);
-        message.error(res.error || '创建失败');
+      let totalOk = 0, totalFail = 0;
+      // 多区域批量：逐区域串行执行（同桌面版语义；后端一次一个区域）
+      for (const rgn of regions) {
+        const res = await api.bedrockCreateProfiles({
+          accountId, region: rgn,
+          items: sel.map(m => ({ modelId: m.modelId, name: buildName(m) })),
+          tags: tagInputs.map(t => ({ key: t.key.trim(), value: t.value.trim() })),
+        });
+        if (res.success) {
+          const lines = res.data.map((r: any) => r.ok ? `[OK] [${rgn}] ${r.name}` : `[ERR] [${rgn}] ${r.name}: ${r.error}`);
+          const ok = res.data.filter((r: any) => r.ok).length;
+          totalOk += ok; totalFail += res.data.length - ok;
+          setLog(prev => [...prev, ...lines]);
+        } else {
+          totalFail += sel.length;
+          setLog(prev => [...prev, `[ERR] [${rgn}] ${res.error}`]);
+        }
       }
+      setLog(prev => [...prev, `全部完成：成功 ${totalOk} / 失败 ${totalFail}`]);
+      message[totalFail ? 'warning' : 'success'](`创建完成：成功 ${totalOk}${totalFail ? `，失败 ${totalFail}` : ''}`);
     } catch (e: any) { message.error(e.message); } finally { setCreating(false); }
   };
 
   return (
     <div style={{ paddingTop: 12 }}>
       <Space wrap style={{ marginBottom: 8 }}>
-        <Select size="small" style={{ width: 150 }} value={region} onChange={setRegion} options={REGION_OPTS} />
+        <Select mode="multiple" size="small" style={{ minWidth: 260 }} value={regions} onChange={setRegions}
+          options={REGION_OPTS} placeholder="创建到哪些区域（可多选）" maxTagCount={3} />
         <Button size="small" icon={<ReloadOutlined />} loading={loading} onClick={loadModels}>刷新模型</Button>
         <Select size="small" style={{ width: 130 }} value={provider} onChange={setProvider}
           options={providers.map(p => ({ label: p, value: p }))} />
@@ -273,8 +288,8 @@ const CreateTab: React.FC<{ accountId: string }> = ({ accountId }) => {
       </div>
       <Space style={{ marginBottom: 8 }}>
         <Button size="small" type="primary" icon={<PlusOutlined />} loading={creating}
-          disabled={!selectedKeys.length || !validTags(tagInputs)} onClick={doCreate}>
-          创建勾选（{selectedKeys.length}）
+          disabled={!visibleSelected.length || !regions.length || !validTags(tagInputs)} onClick={doCreate}>
+          创建勾选（{visibleSelected.length} 个模型 × {regions.length} 区域）
         </Button>
         {!validTags(tagInputs) && <span style={{ fontSize: 12, color: '#cf1322' }}>请先填写完整 Tag</span>}
       </Space>
@@ -553,6 +568,23 @@ const DeliveryTab: React.FC<{ accountId: string }> = ({ accountId }) => {
   const [iamUser, setIamUser] = useState('');
   const [iamPassword, setIamPassword] = useState('');
   const [exporting, setExporting] = useState(false);
+  const [creatingUser, setCreatingUser] = useState(false);
+
+  // 一键创建交付 IAM 用户（AdministratorAccess + console 密码，不建 AK——交付表格只需要 console 登录），
+  // 创建成功后自动填入下方用户名/密码，直接生成表格即可（与桌面版一键流程一致）
+  const oneClickCreateUser = async () => {
+    if (!accountId) { message.warning('请先选择账户'); return; }
+    const name = iamUser.trim() || 'admin';
+    setCreatingUser(true);
+    try {
+      const res = await api.bedrockCreateAdminUser({ accountId, userName: name, createConsoleLogin: true, createAccessKey: false });
+      if (res.success) {
+        setIamUser(res.data.user.userName);
+        setIamPassword(res.data.consolePassword);
+        message.success(`IAM 用户 ${res.data.user.userName} 已创建，凭证已自动填入`);
+      } else message.error(res.error || '创建失败');
+    } catch (e: any) { message.error(e.message); } finally { setCreatingUser(false); }
+  };
 
   const load = async () => {
     if (!accountId) { message.warning('请先选择账户'); return; }
@@ -591,8 +623,12 @@ const DeliveryTab: React.FC<{ accountId: string }> = ({ accountId }) => {
         <Select mode="multiple" size="small" style={{ minWidth: 280 }} value={regions} onChange={setRegions}
           options={REGION_OPTS} maxTagCount={4} />
         <Button size="small" icon={<ReloadOutlined />} loading={loading} onClick={load}>加载 Profiles（{rows.length}）</Button>
-        <Input size="small" placeholder="交付 IAM 用户名" style={{ width: 200 }} value={iamUser} onChange={e => setIamUser(e.target.value)} />
-        <Input.Password size="small" placeholder="交付 IAM 密码" style={{ width: 220 }} value={iamPassword} onChange={e => setIamPassword(e.target.value)} />
+        <Input size="small" placeholder="交付 IAM 用户名（默认 admin）" style={{ width: 210 }} value={iamUser} onChange={e => setIamUser(e.target.value)} />
+        <Popconfirm title={`将在账户创建 AdministratorAccess 用户「${iamUser.trim() || 'admin'}」并生成 Console 密码，继续？`}
+          okText="创建" onConfirm={oneClickCreateUser}>
+          <Button size="small" icon={<UserAddOutlined />} loading={creatingUser}>一键创建 IAM 用户</Button>
+        </Popconfirm>
+        <Input.Password size="small" placeholder="交付 IAM 密码（可一键生成）" style={{ width: 220 }} value={iamPassword} onChange={e => setIamPassword(e.target.value)} />
         <Button size="small" type="primary" icon={<DownloadOutlined />} loading={exporting}
           disabled={!rows.length || !iamUser.trim() || !iamPassword} onClick={doExport}>生成交付表格</Button>
       </Space>
