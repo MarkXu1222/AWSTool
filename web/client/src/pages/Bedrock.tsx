@@ -18,7 +18,16 @@ const BEDROCK_REGIONS = [
 ];
 const REGION_OPTS = BEDROCK_REGIONS.map(r => ({ label: r, value: r }));
 
-/** Tag 输入组件：key/value 都必填，无默认值 */
+// 常见 Provider（未加载模型前也可选；加载后与实际数据合并去重）
+const KNOWN_PROVIDERS = ['Anthropic', 'Amazon', 'Meta', 'Mistral', 'Cohere', 'AI21', 'Stability', 'DeepSeek', 'Qwen'];
+
+// Tag key 固定用 map-migrated（业务纪律）；value 每次必须手动输入，无默认值
+const FIXED_TAG_KEY = 'map-migrated';
+
+/**
+ * Tag 输入组件：第一行 key 固定为 map-migrated（只读），value 每次必填；
+ * 追加行可自定义 key（少数场景需要额外 tag）。
+ */
 const TagInputs: React.FC<{
   tags: { key: string; value: string }[];
   onChange: (tags: { key: string; value: string }[]) => void;
@@ -26,14 +35,15 @@ const TagInputs: React.FC<{
   <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
     {tags.map((t, i) => (
       <Space key={i}>
-        <Input size="small" placeholder="Tag Key（必填，如 map-migrated）" style={{ width: 220 }} value={t.key}
+        <Input size="small" style={{ width: 220 }} value={t.key} disabled={i === 0}
+          placeholder="Tag Key（必填）"
           onChange={e => onChange(tags.map((x, j) => j === i ? { ...x, key: e.target.value } : x))} />
-        <Input size="small" placeholder="Tag Value（必填）" style={{ width: 200 }} value={t.value}
+        <Input size="small" placeholder={i === 0 ? 'Tag Value（每次必填，如 migXXXXXXX）' : 'Tag Value（必填）'} style={{ width: 260 }} value={t.value}
           onChange={e => onChange(tags.map((x, j) => j === i ? { ...x, value: e.target.value } : x))} />
-        {tags.length > 1 && <Button size="small" danger type="text" onClick={() => onChange(tags.filter((_, j) => j !== i))}>删除</Button>}
+        {i > 0 && <Button size="small" danger type="text" onClick={() => onChange(tags.filter((_, j) => j !== i))}>删除</Button>}
       </Space>
     ))}
-    <Button size="small" type="dashed" onClick={() => onChange([...tags, { key: '', value: '' }])} style={{ width: 120 }}>+ 添加 Tag</Button>
+    <Button size="small" type="dashed" onClick={() => onChange([...tags, { key: '', value: '' }])} style={{ width: 140 }}>+ 添加额外 Tag</Button>
   </div>
 );
 
@@ -50,7 +60,7 @@ const ProfilesTab: React.FC<{ accountId: string }> = ({ accountId }) => {
   const [selectedKeys, setSelectedKeys] = useState<React.Key[]>([]);
   const [search, setSearch] = useState('');
   const [tagModalOpen, setTagModalOpen] = useState(false);
-  const [tagInputs, setTagInputs] = useState<{ key: string; value: string }[]>([{ key: '', value: '' }]);
+  const [tagInputs, setTagInputs] = useState<{ key: string; value: string }[]>([{ key: FIXED_TAG_KEY, value: '' }]);
   const [acting, setActing] = useState(false);
 
   const load = async () => {
@@ -110,7 +120,7 @@ const ProfilesTab: React.FC<{ accountId: string }> = ({ accountId }) => {
       }
       message[fail ? 'warning' : 'success'](`打 Tag 完成：成功 ${ok}${fail ? `，失败 ${fail}` : ''}`);
       setTagModalOpen(false);
-      setTagInputs([{ key: '', value: '' }]);
+      setTagInputs([{ key: FIXED_TAG_KEY, value: '' }]);
       load();
     } catch (e: any) { message.error(e.message); } finally { setActing(false); }
   };
@@ -174,7 +184,7 @@ const CreateTab: React.FC<{ accountId: string }> = ({ accountId }) => {
   const [kw, setKw] = useState('');
   const [selectedKeys, setSelectedKeys] = useState<React.Key[]>([]);
   const [prefix, setPrefix] = useState('');
-  const [tagInputs, setTagInputs] = useState<{ key: string; value: string }[]>([{ key: '', value: '' }]);
+  const [tagInputs, setTagInputs] = useState<{ key: string; value: string }[]>([{ key: FIXED_TAG_KEY, value: '' }]);
   const [creating, setCreating] = useState(false);
   const [log, setLog] = useState<string[]>([]);
 
@@ -188,7 +198,8 @@ const CreateTab: React.FC<{ accountId: string }> = ({ accountId }) => {
     } catch (e: any) { message.error(e.message); } finally { setLoading(false); }
   };
 
-  const providers = ['All', ...new Set(models.map(m => m.provider))];
+  // 未加载模型时也有完整 Provider 可选；加载后与实际数据合并去重
+  const providers = ['All', ...new Set([...KNOWN_PROVIDERS, ...models.map(m => m.provider)])];
   const filtered = models.filter(m =>
     (provider === 'All' || m.provider === provider) &&
     (!kw.trim() || `${m.name} ${m.modelId} ${m.scope}`.toLowerCase().includes(kw.toLowerCase())));
@@ -236,7 +247,7 @@ const CreateTab: React.FC<{ accountId: string }> = ({ accountId }) => {
         <Input size="small" placeholder="命名前缀（留空用模型原名）" style={{ width: 240 }} value={prefix} onChange={e => setPrefix(e.target.value)} />
       </Space>
       <Alert type="warning" showIcon style={{ marginBottom: 8 }}
-        message="Tag 必填且每次都要手动输入（如 map-migrated = migXXXXXXX）。平台不记忆、不提供默认值——请核对与该账户所属 MAP 协议一致后再创建。" />
+        message="Tag Key 固定为 map-migrated，Value 每次必须手动输入（migXXXXXXX）。平台不记忆、不提供默认值——请核对与该账户所属 MAP 协议一致后再创建。" />
       <div style={{ marginBottom: 12 }}>
         <TagInputs tags={tagInputs} onChange={setTagInputs} />
       </div>
