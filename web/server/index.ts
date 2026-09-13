@@ -8,6 +8,7 @@ import { authRouter, authMiddleware } from './auth';
 import { auditMiddleware } from './audit';
 import { awsRouter } from './routes/aws';
 import { regionsRouter } from './routes/regions';
+import { bedrockRouter } from './routes/bedrock';
 import { migrateEncryptMFASecrets, backupDB } from './db';
 import { startScheduler, getSchedulerStatus } from './scheduler';
 import { startTagOnboardingRunner } from './tag-onboarding';
@@ -104,6 +105,9 @@ app.use('/api/auth', authRouter);
 // Protected API routes (audit middleware records all authenticated API calls)
 app.use('/api/aws', authMiddleware, auditMiddleware, awsRouter);
 app.use('/api/regions', authMiddleware, auditMiddleware, regionsRouter);
+// Bedrock 工具（Profile 管理/批量创建/FTU/数据共享/IAM/交付表格）。
+// 用独立前缀 /api/bedrock 挂载，避免与 awsRouter 的 /aws/bedrock/quotas 路径歧义。
+app.use('/api/bedrock', authMiddleware, auditMiddleware, bedrockRouter);
 
 // Scheduler status endpoint
 app.get('/api/scheduler/status', authMiddleware, (_req, res) => {

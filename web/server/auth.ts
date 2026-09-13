@@ -19,8 +19,9 @@ const DEFAULT_PAGE_KEYS = [
   'billing', 'cleanup', 'tagcompliance', 'audit', 'settings',
 ];
 
-// 所有可分配页面；ops 对 non-admin 必须在 allowed_pages 中显式出现。
-export const ALL_PAGE_KEYS = [...DEFAULT_PAGE_KEYS, 'ops'];
+// 所有可分配页面；ops 与 bedrock 对 non-admin 必须在 allowed_pages 中显式出现
+// （bedrock 全部走 Admin 凭证，属敏感页面，旧用户不自动继承）。
+export const ALL_PAGE_KEYS = [...DEFAULT_PAGE_KEYS, 'ops', 'bedrock'];
 
 // 规范化前端传来的 allowedPages：过滤非法 key，去重
 function normalizeAllowedPages(input: any): string[] | null {

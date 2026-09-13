@@ -285,6 +285,52 @@ export const api = {
   getBedrockQuotas: (accountId: string, regions: string[]) =>
     request(`/aws/bedrock/quotas/${accountId}?regions=${encodeURIComponent(regions.join(','))}`),
 
+  // ===== Bedrock 工具（/api/bedrock/*）=====
+  bedrockListProfiles: (accountId: string, regions: string[]) =>
+    request(`/bedrock/profiles/${accountId}?regions=${encodeURIComponent(regions.join(','))}`),
+  bedrockListModels: (accountId: string, region: string) =>
+    request(`/bedrock/models/${accountId}?region=${encodeURIComponent(region)}`),
+  bedrockListFoundationModels: (accountId: string, region: string, provider?: string, inferenceType?: string) => {
+    const p = new URLSearchParams({ region });
+    if (provider) p.set('provider', provider);
+    if (inferenceType) p.set('inferenceType', inferenceType);
+    return request(`/bedrock/foundation-models/${accountId}?${p.toString()}`);
+  },
+  // tags 必填：每次都要显式输入，平台不提供默认 Tag
+  bedrockCreateProfiles: (body: { accountId: string; region: string; items: { modelId: string; name: string }[]; tags: { key: string; value: string }[] }) =>
+    request('/bedrock/profiles/create', { method: 'POST', body: JSON.stringify(body) }),
+  bedrockDeleteProfiles: (body: { accountId: string; region: string; arns: string[] }) =>
+    request('/bedrock/profiles/delete', { method: 'POST', body: JSON.stringify(body) }),
+  bedrockTagProfiles: (body: { accountId: string; region: string; arns: string[]; tags: { key: string; value: string }[] }) =>
+    request('/bedrock/profiles/tag', { method: 'POST', body: JSON.stringify(body) }),
+  bedrockUntagProfiles: (body: { accountId: string; region: string; arns: string[]; tagKeys: string[] }) =>
+    request('/bedrock/profiles/untag', { method: 'POST', body: JSON.stringify(body) }),
+  bedrockInvoke: (body: { accountId: string; region: string; modelId: string; prompt: string; maxTokens?: number }) =>
+    request('/bedrock/invoke', { method: 'POST', body: JSON.stringify(body) }),
+  bedrockSubmitFtu: (body: { accountId: string; region: string; form: Record<string, string> }) =>
+    request('/bedrock/ftu', { method: 'POST', body: JSON.stringify(body) }),
+  bedrockGetDataRetention: (accountId: string, regions: string[]) =>
+    request(`/bedrock/data-retention/${accountId}?regions=${encodeURIComponent(regions.join(','))}`),
+  bedrockEnableDataShare: (body: { accountId: string; regions: string[] }) =>
+    request('/bedrock/data-retention/enable', { method: 'POST', body: JSON.stringify(body) }),
+  bedrockListIamUsers: (accountId: string) => request(`/bedrock/iam-users/${accountId}`),
+  bedrockCreateAdminUser: (body: { accountId: string; userName: string; createConsoleLogin?: boolean; createAccessKey?: boolean; passwordResetRequired?: boolean }) =>
+    request('/bedrock/iam-users/create', { method: 'POST', body: JSON.stringify(body) }),
+  // 交付表格：返回二进制 xlsx，用原生 fetch 下载
+  bedrockDeliveryExport: async (body: { rows: any[]; iamUser: string; iamPassword: string }) => {
+    const token = getToken();
+    const res = await fetch(`${BASE}/bedrock/delivery`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ error: '交付表格生成失败' }));
+      throw new Error(err.error || '交付表格生成失败');
+    }
+    return res.blob();
+  },
+
   // 一键提交提额文档到 Support Case（后台 job：生成 PDF → 联邦登录 → Reply → 传附件 → Submit）
   caseDocSubmit: (params: { accountId: string; accountName?: string; caseId: string; companyKey?: string; serviceCode: string; quotaName: string; region: string; requestedValue: number; currentValue?: number; message?: string }) =>
     request('/aws/quotas/case-doc-submit', { method: 'POST', body: JSON.stringify(params) }),

@@ -28,8 +28,10 @@ const SettingsPage: React.FC<SettingsPageProps> = ({ onLogout }) => {
   const [editForm] = Form.useForm();
   const [pwdForm] = Form.useForm();
   const ALL_PAGE_KEYS = PAGE_META.map(p => p.key);
-  // 运维监控包含系统和请求指标，non-admin 必须由管理员显式勾选；旧用户和新用户默认均不授予。
-  const DEFAULT_PAGE_KEYS = PAGE_META.filter(p => p.key !== OPS_PAGE_KEY).map(p => p.key);
+  // 敏感页面（运维监控、Bedrock 工具——后者全部走 Admin 凭证）non-admin 必须显式勾选；
+  // 旧用户和新用户默认均不授予。
+  const SENSITIVE_PAGE_KEYS = [OPS_PAGE_KEY, 'bedrock'];
+  const DEFAULT_PAGE_KEYS = PAGE_META.filter(p => !SENSITIVE_PAGE_KEYS.includes(p.key)).map(p => p.key);
   const ROLE_OPTIONS = [
     { label: '管理员 (admin) — 全部权限', value: 'admin' },
     { label: '部分管理员 (partadmin) — 能操作但仅限勾选页面', value: 'partadmin' },

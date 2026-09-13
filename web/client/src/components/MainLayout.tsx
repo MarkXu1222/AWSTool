@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useLayoutEffect, useRef } from 'react';
 import { Layout, Menu, Button, Skeleton } from 'antd';
-import { HomeOutlined, TeamOutlined, DashboardOutlined, DollarOutlined, SettingOutlined, LogoutOutlined, DeleteOutlined, FileSearchOutlined, GlobalOutlined, TagsOutlined, ThunderboltOutlined, FundOutlined } from '@ant-design/icons';
+import { HomeOutlined, TeamOutlined, DashboardOutlined, DollarOutlined, SettingOutlined, LogoutOutlined, DeleteOutlined, FileSearchOutlined, GlobalOutlined, TagsOutlined, ThunderboltOutlined, FundOutlined, RobotOutlined } from '@ant-design/icons';
 import DashboardPage from '../pages/Dashboard';
 import AccountsPage from '../pages/Accounts';
 import QuotasPage from '../pages/Quotas';
@@ -11,6 +11,7 @@ import AuditLogPage from '../pages/AuditLog';
 import SettingsPage from '../pages/Settings';
 import TagCompliancePage from '../pages/TagCompliance';
 import BulkQuotaPage from '../pages/BulkQuota';
+import BedrockPage from '../pages/Bedrock';
 // 运维监控懒加载：只有实际进入该授权页面时才下载 recharts 分包
 const OpsMonitorPage = React.lazy(() => import('../pages/OpsMonitor'));
 import { api } from '../api';
@@ -27,6 +28,7 @@ export const PAGE_META: { key: string; label: string }[] = [
   { key: 'dashboard', label: '概览' },
   { key: 'accounts', label: '账户管理' },
   { key: 'quotas', label: '配额管理' },
+  { key: 'bedrock', label: 'Bedrock 工具' },
   { key: 'regions', label: '区域管理' },
   { key: 'billing', label: '账单导出' },
   { key: 'cleanup', label: '资源清理' },
@@ -48,6 +50,7 @@ const navItems = [
   { key: 'accounts', icon: <TeamOutlined />, label: '账户管理' },
   { key: 'quotas', icon: <DashboardOutlined />, label: '配额管理' },
   { key: BULK_QUOTA_PAGE_KEY, icon: <ThunderboltOutlined />, label: '批量提额' },
+  { key: 'bedrock', icon: <RobotOutlined />, label: 'Bedrock 工具' },
   { key: 'regions', icon: <GlobalOutlined />, label: '区域管理' },
   { key: 'billing', icon: <DollarOutlined />, label: '账单导出' },
   { key: 'cleanup', icon: <DeleteOutlined />, label: '资源清理' },
@@ -223,6 +226,7 @@ const MainLayout: React.FC<MainLayoutProps> = ({ onLogout }) => {
       case 'dashboard': return <DashboardPage onNavigate={navigate} />;
       case 'accounts': return <AccountsPage />;
       case 'quotas': return <QuotasPage />;
+      case 'bedrock': return <BedrockPage />;
       case BULK_QUOTA_PAGE_KEY: return <BulkQuotaPage />;
       case OPS_PAGE_KEY: return (
         <React.Suspense fallback={<div style={{ padding: 24 }}><Skeleton active paragraph={{ rows: 8 }} /></div>}>

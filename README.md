@@ -3,7 +3,7 @@
 企业级 AWS 多账户（多 Organizations）管理平台。带强制 MFA 登录、页面级权限与全量操作审计。
 
 **线上**：https://markxu.co（EC2 Singapore，PM2 进程 `aws-toolbox`）
-**当前版本**：`0.22.3`（见 `web/client/src/version.ts`，左下角展示）
+**当前版本**：`0.23.0`（见 `web/client/src/version.ts`，左下角展示）
 
 **生产接入规模**（快照 2026-09-06，取自线上 db.json）
 
@@ -75,6 +75,7 @@
 | `accounts` | `Accounts.tsx` | `/api/aws/accounts*`、`/api/aws/root-credentials*`、`/api/aws/temp-credentials` | 账户列表与详情、免登录进控制台、根用户凭证操作 |
 | `quotas` | `Quotas.tsx` | `/api/aws/quotas/*`、`/api/aws/bedrock/quotas/*` | 配额查询、一键提额、流式同步、生成提额 PDF、一键提交文档到 Support Case。Tab：当前配额 / Bedrock 配额 / 当前账户请求 / 在线查询 / 提升记录 |
 | `bulkquota` | `BulkQuota.tsx` | `/api/aws/bulk-quota/*` | 批量提额（按 payer 组织 × 多区域）。**不在 `ALL_PAGE_KEYS` 里**，可见性只由独立权限 `bulk_quota_access` 决定 |
+| `bedrock` | `Bedrock.tsx` | `/api/bedrock/*` | Bedrock 工具（从桌面版 Bedrock Profile Manager 迁移）：Inference Profile 管理/批量创建/模型测试/模型列表/FTU 开通/Fable 5 数据共享/IAM 用户/交付表格。**敏感页面**：全部走 Admin 凭证，non-admin 需显式授权；创建/打 Tag 的 Tag 必须每次手动输入（前后端均无默认值） |
 | `regions` | `Regions.tsx` | `/api/regions/*` | opt-in 区域开通状态扫描与单个/批量开通 |
 | `billing` | `Billing.tsx` | `/api/aws/billing/*` | AWS 官方账单 PDF 批量导出、历史任务、取消与 ZIP 下载 |
 | `cleanup` | `Cleanup.tsx` | `/api/aws/resources/*` | 扫描最近 7 天的 EC2/EBS/S3/Lambda/IAM 用户，展示 IAM 非敏感详情并手动勾选删除；S3 只读 |
@@ -120,11 +121,14 @@ AWS/
     │   ├── restricted-accounts.ts  # ★敏感权限客户：账户级权限收窄 + ExternalId（StackSet 下发必须排除）
     │   ├── billing-export-jobs.ts  # 账单导出持久化 job、全局队列、永久历史、重复下载与重启恢复
     │   ├── billing-exporter.ts     # 严格只读抓取 AWS 官方账单 PDF + 可取消 zip 打包
+    │   ├── bedrock-tools.ts        # Bedrock 工具：Profile 管理/批量创建/FTU/数据共享/IAM（全部走 Admin 凭证，50min 缓存）
+    │   ├── bedrock-delivery.ts     # Bedrock 客户交付 xlsx 生成（exceljs；校验 map-migrated tag 唯一）
     │   ├── case-doc-submitter.ts   # ★一键提交提额文档到 Support Case（生成 PDF → 联邦登录 → Reply → 传附件 → Submit）
     │   ├── security-alerts.ts      # 安全告警：登录爆破/新 IP 登录/敏感操作/429、5xx 突增 → 飞书
     │   └── routes/
     │       ├── aws.ts              # ★awsRouter：主业务端点（50+），含权限守卫
-    │       └── regions.ts          # regionsRouter：区域 opt-in 状态/扫描/开通
+    │       ├── regions.ts          # regionsRouter：区域 opt-in 状态/扫描/开通
+    │       └── bedrock.ts          # bedrockRouter：Bedrock 工具端点（挂 /api/bedrock；tags 强校验无默认值）
     ├── client/
     │   ├── vite.config.ts          # dev 端口 5174；manualChunks 三包分割（vendor/charts/业务）
     │   └── src/
@@ -220,6 +224,7 @@ Admin 临时凭证时长默认 1 小时。数据库当前角色为 `admin` 的�
 | 账单 | PDF job：`POST/GET /billing/export-jobs`、`GET /billing/export-jobs/:jobId`、`POST .../:jobId/cancel`、`GET .../:jobId/download`（均 `requireBillingAccess`，单任务再校验 owner/admin） |
 | 配额 | `GET /quotas/:accountId/:serviceCode`、`POST /quotas/increase`(admin)、`GET /quotas/requests`、`GET /quotas/stats`、`GET /quotas/companies`、`GET /quotas/company/:accountId`、`POST /quotas/generate-doc`、`POST /quotas/case-doc-submit`(admin)、`GET /quotas/case-doc-submit/:jobId`（轮询不写审计；**必须注册在 `/quotas/:accountId/:serviceCode` 通配之前**）、`POST /quotas/sync`、`POST /quotas/sync-account/:accountId`、`GET /quotas/sync-status`、`GET /quotas/sync-stream`(SSE) |
 | Bedrock 配额 | `GET /bedrock/quotas/:accountId?regions=a,b` |
+| Bedrock 工具（独立前缀 `/api/bedrock`） | `GET /profiles/:accountId?regions=`、`GET /models/:accountId?region=`、`GET /foundation-models/:accountId?region=`、`POST /profiles/create`(admin,**tags 必填强校验**)、`POST /profiles/delete`(admin)、`POST /profiles/tag`(admin,tags 必填)、`POST /profiles/untag`(admin)、`POST /invoke`(admin)、`POST /ftu`(admin)、`GET /data-retention/:accountId?regions=`、`POST /data-retention/enable`(strict admin)、`GET /iam-users/:accountId`(admin)、`POST /iam-users/create`(strict admin)、`POST /delivery`(admin，服务端校验 map-migrated tag 唯一且必存在) |
 | 批量提额 | `GET /bulk-quota/payers`、`GET /bulk-quota/accounts/:payerAccountId`、`POST /bulk-quota/submit`、`GET /bulk-quota/job/:jobId`（全部 `requireBulkQuotaAccess`） |
 | 根凭证 | `GET /root-credentials/:accountId`、`GET /temp-credentials/:accountId?durationHours=1`（rootAccess；仅 admin 可请求 2–12 小时）、`POST /root-credentials/:accountId/delete-mfa`(rootAccess)、`.../recover-password`(rootAccess)、`.../delete-access-key`(rootAccess)、`.../delete-key`(admin) |
 | 资源清理 | `GET /resources/:accountId/:region`（最近 7 天；Lambda 按最近修改；IAM/S3 为全局；失败服务通过 warnings 返回）、`POST /resources/:accountId/delete`（服务端重新读取时间并复验；EC2/EBS/Lambda 兼容 admin/partadmin，IAM 用户仅实时 strict admin 且级联清理依赖；S3 不可删除） |
