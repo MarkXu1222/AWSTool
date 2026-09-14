@@ -35,13 +35,22 @@ const App: React.FC = () => {
     return () => clearInterval(interval);
   }, [authenticated]);
 
+  // /auth/me 的 401 不会 reject（要把错误文案交给登录页），所以必须显式判断：
+  // 只有拿到带 username 的正常响应才算已登录。否则会话过期会被当成
+  // 「已登录但 mfaEnabled 缺失」而错误跳转到 MFA 绑定页（且二维码为空）。
+  const isValidMe = (me: any) => !!me && !me.unauthorized && !me.error && !!me.username;
+
   const checkAuth = async () => {
     const token = localStorage.getItem('token');
     if (!token) { setChecking(false); return; }
     try {
       const me = await api.me();
-      setAuthenticated(true);
-      setMfaBound(!!me.mfaEnabled);
+      if (isValidMe(me)) {
+        setAuthenticated(true);
+        setMfaBound(!!me.mfaEnabled);
+      } else {
+        localStorage.removeItem('token');
+      }
     } catch {
       localStorage.removeItem('token');
     }
@@ -53,7 +62,9 @@ const App: React.FC = () => {
     setAuthenticated(true);
     try {
       const me = await api.me();
-      setMfaBound(!!me.mfaEnabled);
+      // 取不到有效信息时按「已绑定」处理，宁可放行到主界面（后续请求会再触发 401
+      // 刷新回登录页），也不要把用户推进一个必然空白的 MFA 绑定页。
+      setMfaBound(isValidMe(me) ? !!me.mfaEnabled : true);
     } catch { setMfaBound(true); }
   };
 

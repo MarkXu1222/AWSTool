@@ -181,6 +181,9 @@ const MainLayout: React.FC<MainLayoutProps> = ({ onLogout }) => {
 
   useEffect(() => {
     api.me().then(r => {
+      // /auth/me 的 401 是正常 resolve 的（带 unauthorized 标记），
+      // 不能拿它去覆盖用户名/权限，否则会闪成空用户名 + 空菜单。
+      if (!r || r.unauthorized || !r.username) return;
       setUsername(r.username || '');
       setBulkQuotaAccess(!!r.bulkQuotaAccess);
       setIsAdmin(r.role === 'admin');

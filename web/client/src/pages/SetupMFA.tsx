@@ -24,8 +24,10 @@ const SetupMFA: React.FC<SetupMFAProps> = ({ onComplete, onLogout }) => {
     setLoading(true);
     try {
       const res = await api.setupMFA();
+      // 会话已过期时不能停在空白二维码页面，直接退回登录页
+      if (res.unauthorized) { message.warning('登录已过期，请重新登录'); onLogout(); return; }
       if (res.qrCode) { setQrCode(res.qrCode); setSecret(res.secret); }
-      else message.error('获取 MFA 二维码失败');
+      else message.error(res.error || '获取 MFA 二维码失败');
     } catch (e: any) { message.error(e.message); }
     finally { setLoading(false); }
   };

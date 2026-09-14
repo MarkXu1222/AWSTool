@@ -21,11 +21,18 @@ async function request(path: string, options: RequestInit = {}) {
     },
   });
 
-  // Only redirect on 401 for non-auth routes
-  if (res.status === 401 && !path.startsWith('/auth/')) {
+  // 401 一律清 token。非 auth 路由直接刷新回登录页；
+  // auth 路由（登录/MFA）要把响应体交回调用方展示「密码错误」等文案，
+  // 但必须打上 unauthorized 标记 —— 否则调用方拿到的是一个正常 resolve 的
+  // 对象，会把「会话过期」误判成「已登录但未绑定 MFA」而错误跳到绑定页。
+  if (res.status === 401) {
     localStorage.removeItem('token');
-    window.location.reload();
-    throw new Error('Session expired');
+    if (!path.startsWith('/auth/')) {
+      window.location.reload();
+      throw new Error('Session expired');
+    }
+    const body = await res.json().catch(() => ({}));
+    return { ...body, unauthorized: true };
   }
 
   return res.json();
