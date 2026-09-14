@@ -350,6 +350,17 @@ const rootEmailFailure = (res: Response, error: unknown) => {
     ? error.message : 'Root 密码任务服务异常，请联系管理员';
   return res.status(status).json({ error: message });
 };
+const verifyRootEmailStepUp = (req: Request, res: Response, value: unknown) => {
+  try { verifyStepUpTotp(res.locals.rootResetUser, value, req.ip); }
+  catch (error) {
+    const user = res.locals.rootResetUser;
+    try {
+      db.addAuditLog(Number(user?.id) || null, 'ROOT_PASSWORD_STEPUP_FAILED',
+        `Root 密码高风险操作 MFA 验证失败 · ${req.method} ${req.path}`, user?.username, req.ip);
+    } catch { console.error('[RootEmail] MFA 失败审计写入失败'); }
+    throw error;
+  }
+};
 awsRouter.post('/root-email/jobs/:id/reset-link', async (req, res) => {
   try {
     const data = await getRootResetLink(String(req.params.id), res.locals.rootResetUser);
@@ -376,7 +387,7 @@ awsRouter.get('/root-email/batches/:id', (req, res) => {
 awsRouter.post('/root-email/batches', async (req, res) => {
   try {
     if (req.body?.confirmSetPassword !== true) throw new RootEmailError('请确认将自动修改所选账户的 Root 密码');
-    verifyStepUpTotp(res.locals.rootResetUser, req.body?.totpCode);
+    verifyRootEmailStepUp(req, res, req.body?.totpCode);
     const result = await submitRootEmailBatch(String(req.body.payerAccountId || ''), req.body.accountIds,
       String(req.body.requestId || ''), {
         payerName: req.body?.confirmPayerName,
@@ -388,11 +399,11 @@ awsRouter.post('/root-email/batches', async (req, res) => {
 });
 awsRouter.post('/root-email/batches/:id/credentials-csv', (req, res) => {
   try {
-    verifyStepUpTotp(res.locals.rootResetUser, req.body?.totpCode);
-    const download = prepareRootCredentialCsv(String(req.params.id), res.locals.rootResetUser);
+    verifyRootEmailStepUp(req, res, req.body?.totpCode);
+    const download = prepareRootCredentialCsv(String(req.params.id), res.locals.rootResetUser, req.ip);
     let finished = false;
     res.once('finish', () => { finished = true; download.complete(true); });
-    res.once('close', () => { if (!finished) download.complete(false); });
+    res.once('close', () => { if (!finished) download.complete(res.headersSent); });
     res.locals.audited = true;
     res.set({
       'Cache-Control': 'no-store, max-age=0',

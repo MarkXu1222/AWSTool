@@ -104,7 +104,7 @@ test('mail waiting survives restart with its cursor, blocks duplicate sends, and
   try {
     const file = path.join(dir, 'jobs.json');
     const store = new RootEmailStore(file);
-    const meta = { batchId: randomUUID(), payerAccountId: '999999999999', payerName: 'payer-a' };
+    const meta = { batchId: randomUUID(), payerAccountId: '999999999999', payerName: 'payer-a', autoSetPassword: true as const };
     const { jobs: [job] } = store.createBatch([input], meta);
     const sentAt = new Date().toISOString();
     store.update(job.id, { status: 'waiting_mail', phase: 'waiting_mail', mailCursor: 4821, sentAt,
@@ -141,7 +141,7 @@ test('a batch is atomic and does not enqueue its valid subset when another membe
     const store = new RootEmailStore(path.join(dir, 'jobs.json'));
     store.create(input);
     assert.throws(() => store.createBatch([{ ...input, accountId: '222222222222' }, input], {
-      batchId: randomUUID(), payerAccountId: '999999999999', payerName: 'payer-a',
+      batchId: randomUUID(), payerAccountId: '999999999999', payerName: 'payer-a', autoSetPassword: true,
     }), /已有/);
     assert.equal(store.list().length, 1);
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
@@ -151,7 +151,7 @@ test('batch request identifiers are idempotent and cannot be reused with another
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'root-email-batch-'));
   try {
     const store = new RootEmailStore(path.join(dir, 'jobs.json'));
-    const meta = { batchId: randomUUID(), payerAccountId: '999999999999', payerName: 'payer-a' };
+    const meta = { batchId: randomUUID(), payerAccountId: '999999999999', payerName: 'payer-a', autoSetPassword: true as const };
     const first = store.createBatch([input], meta);
     assert.equal(first.reused, false);
     store.update(first.jobs[0].id, { status: 'email_sent' });
@@ -165,19 +165,20 @@ test('batch request identifiers are idempotent and cannot be reused with another
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
-test('500 accounts fit in one batch; cancellation leaves sent and running tasks unchanged', () => {
+test('20 accounts fit in one automatic batch; larger batches are rejected and cancellation preserves active results', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'root-email-batch-'));
   try {
     const store = new RootEmailStore(path.join(dir, 'jobs.json'));
-    const meta = { batchId: randomUUID(), payerAccountId: '999999999999', payerName: 'payer-a' };
-    const inputs = Array.from({ length: 500 }, (_, index) => ({ ...input, accountId: String(index).padStart(12, '0') }));
+    const meta = { batchId: randomUUID(), payerAccountId: '999999999999', payerName: 'payer-a', autoSetPassword: true as const };
+    const inputs = Array.from({ length: 20 }, (_, index) => ({ ...input, accountId: String(index).padStart(12, '0') }));
     const result = store.createBatch(inputs, meta);
-    assert.equal(result.jobs.length, 500);
-    assert.throws(() => store.create(input), /队列/);
+    assert.equal(result.jobs.length, 20);
+    assert.throws(() => store.createBatch([...inputs, { ...input, accountId: '999999999998' }],
+      { ...meta, batchId: randomUUID() }), /批次参数/);
     store.update(result.jobs[0].id, { status: 'email_sent' });
     store.update(result.jobs[1].id, { status: 'running' });
     store.cancelQueuedBatch(meta.batchId);
-    assert.equal(store.list().filter(j => j.status === 'cancelled').length, 498);
+    assert.equal(store.list().filter(j => j.status === 'cancelled').length, 18);
     assert.equal(store.get(result.jobs[0].id)?.status, 'email_sent');
     assert.equal(store.get(result.jobs[1].id)?.status, 'running');
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }

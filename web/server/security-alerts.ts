@@ -90,6 +90,13 @@ const SENSITIVE_ACTIONS: Record<string, string> = {
   ROOT_MFA_DELETE: '删除 Root MFA',
   ROOT_PASSWORD_RECOVER: '恢复根用户密码',
   ROOT_ACCESSKEY_DELETE: '删除 Root Access Key',
+  ROOT_PASSWORD_BATCH_CREATE: '创建批量 Root 自动改密任务',
+  ROOT_PASSWORD_SET: '自动设置 Root 新密码成功',
+  ROOT_PASSWORD_SET_FAILED: '自动设置 Root 新密码失败',
+  ROOT_PASSWORD_SET_UNKNOWN: 'Root 新密码提交结果未知',
+  ROOT_PASSWORD_CSV_DOWNLOAD: '下载一次性 Root 密码 CSV',
+  ROOT_PASSWORD_CREDENTIAL_DESTROY: '销毁临时 Root 密码密文',
+  ROOT_PASSWORD_STEPUP_FAILED: 'Root 密码高风险操作 MFA 验证失败',
   CONSOLE_ADMIN_LOGIN: 'Admin 控制台登录',
   USER_CREATE: '创建平台用户',
   USER_DELETE: '删除平台用户',
@@ -102,7 +109,9 @@ const SENSITIVE_ACTIONS: Record<string, string> = {
 
 // 单类敏感操作 5 分钟内只推一次汇总冷却，避免批量操作刷屏；
 // root 凭证四类风险最高，不设冷却、每次必达。
-const ALWAYS_NOTIFY = new Set(['ROOT_MFA_DELETE', 'ROOT_PASSWORD_RECOVER', 'ROOT_ACCESSKEY_DELETE']);
+const ALWAYS_NOTIFY = new Set(['ROOT_MFA_DELETE', 'ROOT_PASSWORD_RECOVER', 'ROOT_ACCESSKEY_DELETE',
+  'ROOT_PASSWORD_BATCH_CREATE', 'ROOT_PASSWORD_SET', 'ROOT_PASSWORD_SET_FAILED', 'ROOT_PASSWORD_SET_UNKNOWN',
+  'ROOT_PASSWORD_CSV_DOWNLOAD', 'ROOT_PASSWORD_CREDENTIAL_DESTROY']);
 const SENSITIVE_COOLDOWN_MS = 5 * 60 * 1000;
 
 export function onAuditAction(action: string, username: string | null | undefined, ip: string | null | undefined, detail: string) {

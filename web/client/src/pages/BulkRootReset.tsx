@@ -1,16 +1,27 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { Alert, Button, Card, Input, message, Popconfirm, Progress, Select, Space, Table, Tag, Typography } from 'antd';
-import { CopyOutlined, MailOutlined, ReloadOutlined, SearchOutlined, StopOutlined } from '@ant-design/icons';
+import { Alert, Button, Card, Input, message, Modal, Popconfirm, Progress, Select, Space, Table, Tag, Typography } from 'antd';
+import { CopyOutlined, DownloadOutlined, LockOutlined, ReloadOutlined, SearchOutlined, StopOutlined } from '@ant-design/icons';
 import { api, RootEmailAccount, RootEmailBatchView, RootEmailJobView } from '../api';
 import { showRootResetLink } from '../utils/root-reset-link';
 
 const statusLabels: Record<RootEmailJobView['status'], string> = {
-  queued: '排队中', running: '执行中', email_sent: 'AWS 已确认发送', failed: '失败', cancelled: '已停止', interrupted: '结果待检查',
-  waiting_mail: '等待邮件', link_ready: '已找到重置链接', mail_failed: '邮件查询失败',
+  queued: '排队中', running: '发送恢复邮件', email_sent: 'AWS 已确认发信', failed: '发信失败', cancelled: '已停止', interrupted: '结果待检查',
+  waiting_mail: '等待恢复邮件', link_ready: '链接已验证', setting_password: '正在设置密码', password_set: '密码设置成功',
+  password_failed: '密码设置失败', password_unknown: '密码结果未知', mail_failed: '邮件查询失败',
 };
 const statusColors: Record<RootEmailJobView['status'], string> = {
   queued: 'default', running: 'processing', email_sent: 'success', failed: 'error', cancelled: 'default', interrupted: 'warning',
-  waiting_mail: 'processing', link_ready: 'success', mail_failed: 'warning',
+  waiting_mail: 'processing', link_ready: 'processing', setting_password: 'processing', password_set: 'success',
+  password_failed: 'error', password_unknown: 'warning', mail_failed: 'warning',
+};
+
+type Availability = {
+  ready: boolean;
+  detail: string;
+  mailboxConfigured: boolean;
+  passwordAutomationReady: boolean;
+  encryptionReady: boolean;
+  encryptionDetail?: string;
 };
 
 const BulkRootResetPage: React.FC<{ canOperate?: boolean }> = ({ canOperate = false }) => {
@@ -20,8 +31,8 @@ const BulkRootResetPage: React.FC<{ canOperate?: boolean }> = ({ canOperate = fa
   const [search, setSearch] = useState('');
   const [selected, setSelected] = useState<string[]>([]);
   const [cachedAt, setCachedAt] = useState('');
-  const [maxBatchSize, setMaxBatchSize] = useState(500);
-  const [available, setAvailable] = useState<{ ready: boolean; detail: string; mailboxConfigured: boolean } | null>(null);
+  const [maxBatchSize, setMaxBatchSize] = useState(20);
+  const [available, setAvailable] = useState<Availability | null>(null);
   const [history, setHistory] = useState<RootEmailBatchView[]>([]);
   const [batchId, setBatchId] = useState('');
   const [batch, setBatch] = useState<RootEmailBatchView | null>(null);
@@ -29,6 +40,12 @@ const BulkRootResetPage: React.FC<{ canOperate?: boolean }> = ({ canOperate = fa
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [refresh, setRefresh] = useState(0);
+  const [confirmOpen, setConfirmOpen] = useState(false);
+  const [confirmPayerName, setConfirmPayerName] = useState('');
+  const [confirmAccountCount, setConfirmAccountCount] = useState('');
+  const [totpCode, setTotpCode] = useState('');
+  const [downloadOpen, setDownloadOpen] = useState(false);
+  const [downloadTotpCode, setDownloadTotpCode] = useState('');
   const request = useRef<{ signature: string; id: string } | null>(null);
 
   useEffect(() => {
@@ -38,13 +55,13 @@ const BulkRootResetPage: React.FC<{ canOperate?: boolean }> = ({ canOperate = fa
       try {
         const results = await Promise.all([api.rootEmailCatalog(), api.rootEmailAvailability(), api.rootEmailBatches()]);
         if (disposed) return;
-        const failed = results.find(r => !r.success);
+        const failed = results.find(result => !result.success);
         if (failed) throw new Error(failed.error || '加载失败');
-        const [catalog, runtime, batches] = results.map(r => r.data);
+        const [catalog, runtime, batches] = results.map(result => result.data);
         setPayers(catalog.payers); setAccounts(catalog.accounts); setCachedAt(catalog.cachedAt);
         setMaxBatchSize(catalog.maxBatchSize); setAvailable(runtime); setHistory(batches);
-        setSelected(ids => ids.filter(id => catalog.accounts.some((a: RootEmailAccount) => a.accountId === id && a.eligible)));
-      } catch (e: any) { if (!disposed) setError(e.message); }
+        setSelected(ids => ids.filter(id => catalog.accounts.some((account: RootEmailAccount) => account.accountId === id && account.eligible)));
+      } catch (cause: any) { if (!disposed) setError(cause.message); }
       finally { if (!disposed) setLoading(false); }
     };
     void load();
@@ -62,69 +79,100 @@ const BulkRootResetPage: React.FC<{ canOperate?: boolean }> = ({ canOperate = fa
         if (!result.success) throw new Error(result.error || '读取批次失败');
         setBatch(result.data);
         if (result.data.done < result.data.total) timer = setTimeout(poll, 5_000);
-      } catch (e: any) {
-        if (!disposed) { setError(e.message); timer = setTimeout(poll, 5_000); }
+      } catch (cause: any) {
+        if (!disposed) { setError(cause.message); timer = setTimeout(poll, 5_000); }
       }
     };
     void poll();
     return () => { disposed = true; clearTimeout(timer); };
   }, [batchId, refresh]);
 
-  const eligible = useMemo(() => accounts.filter(a => a.payerAccountId === payer), [accounts, payer]);
-  const filtered = eligible.filter(a => `${a.accountId} ${a.name} ${a.email}`.toLowerCase().includes(search.trim().toLowerCase()));
-  const selectedAccounts = eligible.filter(a => selected.includes(a.accountId) && a.eligible);
-  const domains = [...new Set(selectedAccounts.map(a => a.email.split('@')[1].toLowerCase()))].sort();
-  const canSend = canOperate && !!available?.ready && !busy && !loading && selectedAccounts.length > 0 && selectedAccounts.length <= maxBatchSize;
+  const selectedPayer = payers.find(item => item.accountId === payer);
+  const eligible = useMemo(() => accounts.filter(account => account.payerAccountId === payer), [accounts, payer]);
+  const filtered = eligible.filter(account => `${account.accountId} ${account.name} ${account.email}`.toLowerCase().includes(search.trim().toLowerCase()));
+  const selectedAccounts = eligible.filter(account => selected.includes(account.accountId) && account.eligible);
+  const domains = [...new Set(selectedAccounts.map(account => account.email.split('@')[1].toLowerCase()))].sort();
+  const canStart = canOperate && !!available?.passwordAutomationReady && !busy && !loading
+    && selectedAccounts.length > 0 && selectedAccounts.length <= maxBatchSize;
+  const confirmationMatches = confirmPayerName === selectedPayer?.name
+    && confirmAccountCount === String(selectedAccounts.length) && /^\d{6}$/.test(totpCode);
 
+  const openConfirmation = () => {
+    if (!canStart) return;
+    setConfirmPayerName(''); setConfirmAccountCount(''); setTotpCode(''); setError(''); setConfirmOpen(true);
+  };
   const submit = async () => {
-    if (!canSend) return;
-    const ids = selectedAccounts.map(a => a.accountId).sort();
+    if (!canStart || !confirmationMatches || !selectedPayer) return;
+    const ids = selectedAccounts.map(account => account.accountId).sort();
     const signature = JSON.stringify([payer, ids]);
     if (request.current?.signature !== signature) request.current = { signature, id: crypto.randomUUID() };
     setBusy(true); setError('');
     try {
-      const result = await api.sendRootEmailBatch({ payerAccountId: payer, accountIds: ids, requestId: request.current.id });
+      const result = await api.sendRootEmailBatch({
+        payerAccountId: payer, accountIds: ids, requestId: request.current.id, totpCode,
+        confirmPayerName, confirmAccountCount: Number(confirmAccountCount),
+      });
       if (!result.success) throw new Error(result.error || '批量提交失败');
       setBatch(result.data); setBatchId(result.data.id); setSelected([]); request.current = null;
-      setRefresh(v => v + 1);
-      message.success(`已创建 ${result.data.total} 个账户的恢复邮件任务`);
-    } catch (e: any) { setError(`${e.message}。请求未确认时可用相同选择重试，系统会防止重复创建同一批次。`); }
-    finally { setBusy(false); }
+      setConfirmOpen(false); setConfirmPayerName(''); setConfirmAccountCount(''); setRefresh(value => value + 1);
+      message.success(`已创建 ${result.data.total} 个账户的自动改密任务`);
+    } catch (cause: any) {
+      setError(`${cause.message}。请求未确认时可用相同选择重试，系统会防止重复创建同一批次。`);
+    } finally { setTotpCode(''); setBusy(false); }
   };
   const cancel = async () => {
     setBusy(true); setError('');
     try {
       const result = await api.cancelRootEmailBatch(batchId);
       if (!result.success) throw new Error(result.error || '停止失败');
-      setBatch(result.data); setRefresh(v => v + 1);
-    } catch (e: any) { setError(e.message); }
+      setBatch(result.data); setRefresh(value => value + 1);
+    } catch (cause: any) { setError(cause.message); }
     finally { setBusy(false); }
+  };
+  const downloadCredentials = async () => {
+    if (!batch?.canDownloadCredentials || !/^\d{6}$/.test(downloadTotpCode)) return;
+    setBusy(true); setError('');
+    try {
+      const count = await api.downloadRootCredentialCsv(batch.id, downloadTotpCode);
+      setDownloadOpen(false); setRefresh(value => value + 1);
+      message.success(`已下载 ${count} 个已确认密码；服务器端临时密文已销毁`);
+    } catch (cause: any) { setError(cause.message); }
+    finally { setDownloadTotpCode(''); setBusy(false); }
   };
 
   return <Space direction="vertical" size={16} style={{ width: '100%' }}>
     <div className="page-header"><div>
-      <h2 className="page-header-title">批量重置 Root 密码</h2>
-      <p className="page-header-subtitle">选择 payer 和成员账户，集中查看恢复任务的进度与结果。</p>
+      <h2 className="page-header-title">批量设置 Root 新密码</h2>
+      <p className="page-header-subtitle">发送恢复邮件、验证一次性链接、自动设置强随机密码，并由创建者一次性导出凭证。</p>
     </div></div>
-    {!canOperate && <Alert type="info" showIcon message="当前为仅查看权限" description="可以查看账户清单和全部批次进度。发信、停止任务和获取重置链接需要操作权限。" />}
-    <Alert type="info" showIcon message={available?.mailboxConfigured ? '批量发信与恢复链接查询' : '当前阶段：批量发送恢复邮件'}
-      description={available?.mailboxConfigured ? '发信后自动查询对应邮箱，找到链接后可打开 AWS 页面设置新密码。链接就绪不代表密码已修改。'
-        : '邮箱 API 后端凭据尚未配置。任务成功表示 AWS 已确认发信，密码尚未修改；请在邮箱平台查收后完成后续重置。'} />
+    {!canOperate && <Alert type="info" showIcon message="当前为仅查看权限"
+      description="可以查看账户清单和全部批次进度，但不能创建、停止任务或下载 Root 凭证。" />}
+    <Alert type="warning" showIcon message="高风险操作：将真实修改 AWS Root 密码"
+      description="每批最多 20 个成员账户。系统生成 24 位强随机密码并严格串行提交；确认成功的密码使用 AES-256-GCM 临时保存，最多 30 分钟，且只能由批次创建者通过 MFA 下载一次。失败或结果未知的任务不会自动重试。" />
     {error && <Alert type="error" showIcon message={error} closable onClose={() => setError('')} />}
     {available && !available.ready && <Alert type="warning" showIcon message="发送环境尚未就绪" description={available.detail} />}
+    {available && available.ready && !available.mailboxConfigured && <Alert type="error" showIcon message="邮箱 API 未配置"
+      description="自动改密必须读取并严格校验恢复邮件，配置完成前不能创建批次。" />}
+    {available && !available.encryptionReady && <Alert type="error" showIcon message="临时凭证加密不可用"
+      description={available.encryptionDetail || '请配置专用 encryptionKey 后重启服务。'} />}
+
     <Card size="small" title="选择账户">
       <Space direction="vertical" size={12} style={{ width: '100%' }}>
         <Space wrap>
           <Select aria-label="选择 Payer" style={{ width: 320, maxWidth: '100%' }} placeholder="选择 payer（组织管理账户）"
             showSearch optionFilterProp="label" value={payer || undefined} disabled={busy || loading}
-            options={payers.map(p => ({ value: p.accountId, label: `${p.name} (${p.accountId})` }))}
+            options={payers.map(item => ({ value: item.accountId, label: `${item.name} (${item.accountId})` }))}
             onChange={value => { setPayer(value); setSelected([]); setSearch(''); request.current = null; }} />
           <Input aria-label="搜索账户" prefix={<SearchOutlined />} placeholder="搜索账户 ID、名称或邮箱" value={search}
-            onChange={e => setSearch(e.target.value)} allowClear style={{ width: 280 }} disabled={!payer || busy} />
-          <Button icon={<ReloadOutlined />} loading={loading} disabled={busy} onClick={() => { setError(''); setRefresh(v => v + 1); }}>刷新列表</Button>
+            onChange={event => setSearch(event.target.value)} allowClear style={{ width: 280 }} disabled={!payer || busy} />
+          <Button icon={<ReloadOutlined />} loading={loading} disabled={busy}
+            onClick={() => { setError(''); setRefresh(value => value + 1); }}>刷新列表</Button>
         </Space>
         <Space wrap>
-          {canOperate && <><Button disabled={!payer || busy} onClick={() => setSelected(filtered.filter(a => a.eligible).map(a => a.accountId))}>选择全部筛选结果</Button>
+          {canOperate && <><Button disabled={!payer || busy}
+            onClick={() => setSelected(filtered.filter(account => account.eligible).slice(0, maxBatchSize).map(account => account.accountId))}>
+            选择前 {maxBatchSize} 个筛选结果
+          </Button>
           <Button disabled={!selected.length || busy} onClick={() => setSelected([])}>清空选择</Button>
           <Typography.Text>已选 {selectedAccounts.length} 个账户 · 每批最多 {maxBatchSize} 个</Typography.Text></>}
           {cachedAt && <Typography.Text type="secondary">账户缓存：{new Date(cachedAt).toLocaleString()}</Typography.Text>}
@@ -133,58 +181,117 @@ const BulkRootResetPage: React.FC<{ canOperate?: boolean }> = ({ canOperate = fa
           pagination={{ pageSize: 20, showSizeChanger: true, showTotal: total => `共 ${total} 个账户` }} scroll={{ x: 760 }}
           locale={{ emptyText: payer ? '该 payer 下没有匹配的成员账户' : '请先选择 payer' }}
           rowSelection={canOperate ? { selectedRowKeys: selected, preserveSelectedRowKeys: true,
-            onChange: keys => setSelected(keys.map(String)), getCheckboxProps: a => ({ disabled: !a.eligible || busy }) } : undefined}
+            onChange: keys => setSelected(keys.map(String)), getCheckboxProps: account => ({ disabled: !account.eligible || busy }) } : undefined}
           columns={[
             { title: '账户 ID', dataIndex: 'accountId', width: 150 },
             { title: '名称', dataIndex: 'name', ellipsis: true },
             { title: 'Root 邮箱', dataIndex: 'email', width: 260, ellipsis: true },
-            { title: '状态', dataIndex: 'state', width: 120, render: (v, a) => <Tag color={a.eligible ? 'success' : 'default'}>{a.eligible ? v : `${v} · 不可选`}</Tag> },
+            { title: '状态', dataIndex: 'state', width: 120,
+              render: (value, account) => <Tag color={account.eligible ? 'success' : 'default'}>{account.eligible ? value : `${value} · 不可选`}</Tag> },
           ]} />
         {!!domains.length && <Space wrap>
           <Typography.Text type="secondary">所选收件邮箱域名：</Typography.Text>
           {domains.map(domain => <Tag key={domain}>{domain}</Tag>)}
           <Button size="small" icon={<CopyOutlined />} onClick={() => navigator.clipboard.writeText(JSON.stringify(domains))
-            .then(() => message.success('已复制所选域名清单')).catch(() => message.error('复制失败，请手动复制域名'))}>复制域名清单</Button>
+            .then(() => message.success('已复制所选域名清单')).catch(() => message.error('复制失败，请手动复制域名'))}>
+            复制域名清单
+          </Button>
         </Space>}
-        {canOperate && <Popconfirm title={`向 ${selectedAccounts.length} 个账户发送恢复邮件？`}
-          description="按所选清单逐个执行，最多识别 3 张验证码。提交后可停止尚未发送的任务。" okText="开始发送" cancelText="取消"
-          onConfirm={submit} disabled={!canSend}>
-          <Button type="primary" icon={<MailOutlined />} loading={busy} disabled={!canSend}>批量发送恢复邮件（{selectedAccounts.length}）</Button>
-        </Popconfirm>}
+        {canOperate && <Button type="primary" danger icon={<LockOutlined />} loading={busy} disabled={!canStart} onClick={openConfirmation}>
+          创建自动改密批次（{selectedAccounts.length}）
+        </Button>}
       </Space>
     </Card>
+
     <Card size="small" title="批次进度与历史">
       <Space direction="vertical" size={12} style={{ width: '100%' }}>
         <Select aria-label="查看历史批次" style={{ width: '100%' }} placeholder="查看最近批次" value={batchId || undefined} disabled={busy}
-          options={history.map(b => ({ value: b.id, label: `${new Date(b.createdAt).toLocaleString()} · ${b.payerName} · ${b.total} 个账户 · ${b.createdBy}` }))}
+          options={history.map(item => ({ value: item.id,
+            label: `${new Date(item.createdAt).toLocaleString()} · ${item.payerName} · ${item.total} 个账户 · ${item.createdBy}` }))}
           onChange={id => { setBatch(null); setBatchId(id); }} />
         {batch ? <>
           <Typography.Text strong>{batch.payerName} · {batch.total} 个账户</Typography.Text>
-          <Progress percent={Math.round(batch.done / batch.total * 100)} status={batch.failed || batch.interrupted || batch.mailFailed ? 'exception' : batch.done === batch.total ? 'normal' : 'active'} />
+          <Progress percent={Math.round(batch.done / batch.total * 100)}
+            status={batch.failed || batch.interrupted || batch.mailFailed || batch.passwordFailed || batch.passwordUnknown
+              ? 'exception' : batch.done === batch.total ? 'normal' : 'active'} />
           <Space wrap>
-            <Tag>排队 {batch.queued}</Tag><Tag color="processing">执行 {batch.running}</Tag>
-            <Tag color="success">已发信 {batch.sent}</Tag><Tag color="error">失败 {batch.failed}</Tag>
-            <Tag color="warning">待检查 {batch.interrupted}</Tag><Tag>已停止 {batch.cancelled}</Tag>
-            <Tag color="processing">等待邮件 {batch.waitingMail || 0}</Tag><Tag color="success">链接就绪 {batch.linkReady || 0}</Tag>
-            <Tag color="warning">邮件查询失败 {batch.mailFailed || 0}</Tag>
-            {canOperate && batch.canManage && batch.done < batch.total && <Popconfirm title="停止本批次？" description="已发送的恢复邮件无法撤回。" okText="停止批次" cancelText="取消" onConfirm={cancel}>
+            <Tag>排队 {batch.queued}</Tag><Tag color="processing">发信 {batch.running}</Tag>
+            <Tag color="success">已发信 {batch.sent}</Tag><Tag color="processing">等待邮件 {batch.waitingMail || 0}</Tag>
+            <Tag color="processing">链接就绪 {batch.linkReady || 0}</Tag><Tag color="processing">设置密码 {batch.settingPassword || 0}</Tag>
+            <Tag color="success">密码成功 {batch.passwordSet || 0}</Tag><Tag color="error">密码失败 {batch.passwordFailed || 0}</Tag>
+            <Tag color="warning">密码未知 {batch.passwordUnknown || 0}</Tag><Tag color="warning">邮件失败 {batch.mailFailed || 0}</Tag>
+            <Tag color="error">发信失败 {batch.failed}</Tag><Tag color="warning">待检查 {batch.interrupted}</Tag><Tag>已停止 {batch.cancelled}</Tag>
+          </Space>
+          <Space wrap>
+            {batch.canDownloadCredentials && <Button type="primary" icon={<DownloadOutlined />} disabled={busy}
+              onClick={() => { setDownloadTotpCode(''); setDownloadOpen(true); }}>
+              一次性下载凭证 CSV（{batch.credentialsAvailable}）
+            </Button>}
+            {batch.credentialExpiresAt && !batch.credentialsDownloadedAt && <Typography.Text type="warning">
+              最早一项凭证将在 {new Date(batch.credentialExpiresAt).toLocaleString()} 自动销毁
+            </Typography.Text>}
+            {batch.batchCredentialCutoffAt && <Tag color="warning">
+              已为凭证下载窗口停止剩余任务（{new Date(batch.batchCredentialCutoffAt).toLocaleString()}）
+            </Tag>}
+            {batch.credentialsDownloadedAt && <Tag color="success">
+              已于 {new Date(batch.credentialsDownloadedAt).toLocaleString()} 下载并销毁服务器密文
+            </Tag>}
+            {!batch.credentialsDownloadedAt && batch.done === batch.total && batch.passwordSet > 0 && batch.credentialsAvailable === 0
+              && <Tag color="warning">临时凭证已过期或销毁</Tag>}
+            {canOperate && batch.canManage && batch.done < batch.total && <Popconfirm title="停止本批次？"
+              description="已发送的恢复邮件无法撤回；提交中的密码可能进入结果未知状态。" okText="停止批次" cancelText="取消" onConfirm={cancel}>
               <Button size="small" icon={<StopOutlined />} disabled={busy}>停止批次</Button>
             </Popconfirm>}
           </Space>
-          <Table<RootEmailJobView> size="small" rowKey="id" dataSource={batch.jobs || []} pagination={{ pageSize: 20, showSizeChanger: true }} scroll={{ x: 900 }} columns={[
-            { title: '账户 ID', dataIndex: 'accountId', width: 140 },
-            { title: '邮箱', dataIndex: 'email', width: 240, ellipsis: true },
-            { title: '结果', dataIndex: 'status', width: 150, render: (s: RootEmailJobView['status']) => <Tag color={statusColors[s]}>{statusLabels[s]}</Tag> },
-            { title: '验证码', dataIndex: 'attempts', width: 80, render: v => `${v}/3` },
-            { title: '说明', dataIndex: 'detail' },
-            { title: '下一步', width: 135, render: (_, job) => canOperate && job.canManage && job.status === 'link_ready' ? <Button size="small" disabled={busy} onClick={async () => {
-              setBusy(true); setError('');
-              try { await showRootResetLink(job.id); } catch (e: any) { setError(e.message); } finally { setBusy(false); }
-            }}>获取重置链接</Button> : '—' },
-          ]} />
-        </> : <Typography.Text type="secondary">提交任务或选择历史批次后，可查看每个账户的结果。</Typography.Text>}
+          <Table<RootEmailJobView> size="small" rowKey="id" dataSource={batch.jobs || []}
+            pagination={{ pageSize: 20, showSizeChanger: true }} scroll={{ x: 980 }} columns={[
+              { title: '账户 ID', dataIndex: 'accountId', width: 140 },
+              { title: '邮箱', dataIndex: 'email', width: 240, ellipsis: true },
+              { title: '结果', dataIndex: 'status', width: 150,
+                render: (status: RootEmailJobView['status']) => <Tag color={statusColors[status]}>{statusLabels[status]}</Tag> },
+              { title: '验证码', dataIndex: 'attempts', width: 80, render: value => `${value}/3` },
+              { title: '说明', dataIndex: 'detail' },
+              { title: '下一步', width: 135, render: (_, job) => canOperate && job.canManage && !job.autoSetPassword && job.status === 'link_ready'
+                ? <Button size="small" disabled={busy} onClick={async () => {
+                  setBusy(true); setError('');
+                  try { await showRootResetLink(job.id); } catch (cause: any) { setError(cause.message); } finally { setBusy(false); }
+                }}>获取重置链接</Button> : '—' },
+            ]} />
+        </> : <Typography.Text type="secondary">提交任务或选择历史批次后，可查看每个账户的发信、邮件和密码设置结果。</Typography.Text>}
       </Space>
     </Card>
+
+    <Modal title="确认批量设置 Root 新密码" open={confirmOpen} confirmLoading={busy}
+      okText="确认并开始自动改密" okButtonProps={{ danger: true, disabled: !confirmationMatches }}
+      cancelText="取消" closable={!busy} maskClosable={false} onCancel={() => { if (!busy) setConfirmOpen(false); }} onOk={submit}>
+      <Space direction="vertical" size={12} style={{ width: '100%' }}>
+        <Alert type="error" showIcon message={`将修改 ${selectedAccounts.length} 个 AWS 账户的 Root 密码`}
+          description="操作开始后，已发送的恢复邮件无法撤回。系统不会重试结果未知的一次性链接。" />
+        <Typography.Text>请准确输入 payer 名称：<Typography.Text code>{selectedPayer?.name}</Typography.Text></Typography.Text>
+        <Input aria-label="确认 Payer 名称" value={confirmPayerName} onChange={event => setConfirmPayerName(event.target.value)}
+          placeholder="完整输入 payer 名称（区分大小写）" disabled={busy} autoComplete="off" />
+        <Typography.Text>请输入账户数量：<Typography.Text code>{selectedAccounts.length}</Typography.Text></Typography.Text>
+        <Input aria-label="确认账户数量" value={confirmAccountCount} onChange={event => setConfirmAccountCount(event.target.value.replace(/\D/g, ''))}
+          placeholder="输入账户数量" disabled={busy} inputMode="numeric" autoComplete="off" />
+        <Typography.Text>输入当前 6 位 MFA 验证码：</Typography.Text>
+        <Input.Password aria-label="MFA 验证码" value={totpCode} onChange={event => setTotpCode(event.target.value.replace(/\D/g, '').slice(0, 6))}
+          placeholder="000000" disabled={busy} inputMode="numeric" autoComplete="one-time-code" />
+      </Space>
+    </Modal>
+
+    <Modal title="一次性下载 Root 凭证" open={downloadOpen} confirmLoading={busy}
+      okText="验证并下载 CSV" okButtonProps={{ disabled: !/^\d{6}$/.test(downloadTotpCode) }} cancelText="取消"
+      closable={!busy} maskClosable={false} onCancel={() => { if (!busy) { setDownloadOpen(false); setDownloadTotpCode(''); } }}
+      onOk={downloadCredentials}>
+      <Space direction="vertical" size={12} style={{ width: '100%' }}>
+        <Alert type="warning" showIcon message="下载成功后不能再次下载"
+          description="服务器会在发送任何 CSV 字节前持久化一次性 claim；正常下载响应完成后销毁密文，若响应已开始后连接中断也按可能披露销毁。请把文件保存到受控位置，不要通过聊天或公共网盘传输。" />
+        <Typography.Text>输入当前 6 位 MFA 验证码：</Typography.Text>
+        <Input.Password aria-label="下载 MFA 验证码" value={downloadTotpCode}
+          onChange={event => setDownloadTotpCode(event.target.value.replace(/\D/g, '').slice(0, 6))}
+          placeholder="000000" disabled={busy} inputMode="numeric" autoComplete="one-time-code" />
+      </Space>
+    </Modal>
   </Space>;
 };
 

@@ -5,12 +5,14 @@ import { api, RootEmailJobView } from '../api';
 import { showRootResetLink } from '../utils/root-reset-link';
 
 const labels: Record<RootEmailJobView['status'], string> = {
-  queued: '排队中', running: '执行中', email_sent: 'AWS 已确认发送', failed: '失败', cancelled: '已取消', interrupted: '结果待检查',
-  waiting_mail: '等待邮件', link_ready: '已找到重置链接', mail_failed: '邮件查询失败',
+  queued: '排队中', running: '发送恢复邮件', email_sent: 'AWS 已确认发信', failed: '发信失败', cancelled: '已取消', interrupted: '结果待检查',
+  waiting_mail: '等待恢复邮件', link_ready: '链接已验证', setting_password: '正在设置密码', password_set: '密码设置成功',
+  password_failed: '密码设置失败', password_unknown: '密码结果未知', mail_failed: '邮件查询失败',
 };
 const colors: Record<RootEmailJobView['status'], string> = {
   queued: 'default', running: 'processing', email_sent: 'success', failed: 'error', cancelled: 'default', interrupted: 'warning',
-  waiting_mail: 'processing', link_ready: 'success', mail_failed: 'warning',
+  waiting_mail: 'processing', link_ready: 'processing', setting_password: 'processing', password_set: 'success',
+  password_failed: 'error', password_unknown: 'warning', mail_failed: 'warning',
 };
 
 /** Remount per account so a previous account's asynchronous response cannot appear here. */
@@ -52,14 +54,15 @@ const RootEmailPanel: React.FC<{ accountId: string; canOperate?: boolean }> = ({
     } catch (e: any) { setError(e.message); }
     finally { setBusy(false); }
   };
-  const pending = jobs.some(j => ['queued', 'running', 'waiting_mail'].includes(j.status));
+  const pending = jobs.some(job => ['queued', 'running', 'waiting_mail', 'setting_password'].includes(job.status)
+    || (job.status === 'link_ready' && job.autoSetPassword));
   return <Space direction="vertical" size={12} style={{ width: '100%' }}>
     <Space wrap>
       <Typography.Text strong>发送 Root 密码恢复邮件</Typography.Text>
       <Button type="text" size="small" icon={<ReloadOutlined />} onClick={() => { setError(''); setRevision(v => v + 1); }}>刷新</Button>
     </Space>
     <Typography.Text type="secondary">
-      自动填写账户根邮箱、识别验证码并请求恢复邮件。最多尝试 3 张验证码；{available?.mailboxConfigured ? '发信后自动查询邮箱，找到链接后可打开 AWS 页面设置密码。' : '邮箱 API 未配置，请到邮箱平台查收并按邮件指引设置密码。'}
+      自动填写账户根邮箱、识别验证码并请求恢复邮件。此处创建的单账户任务仍由操作者打开链接设置密码；批量页面创建的任务会显示自动改密结果，凭证只能回到批量页面一次性下载。
     </Typography.Text>
     {error && <Alert type="error" showIcon message={error} />}
     {available && !available.ready && <Alert type="warning" showIcon message="发送环境尚未就绪" description={available.detail} />}
@@ -69,10 +72,11 @@ const RootEmailPanel: React.FC<{ accountId: string; canOperate?: boolean }> = ({
       <Button icon={<MailOutlined />} loading={busy} disabled={!available?.ready || pending}>发送恢复邮件</Button>
     </Popconfirm>}
     <List size="small" dataSource={jobs} locale={{ emptyText: '暂无恢复邮件任务' }} renderItem={job => <List.Item
-      actions={!canOperate || !job.canManage ? [] : job.status === 'link_ready' ? [<Button key="link" size="small" disabled={busy} onClick={async () => {
+      actions={!canOperate || !job.canManage ? [] : job.status === 'link_ready' && !job.autoSetPassword ? [<Button key="link" size="small" disabled={busy} onClick={async () => {
         setBusy(true); setError('');
         try { await showRootResetLink(job.id); } catch (e: any) { setError(e.message); } finally { setBusy(false); }
-      }}>获取重置链接</Button>] : ['queued', 'running', 'waiting_mail'].includes(job.status) ? [
+      }}>获取重置链接</Button>] : ['queued', 'running', 'waiting_mail', 'setting_password'].includes(job.status)
+        || (job.status === 'link_ready' && job.autoSetPassword) ? [
         <Button key="cancel" size="small" disabled={busy} onClick={() => act(() => api.cancelRootEmail(job.id))}>停止</Button>,
       ] : []}>
       <Space direction="vertical" size={4}>

@@ -278,12 +278,13 @@ Admin 临时凭证时长默认 1 小时。数据库当前角色为 `admin` 的�
 
 `allowed_pages` 控制可见页面（admin 视为全部）。`ops` 包含敏感系统指标，non-admin 只有被显式勾选后才能显示菜单并调用接口；旧用户和新用户默认都不授予。`authMiddleware` 会拦住未绑 MFA 用户访问业务接口。
 
-### 两个独立权限开关
+### 三个独立权限开关
 
 admin 恒有，其他角色必须显式授予，且**都不受 `allowed_pages` 影响**：
 
 - `root_access` → 账户页「根用户」敏感操作（Admin 临时凭证 / 删除 Root MFA / 恢复根密码 / 删除 Root Access Key）以及 Admin 控制台登录；`GET /root-credentials/:accountId` 的状态读取当前不经过该守卫
 - `bulk_quota_access` → 「批量提额」页；未授予时菜单完全不可见，后端 `requireBulkQuotaAccess` 也会拒绝
+- `root_reset_access` → 「批量设置 Root 密码」页，值为 `none` / `view` / `operate`；创建自动改密批次与下载凭证均要求 step-up TOTP。admin 可管理任务，但一次性 CSV 只允许批次创建者下载
 
 `requireRootAccess` 和 Admin 控制台门禁都会用 `db.getUser(username)` 实时读取数据库，严格要求字段为 `true`（admin 恒有），不信任旧 JWT 中缓存的权限。
 
@@ -319,7 +320,7 @@ admin 恒有，其他角色必须显式授予，且**都不受 `allowed_pages` �
     "port": 3000,
     "adminPassword": "登录密码",
     "jwtSecret": "128位hex随机串",
-    "encryptionKey": "独立密钥，AES-256-CBC 加密 MFA secret",
+    "encryptionKey": "至少32字符的独立密钥；MFA使用兼容CBC，临时Root密码使用用途分离的AES-256-GCM",
     "feishuWebhook": "留空则不通知"
   }
 }
@@ -475,6 +476,12 @@ HTML 模板 + Puppeteer 渲染。公司背景库在 `doc-templates.ts`（12 家�
 - 当前前后端尚未在点击前显式排除 payer，因此在管理账户打开 Root 操作会看到 AWS `AccessDenied`；这是已知产品边界，不应通过继续扩大 IAM 权限规避
 
 审计动作：`TEMP_CREDENTIALS`、`ROOT_MFA_DELETE`、`ROOT_PASSWORD_RECOVER`、`ROOT_ACCESSKEY_DELETE`；Admin 控制台另记 `CONSOLE_ADMIN_LOGIN`。
+
+### 批量自动设置 Root 新密码
+
+独立页面 `/rootreset` 受 `root_reset_access` 控制。每批最多 20 个 ACTIVE 成员账户；创建前必须精确输入 payer 名称、账户数量和当前 TOTP。任务严格串行执行：请求恢复邮件 → 精确匹配收件人/时间 → 校验 `signin.aws.amazon.com/resetpassword` 一次性链接 → 生成 24 位 CSPRNG 强密码 → 在 AWS 页面填写两处密码并提交。只有 AWS 页面出现明确成功文案才记为 `password_set`，提交后超时或页面异常记为 `password_unknown`，绝不自动重试。
+
+确认成功的密码以任务 ID、账户 ID、创建者 ID 作为 AAD，使用用途分离密钥和 AES-256-GCM 临时写入 `data/root-email-jobs.json`。密文最多保留 30 分钟；系统会在最早凭证到期前 10 分钟停止剩余任务。仅批次创建者可通过新的 TOTP 一次性下载 CSV（AWS Account ID、Root Email、New Root Password）；发送前持久化 claim；正常响应完成时销毁密文，若响应已开始后中断也按可能披露销毁。列表 API、审计和飞书通知都不包含密码或 reset URL。完整运行与恢复语义见 [`web/ROOT_EMAIL.md`](web/ROOT_EMAIL.md)。
 
 ### 账户角色自愈
 

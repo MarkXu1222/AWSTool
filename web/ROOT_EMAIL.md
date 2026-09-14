@@ -1,12 +1,12 @@
-# Root 密码恢复：批量发信与邮件链接查询
+# Root 密码恢复：手工发信与批量自动改密
 
-账户详情 → 根用户 →「发送 Root 密码恢复邮件」。每次选择一个已有 ACTIVE 成员账户，邮箱从服务器账户缓存读取，调用方不能覆盖邮箱。
+账户详情 → 根用户 →「发送 Root 密码恢复邮件」仍创建单账户手工任务：邮箱从服务器账户缓存读取，调用方不能覆盖；找到恢复链接后由有权限的操作者手工打开 AWS 页面设置密码。
 
-独立导航「批量重置 Root 密码」（`/rootreset`）使用独立的 `root_reset_access` 权限，支持选择 payer、搜索账户、跨页多选、选择全部筛选结果、复制所选邮箱域名清单，以及查看/停止历史批次。配置邮箱 API 后，AWS 确认发信的任务会继续等待恢复邮件。页面显示「等待邮件」「已找到重置链接」「邮件查询失败」，并提供获取链接的入口。
+独立导航「批量设置 Root 密码」（`/rootreset`）创建自动改密批次。系统按 payer 选择最多 20 个 ACTIVE 成员账户，发送恢复邮件、精确匹配收件人和请求时间、重新校验 AWS 一次性链接，然后生成并提交 24 位强随机密码。创建批次必须精确输入 payer 名称、账户数量和当前 TOTP。
 
-后台使用独立 Chrome 配置目录进入 AWS 忘记密码页面，通过本地 PP-OCRv6 模型识别验证码。两个固定预处理结果一致且为 6 位字母数字才提交；最多处理 3 张图片。只有 AWS 显示 `Password email sent` 才记录 `sentAt`。配置邮箱 API 时进入 `waiting_mail`，未配置则终止于 `email_sent`。发信和找到链接均不表示密码已修改。
+后台使用独立 Chrome 配置目录进入 AWS 忘记密码页面，通过本地 PP-OCRv6 模型识别验证码，最多处理 3 张图片。找到链接后，同一浏览器执行槽位只接受 `https://signin.aws.amazon.com/resetpassword` 的 `RootUser` 链接，要求恰好两个可见密码框和唯一的明确提交按钮。只有 AWS 返回明确成功文案才记录 `password_set`；提交后结果不明确时记录 `password_unknown`，绝不重试一次性链接。
 
-后端按账户精确匹配收件人、请求时间，读取邮件并提取 AWS 重置链接。点击「获取重置链接」后，通过弹窗前往 AWS 页面，由用户填写并提交新密码。平台不生成或保存密码。集中式根访问的「允许恢复密码」仍是现有独立操作，不会随发信任务自动改变账户权限。
+新密码由 Node.js CSPRNG 生成，固定 24 位并包含大小写、数字和符号。密码以任务上下文作为 AAD，使用用途分离密钥和 AES-256-GCM 临时写入任务文件；最多保留 30 分钟。若批次仍未完成，系统会在最早凭证到期前 10 分钟停止剩余任务。批次创建者通过新的 TOTP 下载一次 CSV；服务端发送任何字节前先持久化 claim；正常响应完成时销毁密文，若响应已开始后中断也按可能披露立即销毁。列表 API、审计和飞书通知均不包含明文密码或 reset URL。
 
 ## 权限设置
 
@@ -15,16 +15,17 @@
 | 值 | 显示 | 范围 |
 | --- | --- | --- |
 | none | 不开放 | 菜单隐藏，接口拒绝访问 |
-| view | 仅查看 | 账户清单、所有批次进度；无发信、停止或重置链接权限 |
-| operate | 可使用 | 查看、发信、停止本人任务、获取本人重置链接 |
+| view | 仅查看 | 账户清单、所有批次进度；不能创建、停止或下载凭证 |
+| operate | 可使用 | 创建/停止本人任务；本人创建的批次完成后可一次性下载凭证 |
 
-管理员始终可管理全部任务。其他用户缺少字段时默认不开放，原 root_access、allowed_pages 不会自动授予此功能；管理员需要单独设置。授权记录写入用户审计，未指定具体用户时不会批量修改已有授权。后台每次敏感操作复验，撤销或降为查看后，旧会话不能继续发信或取链接，执行任务也会停止。页面导航在刷新后读取最新权限。
+管理员可管理全部任务，但不能覆盖创建者下载其他人的 Root 密码 CSV。其他用户缺少字段时默认不开放，原 root_access、allowed_pages 不会自动授予此功能。后台每次敏感操作复验权限；创建批次和下载 CSV 还必须通过 step-up TOTP。权限撤销后，旧会话不能继续操作，执行中的任务也会停止。
 
 ## 运行依赖
 
 - Chrome：沿用 `CHROME_PATH`，也会查找 macOS Chrome 和 Linux `/usr/bin/google-chrome[-stable]`。
 - Python 3.13 虚拟环境：设置 `ROOT_EMAIL_PYTHON` 为其 Python 可执行文件绝对路径。Mac 默认使用 `~/.cache/aws-ocr-lab/venv/bin/python`。
 - Linux headed Chrome 需要 Xvfb，`ROOT_EMAIL_DISPLAY` 默认 `:99`。Chrome 以普通用户、启用沙箱运行。
+- 自动改密要求配置邮箱 API，以及至少 32 字符的 `config.web.encryptionKey` 或 `ENCRYPTION_KEY`。缺任一项时后端在发送恢复邮件前失败关闭。
 - 源码运行方式：`tsx server/index.ts`。`npm run build` 会把 OCR 脚本复制到编译目录；也可用 `ROOT_EMAIL_OCR_SCRIPT` 显式指定脚本路径。
 
 示例安装（在准备部署的机器执行，平台不会在请求过程中安装软件）：
@@ -63,22 +64,24 @@ PY
 - 每个任务从游标 0 查询，按域名、邮箱搜索并分页；本地再验证精确收件人和请求时间。只对匹配时间与收件人的候选读取正文。每次处理完一页才保存游标，详情读取暂时失败不会跳过该邮件。
 - 无更多数据时至少间隔 5 秒查询；多个任务公平轮流等待，因此不保证每个账户 5 秒内查到。单任务从发信确认起最多等待 10 分钟，超时不会自动重发。
 - 实测空结果页仍可能返回 has_more=true 且游标不前进，此时按无更多数据处理，避免空转。
-- `link_ready` 只保存邮件标识和时间。列表、任务文件与审计均不包含正文或带 token 的 URL；用户获取链接时后端重新读取并校验，响应 no-store。链接仍可能过期，以 AWS 页面为准。
+- `link_ready` 只保存邮件标识和时间，不保存 URL。自动批次由执行器重新读取邮件并校验链接；旧手工任务按需返回 no-store 链接。列表、任务文件与审计均不包含正文或带 token 的 URL。
 - 邮件 HTML 不渲染。仅解析并接受 HTTPS、精确域名 signin.aws.amazon.com、路径 /resetpassword、RootUser 类型及预期参数。
 
 ## 任务和恢复语义
 
-- 当前浏览器全局并发为 1，邮件查询独立进行；最多 500 个排队/执行/等待邮件任务；单批最多 500 个账户。每个账户同时只能有一个任务，创建间隔至少 60 秒。
-- 批次仅允许所选 payer 下的 ACTIVE 成员账户。提交与执行前都复验归属，管理账户不可选。所有账户校验通过后原子写入，任何冲突都拒绝整个新批次。
-- 客户端为每次选择生成请求 UUID；相同 UUID、创建者、payer 和账户集合的重试返回原批次，避免网络重试重复发信。
-- API 和每次浏览器敏感操作前，从数据库复验创建者身份、批量重置操作权限及账户邮箱。
-- 已授权查看的用户可查看账户清单和全部批次进度；非管理员只有 operate 权限才能创建任务、取消本人任务和获取本人重置链接。管理员可管理所有任务。
-- 提交后的网络超时不自动重发，标记 `interrupted` 并提示检查收件箱。明确的验证码错误才允许换图重试。
-- 用户停止或超过 3 分钟会中断任务，关闭浏览器和 OCR 子进程。已经发出的请求无法撤回。
-- 服务重启把排队/浏览器执行任务标记为 `interrupted`，不会从头自动触发恢复；已经发信的 `waiting_mail` 任务保留游标与截止时间，继续只读查询。
-- 元数据保存在 `DB_PATH` 同目录的 `root-email-jobs.json`，原子写入、权限 `0600`；不会更改主数据库结构。备份时应单独包含此文件。
-- 执行器在现有 billing runner 获得 OS 单实例锁后启动，不支持多个服务进程共享写入。
-- 审计记录任务创建及结果；任务查询轮询不写审计。浏览器临时配置在任务结束后删除。
+- 浏览器全局并发为 1，恢复邮件发信和密码提交共用同一槽位；已验证的一次性链接优先。邮件查询独立进行。全局最多 500 个待处理任务，自动改密单批最多 20 个账户；每账户同时只能有一个任务，创建间隔至少 60 秒。
+- 自动批次仅允许所选 payer 下的 ACTIVE 成员账户。所有账户先完成归属、邮箱、数量、typed confirmation、MFA、邮箱 API 和加密密钥检查，再原子写入；任何冲突都拒绝整个新批次。
+- 只有新安全批次写入 `autoSetPassword=true`。升级前已存在或单账户手工创建的 `link_ready` 任务不会因部署而自动修改密码。
+- 客户端为每次选择生成请求 UUID；相同 UUID、创建者、payer 和账户集合的网络重试返回原批次，避免重复发信。
+- API、邮件查询和每次浏览器敏感操作前都从数据库复验创建者身份、operate 权限、payer 归属及账户邮箱。
+- 状态流程：`queued → running → waiting_mail → link_ready → setting_password → password_set`。明确失败为 `password_failed`；点击提交后超时、服务中断或页面异常为 `password_unknown`，密码密文立即销毁且不会自动重试。
+- 密码设置成功后仅保存 `gcm1` 密文、随机 96-bit IV、GCM tag 和到期时间。密钥由专用 encryptionKey 做用途分离，AAD 绑定 job/account/creator，防止跨任务替换。
+- CSV 只包含已明确 `password_set` 且未过期的账户。最早凭证进入最后 10 分钟前会中止剩余任务，保证批次进入终态并留下下载窗口。创建者重新输入未在当前 time-step 使用过的 TOTP 后，服务端先持久化一次性 claim，再在内存生成响应；正常 `finish` 时销毁整批密文，提前 `close` 且已发送 headers 时也按可能部分披露销毁。发送前中止可释放 claim；进程在 claim 期间重启则按可能已披露处理并销毁。
+- 用户停止会取消未提交的任务；若密码已可能提交则最终标记未知。已发送的恢复邮件无法撤回。
+- 服务重启把 `setting_password` 标记为 `password_unknown` 并销毁密文，不重放一次性链接；旧 `queued/running` 仍按保守策略标记 `interrupted`；`waiting_mail` 保留游标继续只读查询；新批次的 `link_ready` 可安全进入首次密码提交。
+- 元数据位于 `DB_PATH` 同目录的 `root-email-jobs.json`，原子写入、目录 `0700`、文件 `0600`。文件可能含有效期内的 GCM 密文，生产备份必须按敏感凭证处理并单独包含该文件。
+- 执行器在 billing runner 获得 OS 单实例锁后启动，不支持多个服务进程共享写入。浏览器临时 profile 在任务结束后删除。
+- 批次创建、每账户成功/失败/未知、MFA 失败、CSV 下载和到期销毁均写审计；高风险事件触发飞书，详情不含密码或 reset URL。任务查询轮询不写审计。
 
 ## API
 
@@ -89,13 +92,14 @@ PY
 | GET | `/root-email/availability` | Python、模型、Chrome 路径、显示器自检；结果缓存 60 秒 |
 | GET | `/root-email/catalog` | 配置的 payer、成员账户缓存与可选状态、缓存时间 |
 | GET | `/root-email/batches` | 可见的最近 20 个批次汇总 |
-| GET | `/root-email/batches/:id` | 批次进度和每个账户的结果 |
-| POST | `/root-email/batches` | `{ payerAccountId, accountIds, requestId, confirmSend: true }`；requestId 为 UUID v4，原子创建批次 |
-| POST | `/root-email/batches/:id/cancel` | 停止批次，取消排队项并中断执行项；已发送邮件不受影响 |
+| GET | `/root-email/batches/:id` | 批次进度、密码状态、凭证可用数量与每个账户结果；不返回密文或邮件标识 |
+| POST | `/root-email/batches` | `{ payerAccountId, accountIds, requestId, confirmSetPassword: true, confirmPayerName, confirmAccountCount, totpCode }`；最多 20 个账户 |
+| POST | `/root-email/batches/:id/credentials-csv` | `{ totpCode }`；仅创建者、持久化一次性 claim 后下载，finish/已开始后 close 时销毁密文 |
+| POST | `/root-email/batches/:id/cancel` | 停止批次；已发送邮件不可撤回，已提交密码可能标记未知 |
 | GET | `/root-email/accounts/:accountId/jobs` | 当前用户可见的最近 20 个账户任务 |
-| POST | `/root-email/accounts/:accountId/jobs` | body 为 `{ "confirmSend": true }`；成功返回 202 和新任务 |
+| POST | `/root-email/accounts/:accountId/jobs` | 创建旧式手工发信任务，body 为 `{ "confirmSend": true }` |
 | POST | `/root-email/jobs/:id/cancel` | 取消排队、停止执行或等待邮件；终态请求幂等 |
-| POST | `/root-email/jobs/:id/reset-link` | 按需读取已就绪任务的链接；仅任务所有者或管理员，重新检查批量重置操作权限 |
+| POST | `/root-email/jobs/:id/reset-link` | 仅旧式手工任务按需读取链接；自动改密批次拒绝返回 URL |
 
 成功响应 `{ "success": true, "data": ... }`；错误响应 `{ "error": "..." }`。重复任务 409、间隔/队列限制 429、运行环境未就绪 503。UI 不把 `email_sent` 标记为「密码重置完成」。
 

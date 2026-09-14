@@ -2,14 +2,16 @@ import fs from 'fs';
 import path from 'path';
 import { randomUUID } from 'crypto';
 
-export type RootEmailStatus = 'queued' | 'running' | 'email_sent' | 'waiting_mail' | 'link_ready' | 'mail_failed' | 'failed' | 'cancelled' | 'interrupted';
-export type RootEmailPhase = 'queued' | 'opening' | 'captcha' | 'submitting' | 'waiting_mail' | 'done';
+export type RootEmailStatus = 'queued' | 'running' | 'email_sent' | 'waiting_mail' | 'link_ready' | 'setting_password'
+  | 'password_set' | 'password_failed' | 'password_unknown' | 'mail_failed' | 'failed' | 'cancelled' | 'interrupted';
+export type RootEmailPhase = 'queued' | 'opening' | 'captcha' | 'submitting' | 'waiting_mail' | 'setting_password' | 'done';
 export interface RootEmailJob {
   id: string;
   accountId: string;
   email: string;
   createdBy: string;
   createdByUserId: string;
+  createdFromIp?: string;
   status: RootEmailStatus;
   phase: RootEmailPhase;
   attempts: number;
@@ -20,27 +22,41 @@ export interface RootEmailJob {
   batchId?: string;
   payerAccountId?: string;
   payerName?: string;
+  autoSetPassword?: boolean;
   requestedAt?: string;
   mailCursor?: number;
   mailNextCheckAt?: string;
   mailDeadlineAt?: string;
   mailKey?: string;
   mailReceivedAt?: string;
+  encryptedPassword?: string;
+  credentialExpiresAt?: string;
+  credentialDownloadedAt?: string;
+  credentialDestroyedAt?: string;
+  credentialDownloadClaimId?: string;
+  credentialDownloadClaimedAt?: string;
+  batchCredentialCutoffAt?: string;
+  passwordSetAt?: string;
 }
 
 export class RootEmailError extends Error {
   constructor(message: string, public statusCode = 400) { super(message); }
 }
 
-export const isPendingEmailJob = (job: RootEmailJob) => ['queued', 'running', 'waiting_mail'].includes(job.status);
+export const isPendingEmailJob = (job: RootEmailJob) => ['queued', 'running', 'waiting_mail', 'setting_password'].includes(job.status)
+  || (job.status === 'link_ready' && job.autoSetPassword === true);
 export const MAX_ROOT_EMAIL_TASKS = 500;
-type RootEmailInput = Pick<RootEmailJob, 'accountId' | 'email' | 'createdBy' | 'createdByUserId'>;
-export type RootEmailBatchMeta = Required<Pick<RootEmailJob, 'batchId' | 'payerAccountId' | 'payerName'>>;
+export const MAX_ROOT_PASSWORD_BATCH = 20;
+type RootEmailInput = Pick<RootEmailJob, 'accountId' | 'email' | 'createdBy' | 'createdByUserId'>
+  & Partial<Pick<RootEmailJob, 'createdFromIp'>>;
+export type RootEmailBatchMeta = Required<Pick<RootEmailJob, 'batchId' | 'payerAccountId' | 'payerName'>>
+  & { autoSetPassword: true };
 
-export function selectRootEmailTargets(accounts: any[], payer: { name: string; accountId: string }, values: unknown) {
-  if (!Array.isArray(values) || !values.length || values.length > MAX_ROOT_EMAIL_TASKS
+export function selectRootEmailTargets(accounts: any[], payer: { name: string; accountId: string }, values: unknown,
+  maximum = MAX_ROOT_EMAIL_TASKS) {
+  if (!Array.isArray(values) || !values.length || values.length > maximum
     || values.some(id => typeof id !== 'string' || !/^\d{12}$/.test(id))) {
-    throw new RootEmailError(`请选择 1–${MAX_ROOT_EMAIL_TASKS} 个有效账户`);
+    throw new RootEmailError(`请选择 1–${maximum} 个有效账户`);
   }
   return [...new Set<string>(values)].map(accountId => {
     const account = accounts.find(a => a.Id === accountId);
@@ -54,14 +70,18 @@ export function selectRootEmailTargets(accounts: any[], payer: { name: string; a
   });
 }
 
-/** Dedicated metadata store; contains no browser profiles, tokens, passwords or email bodies. */
+/** Dedicated metadata store. Passwords may only appear as authenticated ciphertext. */
 export class RootEmailStore {
   private jobs: RootEmailJob[];
   constructor(private readonly filename: string) {
     const value = fs.existsSync(filename) ? JSON.parse(fs.readFileSync(filename, 'utf8')) : [];
+    const statuses: RootEmailStatus[] = ['queued', 'running', 'email_sent', 'waiting_mail', 'link_ready', 'setting_password',
+      'password_set', 'password_failed', 'password_unknown', 'mail_failed', 'failed', 'cancelled', 'interrupted'];
     if (!Array.isArray(value) || value.some(j => !j || typeof j.id !== 'string'
-      || !/^\d{12}$/.test(j.accountId) || typeof j.email !== 'string'
-      || !['queued', 'running', 'email_sent', 'waiting_mail', 'link_ready', 'mail_failed', 'failed', 'cancelled', 'interrupted'].includes(j.status))) {
+      || !/^\d{12}$/.test(j.accountId) || typeof j.email !== 'string' || !statuses.includes(j.status)
+      || (j.encryptedPassword !== undefined && typeof j.encryptedPassword !== 'string')
+      || (j.credentialDownloadClaimId !== undefined && typeof j.credentialDownloadClaimId !== 'string')
+      || (j.autoSetPassword !== undefined && typeof j.autoSetPassword !== 'boolean'))) {
       throw new Error('恢复邮件任务文件格式无效，已拒绝覆盖');
     }
     this.jobs = value;
@@ -85,6 +105,16 @@ export class RootEmailStore {
     const next = this.list();
     const job = next.find(j => j.id === id);
     if (!job) throw new RootEmailError('任务不存在', 404);
+    Object.assign(job, patch, { updatedAt: new Date().toISOString() });
+    this.save(next);
+    return structuredClone(job);
+  }
+  /** Persist a transition only if the current status still matches the caller's snapshot. */
+  updateIfStatus(id: string, expected: RootEmailStatus[], patch: Partial<RootEmailJob>): RootEmailJob | undefined {
+    const next = this.list();
+    const job = next.find(j => j.id === id);
+    if (!job) throw new RootEmailError('任务不存在', 404);
+    if (!expected.includes(job.status)) return undefined;
     Object.assign(job, patch, { updatedAt: new Date().toISOString() });
     this.save(next);
     return structuredClone(job);
@@ -115,14 +145,15 @@ export class RootEmailStore {
   /** Validate every target before one atomic write. A repeated request ID cannot send twice. */
   createBatch(inputs: RootEmailInput[], meta: RootEmailBatchMeta): { jobs: RootEmailJob[]; reused: boolean } {
     if (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(meta.batchId)
-      || !/^\d{12}$/.test(meta.payerAccountId) || !meta.payerName
-      || !inputs.length || inputs.length > MAX_ROOT_EMAIL_TASKS
+      || !/^\d{12}$/.test(meta.payerAccountId) || !meta.payerName || meta.autoSetPassword !== true
+      || !inputs.length || inputs.length > MAX_ROOT_PASSWORD_BATCH
       || new Set(inputs.map(i => i.accountId)).size !== inputs.length
       || new Set(inputs.map(i => i.createdByUserId)).size !== 1) throw new RootEmailError('批次参数无效');
     const previous = this.jobs.filter(j => j.batchId === meta.batchId);
     if (previous.length) {
       if (previous.length !== inputs.length || previous.some(j => j.payerAccountId !== meta.payerAccountId
-        || j.createdByUserId !== inputs[0].createdByUserId || !inputs.some(i => i.accountId === j.accountId))) {
+        || j.createdByUserId !== inputs[0].createdByUserId || j.autoSetPassword !== true
+        || !inputs.some(i => i.accountId === j.accountId))) {
         throw new RootEmailError('请求标识已用于另一个批次，请刷新后重试', 409);
       }
       return { jobs: structuredClone(previous), reused: true };
@@ -136,14 +167,93 @@ export class RootEmailStore {
     return { jobs: structuredClone(jobs), reused: false };
   }
   cancelQueuedBatch(batchId: string) {
-    this.save(this.jobs.map(j => j.batchId === batchId && ['queued', 'waiting_mail'].includes(j.status)
-      ? { ...j, status: 'cancelled', updatedAt: new Date().toISOString(),
-        detail: j.sentAt ? '已停止等待邮件；恢复邮件此前已发送' : '批次已停止，此账户未发送邮件' } : j));
+    this.save(this.jobs.map(j => j.batchId === batchId && ['queued', 'waiting_mail', 'link_ready'].includes(j.status)
+      ? { ...j, status: 'cancelled' as const, phase: 'done' as const, updatedAt: new Date().toISOString(),
+        detail: j.sentAt ? '已停止自动处理；恢复邮件此前已发送' : '批次已停止，此账户未发送邮件' } : j));
   }
+  stopBatchForCredentialWindow(batchId: string): { jobs: RootEmailJob[]; changed: boolean } {
+    const matches = this.jobs.filter(j => j.batchId === batchId);
+    if (!matches.length) throw new RootEmailError('批次不存在', 404);
+    if (matches.some(j => j.batchCredentialCutoffAt)) return { jobs: structuredClone(matches), changed: false };
+    const cutoffAt = new Date().toISOString();
+    this.save(this.jobs.map(j => {
+      if (j.batchId !== batchId) return j;
+      if (['queued', 'waiting_mail', 'link_ready'].includes(j.status)) return { ...j,
+        status: 'cancelled' as const, phase: 'done' as const, batchCredentialCutoffAt: cutoffAt, updatedAt: cutoffAt,
+        detail: '为确保已设置密码仍有至少 10 分钟下载窗口，已停止剩余任务' };
+      return { ...j, batchCredentialCutoffAt: cutoffAt, updatedAt: cutoffAt };
+    }));
+    return { jobs: this.list().filter(j => j.batchId === batchId), changed: true };
+  }
+  /** Mark uncertain browser submissions on restart; never retry a one-time reset link automatically. */
   recover() {
-    if (!this.jobs.some(j => ['queued', 'running'].includes(j.status))) return;
-    this.save(this.jobs.map(j => ['queued', 'running'].includes(j.status) ? { ...j, status: 'interrupted',
-      updatedAt: new Date().toISOString(), detail: '服务重启，任务已中断；请先检查收件箱，再决定是否重新发送' } : j));
+    if (!this.jobs.some(j => ['queued', 'running', 'setting_password'].includes(j.status))) return;
+    const now = new Date().toISOString();
+    this.save(this.jobs.map(j => {
+      if (j.status === 'setting_password') return { ...j, status: 'password_unknown' as const, phase: 'done' as const,
+        encryptedPassword: undefined, credentialDestroyedAt: now, updatedAt: now,
+        detail: '服务在提交新密码期间重启，结果无法确认；临时密码已销毁，系统不会自动重试' };
+      if (['queued', 'running'].includes(j.status)) return { ...j, status: 'interrupted' as const, phase: 'done' as const,
+        updatedAt: now, detail: '服务重启，任务已中断；请先检查收件箱，再决定是否重新发送' };
+      return j;
+    }));
+  }
+  destroyExpiredCredentials(now = Date.now()): RootEmailJob[] {
+    const expired = this.jobs.filter(j => j.encryptedPassword && Number.isFinite(Date.parse(j.credentialExpiresAt || ''))
+      && Date.parse(j.credentialExpiresAt!) <= now);
+    if (!expired.length) return [];
+    const ids = new Set(expired.map(j => j.id));
+    const destroyedAt = new Date(now).toISOString();
+    this.save(this.jobs.map(j => ids.has(j.id) ? { ...j, encryptedPassword: undefined,
+      credentialDestroyedAt: destroyedAt, updatedAt: destroyedAt,
+      detail: j.status === 'password_set' ? '密码已设置；临时凭证已按 30 分钟策略销毁' : j.detail } : j));
+    return structuredClone(expired);
+  }
+  claimBatchCredentials(batchId: string, createdByUserId: string, claimId: string): RootEmailJob[] {
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(claimId)) {
+      throw new RootEmailError('凭证下载 claim 无效');
+    }
+    const matches = this.jobs.filter(j => j.batchId === batchId);
+    if (!matches.length || matches.some(j => j.createdByUserId !== createdByUserId)) throw new RootEmailError('无权下载此批次凭证', 403);
+    if (matches.some(j => j.credentialDownloadedAt)) throw new RootEmailError('此批次凭证已下载并销毁', 410);
+    if (matches.some(j => j.credentialDownloadClaimId)) throw new RootEmailError('此批次凭证已被一次性下载请求占用', 409);
+    if (!matches.some(j => j.encryptedPassword)) throw new RootEmailError('此批次没有可下载的临时凭证', 410);
+    const claimedAt = new Date().toISOString();
+    this.save(this.jobs.map(j => j.batchId === batchId ? { ...j, credentialDownloadClaimId: claimId,
+      credentialDownloadClaimedAt: claimedAt, updatedAt: claimedAt } : j));
+    return this.list().filter(j => j.batchId === batchId);
+  }
+  releaseBatchCredentialClaim(batchId: string, createdByUserId: string, claimId: string): void {
+    const matches = this.jobs.filter(j => j.batchId === batchId);
+    if (!matches.length || matches.some(j => j.createdByUserId !== createdByUserId
+      || j.credentialDownloadClaimId !== claimId)) throw new RootEmailError('凭证下载 claim 已变化', 409);
+    const updatedAt = new Date().toISOString();
+    this.save(this.jobs.map(j => j.batchId === batchId ? { ...j, credentialDownloadClaimId: undefined,
+      credentialDownloadClaimedAt: undefined, updatedAt } : j));
+  }
+  completeBatchCredentialDownload(batchId: string, createdByUserId: string, claimId: string): RootEmailJob[] {
+    const matches = this.jobs.filter(j => j.batchId === batchId);
+    if (!matches.length || matches.some(j => j.createdByUserId !== createdByUserId)) throw new RootEmailError('无权下载此批次凭证', 403);
+    if (matches.some(j => j.credentialDownloadedAt)) throw new RootEmailError('此批次凭证已下载并销毁', 410);
+    if (matches.some(j => j.credentialDownloadClaimId !== claimId)) throw new RootEmailError('凭证下载 claim 已变化', 409);
+    const downloadedAt = new Date().toISOString();
+    this.save(this.jobs.map(j => j.batchId === batchId ? { ...j, encryptedPassword: undefined,
+      credentialDownloadedAt: downloadedAt, credentialDestroyedAt: downloadedAt,
+      credentialDownloadClaimId: undefined, credentialDownloadClaimedAt: undefined, updatedAt: downloadedAt,
+      detail: j.status === 'password_set' ? '密码已设置；一次性下载响应已开始，服务器密文已销毁' : j.detail } : j));
+    return this.list().filter(j => j.batchId === batchId);
+  }
+  /** A restart after a durable claim is treated as possible disclosure and fails closed. */
+  consumeOrphanedCredentialClaims(): RootEmailJob[] {
+    const batchIds = new Set(this.jobs.filter(j => j.credentialDownloadClaimId && j.batchId).map(j => j.batchId!));
+    if (!batchIds.size) return [];
+    const destroyedAt = new Date().toISOString();
+    this.save(this.jobs.map(j => j.batchId && batchIds.has(j.batchId) ? { ...j, encryptedPassword: undefined,
+      credentialDownloadedAt: destroyedAt, credentialDestroyedAt: destroyedAt,
+      credentialDownloadClaimId: undefined, credentialDownloadClaimedAt: undefined, updatedAt: destroyedAt,
+      detail: j.status === 'password_set' ? '服务在一次性下载期间重启；按可能已披露处理并销毁密文' : j.detail } : j));
+    const current = this.list();
+    return [...batchIds].map(batchId => current.find(j => j.batchId === batchId)!).filter(Boolean);
   }
 }
 

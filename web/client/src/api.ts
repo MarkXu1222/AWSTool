@@ -12,13 +12,18 @@ export interface RootEmailJobView {
   id: string;
   accountId: string;
   email: string;
-  status: 'queued' | 'running' | 'email_sent' | 'waiting_mail' | 'link_ready' | 'mail_failed' | 'failed' | 'cancelled' | 'interrupted';
-  phase: 'queued' | 'opening' | 'captcha' | 'submitting' | 'waiting_mail' | 'done';
+  status: 'queued' | 'running' | 'email_sent' | 'waiting_mail' | 'link_ready' | 'setting_password' | 'password_set'
+    | 'password_failed' | 'password_unknown' | 'mail_failed' | 'failed' | 'cancelled' | 'interrupted';
+  phase: 'queued' | 'opening' | 'captcha' | 'submitting' | 'waiting_mail' | 'setting_password' | 'done';
   attempts: number;
   createdBy: string;
   createdAt: string;
   sentAt?: string;
   detail: string;
+  autoSetPassword: boolean;
+  credentialsAvailable: boolean;
+  credentialExpiresAt?: string;
+  passwordSetAt?: string;
 }
 export interface RootEmailAccount {
   accountId: string;
@@ -30,6 +35,7 @@ export interface RootEmailAccount {
 }
 export interface RootEmailBatchView {
   canManage: boolean;
+  canDownloadCredentials: boolean;
   id: string;
   payerAccountId: string;
   payerName: string;
@@ -46,6 +52,14 @@ export interface RootEmailBatchView {
   waitingMail: number;
   linkReady: number;
   mailFailed: number;
+  settingPassword: number;
+  passwordSet: number;
+  passwordFailed: number;
+  passwordUnknown: number;
+  credentialsAvailable: number;
+  credentialExpiresAt?: string;
+  credentialsDownloadedAt?: string;
+  batchCredentialCutoffAt?: string;
   jobs?: RootEmailJobView[];
 }
 
@@ -676,9 +690,40 @@ export const api = {
   rootEmailCatalog: () => request('/aws/root-email/catalog'),
   rootEmailBatches: () => request('/aws/root-email/batches'),
   rootEmailBatch: (id: string) => request(`/aws/root-email/batches/${encodeURIComponent(id)}`),
-  sendRootEmailBatch: (body: { payerAccountId: string; accountIds: string[]; requestId: string }) => request('/aws/root-email/batches', {
-    method: 'POST', body: JSON.stringify({ ...body, confirmSend: true }),
+  sendRootEmailBatch: (body: { payerAccountId: string; accountIds: string[]; requestId: string; totpCode: string;
+    confirmPayerName: string; confirmAccountCount: number }) => request('/aws/root-email/batches', {
+    method: 'POST', body: JSON.stringify({ ...body, confirmSetPassword: true }),
   }),
+  downloadRootCredentialCsv: async (id: string, totpCode: string): Promise<number> => {
+    const token = getToken();
+    const res = await fetch(`${BASE}/aws/root-email/batches/${encodeURIComponent(id)}/credentials-csv`, {
+      method: 'POST', cache: 'no-store',
+      headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+      body: JSON.stringify({ totpCode }),
+    });
+    if (res.status === 401) {
+      localStorage.removeItem('token');
+      window.location.reload();
+      throw new Error('Session expired');
+    }
+    if (!res.ok) {
+      const error = await res.json().catch(() => ({ error: '一次性凭证下载失败' }));
+      throw new Error(error.error || '一次性凭证下载失败');
+    }
+    const disposition = res.headers.get('Content-Disposition') || '';
+    const filename = disposition.match(/filename="?([^";]+)"?/i)?.[1] || `root-passwords-${id}.csv`;
+    const count = Number(res.headers.get('X-Credential-Count') || 0);
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+    return count;
+  },
   cancelRootEmailBatch: (id: string) => request(`/aws/root-email/batches/${encodeURIComponent(id)}/cancel`, { method: 'POST' }),
   rootEmailJobs: (accountId: string) => request(`/aws/root-email/accounts/${accountId}/jobs`),
   sendRootEmail: (accountId: string) => request(`/aws/root-email/accounts/${accountId}/jobs`, {

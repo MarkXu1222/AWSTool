@@ -1,4 +1,5 @@
 import path from 'path';
+import { randomUUID } from 'crypto';
 import { db } from './db';
 import { AwsRootEmailSession, AwsRootPasswordSession, RootPasswordAutomationError, runRootEmailOcr } from './root-email-browser';
 import { RootEmailError, RootEmailJob, RootEmailStore, isPendingEmailJob, sendRootEmail, selectRootEmailTargets,
@@ -18,9 +19,10 @@ let active: { id: string; controller: AbortController; promise: Promise<void> } 
 let runtimeCheck: { checkedAt: number; ready: boolean; detail: string } | undefined;
 let checkingRuntime: Promise<void> | undefined;
 let mailTimer: NodeJS.Timeout | undefined;
-let mailActive: { controller: AbortController; promise: Promise<void> } | undefined;
+let mailActive: { id: string; controller: AbortController; promise: Promise<void> } | undefined;
 let lastCredentialCleanupAt = 0;
 const credentialDownloads = new Set<string>();
+const ROOT_CREDENTIAL_DOWNLOAD_RESERVE_MS = 10 * 60_000;
 
 function getStore() {
   if (!store || stopping) throw new RootEmailError('恢复邮件任务执行器尚未就绪', 503);
@@ -43,10 +45,10 @@ function authorize(job: Pick<RootEmailJob, 'createdBy' | 'createdByUserId' | 'ac
     selectRootEmailTargets(db.getAccountsCache().accounts, { accountId: job.payerAccountId, name: job.payerName }, [job.accountId]);
   }
 }
-function audit(job: RootEmailJob, action: string, detail = job.detail) {
+function audit(job: RootEmailJob, action: string, detail = job.detail, sourceIp = job.createdFromIp) {
   try {
     db.addAuditLog(Number(job.createdByUserId), action,
-      `AWS 账户 ${job.accountId} · 任务 ${job.id} · ${detail}`, job.createdBy, job.createdFromIp);
+      `AWS 账户 ${job.accountId} · 任务 ${job.id} · ${detail}`, job.createdBy, sourceIp);
   } catch { console.error('[RootEmail] 任务审计写入失败'); }
 }
 
@@ -115,7 +117,7 @@ export function rootEmailCatalog() {
 
 function credentialAvailable(job: RootEmailJob, now = Date.now()): boolean {
   return job.status === 'password_set' && !!job.encryptedPassword && !job.credentialDownloadedAt
-    && Number.isFinite(Date.parse(job.credentialExpiresAt || '')) && Date.parse(job.credentialExpiresAt!) > now;
+    && !job.credentialDownloadClaimId && Number.isFinite(Date.parse(job.credentialExpiresAt || '')) && Date.parse(job.credentialExpiresAt!) > now;
 }
 function jobView(job: RootEmailJob, user: RootEmailUser) {
   const { id, accountId, email, status, phase, attempts, createdBy, createdAt, sentAt, detail,
@@ -143,6 +145,7 @@ function batchSummary(jobs: RootEmailJob[], user: RootEmailUser) {
     settingPassword: count('setting_password'), passwordSet: count('password_set'),
     passwordFailed: count('password_failed'), passwordUnknown: count('password_unknown'),
     credentialsAvailable: availableJobs.length, credentialExpiresAt, credentialsDownloadedAt,
+    batchCredentialCutoffAt: first.batchCredentialCutoffAt,
     canDownloadCredentials, cancelled: count('cancelled'), interrupted: count('interrupted'), done,
     canManage: jobs.every(j => canManageRootEmailJob(user, j)) };
 }
@@ -194,8 +197,10 @@ export async function submitRootEmailBatch(payerAccountId: string, accountIds: u
 export function cancelRootEmailBatch(id: string, user: RootEmailUser) {
   const jobs = batchJobs(id);
   if (!jobs.every(j => canManageRootEmailJob(user, j))) throw new RootEmailError('无权停止此批次', 403);
+  const ids = new Set(jobs.map(job => job.id));
+  if (active && ids.has(active.id)) active.controller.abort();
+  if (mailActive && ids.has(mailActive.id)) mailActive.controller.abort();
   getStore().cancelQueuedBatch(id);
-  if (active && jobs.some(j => j.id === active!.id)) cancelRootEmail(active.id, user);
   audit({ ...jobs[0], detail: `停止批次 ${id}；已发送的恢复邮件无法撤回，提交中的密码结果可能未知` }, 'ROOT_EMAIL_BATCH_CANCEL');
   return getRootEmailBatch(id, user);
 }
@@ -204,13 +209,15 @@ export function cancelRootEmail(id: string, user: RootEmailUser) {
   const currentStore = getStore();
   const job = currentStore.get(id);
   if (!job || !canManageRootEmailJob(user, job)) throw new RootEmailError('无权停止此任务', 403);
-  if (!isPendingEmailJob(job)) return jobView(job, user);
   if (active?.id === id) {
     active.controller.abort();
+    if (!isPendingEmailJob(job)) return jobView(job, user);
     const result = currentStore.update(id, { detail: job.status === 'setting_password'
       ? '正在停止密码设置；若已提交，最终状态将标记为未知' : '正在停止；若验证码已提交，请检查邮箱是否已收到邮件' });
     return jobView(result, user);
   }
+  if (!isPendingEmailJob(job)) return jobView(job, user);
+  if (mailActive?.id === id) mailActive.controller.abort();
   const result = currentStore.update(id, { status: 'cancelled', phase: 'done',
     detail: job.sentAt ? '已停止后续自动处理；恢复邮件此前已发送' : '任务已取消' });
   audit(result, 'ROOT_EMAIL_CANCEL');
@@ -220,31 +227,42 @@ export function cancelRootEmail(id: string, user: RootEmailUser) {
 async function execute(job: RootEmailJob, controller: AbortController) {
   const currentStore = store!;
   const deadline = setTimeout(() => controller.abort(), 180_000);
-  const session = new AwsRootEmailSession(controller.signal, () => authorize(job));
+  const ensureRunning = () => {
+    authorize(job);
+    if (currentStore.get(job.id)?.status !== 'running') throw new RootEmailError('任务状态已变化，停止发信');
+  };
+  const session = new AwsRootEmailSession(controller.signal, ensureRunning);
   try {
-    currentStore.update(job.id, { status: 'running' });
-    await sendRootEmail({ email: job.email, session, signal: controller.signal, authorize: () => authorize(job),
-      progress: (phase, attempts, detail) => { currentStore.update(job.id, { phase, attempts, detail,
-        ...(phase === 'opening' ? { requestedAt: new Date(Math.floor(Date.now() / 1000) * 1000).toISOString() } : {}) }); } });
+    if (!currentStore.updateIfStatus(job.id, ['queued'], { status: 'running' })) return;
+    await sendRootEmail({ email: job.email, session, signal: controller.signal, authorize: ensureRunning,
+      progress: (phase, attempts, detail) => {
+        if (!currentStore.updateIfStatus(job.id, ['running'], { phase, attempts, detail,
+          ...(phase === 'opening' ? { requestedAt: new Date(Math.floor(Date.now() / 1000) * 1000).toISOString() } : {}) })) {
+          throw new RootEmailError('任务状态已变化，停止发信');
+        }
+      } });
     const waitForMail = mailApiConfigured();
-    const completed = currentStore.update(job.id, { status: waitForMail ? 'waiting_mail' : job.autoSetPassword ? 'mail_failed' : 'email_sent',
+    const completed = currentStore.updateIfStatus(job.id, ['running'], {
+      status: waitForMail ? 'waiting_mail' : job.autoSetPassword ? 'mail_failed' : 'email_sent',
       phase: waitForMail ? 'waiting_mail' : 'done', sentAt: new Date().toISOString(),
       ...(waitForMail ? { mailCursor: 0, mailNextCheckAt: new Date().toISOString(),
         mailDeadlineAt: new Date(Date.now() + 10 * 60_000).toISOString() } : {}),
       detail: waitForMail ? 'AWS 已确认发信，正在查询对应邮箱的恢复邮件'
         : job.autoSetPassword ? 'AWS 已确认发信，但邮箱 API 当前不可用，无法继续自动改密'
-        : 'AWS 已确认发送恢复邮件；收件情况需自行检查，密码尚未修改' });
-    audit(completed, waitForMail ? 'ROOT_EMAIL_SENT' : job.autoSetPassword ? 'ROOT_PASSWORD_SET_FAILED' : 'ROOT_EMAIL_SENT');
+        : 'AWS 已确认发送恢复邮件；收件情况需自行检查，密码尚未修改',
+    });
+    if (completed) audit(completed, waitForMail ? 'ROOT_EMAIL_SENT' : job.autoSetPassword ? 'ROOT_PASSWORD_SET_FAILED' : 'ROOT_EMAIL_SENT');
   } catch (error) {
-    const latest = currentStore.get(job.id)!;
+    const latest = currentStore.get(job.id);
+    if (!latest || latest.status !== 'running') return;
     const uncertain = latest.phase === 'submitting' && !(error instanceof RootEmailError);
     const status = uncertain || stopping ? 'interrupted' : controller.signal.aborted ? 'cancelled' : 'failed';
     const detail = uncertain ? '提交后结果未确认，请先检查邮箱；系统不会自动再次发送'
       : stopping ? '服务停止，任务已中断，请检查收件箱后再决定是否重试'
       : controller.signal.aborted ? '任务已停止（用户取消或超过 3 分钟）'
       : error instanceof RootEmailError ? error.message : 'AWS 页面未在预期时间完成加载，或页面结构已变化；请检查后重试';
-    const failed = currentStore.update(job.id, { status, phase: 'done', detail });
-    audit(failed, 'ROOT_EMAIL_STOP');
+    const failed = currentStore.updateIfStatus(job.id, ['running'], { status, phase: 'done', detail });
+    if (failed) audit(failed, 'ROOT_EMAIL_STOP');
   } finally {
     clearTimeout(deadline);
     await session.close();
@@ -265,13 +283,14 @@ async function checkMail(job: RootEmailJob, signal: AbortSignal) {
       authorize(job);
     }, signal);
     if (page.kind === 'found') {
-      const result = currentStore.update(job.id, { status: 'link_ready', phase: job.autoSetPassword ? 'setting_password' : 'done',
-        mailKey: page.mailKey, mailReceivedAt: page.receivedAt,
+      if (!stillWaiting()) return;
+      const result = currentStore.updateIfStatus(job.id, ['waiting_mail'], { status: 'link_ready',
+        phase: job.autoSetPassword ? 'setting_password' : 'done', mailKey: page.mailKey, mailReceivedAt: page.receivedAt,
         detail: job.autoSetPassword ? '已找到并验证恢复邮件，等待自动设置强密码' : '已找到本次恢复邮件，可打开 AWS 页面设置新密码' });
-      audit(result, 'ROOT_EMAIL_LINK_READY');
+      if (result) audit(result, 'ROOT_EMAIL_LINK_READY');
       return;
     }
-    if (stillWaiting()) currentStore.update(job.id, { mailCursor: page.cursor,
+    if (stillWaiting()) currentStore.updateIfStatus(job.id, ['waiting_mail'], { mailCursor: page.cursor,
       mailNextCheckAt: new Date(Date.now() + (page.hasMore ? 0 : 5_000)).toISOString() });
   } catch (error) {
     if (!stillWaiting()) return;
@@ -297,18 +316,23 @@ function tickMail() {
     stopping = true;
     console.error('[RootEmail] 邮件任务保存失败，执行器已停止');
   }).finally(() => { mailActive = undefined; });
-  mailActive = { controller, promise };
+  mailActive = { id: job.id, controller, promise };
 }
 
 async function executePassword(job: RootEmailJob, controller: AbortController) {
   const currentStore = store!;
   const deadline = setTimeout(() => controller.abort(), 120_000);
   let session: AwsRootPasswordSession | undefined;
-  try {
+  const ensureStatus = (status: RootEmailJob['status']) => {
+    controller.signal.throwIfAborted();
     authorize(job);
+    if (currentStore.get(job.id)?.status !== status) throw new RootEmailError('任务状态已变化，停止自动改密');
+  };
+  try {
+    ensureStatus('link_ready');
     if (!job.mailKey || !job.requestedAt) throw new RootEmailError('任务缺少已验证的恢复邮件标识');
     const mail = await mailbox.detail(job.mailKey, AbortSignal.timeout(30_000));
-    authorize(job);
+    ensureStatus('link_ready');
     const url = matchRootRecoveryMail(mail, job.email, job.requestedAt);
     if (!url) throw new RootEmailError('恢复邮件链接无法重新校验，自动改密已停止');
 
@@ -316,15 +340,18 @@ async function executePassword(job: RootEmailJob, controller: AbortController) {
     const context = { jobId: job.id, accountId: job.accountId, createdByUserId: job.createdByUserId };
     const encryptedPassword = encryptRootPassword(password, context);
     const credentialExpiresAt = new Date(Date.now() + ROOT_CREDENTIAL_TTL_MS).toISOString();
-    currentStore.update(job.id, { status: 'setting_password', phase: 'setting_password', encryptedPassword,
-      credentialExpiresAt, detail: '正在 AWS 官方页面填写并提交强随机密码' });
-    session = new AwsRootPasswordSession(controller.signal, () => authorize(job));
+    const started = currentStore.updateIfStatus(job.id, ['link_ready'], { status: 'setting_password', phase: 'setting_password',
+      encryptedPassword, credentialExpiresAt, detail: '正在 AWS 官方页面填写并提交强随机密码' });
+    if (!started) return;
+    session = new AwsRootPasswordSession(controller.signal, () => ensureStatus('setting_password'));
     await session.setPassword(url, password);
-    const completed = currentStore.update(job.id, { status: 'password_set', phase: 'done',
+    const completed = currentStore.updateIfStatus(job.id, ['setting_password'], { status: 'password_set', phase: 'done',
       passwordSetAt: new Date().toISOString(), mailKey: undefined,
       detail: 'AWS 已明确确认新密码设置成功；临时凭证可一次性导出，最多保留 30 分钟' });
-    audit(completed, 'ROOT_PASSWORD_SET');
+    if (completed) audit(completed, 'ROOT_PASSWORD_SET');
   } catch (error) {
+    const latest = currentStore.get(job.id);
+    if (!latest || !['link_ready', 'setting_password'].includes(latest.status)) return;
     const outcome = error instanceof RootPasswordAutomationError ? error.outcome : 'failed';
     const cancelled = controller.signal.aborted && outcome === 'failed' && !stopping;
     const status: RootEmailJob['status'] = outcome === 'unknown' ? 'password_unknown' : cancelled ? 'cancelled' : 'password_failed';
@@ -332,9 +359,9 @@ async function executePassword(job: RootEmailJob, controller: AbortController) {
       : cancelled ? '自动密码设置已在提交前停止；临时密码已销毁'
       : error instanceof RootEmailError || error instanceof MailApiError || error instanceof RootPasswordAutomationError
         ? error.message : '自动密码设置失败，未确认修改；临时密码已销毁';
-    const failed = currentStore.update(job.id, { status, phase: 'done', encryptedPassword: undefined,
+    const failed = currentStore.updateIfStatus(job.id, [latest.status], { status, phase: 'done', encryptedPassword: undefined,
       credentialDestroyedAt: new Date().toISOString(), mailKey: undefined, detail });
-    audit(failed, outcome === 'unknown' ? 'ROOT_PASSWORD_SET_UNKNOWN' : 'ROOT_PASSWORD_SET_FAILED');
+    if (failed) audit(failed, outcome === 'unknown' ? 'ROOT_PASSWORD_SET_UNKNOWN' : 'ROOT_PASSWORD_SET_FAILED');
   } finally {
     clearTimeout(deadline);
     if (session) await session.close();
@@ -363,7 +390,7 @@ export async function getRootResetLink(id: string, user: RootEmailUser) {
   return { url };
 }
 
-export function prepareRootCredentialCsv(id: string, user: RootEmailUser) {
+export function prepareRootCredentialCsv(id: string, user: RootEmailUser, requestIp?: string) {
   const currentStore = getStore();
   const jobs = batchJobs(id);
   const current = db.getUser(user.username);
@@ -374,37 +401,70 @@ export function prepareRootCredentialCsv(id: string, user: RootEmailUser) {
   if (jobs.some(isPendingEmailJob)) throw new RootEmailError('批次尚未完成，不能提前下载不完整凭证', 409);
   if (jobs.some(job => job.credentialDownloadedAt)) throw new RootEmailError('此批次凭证已下载并销毁', 410);
   if (credentialDownloads.has(id)) throw new RootEmailError('此批次凭证正在下载，请勿重复提交', 409);
-  currentStore.destroyExpiredCredentials();
+  for (const expired of currentStore.destroyExpiredCredentials()) {
+    audit(expired, 'ROOT_PASSWORD_CREDENTIAL_DESTROY', '下载前检查发现凭证已到期，临时 Root 密码密文已销毁');
+  }
   const freshJobs = batchJobs(id);
-  const available = freshJobs.filter(job => credentialAvailable(job));
-  if (!available.length) throw new RootEmailError('此批次没有可下载的临时凭证，可能已过期或已销毁', 410);
+  const availableIds = new Set(freshJobs.filter(job => credentialAvailable(job)).map(job => job.id));
+  if (!availableIds.size) throw new RootEmailError('此批次没有可下载的临时凭证，可能已过期或已销毁', 410);
 
+  const claimId = randomUUID();
   credentialDownloads.add(id);
   try {
+    const claimed = currentStore.claimBatchCredentials(id, String(current.id), claimId);
+    const available = claimed.filter(job => availableIds.has(job.id));
     const rows = available.map(job => ({ accountId: job.accountId, email: job.email,
       password: decryptRootPassword(job.encryptedPassword!, {
         jobId: job.id, accountId: job.accountId, createdByUserId: job.createdByUserId,
       }) }));
+    audit(claimed[0], 'ROOT_PASSWORD_CSV_CLAIM',
+      `批次 ${id} 已持久化一次性下载 claim，准备发送 ${rows.length} 个已确认密码`, requestIp);
     let settled = false;
     return {
       csv: buildRootCredentialCsv(rows), filename: `root-passwords-${id}.csv`, count: rows.length,
-      complete(delivered: boolean) {
+      complete(possiblyDisclosed: boolean) {
         if (settled) return;
         settled = true;
         try {
-          if (delivered) {
-            const completed = currentStore.markBatchCredentialsDownloaded(id, String(current.id));
+          if (possiblyDisclosed) {
+            const completed = currentStore.completeBatchCredentialDownload(id, String(current.id), claimId);
             audit(completed[0], 'ROOT_PASSWORD_CSV_DOWNLOAD',
-              `批次 ${id} 一次性下载 ${rows.length} 个已确认密码；响应完成后密文已销毁`);
+              `批次 ${id} 一次性响应已开始发送 ${rows.length} 个已确认密码；服务器密文已销毁`, requestIp);
+          } else {
+            currentStore.releaseBatchCredentialClaim(id, String(current.id), claimId);
+            audit(claimed[0], 'ROOT_PASSWORD_CSV_ABORTED', `批次 ${id} 在发送任何响应前中止；下载 claim 已释放`, requestIp);
           }
+          credentialDownloads.delete(id);
         } catch (error) {
-          console.error('[RootEmail] CSV 下载完成后的凭证销毁失败:', error instanceof Error ? error.message : 'unknown');
-        } finally { credentialDownloads.delete(id); }
+          // Keep the in-memory lock and durable claim on failure; restart recovery will fail closed and wipe ciphertext.
+          console.error('[RootEmail] CSV 一次性 claim 收尾失败:', error instanceof Error ? error.message : 'unknown');
+        }
       },
     };
   } catch (error) {
+    try { currentStore.releaseBatchCredentialClaim(id, String(current.id), claimId); } catch {}
     credentialDownloads.delete(id);
     throw error;
+  }
+}
+
+function enforceCredentialDownloadWindows() {
+  if (!store) return;
+  const groups = new Map<string, RootEmailJob[]>();
+  for (const job of store.list()) {
+    if (job.batchId) groups.set(job.batchId, [...(groups.get(job.batchId) || []), job]);
+  }
+  for (const [batchId, jobs] of groups) {
+    if (jobs.some(job => job.batchCredentialCutoffAt) || !jobs.some(isPendingEmailJob)) continue;
+    const expirations = jobs.filter(job => job.encryptedPassword && job.credentialExpiresAt)
+      .map(job => Date.parse(job.credentialExpiresAt!)).filter(Number.isFinite);
+    if (!expirations.length || Math.min(...expirations) - Date.now() > ROOT_CREDENTIAL_DOWNLOAD_RESERVE_MS) continue;
+    const ids = new Set(jobs.map(job => job.id));
+    if (active && ids.has(active.id)) active.controller.abort();
+    if (mailActive && ids.has(mailActive.id)) mailActive.controller.abort();
+    const stopped = store.stopBatchForCredentialWindow(batchId);
+    if (stopped.changed) audit(stopped.jobs[0], 'ROOT_PASSWORD_BATCH_CUTOFF',
+      `批次 ${batchId} 为已设置密码预留至少 10 分钟一次性下载窗口，剩余任务已停止`);
   }
 }
 
@@ -418,6 +478,7 @@ function cleanupExpiredCredentials() {
 
 function tick() {
   if (!store || stopping) return;
+  enforceCredentialDownloadWindows();
   cleanupExpiredCredentials();
   if (active) return;
   // Reset links are time-sensitive, so confirmed links take priority over new recovery-email requests.
@@ -439,7 +500,13 @@ export function startRootEmailRunner() {
   const dbFile = process.env.DB_PATH || path.resolve(__dirname, '../../data/db.json');
   store = new RootEmailStore(path.join(path.dirname(dbFile), 'root-email-jobs.json'));
   store.recover();
-  store.destroyExpiredCredentials();
+  for (const orphaned of store.consumeOrphanedCredentialClaims()) {
+    audit(orphaned, 'ROOT_PASSWORD_CREDENTIAL_DESTROY',
+      '服务在一次性下载 claim 期间重启；按可能已披露处理并销毁临时 Root 密码密文');
+  }
+  for (const expired of store.destroyExpiredCredentials()) {
+    audit(expired, 'ROOT_PASSWORD_CREDENTIAL_DESTROY', '服务启动检查发现凭证已到期，临时 Root 密码密文已销毁');
+  }
   stopping = false;
   timer = setInterval(tick, 1_000);
   timer.unref();

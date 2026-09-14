@@ -151,26 +151,212 @@ export class AwsRootEmailSession implements RootEmailSession {
     return result === 'sent' ? 'sent' : 'invalid';
   }
   async close() {
-    if (this.browser) {
-      const child = this.browser.process();
-      let timeout: NodeJS.Timeout | undefined;
-      try {
-        await Promise.race([this.browser.close(), new Promise<void>(resolve => {
-          timeout = setTimeout(() => { child?.kill('SIGKILL'); resolve(); }, 5_000);
-        })]);
-      } catch { child?.kill('SIGKILL'); }
-      finally { if (timeout) clearTimeout(timeout); }
-      if (child && child.exitCode === null && child.signalCode === null) {
-        await new Promise<void>((resolve, reject) => {
-          const deadline = setTimeout(() => {
-            child.removeListener('exit', exited);
-            reject(new Error('Chrome cleanup did not complete'));
-          }, 3_000);
-          const exited = () => { clearTimeout(deadline); resolve(); };
-          child.once('exit', exited);
-        });
+    try {
+      if (this.browser) {
+        const child = this.browser.process();
+        let timeout: NodeJS.Timeout | undefined;
+        try {
+          await Promise.race([this.browser.close(), new Promise<void>(resolve => {
+            timeout = setTimeout(() => { child?.kill('SIGKILL'); resolve(); }, 5_000);
+          })]);
+        } catch { child?.kill('SIGKILL'); }
+        finally { if (timeout) clearTimeout(timeout); }
+        if (child && child.exitCode === null && child.signalCode === null) {
+          await new Promise<void>((resolve, reject) => {
+            const deadline = setTimeout(() => {
+              child.removeListener('exit', exited);
+              reject(new Error('Chrome cleanup did not complete'));
+            }, 3_000);
+            const exited = () => { clearTimeout(deadline); resolve(); };
+            child.once('exit', exited);
+          });
+        }
+      }
+    } finally {
+      if (this.profile) {
+        try { fs.rmSync(this.profile, { recursive: true, force: true }); }
+        catch { console.error('[RootEmail] 临时浏览器目录清理失败'); }
       }
     }
-    if (this.profile) fs.rmSync(this.profile, { recursive: true, force: true });
+  }
+}
+
+
+export type RootPasswordAutomationOutcome = 'failed' | 'unknown';
+
+export class RootPasswordAutomationError extends RootEmailError {
+  constructor(message: string, public readonly outcome: RootPasswordAutomationOutcome) { super(message, 422); }
+}
+
+/** Strict reset-link automation. It never retries after the submit button may have been clicked. */
+export class AwsRootPasswordSession {
+  private browser?: Browser;
+  private page?: Page;
+  private profile?: string;
+  private submitted = false;
+
+  constructor(private readonly signal: AbortSignal, private readonly authorize: () => void) {}
+
+  private checkedPage(): Page {
+    this.signal.throwIfAborted();
+    this.authorize();
+    if (!this.page) throw new RootPasswordAutomationError('密码设置浏览器尚未就绪', 'failed');
+    const url = new URL(this.page.url());
+    if (url.protocol !== 'https:' || url.hostname !== 'signin.aws.amazon.com' || url.port || url.username || url.password) {
+      throw new RootPasswordAutomationError('密码设置页面离开 AWS 官方登录域名，已停止', this.submitted ? 'unknown' : 'failed');
+    }
+    return this.page;
+  }
+
+  private async pause(milliseconds: number): Promise<void> {
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(done, milliseconds);
+      const aborted = () => { clearTimeout(timer); reject(this.signal.reason || new Error('任务已停止')); };
+      function done() { signalCleanup(); resolve(); }
+      const signalCleanup = () => this.signal.removeEventListener('abort', aborted);
+      this.signal.addEventListener('abort', aborted, { once: true });
+    });
+  }
+
+  private async pageState(): Promise<'waiting' | 'ready' | 'success' | 'rejected' | 'changed'> {
+    const page = this.checkedPage();
+    return page.evaluate(() => {
+      const doc = (globalThis as any).document;
+      const text = String(doc.body?.innerText || '');
+      if (/password (?:has been|was) (?:successfully )?reset|password reset (?:was )?successful|new password (?:has been|was) saved|you can now sign in with your new password/i.test(text)) return 'success';
+      if (/reset link (?:is |has )?(?:invalid|expired|already used)|link (?:is |has )?(?:invalid|expired|already been used)|request a new password reset|passwords? do not match|password.*(?:does not meet|requirements|invalid)/i.test(text)) return 'rejected';
+      const visible = (element: any) => {
+        const style = (globalThis as any).getComputedStyle(element);
+        const rect = element.getBoundingClientRect();
+        return style.visibility !== 'hidden' && style.display !== 'none' && rect.width > 0 && rect.height > 0 && !element.disabled;
+      };
+      const fields = [...doc.querySelectorAll('input[type="password"]')].filter(visible);
+      const buttons = [...doc.querySelectorAll('button, input[type="submit"]')].filter(visible).filter((element: any) => {
+        const label = String(element.innerText || element.value || element.getAttribute('aria-label') || '').trim();
+        return /^(reset password|save new password|change password|submit)$/i.test(label);
+      });
+      if (fields.length > 2 || buttons.length > 1) return 'changed';
+      return fields.length === 2 && buttons.length === 1 ? 'ready' : 'waiting';
+    });
+  }
+
+  private async waitFor(expected: 'ready' | 'success', timeoutMs: number): Promise<void> {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      const state = await this.pageState();
+      if (state === expected) return;
+      if (state === 'changed') throw new RootPasswordAutomationError('AWS 密码页面结构与安全选择器不一致，已停止', this.submitted ? 'unknown' : 'failed');
+      if (state === 'rejected') throw new RootPasswordAutomationError(
+        this.submitted ? 'AWS 拒绝了新密码或重置链接，密码未确认设置' : 'AWS 重置链接无效、过期或已使用', 'failed');
+      await this.pause(500);
+    }
+    throw new RootPasswordAutomationError(
+      this.submitted ? '提交新密码后未收到明确结果，状态未知；系统不会自动重试' : 'AWS 密码设置页面未在预期时间就绪',
+      this.submitted ? 'unknown' : 'failed');
+  }
+
+  async setPassword(resetUrl: string, password: string): Promise<void> {
+    try {
+      const { validateRootResetLink } = await import('./root-mail-links');
+      const validated = validateRootResetLink(resetUrl);
+      if (!validated) throw new RootPasswordAutomationError('恢复邮件中的 AWS 重置链接未通过严格校验', 'failed');
+      this.signal.throwIfAborted();
+      this.authorize();
+      const runtime = rootEmailRuntime();
+      const { default: puppeteer } = await import('puppeteer-core');
+      this.profile = fs.mkdtempSync(path.join(os.tmpdir(), 'aws-root-password-'));
+      this.browser = await puppeteer.launch({
+        executablePath: runtime.chrome, headless: false, userDataDir: this.profile,
+        defaultViewport: { width: 1280, height: 900, deviceScaleFactor: 1 },
+        args: ['--no-first-run', '--no-default-browser-check', '--lang=en-US', '--disable-dev-shm-usage'],
+        env: runtime.display ? { ...process.env, DISPLAY: runtime.display } : process.env,
+        timeout: 15_000, signal: this.signal,
+      });
+      this.page = await this.browser.newPage();
+      this.page.setDefaultTimeout(25_000);
+      this.page.setDefaultNavigationTimeout(30_000);
+      await this.page.setExtraHTTPHeaders({ 'Accept-Language': 'en-US,en;q=0.9' });
+      await this.page.goto(validated, { waitUntil: 'domcontentloaded' });
+      this.checkedPage();
+      await this.waitFor('ready', 30_000);
+
+      const page = this.checkedPage();
+      const filled = await page.evaluate((value: string) => {
+        const doc = (globalThis as any).document;
+        const visible = (element: any) => {
+          const style = (globalThis as any).getComputedStyle(element);
+          const rect = element.getBoundingClientRect();
+          return style.visibility !== 'hidden' && style.display !== 'none' && rect.width > 0 && rect.height > 0 && !element.disabled;
+        };
+        const fields = [...doc.querySelectorAll('input[type="password"]')].filter(visible) as any[];
+        if (fields.length !== 2) return false;
+        const setter = Object.getOwnPropertyDescriptor((globalThis as any).HTMLInputElement.prototype, 'value')?.set;
+        if (!setter) return false;
+        for (const field of fields) {
+          setter.call(field, value);
+          field.dispatchEvent(new Event('input', { bubbles: true }));
+          field.dispatchEvent(new Event('change', { bubbles: true }));
+        }
+        return fields.every(field => field.value === value);
+      }, password);
+      if (!filled) throw new RootPasswordAutomationError('无法安全识别并填写两处新密码输入框', 'failed');
+      this.signal.throwIfAborted();
+      this.authorize();
+
+      // Conservative boundary: any failure after this point is unknown, even if evaluate fails before returning.
+      this.submitted = true;
+      const clicked = await page.evaluate(() => {
+        const doc = (globalThis as any).document;
+        const visible = (element: any) => {
+          const style = (globalThis as any).getComputedStyle(element);
+          const rect = element.getBoundingClientRect();
+          return style.visibility !== 'hidden' && style.display !== 'none' && rect.width > 0 && rect.height > 0 && !element.disabled;
+        };
+        const buttons = [...doc.querySelectorAll('button, input[type="submit"]')].filter(visible).filter((element: any) => {
+          const label = String(element.innerText || element.value || element.getAttribute('aria-label') || '').trim();
+          return /^(reset password|save new password|change password|submit)$/i.test(label);
+        }) as any[];
+        if (buttons.length !== 1) return false;
+        buttons[0].click();
+        return true;
+      });
+      if (!clicked) throw new RootPasswordAutomationError('提交按钮状态已变化，密码设置结果未知；系统不会自动重试', 'unknown');
+      await this.waitFor('success', 45_000);
+    } catch (error) {
+      if (error instanceof RootPasswordAutomationError) throw error;
+      throw new RootPasswordAutomationError(
+        this.submitted ? '提交新密码后页面异常，状态未知；系统不会自动重试' : 'AWS 密码页面加载失败，未提交新密码',
+        this.submitted ? 'unknown' : 'failed');
+    }
+  }
+
+  async close(): Promise<void> {
+    try {
+      if (this.browser) {
+        const child = this.browser.process();
+        let timeout: NodeJS.Timeout | undefined;
+        try {
+          await Promise.race([this.browser.close(), new Promise<void>(resolve => {
+            timeout = setTimeout(() => { child?.kill('SIGKILL'); resolve(); }, 5_000);
+          })]);
+        } catch { child?.kill('SIGKILL'); }
+        finally { if (timeout) clearTimeout(timeout); }
+        if (child && child.exitCode === null && child.signalCode === null) {
+          await new Promise<void>((resolve, reject) => {
+            const deadline = setTimeout(() => {
+              child.removeListener('exit', exited);
+              reject(new Error('Chrome cleanup did not complete'));
+            }, 3_000);
+            const exited = () => { clearTimeout(deadline); resolve(); };
+            child.once('exit', exited);
+          });
+        }
+      }
+    } finally {
+      if (this.profile) {
+        try { fs.rmSync(this.profile, { recursive: true, force: true }); }
+        catch { console.error('[RootEmail] 临时密码浏览器目录清理失败'); }
+      }
+    }
   }
 }

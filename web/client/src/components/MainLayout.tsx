@@ -53,7 +53,7 @@ const navItems = [
   { key: 'accounts', icon: <TeamOutlined />, label: '账户管理' },
   { key: 'quotas', icon: <DashboardOutlined />, label: '配额管理' },
   { key: BULK_QUOTA_PAGE_KEY, icon: <ThunderboltOutlined />, label: '批量提额' },
-  { key: ROOT_RESET_PAGE_KEY, icon: <UnlockOutlined />, label: '批量重置 Root 密码' },
+  { key: ROOT_RESET_PAGE_KEY, icon: <UnlockOutlined />, label: '批量设置 Root 密码' },
   { key: 'bedrock', icon: <RobotOutlined />, label: 'Bedrock 工具' },
   { key: 'regions', icon: <GlobalOutlined />, label: '区域管理' },
   { key: 'billing', icon: <DollarOutlined />, label: '账单导出' },

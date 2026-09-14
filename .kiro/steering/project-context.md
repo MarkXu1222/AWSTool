@@ -52,9 +52,10 @@ web/
 │   ├── account-roles.ts        # ★账户角色自愈：探测成员账户角色 → 缺失则触发 StackSet 补齐 → 超限告警
 │   ├── billing-export-jobs.ts  # 账单导出持久化 job、全局队列、永久历史、重复下载与重启恢复
 │   ├── billing-exporter.ts     # 严格只读抓取 AWS 官方账单 PDF + 可取消 zip 打包
-│   ├── root-email-jobs.ts      # Root 恢复邮件队列、实时权限复验、停止/重启恢复（单并发）
-│   ├── root-email-browser.ts   # 独立 Chrome + 本地 OCR，最多 3 张验证码；AWS 确认发信后停止
-│   ├── root-email-core.ts      # 独立原子任务存储和可测试的发信状态流程，见 web/ROOT_EMAIL.md
+│   ├── root-email-jobs.ts      # Root 恢复邮件/自动改密队列、30分钟凭证TTL、一次性CSV（单浏览器并发）
+│   ├── root-email-browser.ts   # 独立 Chrome：OCR发信 + 严格AWS reset页面自动填充；未知结果不重试
+│   ├── root-email-core.ts      # 原子任务存储、自动改密状态机和旧任务兼容，见 web/ROOT_EMAIL.md
+│   ├── root-password-secrets.ts # 24位CSPRNG、AES-256-GCM任务绑定密文、CSV生成
 │   ├── mail-api.ts             # 自建邮箱 HMAC 只读客户端，共用节流队列
 │   ├── root-mail-poll.ts       # 按任务游标查询、精确匹配恢复邮件
 │   ├── root-mail-links.ts      # AWS RootUser 链接解析；任务不存正文或重置 URL
@@ -80,11 +81,11 @@ web/
 │       ├── components/
 │       │   ├── MainLayout.tsx  # ★侧栏导航 + 页面切换（PAGE_META 对齐 ALL_PAGE_KEYS；rootreset/bulkquota 使用独立权限）
 │       │   ├── RootCredentialsPanel.tsx  # 根用户凭证敏感操作面板
-│       │   ├── RootEmailPanel.tsx # 恢复邮件任务入口、依赖状态和任务历史；不处理密码
+│       │   ├── RootEmailPanel.tsx # 单账户手工恢复邮件任务与自动改密任务状态；密码仅在批量页导出
 │       │   ├── DangerConfirm.tsx         # 危险操作二次确认
 │       │   ├── EmptyState.tsx / ErrorBoundary.tsx
 │       ├── pages/              # 每个业务页面一个文件（见下表）
-│       │   ├── BulkRootReset.tsx # /rootreset：按 payer 批量选择成员账户，最多 500 个，批次进度/停止/域名清单
+│       │   ├── BulkRootReset.tsx # /rootreset：自动设置Root新密码，单批20、typed确认+TOTP、一次性CSV
 │       ├── styles/global.css
 │       └── utils/              # cache.ts（前端缓存）、color.ts、export.ts
 │
@@ -222,7 +223,7 @@ web { port, adminPassword, jwtSecret, encryptionKey, feishuWebhook }
 - `root_access` → 账户页「根用户」敏感操作（Admin 临时凭证 / 删 Root MFA / 恢复根密码）、Admin 控制台登录；非 admin 即使有此权限也只能签发 1 小时凭证，2–12 小时仅限数据库当前角色为 admin
 - `bulk_quota_access` → 「批量提额」页；未授予时该菜单完全不可见，后端 `requireBulkQuotaAccess` 也会拒绝
 
-- `root_reset_access` → 批量重置 Root 密码：none/view/operate，非 admin 缺省 none；view 查看全部批次进度，operate 管理本人任务及链接，admin 管理全部。独立于 root_access。守卫与解析见 `root-reset-permissions.ts`。
+- `root_reset_access` → 批量设置 Root 新密码：none/view/operate，非 admin 缺省 none；view 查看全部批次进度，operate 创建和停止本人任务；admin 可管理任务，但一次性密码 CSV 始终只允许批次创建者下载。新批次单批最多 20 个账户，创建和下载都要求 step-up TOTP，创建还需精确输入 payer 名称与账户数。独立于 root_access。守卫与解析见 `root-reset-permissions.ts`。
 
 新增独立权限的改动点：`auth.ts`（resolve 函数 + me + create/update）、`db.ts`（getAllUsers 暴露字段）、`routes/aws.ts`（中间件）、`MainLayout.tsx`（导航 gating）、`Settings.tsx`（授予勾选 + 列表列）、`api.ts`（createUser/updateUser 参数）。
 
