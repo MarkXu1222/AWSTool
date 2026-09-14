@@ -52,6 +52,11 @@
   --z-sider: 100;       /* 桌面固定侧栏 */
   --z-overlay: 900;     /* 移动端全屏覆盖层 */
   --z-bottom-nav: 1000; /* 移动端底部导航，须压过 overlay */
+  /* 安全区（iOS 刘海/灵动岛/状态栏）。index.html 用了 viewport-fit=cover +
+     black-translucent 状态栏，内容会延伸到状态栏下方，凡是 position:fixed
+     且贴顶的元素都必须加上这个偏移。桌面端该值恒为 0，可无条件使用。 */
+  --safe-top: env(safe-area-inset-top, 0px);
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
 }
 
 /* === Reset === */
@@ -93,6 +98,28 @@ code, pre {
 /* === Layout Structure (模仿 ProLayout) === */
 .app-container {
   min-height: 100vh;
+}
+
+/* === 全局浮层安全区 ===
+   AntD v5 的 message 容器是 position:fixed; top: 8px（marginXS），该 8px 从
+   物理屏幕顶端起算。叠加 viewport-fit=cover + black-translucent 状态栏后，
+   提示条正好被状态栏/灵动岛盖住 —— 移动端 301 处 message.* 调用全都看不见。
+   项目未使用 App.useApp()，无法逐处传 top，故在容器层统一下压。
+   桌面端 --safe-top 为 0，规则等价于 AntD 默认值，不影响现有表现。 */
+.ant-message {
+  top: calc(var(--safe-top) + 8px) !important;
+}
+/* notification 贴顶的两种放置方式同样需要避让 */
+.ant-notification-topRight,
+.ant-notification-topLeft,
+.ant-notification-top {
+  margin-top: var(--safe-top) !important;
+}
+/* 顶部抽屉与全屏抽屉的内容区避让 */
+.ant-drawer-top .ant-drawer-content,
+.ant-drawer-left .ant-drawer-content,
+.ant-drawer-right .ant-drawer-content {
+  padding-top: var(--safe-top);
 }
 
 /* === Sidebar (Ant Design Pro 深色主题) === */
@@ -449,7 +476,7 @@ code, pre {
     height: 100dvh;
     min-height: 0;
     overflow: hidden;
-    padding-top: env(safe-area-inset-top, 0px);
+    padding-top: var(--safe-top);
     background: var(--color-bg-layout);
   }
   .app-container > .ant-layout,
@@ -567,7 +594,7 @@ code, pre {
   z-index: var(--z-overlay);
   overflow-y: auto;
   -webkit-overflow-scrolling: touch;
-  padding-top: env(safe-area-inset-top, 0px);
+  padding-top: var(--safe-top);
 }
 
 /* === Account Cards (mobile) === */
