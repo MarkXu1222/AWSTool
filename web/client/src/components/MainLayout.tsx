@@ -291,8 +291,21 @@ const MainLayout: React.FC<MainLayoutProps> = ({ onLogout }) => {
     );
   };
 
+  // 移动端顶栏标题：优先用导航项的全名，兜底用 PAGE_META
+  const currentTitle =
+    navItems.find(i => i.key === currentPage)?.label
+    || PAGE_META.find(p => p.key === currentPage)?.label
+    || 'AWS Toolbox';
+
   return (
     <div className="app-container">
+      {/* Mobile top bar —— 电脑端靠深色侧边栏承载品牌，手机端此前顶部是一片
+          空白浅灰。这里补一条同色系品牌栏，并让状态栏安全区也染上品牌色。 */}
+      <header className="mobile-topbar">
+        <img src="/logo.png" alt="" className="mobile-topbar-logo" />
+        <span className="mobile-topbar-title">{currentTitle}</span>
+        <span className="mobile-topbar-user">{username}</span>
+      </header>
       <Layout style={{ minHeight: '100vh' }}>
         {/* Desktop Sidebar — Ant Design Pro style */}
         <Sider width={208} className="desktop-sider">

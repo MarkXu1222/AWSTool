@@ -101,6 +101,57 @@ code, pre {
   min-height: 100vh;
 }
 
+/* === Mobile Top Bar（仅移动端显示） ===
+   电脑端用深色侧边栏承载品牌，手机端没有侧边栏，顶部原本是一片空白浅灰。
+   这条品牌栏与侧边栏同色（--color-bg-sidebar），并把 safe-area 顶部区域
+   一并染色，状态栏/灵动岛背后不再露出浅灰底。 */
+.mobile-topbar {
+  display: none;
+}
+@media (max-width: 768px) {
+  .mobile-topbar {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-shrink: 0;
+    /* 安全区在这里消化，app-container 不再加 padding-top */
+    padding: 10px 16px;
+    padding-top: calc(var(--safe-top) + 10px);
+    background: var(--color-bg-sidebar);
+    background-image: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
+    box-shadow: 0 1px 8px rgba(15, 23, 42, 0.18);
+    position: relative;
+    z-index: 10;
+  }
+  .mobile-topbar-logo {
+    width: 26px;
+    height: 26px;
+    object-fit: contain;
+    border-radius: 6px;
+    flex-shrink: 0;
+  }
+  .mobile-topbar-title {
+    font-size: 16px;
+    font-weight: 650;
+    color: #fff;
+    letter-spacing: -0.01em;
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .mobile-topbar-user {
+    font-size: 12px;
+    color: rgba(255, 255, 255, 0.55);
+    flex-shrink: 0;
+    max-width: 30%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+}
+
 /* === 全局浮层安全区 ===
    AntD v5 的 message 容器是 position:fixed; top: 8px（marginXS），该 8px 从
    物理屏幕顶端起算。叠加 viewport-fit=cover + black-translucent 状态栏后，
@@ -476,6 +527,8 @@ code, pre {
   /* index.html 用了 viewport-fit=cover + black-translucent 状态栏，内容会延伸到
      刘海/状态栏下方。这里用 safe-area-inset-top 把整个应用壳下压，状态栏区域
      只露出布局底色（box-sizing: border-box，内部高度自动扣除该 padding）。 */
+  /* 顶栏自带安全区内边距并填充品牌色，所以这里不再加 padding-top —— 状态栏
+     区域由顶栏的深色背景铺满，而不是露出浅灰底色。 */
   .app-container {
     position: fixed;
     inset: 0;
@@ -484,10 +537,16 @@ code, pre {
     height: 100dvh;
     min-height: 0;
     overflow: hidden;
-    padding-top: var(--safe-top);
-    background: var(--color-bg-layout);
+    display: flex;
+    flex-direction: column;
+    background: var(--color-bg-sidebar);
   }
-  .app-container > .ant-layout,
+  /* 顶栏是 flex 项，剩余高度全部给内容区 */
+  .app-container > .ant-layout {
+    flex: 1;
+    min-height: 0 !important;
+    overflow: hidden;
+  }
   .app-container > .ant-layout > .ant-layout {
     height: 100%;
     min-height: 0 !important;
@@ -529,14 +588,16 @@ code, pre {
   .ant-card-head { padding: 0 12px !important; }
   .stat-chips { gap: 8px; }
   .stat-chip { height: 24px; padding: 0 8px; font-size: 12px; }
-  .page-header-title { font-size: 18px; }
+  /* 顶栏已显示页面名，页内大标题重复且占掉近一屏，移动端隐藏标题保留副标题 */
+  .page-header-title { display: none; }
   /* 标题与右上角操作区挤在一行会被裁掉（「扫描所有账户」等按钮看不全）。
      手机上改为竖排：标题在上，操作按钮换行铺在下面。 */
   .page-header {
     flex-direction: column;
     align-items: stretch;
-    gap: 12px;
-    padding-bottom: 12px;
+    gap: 10px;
+    margin-bottom: 12px;
+    padding-bottom: 0;
   }
   .page-header > * { min-width: 0; }
   .page-header-subtitle { font-size: 12px; }
