@@ -6,6 +6,8 @@ dist/
 config.json
 提额文档/
 data/db.json
+data/root-email-jobs.json
+data/root-email-jobs.json.*.tmp
 
 # 密钥与凭证备份：绝不入库
 config.json.bak*

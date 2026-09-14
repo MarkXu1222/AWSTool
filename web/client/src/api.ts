@@ -6,6 +6,46 @@ import { cacheGet, cacheSet } from './utils/cache';
 
 const BASE = '/api';
 
+export interface RootEmailJobView {
+  id: string;
+  accountId: string;
+  email: string;
+  status: 'queued' | 'running' | 'email_sent' | 'waiting_mail' | 'link_ready' | 'mail_failed' | 'failed' | 'cancelled' | 'interrupted';
+  phase: 'queued' | 'opening' | 'captcha' | 'submitting' | 'waiting_mail' | 'done';
+  attempts: number;
+  createdBy: string;
+  createdAt: string;
+  sentAt?: string;
+  detail: string;
+}
+export interface RootEmailAccount {
+  accountId: string;
+  name: string;
+  email: string;
+  payerAccountId: string;
+  state: string;
+  eligible: boolean;
+}
+export interface RootEmailBatchView {
+  id: string;
+  payerAccountId: string;
+  payerName: string;
+  createdBy: string;
+  createdAt: string;
+  total: number;
+  done: number;
+  queued: number;
+  running: number;
+  sent: number;
+  failed: number;
+  cancelled: number;
+  interrupted: number;
+  waitingMail: number;
+  linkReady: number;
+  mailFailed: number;
+  jobs?: RootEmailJobView[];
+}
+
 function getToken(): string | null {
   return localStorage.getItem('token');
 }
@@ -628,6 +668,20 @@ export const api = {
   // Root user privileged tasks (via sts:AssumeRoot centralized root access)
   deleteRootMFA: (accountId: string) => request(`/aws/root-credentials/${accountId}/delete-mfa`, { method: 'POST' }),
   recoverRootPassword: (accountId: string) => request(`/aws/root-credentials/${accountId}/recover-password`, { method: 'POST' }),
+  rootEmailAvailability: () => request('/aws/root-email/availability'),
+  rootResetLink: (id: string) => request(`/aws/root-email/jobs/${encodeURIComponent(id)}/reset-link`, { method: 'POST' }),
+  rootEmailCatalog: () => request('/aws/root-email/catalog'),
+  rootEmailBatches: () => request('/aws/root-email/batches'),
+  rootEmailBatch: (id: string) => request(`/aws/root-email/batches/${encodeURIComponent(id)}`),
+  sendRootEmailBatch: (body: { payerAccountId: string; accountIds: string[]; requestId: string }) => request('/aws/root-email/batches', {
+    method: 'POST', body: JSON.stringify({ ...body, confirmSend: true }),
+  }),
+  cancelRootEmailBatch: (id: string) => request(`/aws/root-email/batches/${encodeURIComponent(id)}/cancel`, { method: 'POST' }),
+  rootEmailJobs: (accountId: string) => request(`/aws/root-email/accounts/${accountId}/jobs`),
+  sendRootEmail: (accountId: string) => request(`/aws/root-email/accounts/${accountId}/jobs`, {
+    method: 'POST', body: JSON.stringify({ confirmSend: true }),
+  }),
+  cancelRootEmail: (id: string) => request(`/aws/root-email/jobs/${id}/cancel`, { method: 'POST' }),
   deleteRootAccessKey: (accountId: string, accessKeyId: string) =>
     request(`/aws/root-credentials/${accountId}/delete-access-key`, { method: 'POST', body: JSON.stringify({ accessKeyId }) }),
   changePassword: (currentPassword: string, newPassword: string) =>

@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { Descriptions, Tag, Button, Space, message, Divider, Tooltip, Alert, Popconfirm, InputNumber } from 'antd';
 import { ReloadOutlined, CopyOutlined, EyeOutlined, EyeInvisibleOutlined, KeyOutlined, SafetyCertificateOutlined, DeleteOutlined, UnlockOutlined } from '@ant-design/icons';
 import { api } from '../api';
+import RootEmailPanel from './RootEmailPanel';
 
 interface TempCreds {
   accountId: string;
@@ -278,6 +279,11 @@ const RootCredentialsPanel: React.FC<Props> = ({ accountId, rootCredentials, can
           {status.passwordLastUsed && <Descriptions.Item label="密码最后使用">{status.passwordLastUsed}</Descriptions.Item>}
         </Descriptions>
       ) : detailLoading ? <span style={{ color: '#8a94a6', fontSize: 12 }}>正在加载根用户状态…</span> : <span style={{ color: '#8a94a6', fontSize: 12 }}>根用户凭证状态不可用（凭证报告获取失败）</span>}
+
+      {canRoot && !isPayer && <>
+        <Divider style={{ margin: '12px 0' }} />
+        <RootEmailPanel key={accountId} accountId={accountId} />
+      </>}
 
       {canRoot && adminExcluded && (
         <>

@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useLayoutEffect, useRef } from 'react';
 import { Layout, Menu, Button, Skeleton, Drawer } from 'antd';
-import { HomeOutlined, TeamOutlined, DashboardOutlined, DollarOutlined, SettingOutlined, LogoutOutlined, DeleteOutlined, FileSearchOutlined, GlobalOutlined, TagsOutlined, ThunderboltOutlined, FundOutlined, RobotOutlined, AppstoreOutlined } from '@ant-design/icons';
+import { HomeOutlined, TeamOutlined, DashboardOutlined, DollarOutlined, SettingOutlined, LogoutOutlined, DeleteOutlined, FileSearchOutlined, GlobalOutlined, TagsOutlined, ThunderboltOutlined, FundOutlined, RobotOutlined, AppstoreOutlined, UnlockOutlined } from '@ant-design/icons';
 import DashboardPage from '../pages/Dashboard';
 import AccountsPage from '../pages/Accounts';
 import QuotasPage from '../pages/Quotas';
@@ -11,6 +11,7 @@ import AuditLogPage from '../pages/AuditLog';
 import SettingsPage from '../pages/Settings';
 import TagCompliancePage from '../pages/TagCompliance';
 import BulkQuotaPage from '../pages/BulkQuota';
+import BulkRootResetPage from '../pages/BulkRootReset';
 import BedrockPage from '../pages/Bedrock';
 // 运维监控懒加载：只有实际进入该授权页面时才下载 recharts 分包
 const OpsMonitorPage = React.lazy(() => import('../pages/OpsMonitor'));
@@ -41,6 +42,8 @@ export const PAGE_META: { key: string; label: string }[] = [
 // 批量提额页 key。注意：它不在 PAGE_META / 后端 ALL_PAGE_KEYS 里，
 // 可见性完全由独立权限 bulkQuotaAccess 决定，不能通过「页面权限」勾选获得。
 export const BULK_QUOTA_PAGE_KEY = 'bulkquota';
+// 与批量提额一样使用独立权限；此入口沿用后端实时 root_access，不通过页面授权扩大权限。
+export const ROOT_RESET_PAGE_KEY = 'rootreset';
 
 // 运维监控属于可分配页面；admin 恒有，其他角色必须在 allowed_pages 中显式授权。
 export const OPS_PAGE_KEY = 'ops';
@@ -50,6 +53,7 @@ const navItems = [
   { key: 'accounts', icon: <TeamOutlined />, label: '账户管理' },
   { key: 'quotas', icon: <DashboardOutlined />, label: '配额管理' },
   { key: BULK_QUOTA_PAGE_KEY, icon: <ThunderboltOutlined />, label: '批量提额' },
+  { key: ROOT_RESET_PAGE_KEY, icon: <UnlockOutlined />, label: '批量重置 Root 密码' },
   { key: 'bedrock', icon: <RobotOutlined />, label: 'Bedrock 工具' },
   { key: 'regions', icon: <GlobalOutlined />, label: '区域管理' },
   { key: 'billing', icon: <DollarOutlined />, label: '账单导出' },
@@ -79,6 +83,7 @@ const MOBILE_SHORT_LABEL: Record<string, string> = {
 const VALID_PAGE_KEYS = new Set([
   ...PAGE_META.map(p => p.key),
   BULK_QUOTA_PAGE_KEY,
+  ROOT_RESET_PAGE_KEY,
   OPS_PAGE_KEY,
 ]);
 
@@ -95,6 +100,7 @@ const MainLayout: React.FC<MainLayoutProps> = ({ onLogout }) => {
   const [allowedPages, setAllowedPages] = useState<string[] | null>(null);
   // 批量提额独立权限；未加载完前按无权限处理，避免菜单闪现
   const [bulkQuotaAccess, setBulkQuotaAccess] = useState(false);
+  const [rootAccess, setRootAccess] = useState(false);
   // admin 恒有运维监控权限；未加载完前按无权限处理，避免敏感菜单闪现
   const [isAdmin, setIsAdmin] = useState(false);
   // 移动端「更多」抽屉
@@ -202,11 +208,15 @@ const MainLayout: React.FC<MainLayoutProps> = ({ onLogout }) => {
       if (!r || r.unauthorized || !r.username) return;
       setUsername(r.username || '');
       setBulkQuotaAccess(!!r.bulkQuotaAccess);
+      setRootAccess(!!r.rootAccess);
       setIsAdmin(r.role === 'admin');
       if (Array.isArray(r.allowedPages)) {
         setAllowedPages(r.allowedPages);
         // 如果当前页不在允许列表里，回退到第一个允许的页面
-        if (r.allowedPages.length > 0 && !r.allowedPages.includes('dashboard')) {
+        const requested = pageFromLocation();
+        const independentAccess = (requested === ROOT_RESET_PAGE_KEY && r.rootAccess)
+          || (requested === BULK_QUOTA_PAGE_KEY && r.bulkQuotaAccess);
+        if (r.allowedPages.length > 0 && !r.allowedPages.includes(requested) && !independentAccess) {
           navigate(r.allowedPages[0]);
         }
       }
@@ -217,6 +227,7 @@ const MainLayout: React.FC<MainLayoutProps> = ({ onLogout }) => {
   const isPageAllowed = (key: string) => {
     // 批量提额只看独立权限，与页面权限无关
     if (key === BULK_QUOTA_PAGE_KEY) return bulkQuotaAccess;
+    if (key === ROOT_RESET_PAGE_KEY) return rootAccess;
     // 运维监控：admin 恒有；其他角色仅在页面权限中显式授予后可见
     if (key === OPS_PAGE_KEY) return isAdmin || allowedPages?.includes(OPS_PAGE_KEY) === true;
     if (allowedPages === null) return true;
@@ -257,6 +268,7 @@ const MainLayout: React.FC<MainLayoutProps> = ({ onLogout }) => {
       case 'quotas': return <QuotasPage />;
       case 'bedrock': return <BedrockPage />;
       case BULK_QUOTA_PAGE_KEY: return <BulkQuotaPage />;
+      case ROOT_RESET_PAGE_KEY: return <BulkRootResetPage />;
       case OPS_PAGE_KEY: return (
         <React.Suspense fallback={<div style={{ padding: 24 }}><Skeleton active paragraph={{ rows: 8 }} /></div>}>
           <OpsMonitorPage />

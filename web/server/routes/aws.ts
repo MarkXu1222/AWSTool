@@ -22,6 +22,10 @@ import {
 import * as tagCompliance from '../tag-compliance';
 import * as tagOnboarding from '../tag-onboarding';
 import { pipeline } from 'stream/promises';
+import { cancelRootEmail, listRootEmails, rootEmailAvailability, submitRootEmail, rootEmailCatalog,
+  listRootEmailBatches, getRootEmailBatch, submitRootEmailBatch, cancelRootEmailBatch, getRootResetLink } from '../root-email-jobs';
+import { RootEmailError } from '../root-email-core';
+import { MailApiError } from '../mail-api';
 
 export const awsRouter = Router();
 
@@ -333,6 +337,68 @@ const requireRootAccess = (req: Request, res: Response, next: any) => {
   }
   return res.status(403).json({ error: '无根用户凭证操作权限，请联系管理员分配' });
 };
+
+// Root recovery email jobs. These endpoints never receive a password or a reset URL.
+awsRouter.use('/root-email', requireRootAccess, (_req, res, next) => {
+  res.set('Cache-Control', 'no-store');
+  next();
+});
+const rootEmailFailure = (res: Response, error: unknown) => res.status(error instanceof RootEmailError ? error.statusCode : error instanceof MailApiError ? 503 : 500)
+  .json({ error: error instanceof RootEmailError || error instanceof MailApiError ? error.message : '恢复邮件任务服务异常，请联系管理员' });
+awsRouter.post('/root-email/jobs/:id/reset-link', async (req, res) => {
+  try {
+    const data = await getRootResetLink(String(req.params.id), res.locals.rootAccessUser);
+    res.locals.audited = true;
+    res.json({ success: true, data });
+  } catch (error) { rootEmailFailure(res, error); }
+});
+awsRouter.get('/root-email/availability', async (_req, res) => {
+  try { res.json({ success: true, data: await rootEmailAvailability() }); }
+  catch (error) { rootEmailFailure(res, error); }
+});
+awsRouter.get('/root-email/catalog', (_req, res) => {
+  try { res.json({ success: true, data: rootEmailCatalog() }); }
+  catch (error) { rootEmailFailure(res, error); }
+});
+awsRouter.get('/root-email/batches', (_req, res) => {
+  try { res.json({ success: true, data: listRootEmailBatches(res.locals.rootAccessUser) }); }
+  catch (error) { rootEmailFailure(res, error); }
+});
+awsRouter.get('/root-email/batches/:id', (req, res) => {
+  try { res.json({ success: true, data: getRootEmailBatch(String(req.params.id), res.locals.rootAccessUser) }); }
+  catch (error) { rootEmailFailure(res, error); }
+});
+awsRouter.post('/root-email/batches', async (req, res) => {
+  try {
+    if (req.body?.confirmSend !== true) throw new RootEmailError('请确认批量发送恢复邮件');
+    const result = await submitRootEmailBatch(String(req.body.payerAccountId || ''), req.body.accountIds,
+      String(req.body.requestId || ''), res.locals.rootAccessUser);
+    res.locals.audited = true;
+    res.status(result.reused ? 200 : 202).json({ success: true, data: result });
+  } catch (error) { rootEmailFailure(res, error); }
+});
+awsRouter.post('/root-email/batches/:id/cancel', (req, res) => {
+  try {
+    res.json({ success: true, data: cancelRootEmailBatch(String(req.params.id), res.locals.rootAccessUser) });
+    res.locals.audited = true;
+  } catch (error) { rootEmailFailure(res, error); }
+});
+awsRouter.get('/root-email/accounts/:accountId/jobs', (req, res) => {
+  try { res.json({ success: true, data: listRootEmails(String(req.params.accountId), res.locals.rootAccessUser) }); }
+  catch (error) { rootEmailFailure(res, error); }
+});
+awsRouter.post('/root-email/accounts/:accountId/jobs', async (req, res) => {
+  try {
+    if (req.body?.confirmSend !== true) throw new RootEmailError('请确认向该账户的根邮箱发送恢复邮件');
+    const job = await submitRootEmail(String(req.params.accountId), res.locals.rootAccessUser);
+    res.locals.audited = true;
+    res.status(202).json({ success: true, data: job });
+  } catch (error) { rootEmailFailure(res, error); }
+});
+awsRouter.post('/root-email/jobs/:id/cancel', (req, res) => {
+  try { res.json({ success: true, data: cancelRootEmail(String(req.params.id), res.locals.rootAccessUser) }); }
+  catch (error) { rootEmailFailure(res, error); }
+});
 
 // RBAC: 批量 payer 提额权限（独立开关，必须显式授予）。
 // 该功能会对整个组织所有账户批量提交提额请求，影响面大，因此与页面权限解耦，

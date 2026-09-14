@@ -7,7 +7,7 @@
     "dev": "concurrently \"npm run dev:server\" \"npm run dev:client\"",
     "dev:server": "tsx watch server/index.ts",
     "dev:client": "vite --config client/vite.config.ts",
-    "build": "vite build --config client/vite.config.ts && tsc -p server/tsconfig.json",
+    "build": "vite build --config client/vite.config.ts && tsc -p server/tsconfig.json && node scripts/copy-runtime-assets.cjs",
     "start": "node dist/server/index.js",
     "setup": "node -e \"const { generateSecret } = require('./dist/server/auth'); console.log(generateSecret())\""
   },

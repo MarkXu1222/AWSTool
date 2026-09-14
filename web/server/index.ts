@@ -13,6 +13,7 @@ import { migrateEncryptMFASecrets, backupDB } from './db';
 import { startScheduler, getSchedulerStatus } from './scheduler';
 import { startTagOnboardingRunner } from './tag-onboarding';
 import { startBillingExportRunner, stopBillingExportRunner } from './billing-export-jobs';
+import { startRootEmailRunner, stopRootEmailRunner } from './root-email-jobs';
 import { opsRouter, requireOpsAccess, recordRequest, startOpsMonitor, stopOpsMonitor } from './ops-monitor';
 import { recordHttpStatus } from './security-alerts';
 
@@ -169,6 +170,7 @@ const server = app.listen(Number(PORT), '127.0.0.1', async () => {
   try {
     // 先取得 billing runner 的 OS 单实例锁；失败时不允许此进程继续提供可能竞争写 DB 的 API。
     await startBillingExportRunner();
+    startRootEmailRunner();
     startScheduler();
     startTagOnboardingRunner();
     startOpsMonitor();
@@ -193,7 +195,7 @@ function shutdown(signal: NodeJS.Signals): Promise<void> {
     });
     try {
       await Promise.race([
-        Promise.all([stopBillingExportRunner(), closeServer]),
+        Promise.all([stopBillingExportRunner(), stopRootEmailRunner(), closeServer]),
         deadline,
       ]);
       console.log('[Shutdown] 账单导出进程与 HTTP server 已安全停止');

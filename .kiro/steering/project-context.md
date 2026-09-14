@@ -52,6 +52,12 @@ web/
 │   ├── account-roles.ts        # ★账户角色自愈：探测成员账户角色 → 缺失则触发 StackSet 补齐 → 超限告警
 │   ├── billing-export-jobs.ts  # 账单导出持久化 job、全局队列、永久历史、重复下载与重启恢复
 │   ├── billing-exporter.ts     # 严格只读抓取 AWS 官方账单 PDF + 可取消 zip 打包
+│   ├── root-email-jobs.ts      # Root 恢复邮件队列、实时权限复验、停止/重启恢复（单并发）
+│   ├── root-email-browser.ts   # 独立 Chrome + 本地 OCR，最多 3 张验证码；AWS 确认发信后停止
+│   ├── root-email-core.ts      # 独立原子任务存储和可测试的发信状态流程，见 web/ROOT_EMAIL.md
+│   ├── mail-api.ts             # 自建邮箱 HMAC 只读客户端，共用节流队列
+│   ├── root-mail-poll.ts       # 按任务游标查询、精确匹配恢复邮件
+│   ├── root-mail-links.ts      # AWS RootUser 链接解析；任务不存正文或重置 URL
 │   ├── case-doc-submitter.ts   # 一键提交提额文档到 Support Case（浏览器自动化）
 │   ├── security-alerts.ts      # 安全告警：登录爆破/新IP/敏感操作/429、5xx 突增 → 飞书
 │   ├── ops-monitor.ts          # 运维监控指标采集（24h 环形缓冲）+ /api/ops 守卫
@@ -72,11 +78,13 @@ web/
 │       ├── api.ts              # ★统一 HTTP 客户端：封装所有后端接口，token 存 localStorage
 │       ├── version.ts          # ★APP_VERSION，单一版本源，每次部署递增
 │       ├── components/
-│       │   ├── MainLayout.tsx  # ★侧栏导航 + 页面切换（PAGE_META/navItems 要与后端 ALL_PAGE_KEYS 对齐）
+│       │   ├── MainLayout.tsx  # ★侧栏导航 + 页面切换（PAGE_META 对齐 ALL_PAGE_KEYS；rootreset/bulkquota 使用独立权限）
 │       │   ├── RootCredentialsPanel.tsx  # 根用户凭证敏感操作面板
+│       │   ├── RootEmailPanel.tsx # 恢复邮件任务入口、依赖状态和任务历史；不处理密码
 │       │   ├── DangerConfirm.tsx         # 危险操作二次确认
 │       │   ├── EmptyState.tsx / ErrorBoundary.tsx
 │       ├── pages/              # 每个业务页面一个文件（见下表）
+│       │   ├── BulkRootReset.tsx # /rootreset：按 payer 批量选择成员账户，最多 500 个，批次进度/停止/域名清单
 │       ├── styles/global.css
 │       └── utils/              # cache.ts（前端缓存）、color.ts、export.ts
 │

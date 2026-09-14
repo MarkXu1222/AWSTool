@@ -34,7 +34,8 @@ function maskSensitive(obj: any): any {
 function isNoise(method: string, path: string): boolean {
   if (NOISE_SUFFIXES.some(sfx => path.endsWith(sfx))) return true;
   // 账单 job 列表和状态每 2 秒轮询，不写审计；下载路径会显式记录。
-  return method === 'GET' && /^\/billing\/export-jobs(?:\/[^/]+)?$/.test(path);
+  return method === 'GET' && (/^\/billing\/export-jobs(?:\/[^/]+)?$/.test(path)
+    || /^\/root-email\/(?:availability|catalog|batches(?:\/[^/]+)?|accounts\/\d{12}\/jobs)$/.test(path));
 }
 
 export function auditMiddleware(req: Request, res: Response, next: NextFunction) {
