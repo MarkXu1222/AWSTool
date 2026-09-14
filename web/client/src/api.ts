@@ -237,8 +237,19 @@ export interface CleanupDeleteResult {
   iamCleanup?: Record<string, number>;
 }
 
+/** 交付表格下载结果：blob + 服务端回传的交付元信息（条数/缺失/零配额） */
+export interface DeliveryResult {
+  blob: Blob;
+  rows: number;
+  variant: string;
+  /** 配额实测为 0 的条目，形如 `us-east-1/sef-global-claude-opus-5` */
+  zeroQuota: string[];
+  /** 清单中但账户里不存在的型号，形如 `us-east-1:name1|name2` */
+  missing: string[];
+}
+
 /** Bedrock 交付表格公共下载器：POST → 二进制 xlsx blob（失败解析 JSON error） */
-async function bedrockDeliveryFetch(path: string, body: any): Promise<Blob> {
+async function bedrockDeliveryFetch(path: string, body: any): Promise<DeliveryResult> {
   const token = getToken();
   const res = await fetch(`${BASE}${path}`, {
     method: 'POST',
@@ -249,7 +260,15 @@ async function bedrockDeliveryFetch(path: string, body: any): Promise<Blob> {
     const err = await res.json().catch(() => ({ error: '交付表格生成失败' }));
     throw new Error(err.error || '交付表格生成失败');
   }
-  return res.blob();
+  // 服务端用自定义头回传交付元信息（body 是二进制，塞不进 JSON）
+  const dec = (h: string | null) => (h ? decodeURIComponent(h).split(',').filter(Boolean) : []);
+  return {
+    blob: await res.blob(),
+    rows: Number(res.headers.get('X-Delivery-Rows') || 0),
+    variant: res.headers.get('X-Delivery-Variant') || '',
+    zeroQuota: dec(res.headers.get('X-Delivery-Zero-Quota')),
+    missing: dec(res.headers.get('X-Delivery-Missing')),
+  };
 }
 
 export const api = {
@@ -343,7 +362,8 @@ export const api = {
   bedrockDeliveryExport: async (body: { rows: any[]; iamUser: string; iamPassword: string }) =>
     bedrockDeliveryFetch('/bedrock/delivery', body),
   // 交付表格 v2（李浩版，五列带 TPM/TPD，服务端实时查配额匹配）
-  bedrockDeliveryExportV2: async (body: { accountId: string; rows: any[]; iamUser: string; iamPassword: string }) =>
+  // variant: 'global' = 每区 6 条（仅 global，默认）；'full' = 每区 12 条（us+global）
+  bedrockDeliveryExportV2: async (body: { accountId: string; rows: any[]; iamUser: string; iamPassword: string; variant: 'full' | 'global' }) =>
     bedrockDeliveryFetch('/bedrock/delivery-v2', body),
 
   // 一键提交提额文档到 Support Case（后台 job：生成 PDF → 联邦登录 → Reply → 传附件 → Submit）

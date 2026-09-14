@@ -57,6 +57,12 @@ app.use(cors({
     return callback(null, false);
   },
   credentials: true,
+  // 交付表格下载是二进制 body，条数/缺失型号/零配额等元信息只能走响应头回传。
+  // 跨域下自定义响应头默认对 JS 不可见，必须显式 expose。
+  exposedHeaders: [
+    'X-Delivery-Variant', 'X-Delivery-Rows',
+    'X-Delivery-Zero-Quota', 'X-Delivery-Missing',
+  ],
 }));
 app.use(express.json());
 

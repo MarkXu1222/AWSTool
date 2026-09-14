@@ -8,7 +8,10 @@
 import { Router, Request, Response, NextFunction } from 'express';
 import { db } from '../db';
 import * as bt from '../bedrock-tools';
-import { buildDeliveryXlsx, buildDeliveryXlsxV2 } from '../bedrock-delivery';
+import {
+  buildDeliveryXlsx, buildDeliveryXlsxV2, filterAndSortForDelivery,
+  type DeliveryVariant,
+} from '../bedrock-delivery';
 import { listBedrockQuotas } from '../aws-service';
 
 export const bedrockRouter = Router();
@@ -296,10 +299,26 @@ bedrockRouter.post('/delivery-v2', requireAdmin, async (req: Request, res: Respo
     if (!rows.length) return res.status(400).json({ error: '没有 Profile 数据' });
     if (!iamUser || !iamPassword) return res.status(400).json({ error: 'IAM 用户名和密码必填' });
 
-    // 实时拉配额（覆盖 rows 涉及的全部区域）
-    const regions: string[] = [...new Set<string>(rows.map((r: any) => String(r.region)))].filter(r => REGION_RE.test(r));
+    // 交付变体：full = 每区 12 条（us+global）；global = 每区 6 条（仅 global）
+    const variant: DeliveryVariant = req.body.variant === 'full' ? 'full' : 'global';
+
+    // ⚠️ 必须先按规范筛选再做后续处理，顺序不能调换：
+    // 1) prepareDelivery 会对**每一行**强校验 map-migrated tag，老模型若没打 tag
+    //    会直接抛错，可它本来就不该出现在交付表里；
+    // 2) 配额匹配对老模型也是纯浪费。
+    const { kept, dropped, missingByRegion } =
+      filterAndSortForDelivery(rows.map((r: any) => ({ ...r, name: String(r.name || ''), region: String(r.region || '') })), variant);
+    if (!kept.length) {
+      return res.status(400).json({
+        error: `账户中找不到任何交付清单内的 Profile（变体：${variant === 'full' ? '全量版' : '仅 global 版'}）。`
+          + `已加载 ${rows.length} 个 Profile，均不在清单中。`,
+      });
+    }
+
+    // 实时拉配额（只覆盖筛选后 rows 涉及的区域）
+    const regions: string[] = [...new Set<string>(kept.map((r: any) => String(r.region)))].filter(r => REGION_RE.test(r));
     const quota = await listBedrockQuotas(accountId, regions);
-    const rowsV2 = rows.map((r: any) => ({
+    const rowsV2 = kept.map((r: any) => ({
       name: String(r.name || ''), arn: String(r.arn || ''), region: String(r.region || ''),
       tags: Array.isArray(r.tags) ? r.tags : [],
       ...bt.matchProfileTpmTpd(
@@ -308,9 +327,23 @@ bedrockRouter.post('/delivery-v2', requireAdmin, async (req: Request, res: Respo
       ),
     }));
     const { buffer, accountId: acc, tagValue } = await buildDeliveryXlsxV2(rowsV2, iamUser, iamPassword);
+
+    // 配额为 0 的条目要让操作者知道（规范：提额未生效如实写 0，但必须人工确认后再交付）
+    const zeroQuota = rowsV2.filter(r => !r.tpm || !r.tpd).map(r => `${r.region}/${r.name}`);
+    res.setHeader('X-Delivery-Variant', variant);
+    res.setHeader('X-Delivery-Rows', String(rowsV2.length));
+    if (zeroQuota.length) res.setHeader('X-Delivery-Zero-Quota', encodeURIComponent(zeroQuota.join(',')));
+    if (missingByRegion.size) {
+      const miss = [...missingByRegion].map(([reg, ns]) => `${reg}:${ns.join('|')}`).join(',');
+      res.setHeader('X-Delivery-Missing', encodeURIComponent(miss));
+    }
+
     const user = (req as any).user;
     db.addAuditLog(user?.userId, 'BEDROCK_DELIVERY_EXPORT',
-      `账户 ${acc} | 交付表格 v2（李浩版，含 TPM/TPD，${rows.length} 个 Profile，tag=${tagValue}）`, user?.username, req.ip);
+      `账户 ${acc} | 交付表格 v2（李浩版，变体=${variant}，含 TPM/TPD，`
+      + `加载 ${rows.length} → 交付 ${rowsV2.length} 条，剔除 ${dropped.length} 种老模型`
+      + `${zeroQuota.length ? `，配额为 0：${zeroQuota.length} 条` : ''}，tag=${tagValue}）`,
+      user?.username, req.ip);
     (res.locals as any).audited = true;
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
     res.setHeader('Content-Disposition', `attachment; filename="${acc}-delivery-v2.xlsx"`);

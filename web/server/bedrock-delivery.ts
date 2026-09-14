@@ -149,6 +149,86 @@ export interface DeliveryProfileRowV2 extends DeliveryProfileRow {
   tpd: number;   // 实测 TPD
 }
 
+/**
+ * 交付变体（规范第四节「模型清单（两种交付变体）」）：
+ *   full   = 变体 A：核心 6 模型的 us + global 版，每区 12 条
+ *   global = 变体 B：只要 global 版，每区 6 条（李浩近期主要要求）
+ */
+export type DeliveryVariant = 'full' | 'global';
+
+/**
+ * 变体 A 的顺序：**沿用基准文件 964949461994交付(1).xlsx 第 7–18 行的历史顺序**
+ * （us/global 交错，不是按模型分组）。与 generate_delivery_v2.py 的 DELIVER 一致。
+ * ⚠️ 不要「顺手整理」成按模型分组，会与历史交付件对不上。
+ */
+const VARIANT_FULL_ORDER = [
+  'sef-us-claude-sonnet-4-6',
+  'sef-us-claude-opus-4-7',
+  'sef-us-claude-opus-4-6-v1',
+  'sef-global-claude-opus-4-6-v1',
+  'sef-global-claude-sonnet-4-6',
+  'sef-global-claude-opus-4-7',
+  'sef-us-claude-opus-4-8',
+  'sef-global-claude-opus-4-8',
+  'sef-us-claude-sonnet-5',
+  'sef-us-claude-opus-5',
+  'sef-global-claude-sonnet-5',
+  'sef-global-claude-opus-5',
+];
+
+/** 变体 B 的顺序，与 filter_global_only.py 的 KEEP 一致（干净的模型序） */
+const VARIANT_GLOBAL_ORDER = [
+  'sef-global-claude-opus-4-6-v1',
+  'sef-global-claude-sonnet-4-6',
+  'sef-global-claude-opus-4-7',
+  'sef-global-claude-opus-4-8',
+  'sef-global-claude-sonnet-5',
+  'sef-global-claude-opus-5',
+];
+
+export function deliveryOrderFor(variant: DeliveryVariant): string[] {
+  return variant === 'global' ? VARIANT_GLOBAL_ORDER : VARIANT_FULL_ORDER;
+}
+
+/**
+ * 按变体筛选 + 排序。规范要求交付表只含核心 6 模型，且顺序固定；
+ * 账户里的老模型（3-haiku / opus-4-1 / opus-4-5 / sonnet-4 / sonnet-4-5 /
+ * haiku-4-5 / fable-5 / fable-5-1）一律不出现在交付表中。
+ *
+ * 采用**白名单**而非黑名单：AWS 随时会上新模型，黑名单会漏，
+ * 白名单能保证交付表内容完全可预期。
+ * 账户中不存在的型号自动跳过（规范：「账户缺某系列时自动跳过」）。
+ */
+export function filterAndSortForDelivery<T extends { name: string; region: string }>(
+  rows: T[], variant: DeliveryVariant,
+): { kept: T[]; dropped: string[]; missingByRegion: Map<string, string[]> } {
+  const order = deliveryOrderFor(variant);
+  const rank = new Map(order.map((n, i) => [n, i]));
+  const norm = (s: string) => String(s || '').trim();
+
+  const kept: T[] = [];
+  const missingByRegion = new Map<string, string[]>();
+  // 按区域分组后，各区内按清单顺序取；同名重复保留首个（与源表/历史一致）
+  const byRegion = new Map<string, Map<string, T>>();
+  for (const r of rows) {
+    const reg = norm(r.region);
+    if (!byRegion.has(reg)) byRegion.set(reg, new Map());
+    const m = byRegion.get(reg)!;
+    if (!m.has(norm(r.name))) m.set(norm(r.name), r);
+  }
+  for (const [reg, m] of byRegion) {
+    const missing: string[] = [];
+    for (const name of order) {
+      const hit = m.get(name);
+      if (hit) kept.push(hit);
+      else missing.push(name);
+    }
+    if (missing.length) missingByRegion.set(reg, missing);
+  }
+  const dropped = [...new Set(rows.map(r => norm(r.name)).filter(n => !rank.has(n)))].sort();
+  return { kept, dropped, missingByRegion };
+}
+
 export async function buildDeliveryXlsxV2(
   rows: DeliveryProfileRowV2[], iamUser: string, iamPassword: string,
 ): Promise<{ buffer: Buffer; accountId: string; tagValue: string }> {

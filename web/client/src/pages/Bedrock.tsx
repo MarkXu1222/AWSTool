@@ -671,6 +671,8 @@ const DeliveryTab: React.FC<{ accountId: string }> = ({ accountId }) => {
   const [iamPassword, setIamPassword] = useState('');
   const [exporting, setExporting] = useState(false);
   const [creatingUser, setCreatingUser] = useState(false);
+  // 交付变体（规范第四节）：仅 global 版是近期主要要求，故作默认值
+  const [variant, setVariant] = useState<'full' | 'global'>('global');
 
   // 一键创建交付 IAM 用户（AdministratorAccess + console 密码，不建 AK——交付表格只需要 console 登录），
   // 创建成功后自动填入下方用户名/密码，直接生成表格即可（与桌面版一键流程一致）
@@ -705,26 +707,41 @@ const DeliveryTab: React.FC<{ accountId: string }> = ({ accountId }) => {
     if (!iamUser.trim() || !iamPassword) { message.warning('请填写 IAM 用户名和密码'); return; }
     setExporting(true);
     try {
-      let blob: Blob;
-      if (v2) {
+      const res = v2
         // 李浩版：带 backendModels/scope 供服务端做 Profile↔配额（TPM/TPD）匹配，
-        // 服务端会实时查 Service Quotas，耗时约 10-30s
-        blob = await api.bedrockDeliveryExportV2({
+        // 服务端会按 variant 筛选清单内模型并实时查 Service Quotas，耗时约 10-30s
+        ? await api.bedrockDeliveryExportV2({
           accountId,
           rows: rows.map(r => ({ name: r.name, arn: r.arn, region: r.region, tags: r.tags || [], backendModels: r.backendModels, scope: r.scope })),
-          iamUser: iamUser.trim(), iamPassword,
-        });
-      } else {
-        blob = await api.bedrockDeliveryExport({
+          iamUser: iamUser.trim(), iamPassword, variant,
+        })
+        : await api.bedrockDeliveryExport({
           rows: rows.map(r => ({ name: r.name, arn: r.arn, region: r.region, tags: r.tags || [] })),
           iamUser: iamUser.trim(), iamPassword,
         });
-      }
-      const url = URL.createObjectURL(blob);
+      const url = URL.createObjectURL(res.blob);
       const a = document.createElement('a');
       a.href = url; a.download = `${accountId}-delivery${v2 ? '-v2' : ''}.xlsx`; a.click();
       URL.revokeObjectURL(url);
-      message.success(`交付表格${v2 ? '（带 TPM 版）' : ''}已下载`);
+
+      if (v2) {
+        message.success(`交付表格（带 TPM 版）已下载：${res.rows} 条（${variant === 'full' ? '全量版' : '仅 global 版'}）`);
+        // 规范红线：配额为 0 说明提额未生效，必须人工确认后再交付，不能直接发客户
+        if (res.zeroQuota.length) {
+          message.warning({
+            content: `⚠️ ${res.zeroQuota.length} 条配额实测为 0（提额未生效），已如实写入。确认提额生效后请重新生成再交付：${res.zeroQuota.slice(0, 3).join('、')}${res.zeroQuota.length > 3 ? ' 等' : ''}`,
+            duration: 10,
+          });
+        }
+        if (res.missing.length) {
+          message.warning({
+            content: `清单中有型号在账户内不存在，已自动跳过：${res.missing.join('；')}`,
+            duration: 8,
+          });
+        }
+      } else {
+        message.success('交付表格已下载');
+      }
     } catch (e: any) { message.error(e.message); } finally { setExporting(false); }
   };
 
@@ -744,7 +761,12 @@ const DeliveryTab: React.FC<{ accountId: string }> = ({ accountId }) => {
         <Input.Password size="small" placeholder="交付 IAM 密码（可一键生成）" style={{ width: 220 }} value={iamPassword} onChange={e => setIamPassword(e.target.value)} />
         <Button size="small" type="primary" icon={<DownloadOutlined />} loading={exporting}
           disabled={!rows.length || !iamUser.trim() || !iamPassword} onClick={() => doExport(false)}>生成交付表格</Button>
-        <Tooltip title="李浩版五列格式：Profile Name / ARN / TPM / TPD / Region。服务端实时查 Service Quotas 匹配 TPM/TPD（约 10-30s），提额未生效如实写 0">
+        <Select size="small" style={{ width: 178 }} value={variant} onChange={setVariant}
+          options={[
+            { value: 'global', label: '仅 global 版（6 条/区）' },
+            { value: 'full', label: '全量版（12 条/区）' },
+          ]} />
+        <Tooltip title="李浩版五列格式：Profile Name / ARN / TPM / TPD / Region。按所选变体筛选核心 6 模型并固定排序（老模型 haiku/fable/opus-4-1/4-5/sonnet-4/4-5 一律剔除）；服务端实时查 Service Quotas 匹配 TPM/TPD（约 10-30s），提额未生效如实写 0">
           <Button size="small" icon={<DownloadOutlined />} loading={exporting}
             disabled={!rows.length || !iamUser.trim() || !iamPassword} onClick={() => doExport(true)}>交付表格-带TPM版</Button>
         </Tooltip>
