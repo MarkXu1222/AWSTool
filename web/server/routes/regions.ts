@@ -1,9 +1,19 @@
-import { Router, Request, Response } from 'express';
+import { Router, Request, Response, NextFunction } from 'express';
 import { AccountClient, ListRegionsCommand, EnableRegionCommand } from '@aws-sdk/client-account';
 import { db } from '../db';
 import * as aws from '../aws-service';
 
 export const regionsRouter = Router();
+
+// 区域开通是写操作：走 Admin 凭证真实改动客户账户状态（且 opt-in 区域开通后不可逆），
+// 必须拦住 viewer。与 aws.ts 的 requireAdmin 同语义（admin + partadmin 放行）。
+const requireAdmin = (req: Request, res: Response, next: NextFunction) => {
+  const user = (req as any).user;
+  if (user?.role !== 'admin' && user?.role !== 'partadmin') {
+    return res.status(403).json({ error: '需要管理员权限' });
+  }
+  next();
+};
 
 // All opt-in regions that can be enabled/disabled
 const OPT_IN_REGIONS = [
@@ -98,7 +108,7 @@ regionsRouter.post('/scan/:accountId', async (req: Request, res: Response) => {
 });
 
 // Enable region for single account
-regionsRouter.post('/enable', async (req: Request, res: Response) => {
+regionsRouter.post('/enable', requireAdmin, async (req: Request, res: Response) => {
   try {
     const { accountId, region } = req.body;
     await enableRegion(accountId, region);
@@ -112,7 +122,7 @@ regionsRouter.post('/enable', async (req: Request, res: Response) => {
 });
 
 // Batch enable region for multiple accounts
-regionsRouter.post('/enable-batch', async (req: Request, res: Response) => {
+regionsRouter.post('/enable-batch', requireAdmin, async (req: Request, res: Response) => {
   try {
     const { accountIds, region } = req.body;
     const results: { accountId: string; success: boolean; error?: string }[] = [];

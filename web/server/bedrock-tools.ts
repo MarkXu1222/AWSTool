@@ -32,12 +32,28 @@ import crypto from 'crypto';
 import { getTempAdminCredentials } from './aws-service';
 
 // ===== Admin 凭证缓存（50 分钟；STS 凭证本身 1 小时） =====
+// 有界缓存：平台有 3000+ 账户，无上限的 Map 会让 Admin 凭证在内存里无限累积
+// （既是内存泄漏，也让已过期凭证长期滞留）。每次读写顺带清理过期项并限制容量。
+const CRED_CACHE_MAX = 50;
 const credCache = new Map<string, { creds: any; expireAt: number }>();
+
+function pruneCredCache() {
+  const now = Date.now();
+  for (const [key, v] of credCache) if (v.expireAt <= now) credCache.delete(key);
+  // 仍超限时按插入顺序淘汰最旧的（Map 保序）
+  while (credCache.size >= CRED_CACHE_MAX) {
+    const oldest = credCache.keys().next().value;
+    if (oldest === undefined) break;
+    credCache.delete(oldest);
+  }
+}
+
 async function adminCreds(accountId: string) {
   const hit = credCache.get(accountId);
   if (hit && hit.expireAt > Date.now()) return hit.creds;
   const t = await getTempAdminCredentials(accountId);
   const creds = { accessKeyId: t.accessKeyId, secretAccessKey: t.secretAccessKey, sessionToken: t.sessionToken };
+  pruneCredCache();
   credCache.set(accountId, { creds, expireAt: Date.now() + 50 * 60 * 1000 });
   return creds;
 }
