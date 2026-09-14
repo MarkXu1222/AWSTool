@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useLayoutEffect, useRef } from 'react';
-import { Layout, Menu, Button, Skeleton } from 'antd';
-import { HomeOutlined, TeamOutlined, DashboardOutlined, DollarOutlined, SettingOutlined, LogoutOutlined, DeleteOutlined, FileSearchOutlined, GlobalOutlined, TagsOutlined, ThunderboltOutlined, FundOutlined, RobotOutlined } from '@ant-design/icons';
+import { Layout, Menu, Button, Skeleton, Drawer } from 'antd';
+import { HomeOutlined, TeamOutlined, DashboardOutlined, DollarOutlined, SettingOutlined, LogoutOutlined, DeleteOutlined, FileSearchOutlined, GlobalOutlined, TagsOutlined, ThunderboltOutlined, FundOutlined, RobotOutlined, AppstoreOutlined } from '@ant-design/icons';
 import DashboardPage from '../pages/Dashboard';
 import AccountsPage from '../pages/Accounts';
 import QuotasPage from '../pages/Quotas';
@@ -60,13 +60,17 @@ const navItems = [
   { key: 'settings', icon: <SettingOutlined />, label: '系统设置' },
 ];
 
-const mobileNavItems = [
-  { key: 'dashboard', icon: <HomeOutlined />, label: '概览' },
-  { key: 'accounts', icon: <TeamOutlined />, label: '账户' },
-  { key: 'quotas', icon: <DashboardOutlined />, label: '配额' },
-  { key: 'billing', icon: <DollarOutlined />, label: '账单' },
-  { key: 'settings', icon: <SettingOutlined />, label: '设置' },
-];
+// 移动端底栏只放 4 个高频入口，其余全部收进「更多」抽屉。
+// 此前底栏是写死的 5 项，Bedrock/区域/清理/MAP 标签/审计/运维/批量提额
+// 在手机上完全无法访问 —— 现在所有有权限的页面都能从「更多」进入。
+// 底栏标签用短名（账户/配额），抽屉里用 navItems 的全名。
+const MOBILE_PRIMARY_KEYS = ['dashboard', 'accounts', 'quotas', 'bedrock'];
+const MOBILE_SHORT_LABEL: Record<string, string> = {
+  dashboard: '概览',
+  accounts: '账户',
+  quotas: '配额',
+  bedrock: 'Bedrock',
+};
 
 // ===== URL 同步（轻量实现，不引入 react-router）=====
 // 规则：/accounts → accounts 页；/ 或未知路径 → dashboard。
@@ -93,6 +97,8 @@ const MainLayout: React.FC<MainLayoutProps> = ({ onLogout }) => {
   const [bulkQuotaAccess, setBulkQuotaAccess] = useState(false);
   // admin 恒有运维监控权限；未加载完前按无权限处理，避免敏感菜单闪现
   const [isAdmin, setIsAdmin] = useState(false);
+  // 移动端「更多」抽屉
+  const [moreOpen, setMoreOpen] = useState(false);
   const appContainerRef = useRef<HTMLElement | null>(null);
 
   // 导航：更新 state 并把页面 key 写入 URL（pushState 不触发刷新）
@@ -106,7 +112,7 @@ const MainLayout: React.FC<MainLayoutProps> = ({ onLogout }) => {
 
   // 浏览器前进/后退：从 URL 恢复页面（不再 pushState，避免历史循环）
   useEffect(() => {
-    const onPopState = () => setCurrentPage(pageFromLocation());
+    const onPopState = () => { setCurrentPage(pageFromLocation()); setMoreOpen(false); };
     window.addEventListener('popstate', onPopState);
     // 首次进入时把当前页写进 history state，保证后退行为一致
     window.history.replaceState({ page: pageFromLocation() }, '', window.location.pathname);
@@ -208,7 +214,17 @@ const MainLayout: React.FC<MainLayoutProps> = ({ onLogout }) => {
   };
 
   const visibleNavItems = navItems.filter(item => isPageAllowed(item.key));
-  const visibleMobileNavItems = mobileNavItems.filter(item => isPageAllowed(item.key));
+  // 底栏 = 有权限的高频页（按 MOBILE_PRIMARY_KEYS 顺序）；其余进「更多」抽屉。
+  // 若高频页因权限缺失不足 4 个，从剩余页面按 navItems 顺序补位，避免底栏出现空位。
+  const mobilePrimary = (() => {
+    const primary = MOBILE_PRIMARY_KEYS
+      .map(key => visibleNavItems.find(item => item.key === key))
+      .filter((item): item is typeof navItems[number] => !!item);
+    if (primary.length >= 4) return primary.slice(0, 4);
+    const fill = visibleNavItems.filter(item => !primary.includes(item));
+    return [...primary, ...fill].slice(0, 4);
+  })();
+  const mobileMoreItems = visibleNavItems.filter(item => !mobilePrimary.includes(item));
 
   // keep-alive：高频切换、数据重的页面保持挂载（display:none 隐藏），
   // 切回时不重新请求/重建，明显更流畅。
@@ -320,19 +336,58 @@ const MainLayout: React.FC<MainLayoutProps> = ({ onLogout }) => {
         </Layout>
       </Layout>
 
-      {/* Mobile bottom navigation */}
+      {/* Mobile bottom navigation：4 个高频入口 + 「更多」 */}
       <nav className="bottom-nav">
-        {visibleMobileNavItems.map(item => (
+        {mobilePrimary.map(item => (
           <div
             key={item.key}
             className={`bottom-nav-item ${currentPage === item.key ? 'active' : ''}`}
             onClick={() => navigate(item.key)}
           >
             <span className="nav-icon">{item.icon}</span>
-            <span className="nav-label">{item.label}</span>
+            <span className="nav-label">{MOBILE_SHORT_LABEL[item.key] || item.label}</span>
           </div>
         ))}
+        {mobileMoreItems.length > 0 && (
+          <div
+            className={`bottom-nav-item ${moreOpen || mobileMoreItems.some(i => i.key === currentPage) ? 'active' : ''}`}
+            onClick={() => setMoreOpen(true)}
+          >
+            <span className="nav-icon"><AppstoreOutlined /></span>
+            <span className="nav-label">更多</span>
+          </div>
+        )}
       </nav>
+
+      {/* 「更多」抽屉：宫格排列剩余全部有权限页面 + 用户信息/退出 */}
+      <Drawer
+        placement="bottom"
+        open={moreOpen}
+        onClose={() => setMoreOpen(false)}
+        closable={false}
+        height="auto"
+        styles={{ body: { padding: '20px 16px calc(20px + var(--safe-bottom))' } }}
+        zIndex={1050}
+        rootClassName="more-drawer"
+      >
+        <div className="more-drawer-title">全部功能</div>
+        <div className="more-grid">
+          {mobileMoreItems.map(item => (
+            <div
+              key={item.key}
+              className={`more-grid-item ${currentPage === item.key ? 'active' : ''}`}
+              onClick={() => { navigate(item.key); setMoreOpen(false); }}
+            >
+              <span className="more-grid-icon">{item.icon}</span>
+              <span className="more-grid-label">{item.label}</span>
+            </div>
+          ))}
+        </div>
+        <div className="more-drawer-footer">
+          <span className="more-drawer-user">{username}<span className="more-drawer-version">v{APP_VERSION}</span></span>
+          <Button size="small" icon={<LogoutOutlined />} onClick={onLogout}>退出登录</Button>
+        </div>
+      </Drawer>
     </div>
   );
 };
