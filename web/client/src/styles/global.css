@@ -438,6 +438,9 @@ code, pre {
   }
   /* 固定认证后的应用壳，避免 document 滚动与移动浏览器动态工具栏
      共同导致底部导航随页面上下位移。登录/MFA 页面不使用该类，不受影响。 */
+  /* index.html 用了 viewport-fit=cover + black-translucent 状态栏，内容会延伸到
+     刘海/状态栏下方。这里用 safe-area-inset-top 把整个应用壳下压，状态栏区域
+     只露出布局底色（box-sizing: border-box，内部高度自动扣除该 padding）。 */
   .app-container {
     position: fixed;
     inset: 0;
@@ -446,6 +449,8 @@ code, pre {
     height: 100dvh;
     min-height: 0;
     overflow: hidden;
+    padding-top: env(safe-area-inset-top, 0px);
+    background: var(--color-bg-layout);
   }
   .app-container > .ant-layout,
   .app-container > .ant-layout > .ant-layout {
@@ -551,6 +556,8 @@ code, pre {
 }
 
 /* === Mobile Detail Overlay === */
+/* fixed 的包含块是视口（.app-container 未创建 transform 等包含块），
+   所以顶部安全区必须在这里单独再补一次，否则返回栏会被状态栏遮住。 */
 .mobile-detail-overlay {
   position: fixed;
   top: 0; left: 0; right: 0; bottom: 0;
@@ -560,6 +567,7 @@ code, pre {
   z-index: var(--z-overlay);
   overflow-y: auto;
   -webkit-overflow-scrolling: touch;
+  padding-top: env(safe-area-inset-top, 0px);
 }
 
 /* === Account Cards (mobile) === */
