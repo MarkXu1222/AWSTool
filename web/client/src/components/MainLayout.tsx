@@ -119,6 +119,16 @@ const MainLayout: React.FC<MainLayoutProps> = ({ onLogout }) => {
     return () => window.removeEventListener('popstate', onPopState);
   }, []);
 
+  // 给 <html> 打标记：仅在已登录的应用壳内把根背景染成品牌深色。
+  // iOS Safari 状态栏后的半透明材质是从根元素背景取色的，根元素若是浅灰
+  // （body 的 #f4f5f7），顶部就会糊出一圈磨砂白影。登录/MFA 页不加该类，
+  // 仍保持浅色背景。
+  useLayoutEffect(() => {
+    const root = document.documentElement;
+    root.classList.add('app-shell');
+    return () => root.classList.remove('app-shell');
+  }, []);
+
   useLayoutEffect(() => {
     const navigatorWithStandalone = navigator as Navigator & { standalone?: boolean };
     const isStandalone = window.matchMedia('(display-mode: standalone)').matches

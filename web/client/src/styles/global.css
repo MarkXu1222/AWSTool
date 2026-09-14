@@ -104,7 +104,15 @@ code, pre {
 /* === Mobile Top Bar（仅移动端显示） ===
    电脑端用深色侧边栏承载品牌，手机端没有侧边栏，顶部原本是一片空白浅灰。
    这条品牌栏与侧边栏同色（--color-bg-sidebar），并把 safe-area 顶部区域
-   一并染色，状态栏/灵动岛背后不再露出浅灰底。 */
+   一并染色，状态栏/灵动岛背后不再露出浅灰底。
+
+   ⚠️ 顶部那圈「磨砂白影」不是我们画的：
+   1) Safari（非 standalone）会在状态栏后面铺一层半透明材质，取色来自页面
+      根元素背景。根元素此前是 body 的浅灰 #f4f5f7，于是糊出一片浅灰白雾，
+      且系统判定为浅色背景 → 状态栏时间被渲染成黑字。
+   2) 顶栏之前用 135deg 斜向渐变，与状态栏材质叠加后上浅下深，更像脏渐变。
+   对策：根元素在应用壳里改成品牌深色（见 html.app-shell 规则），顶栏改纯色，
+   阴影换成 1px 发丝分隔线，避免深色阴影糊到浅色内容区上。 */
 .mobile-topbar {
   display: none;
 }
@@ -114,25 +122,26 @@ code, pre {
     align-items: center;
     gap: 10px;
     flex-shrink: 0;
-    /* 安全区在这里消化，app-container 不再加 padding-top */
-    padding: 10px 16px;
-    padding-top: calc(var(--safe-top) + 10px);
+    /* 安全区在这里消化，app-container 不再加 padding-top。
+       用固定高度而不是上下 padding，标题栏在不同机型上高度一致。 */
+    height: calc(var(--safe-top) + 52px);
+    padding: 0 16px;
+    padding-top: var(--safe-top);
     background: var(--color-bg-sidebar);
-    background-image: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
-    box-shadow: 0 1px 8px rgba(15, 23, 42, 0.18);
+    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
     position: relative;
     z-index: 10;
   }
   .mobile-topbar-logo {
-    width: 26px;
-    height: 26px;
+    width: 24px;
+    height: 24px;
     object-fit: contain;
     border-radius: 6px;
     flex-shrink: 0;
   }
   .mobile-topbar-title {
-    font-size: 16px;
-    font-weight: 650;
+    font-size: 17px;
+    font-weight: 600;
     color: #fff;
     letter-spacing: -0.01em;
     flex: 1;
@@ -141,14 +150,32 @@ code, pre {
     text-overflow: ellipsis;
     white-space: nowrap;
   }
+  /* 用户名做成胶囊 chip：比之前半透明白字更清晰，也和右上角留白更协调 */
   .mobile-topbar-user {
-    font-size: 12px;
-    color: rgba(255, 255, 255, 0.55);
     flex-shrink: 0;
-    max-width: 30%;
+    max-width: 36%;
+    padding: 3px 9px;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.1);
+    font-size: 11px;
+    font-weight: 500;
+    line-height: 1.5;
+    color: rgba(255, 255, 255, 0.82);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+  /* 用户名未加载完时不要留一个空胶囊 */
+  .mobile-topbar-user:empty { display: none; }
+}
+
+/* 根元素染成品牌深色：状态栏材质取色、以及橡皮筋回弹露出的底色都跟着变深，
+   顶部不再出现浅灰白雾。只在已登录的应用壳（MainLayout 挂载）内生效，
+   登录 / MFA 页保持自己的浅色背景。 */
+@media (max-width: 768px) {
+  html.app-shell,
+  html.app-shell body {
+    background: var(--color-bg-sidebar);
   }
 }
 
@@ -588,8 +615,11 @@ code, pre {
   .ant-card-head { padding: 0 12px !important; }
   .stat-chips { gap: 8px; }
   .stat-chip { height: 24px; padding: 0 8px; font-size: 12px; }
-  /* 顶栏已显示页面名，页内大标题重复且占掉近一屏，移动端隐藏标题保留副标题 */
-  .page-header-title { display: none; }
+  /* 顶栏已显示页面名，页内大标题重复且占掉近一屏，移动端隐藏。
+     副标题同样隐藏：标题被隐藏后它会变成一行没有归属的灰字悬在内容区顶部，
+     既占位又显脏（概览页的「AWS 多账户管理总览」就是这个问题）。 */
+  .page-header-title,
+  .page-header-subtitle { display: none; }
   /* 标题与右上角操作区挤在一行会被裁掉（「扫描所有账户」等按钮看不全）。
      手机上改为竖排：标题在上，操作按钮换行铺在下面。 */
   .page-header {
@@ -599,8 +629,12 @@ code, pre {
     margin-bottom: 12px;
     padding-bottom: 0;
   }
+  /* 标题/副标题全隐藏后，包裹它们的 div 变成 0 高度空盒（子元素只是
+     display:none，节点仍在，:empty 匹配不到），仍会吃掉一个 flex gap，
+     让内容区顶部多出一段莫名空白。用 :has 把这个包裹盒一并干掉。 */
+  .page-header:has(> :only-child > .page-header-title) { display: none; }
+  .page-header > *:has(> .page-header-title) { display: none; }
   .page-header > * { min-width: 0; }
-  .page-header-subtitle { font-size: 12px; }
   /* 操作区（page-header 的第二个子元素）按钮换行，不再被挤出屏幕 */
   .page-header > *:last-child:not(:only-child) {
     display: flex;
