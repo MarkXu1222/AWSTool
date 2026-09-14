@@ -494,6 +494,12 @@ const DataShareTab: React.FC<{ accountId: string }> = ({ accountId }) => {
 
 // ===== Tab: Bedrock 配额查询（TPM/RPM/TPD，与配额管理页 Bedrock Tab 同一后端接口） =====
 const BEDROCK_QUOTA_SCOPES = ['Global Cross-Region', 'Cross-Region', 'On-Demand', 'Latency-Optimized', 'Other'];
+// Provider 固定候选（与后端 inferBedrockProvider 的规范名一致，同 Quotas 页），查询前也能直接选
+const BEDROCK_QUOTA_PROVIDERS = [
+  'Anthropic', 'Amazon', 'Meta', 'Mistral', 'Cohere', 'AI21', 'DeepSeek', 'Qwen',
+  'OpenAI', 'Google', 'Moonshot', 'MiniMax', 'NVIDIA', 'Z.ai', 'Stability',
+  'TwelveLabs', 'Writer', 'Luma', 'Bedrock (服务级)', 'Other',
+];
 const SCOPE_COLOR: Record<string, string> = {
   'Global Cross-Region': 'blue', 'Cross-Region': 'green', 'On-Demand': 'orange', 'Latency-Optimized': 'purple',
 };
@@ -523,7 +529,8 @@ const QuotaQueryTab: React.FC<{ accountId: string }> = ({ accountId }) => {
     } catch (e: any) { message.error(e.message); } finally { setLoading(false); }
   };
 
-  const providers = [...new Set(rows.map(r => r.provider))].sort();
+  // Provider 候选 = 固定清单 ∪ 实际查到的（保证查询前就能选，查询后也不漏新 provider）
+  const providers = [...new Set([...BEDROCK_QUOTA_PROVIDERS, ...rows.map(r => r.provider).filter(Boolean)])];
   const filtered = rows.filter(r =>
     (!provider || r.provider === provider) &&
     scopes.includes(r.scope) &&
