@@ -21,3 +21,9 @@ data/exports/
 # 客户沟通材料：含 ExternalId 等敏感值，绝不入库
 客户沟通/
 .agents/
+
+# 临时调试脚本与编译产物（曾因 git add -A 误入库，见 deployment.md 提交纪律）
+*.tmp.ts
+web/scripts/.*.mts
+__pycache__/
+*.pyc

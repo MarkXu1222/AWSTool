@@ -11,7 +11,7 @@ AWS 多账户管理平台。用于跨组织管理成员账户：配额提升、�
 
 | 应用 | 位置 | 包名 / 版本 | 状态 | 说明 |
 |------|------|-------------|------|------|
-| **Web 版（生产）** | `web/` | `aws-toolbox-web` / `APP_VERSION 0.21.2` | ✅ **在维护** | 部署在 EC2（https://markxu.co）。日常改动几乎都在这里。 |
+| **Web 版（生产）** | `web/` | `aws-toolbox-web` / `APP_VERSION 0.24.2` | ✅ **在维护** | 部署在 EC2（https://markxu.co）。日常改动几乎都在这里。 |
 | 桌面版（旧） | 根 `src/` + `electron/` | `aws-toolbox` / `0.1.0` | ⚠️ 旧版/基本冻结 | 早期 Electron macOS 版，`main: dist/main/index.js`。除非专门维护桌面版，否则**不要动**。 |
 
 **结论：接到"平台/网站"相关的需求，一律在 `web/` 下操作。**
@@ -52,9 +52,15 @@ web/
 │   ├── account-roles.ts        # ★账户角色自愈：探测成员账户角色 → 缺失则触发 StackSet 补齐 → 超限告警
 │   ├── billing-export-jobs.ts  # 账单导出持久化 job、全局队列、永久历史、重复下载与重启恢复
 │   ├── billing-exporter.ts     # 严格只读抓取 AWS 官方账单 PDF + 可取消 zip 打包
+│   ├── case-doc-submitter.ts   # 一键提交提额文档到 Support Case（浏览器自动化）
+│   ├── security-alerts.ts      # 安全告警：登录爆破/新IP/敏感操作/429、5xx 突增 → 飞书
+│   ├── ops-monitor.ts          # 运维监控指标采集（24h 环形缓冲）+ /api/ops 守卫
+│   ├── bedrock-tools.ts        # Bedrock：Profile 管理/创建/FTU/数据共享/IAM（走 Admin 凭证）
+│   ├── bedrock-delivery.ts     # Bedrock 客户交付 xlsx（v1 三列 / v2 李浩版五列含 TPM/TPD）
 │   └── routes/
-│       ├── aws.ts              # ★awsRouter：主业务端点（40+），含权限守卫
-│       └── regions.ts          # regionsRouter：区域 opt-in 状态/扫描/开通
+│       ├── aws.ts              # ★awsRouter：主业务端点（50+），含权限守卫
+│       ├── regions.ts          # regionsRouter：区域 opt-in 状态/扫描/开通（enable* 需 requireAdmin）
+│       └── bedrock.ts          # bedrockRouter：挂 /api/bedrock，tags 强校验无默认值
 │
 ├── client/                     # 前端（React + Vite）
 │   ├── index.html
