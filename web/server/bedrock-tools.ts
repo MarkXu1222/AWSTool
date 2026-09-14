@@ -271,12 +271,34 @@ export async function invokeModel(accountId: string, region: string, modelId: st
 
 /**
  * 从后端模型 ID 提取匹配键：`anthropic.claude-sonnet-4-5-20250929-v1:0` →
- * { family: 'sonnet', version: '4.5', v: '' }；`claude-opus-4-6-v1` → { family:'opus', version:'4.6', v:'v1' }。
+ * { family: 'sonnet', version: '4.5', v: 'v1' }；`claude-opus-4-6-v1` → { family:'opus', version:'4.6', v:'v1' }。
+ *
+ * ⚠️ 次版本号必须限长并加 `(?!\d)` 边界。
+ * 旧写法 `(?:-(\d+))?` 是贪婪的：对**单段版本号 + 日期**的模型
+ * （`claude-opus-5-20260301-v1:0`）会把 8 位日期当成次版本，
+ * 得到 version='5.20260301'，后续 `model.includes(key.version)` 永远匹配不上
+ * 配额名里的 "Anthropic Claude Opus 5" → TPM/TPD 静默写 0。
+ * 双段版本号（4-6 / 4-7）因为日期前已有次版本，反而不受影响，
+ * 所以这个 bug 只在 sonnet-5 / opus-5 这类模型上出现。
  */
 export function extractClaudeKey(modelId: string): { family: string; version: string; v: string } | null {
-  const m = /claude-([a-z]+)-(\d+)(?:-(\d+))?(?:-\d{8})?(?:-v(\d+))?/.exec(String(modelId).toLowerCase());
+  const m = /claude-([a-z]+)-(\d+)(?:-(\d{1,2})(?!\d))?(?:-\d{8})?(?:-v(\d+))?/
+    .exec(String(modelId).toLowerCase());
   if (!m) return null;
   return { family: m[1], version: m[3] ? `${m[2]}.${m[3]}` : m[2], v: m[4] ? `v${m[4]}` : '' };
+}
+
+/**
+ * 版本号必须**整段**出现在配额名里，不能用 includes 子串判断。
+ * 配额名形如 "Anthropic Claude Opus 4.5" / "Anthropic Claude Opus 5"，
+ * 而 `"opus 4.5".includes("5")` === true —— 查 Opus 5 会命中 Opus 4.5 的配额，
+ * 把 1,111,111 这种错误数字写进交付表（比写 0 更危险：0 一眼能看出异常，
+ * 错误数字会被当成真实配额直接发给客户）。
+ * 这里用数字边界锚定：版本号前后都不能再接数字或小数点。
+ */
+function versionMatches(model: string, version: string): boolean {
+  const esc = version.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(`(?<![\\d.])${esc}(?![\\d.])`).test(model);
 }
 
 /**
@@ -294,7 +316,7 @@ export function matchProfileTpmTpd(
   for (const q of quotaRows) {
     if (q.region !== profile.region || q.scope !== wantScope) continue;
     const model = String(q.model || '').toLowerCase();
-    if (!model.includes(key.family) || !model.includes(key.version)) continue;
+    if (!model.includes(key.family) || !versionMatches(model, key.version)) continue;
     if (key.v && !model.includes(key.v)) continue;
     // 无 v 后缀时避免匹配到 "4.6 V1" 这类带版本的行（除非只有它）
     if (!key.v && /v\d/.test(model)) continue;
@@ -303,11 +325,12 @@ export function matchProfileTpmTpd(
       tpd: Math.round(q.metrics?.TPD?.value || 0),
     };
   }
-  // 放宽一轮：允许 v 后缀不严格（应对配额命名差异）
+  // 放宽一轮：允许 v 后缀不严格（应对配额命名差异）。
+  // 注意版本号仍须整段匹配，绝不放宽到子串，否则又会串到隔壁版本上。
   for (const q of quotaRows) {
     if (q.region !== profile.region || q.scope !== wantScope) continue;
     const model = String(q.model || '').toLowerCase();
-    if (model.includes(key.family) && model.includes(key.version)) {
+    if (model.includes(key.family) && versionMatches(model, key.version)) {
       return { tpm: Math.round(q.metrics?.TPM?.value || 0), tpd: Math.round(q.metrics?.TPD?.value || 0) };
     }
   }
