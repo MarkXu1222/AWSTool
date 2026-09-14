@@ -58,6 +58,16 @@
      且贴顶的元素都必须加上这个偏移。桌面端该值恒为 0，可无条件使用。 */
   --safe-top: env(safe-area-inset-top, 0px);
   --safe-bottom: env(safe-area-inset-bottom, 0px);
+  /* 顶栏专用的「视觉」安全区。
+     env(safe-area-inset-top) 只保证内容**不被系统 UI 几何遮挡**，它不包含
+     状态栏背后那层半透明模糊材质的羽化范围。灵动岛机型 env() 报 59px，
+     文字紧贴 59px 起排时，字的上半截正好落在材质的渐隐边缘里 —— 看起来
+     就是「标题被模糊糊掉了一半」。
+     缓冲用**乘法**而不是加法：env 为 0 时（移动端 Safari 非 standalone，
+     浏览器工具栏已经把页面下推）结果自动为 0，不会平白多出一块空白；
+     env 为 59px（灵动岛）时得到约 71px，正好把文字推出材质羽化区。
+     加法（env + 12px）做不到这点，会在 Safari 里凭空塞 12px。 */
+  --safe-top-visual: calc(env(safe-area-inset-top, 0px) * 1.2);
 }
 
 /* === Reset === */
@@ -123,10 +133,12 @@ code, pre {
     gap: 10px;
     flex-shrink: 0;
     /* 安全区在这里消化，app-container 不再加 padding-top。
-       用固定高度而不是上下 padding，标题栏在不同机型上高度一致。 */
-    height: calc(var(--safe-top) + 52px);
+       用固定高度而不是上下 padding，标题栏在不同机型上高度一致。
+       这里用 --safe-top-visual（比 env() 多留一段）把标题推出状态栏
+       模糊材质的羽化区，否则「概览」等标题看起来上半截被糊掉。 */
+    height: calc(var(--safe-top-visual) + 52px);
     padding: 0 16px;
-    padding-top: var(--safe-top);
+    padding-top: var(--safe-top-visual);
     background: var(--color-bg-sidebar);
     border-bottom: 1px solid rgba(255, 255, 255, 0.08);
     position: relative;
@@ -827,7 +839,9 @@ code, pre {
 
 /* === Mobile Detail Overlay === */
 /* fixed 的包含块是视口（.app-container 未创建 transform 等包含块），
-   所以顶部安全区必须在这里单独再补一次，否则返回栏会被状态栏遮住。 */
+   所以顶部安全区必须在这里单独再补一次，否则返回栏会被状态栏遮住。
+   同样用 --safe-top-visual：这层是白底，紧贴 env() 时返回栏文字会落进
+   状态栏模糊材质的羽化区，和顶栏标题是同一个问题。 */
 .mobile-detail-overlay {
   position: fixed;
   top: 0; left: 0; right: 0; bottom: 0;
@@ -838,7 +852,7 @@ code, pre {
   overflow-x: hidden;
   overflow-y: auto;
   -webkit-overflow-scrolling: touch;
-  padding-top: var(--safe-top);
+  padding-top: var(--safe-top-visual);
 }
 
 /* === Account Cards (mobile) === */
