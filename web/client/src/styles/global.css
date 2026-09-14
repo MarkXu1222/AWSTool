@@ -109,6 +109,13 @@ code, pre {
 .ant-message {
   top: calc(var(--safe-top) + 8px) !important;
 }
+/* 移动端再多留一段：灵动岛是胶囊悬浮的，仅避开状态栏高度仍会贴得太近，
+   视觉上像是从岛底下钻出来。多压 24px 让提示条完整脱离灵动岛区域。 */
+@media (max-width: 768px) {
+  .ant-message {
+    top: calc(var(--safe-top) + 32px) !important;
+  }
+}
 /* notification 贴顶的两种放置方式同样需要避让 */
 .ant-notification-topRight,
 .ant-notification-topLeft,
