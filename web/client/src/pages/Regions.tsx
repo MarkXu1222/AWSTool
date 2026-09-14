@@ -367,7 +367,7 @@ const RegionsPage: React.FC = () => {
                 { title: '启用中', dataIndex: 'enabling', width: 80, align: 'center', render: (n: number) => n > 0 ? <Tag color="blue">{n}</Tag> : <span style={{ color: '#b6bdca' }}>0</span> },
                 { title: '未开通', dataIndex: 'disabled', width: 80, align: 'center', render: (n: number) => n > 0 ? <Tag color="red">{n}</Tag> : <span style={{ color: '#b6bdca' }}>0</span> },
                 { title: '开通率', key: 'rate', width: 120, render: (_: any, r: any) => r.total > 0 ? <Progress percent={Math.round((r.enabled / r.total) * 100)} size="small" strokeColor="#52c41a" /> : '-' },
-                { title: '操作', key: 'action', width: 100, render: (_: any, r: any) => r.disabled > 0 ? (
+                { title: '操作', key: 'action', width: 100, fixed: 'right' as const, render: (_: any, r: any) => r.disabled > 0 ? (
                   <Button size="small" type="link" onClick={() => setExpandedRegion(expandedRegion === r.region ? null : r.region)}>
                     {expandedRegion === r.region ? '收起' : `查看 (${r.disabled})`}
                   </Button>
@@ -375,6 +375,7 @@ const RegionsPage: React.FC = () => {
                   ? <Tooltip title={`还有 ${unscannedAccountCount} 个账户尚未扫描`}><span style={{ color: '#d46b08' }}>等待扫描</span></Tooltip>
                   : <span style={{ color: '#b6bdca' }}>全部开通</span> },
               ]}
+              scroll={{ x: 780 }}
             />
           </Card>
 

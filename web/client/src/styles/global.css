@@ -496,16 +496,29 @@ code, pre {
   .desktop-sider {
     display: none !important;
   }
+  /* overflow-y:auto 会让另一轴从 visible 被计算成 auto，于是整个内容区
+     （含标题栏）可横向滚动：宽表格一撑，整页被拖偏、标题和右上角按钮跑出屏幕。
+     这里显式锁死 x 轴，横向滚动交给表格自身的 .ant-table-content 承担。 */
   .main-content {
     margin-left: 0 !important;
     height: 100%;
     min-height: 0;
+    width: 100%;
+    max-width: 100%;
+    overflow-x: hidden;
     overflow-y: auto;
     -webkit-overflow-scrolling: touch;
     overscroll-behavior-y: contain;
     padding: 16px;
-    padding-bottom: calc(72px + env(safe-area-inset-bottom, 0px));
-    scroll-padding-bottom: calc(72px + env(safe-area-inset-bottom, 0px));
+    padding-bottom: calc(72px + var(--safe-bottom));
+    scroll-padding-bottom: calc(72px + var(--safe-bottom));
+  }
+  /* 页面根容器普遍是 flex/块级，子项默认 min-width:auto 会被内容撑破，
+     导致上面的 overflow-x:hidden 形同虚设。统一允许收缩。 */
+  .main-content > *,
+  .main-content .page-fade {
+    min-width: 0;
+    max-width: 100%;
   }
   .ant-table-thead > tr > th,
   .ant-table-tbody > tr > td {
@@ -517,9 +530,64 @@ code, pre {
   .stat-chips { gap: 8px; }
   .stat-chip { height: 24px; padding: 0 8px; font-size: 12px; }
   .page-header-title { font-size: 18px; }
+  /* 标题与右上角操作区挤在一行会被裁掉（「扫描所有账户」等按钮看不全）。
+     手机上改为竖排：标题在上，操作按钮换行铺在下面。 */
+  .page-header {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 12px;
+    padding-bottom: 12px;
+  }
+  .page-header > * { min-width: 0; }
+  .page-header-subtitle { font-size: 12px; }
+  /* 操作区（page-header 的第二个子元素）按钮换行，不再被挤出屏幕 */
+  .page-header > *:last-child:not(:only-child) {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+  .page-header > *:last-child:not(:only-child) > * { margin-inline: 0 !important; }
   .filter-bar { padding: 12px; gap: 8px; }
   .table-toolbar .ant-input-affix-wrapper { max-width: 100%; }
   .hide-mobile { display: none !important; }
+
+  /* 表格横向滚动限制在表格内部，避免撑破页面。
+     多数表格未配 scroll={{x}}，列宽合计远超 390px 屏宽，
+     没有这条兜底时会把 .main-content 一起撑开、整页被拖偏。 */
+  .ant-table-wrapper { max-width: 100%; }
+  .ant-table-wrapper .ant-table { max-width: 100%; }
+  .ant-table-wrapper .ant-table-content,
+  .ant-table-wrapper .ant-table-body {
+    overflow-x: auto !important;
+    -webkit-overflow-scrolling: touch;
+  }
+  /* Tabs 标签过多时横向滚动而非撑宽页面（Bedrock 9 个 tab、配额 5 个 tab） */
+  .ant-tabs-nav-wrap { overflow-x: auto !important; }
+  .ant-tabs-nav-wrap::-webkit-scrollbar { display: none; }
+  .ant-tabs-nav { max-width: 100%; }
+  /* Space 组件在窄屏自动换行，避免一行排不下被裁切 */
+  .ant-card-body > .ant-space-horizontal,
+  .ant-space-horizontal { flex-wrap: wrap; }
+  /* 大量控件写死了 width:300~420px（批量提额、Bedrock 等），
+     在 390px 屏上必然溢出。窄屏一律不超过容器宽度。 */
+  .main-content .ant-select,
+  .main-content .ant-picker,
+  .main-content .ant-input-number,
+  .main-content .ant-input-affix-wrapper,
+  .main-content .ant-input {
+    max-width: 100% !important;
+    /* 内联 minWidth（如批量提额的 420px）优先级更高，必须一并压掉 */
+    min-width: 0 !important;
+  }
+  /* 卡片内直接排列的行容器允许换行 */
+  .ant-card-body > div[style*="display: flex"],
+  .ant-card-body > div[style*="display:flex"] {
+    flex-wrap: wrap;
+  }
+  /* 弹窗/抽屉在小屏留边 */
+  .ant-modal { max-width: calc(100vw - 24px); margin: 8px auto; }
+  /* 描述列表在窄屏堆叠，避免标签列挤压内容（账户详情「基本」页） */
+  .ant-descriptions-bordered .ant-descriptions-item-label { white-space: nowrap; }
 }
 
 /* === Bottom Nav (仅移动端) === */
@@ -672,6 +740,7 @@ code, pre {
   height: 100dvh;
   background: #fff;
   z-index: var(--z-overlay);
+  overflow-x: hidden;
   overflow-y: auto;
   -webkit-overflow-scrolling: touch;
   padding-top: var(--safe-top);

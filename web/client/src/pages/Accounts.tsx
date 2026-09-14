@@ -308,12 +308,21 @@ const AccountsPage: React.FC = () => {
   if (selectedAccount && detailFullScreen) {
     return (
       <div className="mobile-detail-overlay" style={{ padding: 16, paddingBottom: 88 }}>
-        <div style={{ display: 'flex', alignItems: 'center', marginBottom: 16 }}>
-          <Button type="text" icon={<LeftOutlined />} onClick={() => setSelectedAccount(null)}>返回</Button>
-          <span style={{ fontWeight: 600, marginLeft: 8 }}>{selectedAccount.Name}</span>
-          <Tag style={{ marginLeft: 8 }}>{selectedAccount._payer}</Tag>
-          {selectedAccount._isPayer && <Tag color="gold" style={{ marginLeft: 4 }}>Payer</Tag>}
-          <ConsoleButton account={selectedAccount} style={{ marginLeft: 'auto' }} />
+        {/* 返回栏两行布局：账户名可能很长，此前「返回 + 名称 + 组织 Tag + Payer Tag
+            + 控制台按钮」硬挤一行，marginLeft:'auto' 会把控制台按钮推出屏幕外。 */}
+        <div style={{ marginBottom: 16 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
+            <Button type="text" icon={<LeftOutlined />} onClick={() => setSelectedAccount(null)}
+              style={{ flexShrink: 0, paddingInline: 4 }}>返回</Button>
+            <span style={{ fontWeight: 600, flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {selectedAccount.Name}
+            </span>
+            <ConsoleButton account={selectedAccount} style={{ flexShrink: 0 }} />
+          </div>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginTop: 8 }}>
+            <Tag style={{ margin: 0 }}>{selectedAccount._payer}</Tag>
+            {selectedAccount._isPayer && <Tag color="gold" style={{ margin: 0 }}>Payer</Tag>}
+          </div>
         </div>
         <Tabs size="small" items={[
           { key: 'info', label: '基本', children: (
