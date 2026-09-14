@@ -42,7 +42,7 @@ export const PAGE_META: { key: string; label: string }[] = [
 // 批量提额页 key。注意：它不在 PAGE_META / 后端 ALL_PAGE_KEYS 里，
 // 可见性完全由独立权限 bulkQuotaAccess 决定，不能通过「页面权限」勾选获得。
 export const BULK_QUOTA_PAGE_KEY = 'bulkquota';
-// 与批量提额一样使用独立权限；此入口沿用后端实时 root_access，不通过页面授权扩大权限。
+// 独立的 rootResetAccess 决定可见和操作，不与根用户凭证权限合并。
 export const ROOT_RESET_PAGE_KEY = 'rootreset';
 
 // 运维监控属于可分配页面；admin 恒有，其他角色必须在 allowed_pages 中显式授权。
@@ -100,7 +100,7 @@ const MainLayout: React.FC<MainLayoutProps> = ({ onLogout }) => {
   const [allowedPages, setAllowedPages] = useState<string[] | null>(null);
   // 批量提额独立权限；未加载完前按无权限处理，避免菜单闪现
   const [bulkQuotaAccess, setBulkQuotaAccess] = useState(false);
-  const [rootAccess, setRootAccess] = useState(false);
+  const [rootResetAccess, setRootResetAccess] = useState<'none' | 'view' | 'operate'>('none');
   // admin 恒有运维监控权限；未加载完前按无权限处理，避免敏感菜单闪现
   const [isAdmin, setIsAdmin] = useState(false);
   // 移动端「更多」抽屉
@@ -208,13 +208,13 @@ const MainLayout: React.FC<MainLayoutProps> = ({ onLogout }) => {
       if (!r || r.unauthorized || !r.username) return;
       setUsername(r.username || '');
       setBulkQuotaAccess(!!r.bulkQuotaAccess);
-      setRootAccess(!!r.rootAccess);
+      setRootResetAccess(['view', 'operate'].includes(r.rootResetAccess) ? r.rootResetAccess : 'none');
       setIsAdmin(r.role === 'admin');
       if (Array.isArray(r.allowedPages)) {
         setAllowedPages(r.allowedPages);
         // 如果当前页不在允许列表里，回退到第一个允许的页面
         const requested = pageFromLocation();
-        const independentAccess = (requested === ROOT_RESET_PAGE_KEY && r.rootAccess)
+        const independentAccess = (requested === ROOT_RESET_PAGE_KEY && ['view', 'operate'].includes(r.rootResetAccess))
           || (requested === BULK_QUOTA_PAGE_KEY && r.bulkQuotaAccess);
         if (r.allowedPages.length > 0 && !r.allowedPages.includes(requested) && !independentAccess) {
           navigate(r.allowedPages[0]);
@@ -227,7 +227,7 @@ const MainLayout: React.FC<MainLayoutProps> = ({ onLogout }) => {
   const isPageAllowed = (key: string) => {
     // 批量提额只看独立权限，与页面权限无关
     if (key === BULK_QUOTA_PAGE_KEY) return bulkQuotaAccess;
-    if (key === ROOT_RESET_PAGE_KEY) return rootAccess;
+    if (key === ROOT_RESET_PAGE_KEY) return rootResetAccess !== 'none';
     // 运维监控：admin 恒有；其他角色仅在页面权限中显式授予后可见
     if (key === OPS_PAGE_KEY) return isAdmin || allowedPages?.includes(OPS_PAGE_KEY) === true;
     if (allowedPages === null) return true;
@@ -268,7 +268,7 @@ const MainLayout: React.FC<MainLayoutProps> = ({ onLogout }) => {
       case 'quotas': return <QuotasPage />;
       case 'bedrock': return <BedrockPage />;
       case BULK_QUOTA_PAGE_KEY: return <BulkQuotaPage />;
-      case ROOT_RESET_PAGE_KEY: return <BulkRootResetPage />;
+      case ROOT_RESET_PAGE_KEY: return <BulkRootResetPage canOperate={rootResetAccess === 'operate'} />;
       case OPS_PAGE_KEY: return (
         <React.Suspense fallback={<div style={{ padding: 24 }}><Skeleton active paragraph={{ rows: 8 }} /></div>}>
           <OpsMonitorPage />

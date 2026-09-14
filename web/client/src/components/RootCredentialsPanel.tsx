@@ -19,6 +19,7 @@ interface Props {
   rootCredentials: any;
   // 是否具备根用户凭证操作权限（admin 或被授予 root_access）。无权限时隐藏三个敏感功能。
   canRoot?: boolean;
+  rootResetAccess?: 'none' | 'view' | 'operate';
   // 只有严格 admin 可以选择超过 1 小时；后端仍会从数据库实时复验。
   isAdmin?: boolean;
   // payer 管理账户受 role/tool 会话上限约束，前端固定为 1 小时。
@@ -50,7 +51,7 @@ const CredRow: React.FC<{ label: string; value: string; secret?: boolean; reveal
   </div>
 );
 
-const RootCredentialsPanel: React.FC<Props> = ({ accountId, rootCredentials, canRoot, isAdmin, isPayer, adminExcluded, loading: detailLoading }) => {
+const RootCredentialsPanel: React.FC<Props> = ({ accountId, rootCredentials, canRoot, rootResetAccess = 'none', isAdmin, isPayer, adminExcluded, loading: detailLoading }) => {
   const isMobile = typeof window !== 'undefined' && window.innerWidth < 769;
   const [creds, setCreds] = useState<TempCreds | null>(null);
   const [durationHours, setDurationHours] = useState(1);
@@ -280,9 +281,9 @@ const RootCredentialsPanel: React.FC<Props> = ({ accountId, rootCredentials, can
         </Descriptions>
       ) : detailLoading ? <span style={{ color: '#8a94a6', fontSize: 12 }}>正在加载根用户状态…</span> : <span style={{ color: '#8a94a6', fontSize: 12 }}>根用户凭证状态不可用（凭证报告获取失败）</span>}
 
-      {canRoot && !isPayer && <>
+      {rootResetAccess !== 'none' && !isPayer && <>
         <Divider style={{ margin: '12px 0' }} />
-        <RootEmailPanel key={accountId} accountId={accountId} />
+        <RootEmailPanel key={accountId} accountId={accountId} canOperate={rootResetAccess === 'operate'} />
       </>}
 
       {canRoot && adminExcluded && (

@@ -5,8 +5,10 @@
 import { cacheGet, cacheSet } from './utils/cache';
 
 const BASE = '/api';
+export type RootResetAccess = 'none' | 'view' | 'operate';
 
 export interface RootEmailJobView {
+  canManage: boolean;
   id: string;
   accountId: string;
   email: string;
@@ -27,6 +29,7 @@ export interface RootEmailAccount {
   eligible: boolean;
 }
 export interface RootEmailBatchView {
+  canManage: boolean;
   id: string;
   payerAccountId: string;
   payerName: string;
@@ -688,9 +691,9 @@ export const api = {
     request('/auth/change-password', { method: 'POST', body: JSON.stringify({ currentPassword, newPassword }) }),
   // User management
   listUsers: () => request('/auth/users'),
-  createUser: (username: string, password: string, role: string, allowedPages?: string[], rootAccess?: boolean, bulkQuotaAccess?: boolean) =>
-    request('/auth/users', { method: 'POST', body: JSON.stringify({ username, password, role, allowedPages, rootAccess, bulkQuotaAccess }) }),
-  updateUser: (id: number, patch: { role?: string; allowedPages?: string[]; rootAccess?: boolean; bulkQuotaAccess?: boolean }) =>
+  createUser: (username: string, password: string, role: string, allowedPages?: string[], rootAccess?: boolean, bulkQuotaAccess?: boolean, rootResetAccess?: RootResetAccess) =>
+    request('/auth/users', { method: 'POST', body: JSON.stringify({ username, password, role, allowedPages, rootAccess, bulkQuotaAccess, rootResetAccess }) }),
+  updateUser: (id: number, patch: { role?: string; allowedPages?: string[]; rootAccess?: boolean; bulkQuotaAccess?: boolean; rootResetAccess?: RootResetAccess }) =>
     request(`/auth/users/${id}`, { method: 'PUT', body: JSON.stringify(patch) }),
   deleteUser: (id: number) => request(`/auth/users/${id}`, { method: 'DELETE' }),
   resetUserPassword: (id: number, newPassword: string) =>

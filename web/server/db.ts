@@ -3,22 +3,34 @@
  */
 import fs from 'fs';
 import path from 'path';
-import { createCipheriv, createDecipheriv, randomBytes, createHash, randomUUID } from 'crypto';
+import { createCipheriv, createDecipheriv, randomBytes, createHash, createHmac, randomUUID } from 'crypto';
+import { isRootResetAccess } from './root-reset-permissions';
 
 const DB_PATH = process.env.DB_PATH || path.join(__dirname, '../../data/db.json');
 
 // Encryption key for sensitive fields (MFA secrets) — independent from JWT
 let ENC_KEY: Buffer;
+let dedicatedEncryptionKeyConfigured = false;
 try {
   const configPath = path.join(__dirname, '../../config.json');
   const config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
-  const source = config.web?.encryptionKey  // Dedicated key (preferred)
-    || process.env.ENCRYPTION_KEY
+  const dedicatedSource = config.web?.encryptionKey || process.env.ENCRYPTION_KEY;
+  const source = dedicatedSource
     || config.web?.jwtSecret                // Fallback for backward compat
     || 'default-fallback-key-32chars-xxx';
+  dedicatedEncryptionKeyConfigured = typeof dedicatedSource === 'string' && dedicatedSource.length >= 32;
   ENC_KEY = createHash('sha256').update(source).digest();
 } catch {
   ENC_KEY = createHash('sha256').update('default-fallback-key-32chars-xxx').digest();
+}
+
+/** Derive a purpose-specific key. Root credentials fail closed unless a dedicated key is configured. */
+export function deriveEncryptionKey(purpose: string): Buffer {
+  if (!dedicatedEncryptionKeyConfigured) {
+    throw new Error('Root 密码临时存储要求配置至少 32 字符的 web.encryptionKey 或 ENCRYPTION_KEY');
+  }
+  if (!/^[a-z0-9-]{3,64}$/.test(purpose)) throw new Error('加密密钥用途无效');
+  return createHmac('sha256', ENC_KEY).update(`awstool:${purpose}:v1`, 'utf8').digest();
 }
 
 export function encryptField(text: string): string {
@@ -659,6 +671,7 @@ export const db = {
       allowed_pages: (u as any).allowed_pages ?? null,
       root_access: (u as any).root_access === true,
       bulk_quota_access: (u as any).bulk_quota_access === true,
+      root_reset_access: isRootResetAccess((u as any).root_reset_access) ? (u as any).root_reset_access : 'none',
       created_at: u.created_at,
     }));
   },

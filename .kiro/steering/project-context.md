@@ -201,7 +201,7 @@ web { port, adminPassword, jwtSecret, encryptionKey, feishuWebhook }
 ```
 
 **`data/db.json`（gitignore，运行时数据库）**，顶层键：
-- `users`：账号（bcrypt 密码、加密的 mfa_secret、role、allowed_pages、root_access）
+- `users`：账号（bcrypt 密码、加密的 mfa_secret、role、allowed_pages、root_access、root_reset_access）
 - `quota_requests`：配额提升记录
 - `audit_log`：审计日志（上限 5000 条滚动）
 - `region_data`：各账户区域 opt-in 状态
@@ -218,9 +218,11 @@ web { port, adminPassword, jwtSecret, encryptionKey, feishuWebhook }
 
 **权限模型（auth.ts）**：角色 `admin` / `partadmin` / `viewer`；`allowed_pages` 控制可见页面（admin=全部）；`authMiddleware` 强制未绑 MFA 用户不能访问业务接口。`ops` 属于敏感页面：admin 恒有，其他角色只有 `allowed_pages` 显式包含 `ops` 才能显示菜单并访问 `/api/ops`；旧用户缺少 `allowed_pages` 时只继承原有常规页面，不自动获得运维监控。
 
-两个**独立权限开关**（admin 恒有，其他角色必须显式授予，且都不受 `allowed_pages` 影响）：
+**独立功能权限**（admin 恒有，其他角色必须显式授予，且都不受 `allowed_pages` 影响）：
 - `root_access` → 账户页「根用户」敏感操作（Admin 临时凭证 / 删 Root MFA / 恢复根密码）、Admin 控制台登录；非 admin 即使有此权限也只能签发 1 小时凭证，2–12 小时仅限数据库当前角色为 admin
 - `bulk_quota_access` → 「批量提额」页；未授予时该菜单完全不可见，后端 `requireBulkQuotaAccess` 也会拒绝
+
+- `root_reset_access` → 批量重置 Root 密码：none/view/operate，非 admin 缺省 none；view 查看全部批次进度，operate 管理本人任务及链接，admin 管理全部。独立于 root_access。守卫与解析见 `root-reset-permissions.ts`。
 
 新增独立权限的改动点：`auth.ts`（resolve 函数 + me + create/update）、`db.ts`（getAllUsers 暴露字段）、`routes/aws.ts`（中间件）、`MainLayout.tsx`（导航 gating）、`Settings.tsx`（授予勾选 + 列表列）、`api.ts`（createUser/updateUser 参数）。
 

@@ -23,9 +23,12 @@ import * as tagCompliance from '../tag-compliance';
 import * as tagOnboarding from '../tag-onboarding';
 import { pipeline } from 'stream/promises';
 import { cancelRootEmail, listRootEmails, rootEmailAvailability, submitRootEmail, rootEmailCatalog,
-  listRootEmailBatches, getRootEmailBatch, submitRootEmailBatch, cancelRootEmailBatch, getRootResetLink } from '../root-email-jobs';
+  listRootEmailBatches, getRootEmailBatch, submitRootEmailBatch, cancelRootEmailBatch, getRootResetLink,
+  prepareRootCredentialCsv } from '../root-email-jobs';
 import { RootEmailError } from '../root-email-core';
 import { MailApiError } from '../mail-api';
+import { createRootResetGuard } from '../root-reset-permissions';
+import { StepUpMfaError, verifyStepUpTotp } from '../step-up-mfa';
 
 export const awsRouter = Router();
 
@@ -338,16 +341,18 @@ const requireRootAccess = (req: Request, res: Response, next: any) => {
   return res.status(403).json({ error: '无根用户凭证操作权限，请联系管理员分配' });
 };
 
-// Root recovery email jobs. These endpoints never receive a password or a reset URL.
-awsRouter.use('/root-email', requireRootAccess, (_req, res, next) => {
-  res.set('Cache-Control', 'no-store');
-  next();
-});
-const rootEmailFailure = (res: Response, error: unknown) => res.status(error instanceof RootEmailError ? error.statusCode : error instanceof MailApiError ? 503 : 500)
-  .json({ error: error instanceof RootEmailError || error instanceof MailApiError ? error.message : '恢复邮件任务服务异常，请联系管理员' });
+// Root recovery email and automatic password jobs. Reset URLs and plaintext passwords never appear in list APIs.
+awsRouter.use('/root-email', createRootResetGuard(username => db.getUser(username)));
+const rootEmailFailure = (res: Response, error: unknown) => {
+  const status = error instanceof RootEmailError || error instanceof StepUpMfaError ? error.statusCode
+    : error instanceof MailApiError ? 503 : 500;
+  const message = error instanceof RootEmailError || error instanceof StepUpMfaError || error instanceof MailApiError
+    ? error.message : 'Root 密码任务服务异常，请联系管理员';
+  return res.status(status).json({ error: message });
+};
 awsRouter.post('/root-email/jobs/:id/reset-link', async (req, res) => {
   try {
-    const data = await getRootResetLink(String(req.params.id), res.locals.rootAccessUser);
+    const data = await getRootResetLink(String(req.params.id), res.locals.rootResetUser);
     res.locals.audited = true;
     res.json({ success: true, data });
   } catch (error) { rootEmailFailure(res, error); }
@@ -361,43 +366,68 @@ awsRouter.get('/root-email/catalog', (_req, res) => {
   catch (error) { rootEmailFailure(res, error); }
 });
 awsRouter.get('/root-email/batches', (_req, res) => {
-  try { res.json({ success: true, data: listRootEmailBatches(res.locals.rootAccessUser) }); }
+  try { res.json({ success: true, data: listRootEmailBatches(res.locals.rootResetUser) }); }
   catch (error) { rootEmailFailure(res, error); }
 });
 awsRouter.get('/root-email/batches/:id', (req, res) => {
-  try { res.json({ success: true, data: getRootEmailBatch(String(req.params.id), res.locals.rootAccessUser) }); }
+  try { res.json({ success: true, data: getRootEmailBatch(String(req.params.id), res.locals.rootResetUser) }); }
   catch (error) { rootEmailFailure(res, error); }
 });
 awsRouter.post('/root-email/batches', async (req, res) => {
   try {
-    if (req.body?.confirmSend !== true) throw new RootEmailError('请确认批量发送恢复邮件');
+    if (req.body?.confirmSetPassword !== true) throw new RootEmailError('请确认将自动修改所选账户的 Root 密码');
+    verifyStepUpTotp(res.locals.rootResetUser, req.body?.totpCode);
     const result = await submitRootEmailBatch(String(req.body.payerAccountId || ''), req.body.accountIds,
-      String(req.body.requestId || ''), res.locals.rootAccessUser);
+      String(req.body.requestId || ''), {
+        payerName: req.body?.confirmPayerName,
+        accountCount: req.body?.confirmAccountCount,
+      }, res.locals.rootResetUser, req.ip);
     res.locals.audited = true;
     res.status(result.reused ? 200 : 202).json({ success: true, data: result });
   } catch (error) { rootEmailFailure(res, error); }
 });
+awsRouter.post('/root-email/batches/:id/credentials-csv', (req, res) => {
+  try {
+    verifyStepUpTotp(res.locals.rootResetUser, req.body?.totpCode);
+    const download = prepareRootCredentialCsv(String(req.params.id), res.locals.rootResetUser);
+    let finished = false;
+    res.once('finish', () => { finished = true; download.complete(true); });
+    res.once('close', () => { if (!finished) download.complete(false); });
+    res.locals.audited = true;
+    res.set({
+      'Cache-Control': 'no-store, max-age=0',
+      Pragma: 'no-cache',
+      Expires: '0',
+      'Content-Type': 'text/csv; charset=utf-8',
+      'Content-Disposition': `attachment; filename="${download.filename}"`,
+      'X-Credential-Count': String(download.count),
+    });
+    res.status(200).send(download.csv);
+  } catch (error) { rootEmailFailure(res, error); }
+});
 awsRouter.post('/root-email/batches/:id/cancel', (req, res) => {
   try {
-    res.json({ success: true, data: cancelRootEmailBatch(String(req.params.id), res.locals.rootAccessUser) });
+    res.json({ success: true, data: cancelRootEmailBatch(String(req.params.id), res.locals.rootResetUser) });
     res.locals.audited = true;
   } catch (error) { rootEmailFailure(res, error); }
 });
 awsRouter.get('/root-email/accounts/:accountId/jobs', (req, res) => {
-  try { res.json({ success: true, data: listRootEmails(String(req.params.accountId), res.locals.rootAccessUser) }); }
+  try { res.json({ success: true, data: listRootEmails(String(req.params.accountId), res.locals.rootResetUser) }); }
   catch (error) { rootEmailFailure(res, error); }
 });
 awsRouter.post('/root-email/accounts/:accountId/jobs', async (req, res) => {
   try {
     if (req.body?.confirmSend !== true) throw new RootEmailError('请确认向该账户的根邮箱发送恢复邮件');
-    const job = await submitRootEmail(String(req.params.accountId), res.locals.rootAccessUser);
+    const job = await submitRootEmail(String(req.params.accountId), res.locals.rootResetUser, req.ip);
     res.locals.audited = true;
     res.status(202).json({ success: true, data: job });
   } catch (error) { rootEmailFailure(res, error); }
 });
 awsRouter.post('/root-email/jobs/:id/cancel', (req, res) => {
-  try { res.json({ success: true, data: cancelRootEmail(String(req.params.id), res.locals.rootAccessUser) }); }
-  catch (error) { rootEmailFailure(res, error); }
+  try {
+    res.json({ success: true, data: cancelRootEmail(String(req.params.id), res.locals.rootResetUser) });
+    res.locals.audited = true;
+  } catch (error) { rootEmailFailure(res, error); }
 });
 
 // RBAC: 批量 payer 提额权限（独立开关，必须显式授予）。

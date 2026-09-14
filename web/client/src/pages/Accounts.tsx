@@ -40,6 +40,7 @@ const AccountsPage: React.FC = () => {
     return () => window.removeEventListener('resize', onResize);
   }, []);
   const [canRoot, setCanRoot] = useState(false);
+  const [rootResetAccess, setRootResetAccess] = useState<'none' | 'view' | 'operate'>('none');
   // 独立会话功能仅 admin 可见可用
   const [isAdmin, setIsAdmin] = useState(false);
   // 独立会话开关：开启后每个账户用独立浏览器 profile 打开，可同时登录多个账户
@@ -183,6 +184,7 @@ const AccountsPage: React.FC = () => {
   useEffect(() => {
     api.me().then(r => {
       setCanRoot(!!r.rootAccess);
+      setRootResetAccess(['view', 'operate'].includes(r.rootResetAccess) ? r.rootResetAccess : 'none');
       setIsAdmin(r.role === 'admin');
     }).catch(() => {});
   }, []);
@@ -349,7 +351,7 @@ const AccountsPage: React.FC = () => {
             </>
           ) : <span style={{ color: '#8a94a6' }}>无数据</span> },
           { key: 'root', label: '根用户', children: (
-            <RootCredentialsPanel accountId={selectedAccount.Id} rootCredentials={detail?.rootCredentials} canRoot={canRoot} isAdmin={isAdmin} isPayer={!!selectedAccount._isPayer} adminExcluded={!!selectedAccount._adminRoleExcluded} loading={detailLoading} />
+            <RootCredentialsPanel accountId={selectedAccount.Id} rootCredentials={detail?.rootCredentials} canRoot={canRoot} rootResetAccess={rootResetAccess} isAdmin={isAdmin} isPayer={!!selectedAccount._isPayer} adminExcluded={!!selectedAccount._adminRoleExcluded} loading={detailLoading} />
           ) },
         ]} />
       </div>
@@ -939,7 +941,7 @@ const AccountsPage: React.FC = () => {
                       </>
                     ) : '无数据' },
                     { key: 'root', label: '根用户', children: (
-                      <RootCredentialsPanel accountId={selectedAccount.Id} rootCredentials={detail?.rootCredentials} canRoot={canRoot} isAdmin={isAdmin} isPayer={!!selectedAccount._isPayer} adminExcluded={!!selectedAccount._adminRoleExcluded} loading={detailLoading} />
+                      <RootCredentialsPanel accountId={selectedAccount.Id} rootCredentials={detail?.rootCredentials} canRoot={canRoot} rootResetAccess={rootResetAccess} isAdmin={isAdmin} isPayer={!!selectedAccount._isPayer} adminExcluded={!!selectedAccount._adminRoleExcluded} loading={detailLoading} />
                     ) },
                   ]} />
                 </Card>

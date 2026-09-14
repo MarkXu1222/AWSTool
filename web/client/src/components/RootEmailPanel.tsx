@@ -14,7 +14,7 @@ const colors: Record<RootEmailJobView['status'], string> = {
 };
 
 /** Remount per account so a previous account's asynchronous response cannot appear here. */
-const RootEmailPanel: React.FC<{ accountId: string }> = ({ accountId }) => {
+const RootEmailPanel: React.FC<{ accountId: string; canOperate?: boolean }> = ({ accountId, canOperate = false }) => {
   const [jobs, setJobs] = useState<RootEmailJobView[]>([]);
   const [available, setAvailable] = useState<{ ready: boolean; detail: string; mailboxConfigured: boolean } | null>(null);
   const [error, setError] = useState('');
@@ -63,13 +63,13 @@ const RootEmailPanel: React.FC<{ accountId: string }> = ({ accountId }) => {
     </Typography.Text>
     {error && <Alert type="error" showIcon message={error} />}
     {available && !available.ready && <Alert type="warning" showIcon message="发送环境尚未就绪" description={available.detail} />}
-    <Popconfirm title="发送恢复邮件" description={`将为账户 ${accountId} 自动完成验证码并发送恢复邮件，操作会被审计。`}
+    {canOperate && <Popconfirm title="发送恢复邮件" description={`将为账户 ${accountId} 自动完成验证码并发送恢复邮件，操作会被审计。`}
       okText="发送邮件" cancelText="取消" onConfirm={() => act(() => api.sendRootEmail(accountId))}
       disabled={!available?.ready || busy || pending}>
       <Button icon={<MailOutlined />} loading={busy} disabled={!available?.ready || pending}>发送恢复邮件</Button>
-    </Popconfirm>
+    </Popconfirm>}
     <List size="small" dataSource={jobs} locale={{ emptyText: '暂无恢复邮件任务' }} renderItem={job => <List.Item
-      actions={job.status === 'link_ready' ? [<Button key="link" size="small" disabled={busy} onClick={async () => {
+      actions={!canOperate || !job.canManage ? [] : job.status === 'link_ready' ? [<Button key="link" size="small" disabled={busy} onClick={async () => {
         setBusy(true); setError('');
         try { await showRootResetLink(job.id); } catch (e: any) { setError(e.message); } finally { setBusy(false); }
       }}>获取重置链接</Button>] : ['queued', 'running', 'waiting_mail'].includes(job.status) ? [
