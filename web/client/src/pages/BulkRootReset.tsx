@@ -45,7 +45,7 @@ const BulkRootResetPage: React.FC<{ canOperate?: boolean }> = ({ canOperate = fa
   const [confirmAccountCount, setConfirmAccountCount] = useState('');
   const [totpCode, setTotpCode] = useState('');
   const [downloadOpen, setDownloadOpen] = useState(false);
-  const [downloadTotpCode, setDownloadTotpCode] = useState('');
+  const [downloadSlot, setDownloadSlot] = useState<'owner' | 'admin' | null>(null);
   const [manualLinkJob, setManualLinkJob] = useState<RootEmailJobView | null>(null);
   const [manualLinkTotpCode, setManualLinkTotpCode] = useState('');
   const request = useRef<{ signature: string; id: string } | null>(null);
@@ -132,14 +132,17 @@ const BulkRootResetPage: React.FC<{ canOperate?: boolean }> = ({ canOperate = fa
     finally { setBusy(false); }
   };
   const downloadCredentials = async () => {
-    if (!batch?.canDownloadCredentials || !/^\d{6}$/.test(downloadTotpCode)) return;
+    if (!batch || !downloadSlot) return;
+    const allowed = downloadSlot === 'owner' ? batch.canDownloadOwnerCredentials : batch.canDownloadAdminCredentials;
+    if (!allowed) return;
     setBusy(true); setError('');
     try {
-      const count = await api.downloadRootCredentialCsv(batch.id, downloadTotpCode);
-      setDownloadOpen(false); setRefresh(value => value + 1);
-      message.success(`已下载 ${count} 个已确认密码；服务器端临时密文已销毁`);
+      const count = await api.downloadRootCredentialCsv(batch.id, downloadSlot);
+      const label = downloadSlot === 'owner' ? '创建者' : 'Admin';
+      setDownloadOpen(false); setDownloadSlot(null); setRefresh(value => value + 1);
+      message.success(`已下载 ${count} 个已确认密码的${label}副本；该副本已消费，页面将刷新剩余状态`);
     } catch (cause: any) { setError(cause.message); }
-    finally { setDownloadTotpCode(''); setBusy(false); }
+    finally { setBusy(false); }
   };
   const openManualLink = (job: RootEmailJobView) => {
     setManualLinkJob(job); setManualLinkTotpCode(''); setError('');
@@ -160,9 +163,9 @@ const BulkRootResetPage: React.FC<{ canOperate?: boolean }> = ({ canOperate = fa
       <p className="page-header-subtitle">发送恢复邮件、验证一次性链接、自动设置强随机密码，并由创建者一次性导出凭证。</p>
     </div></div>
     {!canOperate && <Alert type="info" showIcon message="当前为仅查看权限"
-      description="可以查看账户清单和全部批次进度，但不能创建、停止任务或下载 Root 凭证。" />}
+      description="只能查看自己创建的批次进度，不能创建、停止任务或下载 Root 凭证。" />}
     <Alert type="warning" showIcon message="高风险操作：将真实修改 AWS Root 密码"
-      description="每批最多 20 个成员账户。系统生成 24 位强随机密码并严格串行提交；发信或密码页浏览器仅在确认未提交时最多尝试 3 次，结果未知绝不重试。确认成功的密码使用 AES-256-GCM 临时保存，最多 30 分钟，且只能由批次创建者通过 MFA 下载一次。" />
+      description="每批最多 20 个成员账户。普通用户只看到本人批次，Admin 可查看全部。下载 CSV 不再二次验证 MFA；每批创建者副本和 Admin 共享副本各可下载一次，密文保留到两份均下载或 30 分钟到期。" />
     {error && <Alert type="error" showIcon message={error} closable onClose={() => setError('')} />}
     {available && !available.ready && <Alert type="warning" showIcon message="发送环境尚未就绪" description={available.detail} />}
     {available && available.ready && !available.mailboxConfigured && <Alert type="error" showIcon message="邮箱 API 未配置"
@@ -237,30 +240,40 @@ const BulkRootResetPage: React.FC<{ canOperate?: boolean }> = ({ canOperate = fa
             <Tag color="error">发信失败 {batch.failed}</Tag><Tag color="warning">待检查 {batch.interrupted}</Tag><Tag>已停止 {batch.cancelled}</Tag>
           </Space>
           <Space wrap>
-            {canOperate && batch.canManage && <Space direction="vertical" size={2}>
-              <Button type="primary" icon={<DownloadOutlined />} disabled={busy || !batch.canDownloadCredentials}
-                onClick={() => { setDownloadTotpCode(''); setDownloadOpen(true); }}>
-                {batch.canDownloadCredentials
-                  ? `一次性下载凭证 CSV（${batch.credentialsAvailable}）`
-                  : '下载 Root 凭证 CSV'}
-              </Button>
-              {!batch.canDownloadCredentials && !batch.credentialsDownloadedAt && <Typography.Text type="secondary">
-                {batch.done < batch.total ? '批次完成后，如当前用户是创建者且至少一个密码成功，即可通过 MFA 下载一次'
-                  : batch.passwordSet === 0 ? '本批次没有设置成功的密码，暂无 CSV'
-                  : '仅创建者可在临时凭证有效期内通过 MFA 下载一次'}
-              </Typography.Text>}
+            {(batch.ownerCredentialAccess || batch.adminCredentialAccess) && <Space direction="vertical" size={4}>
+              <Space wrap>
+                {batch.ownerCredentialAccess && <Button type="primary" icon={<DownloadOutlined />}
+                  disabled={busy || !batch.canDownloadOwnerCredentials}
+                  onClick={() => { setDownloadSlot('owner'); setDownloadOpen(true); }}>
+                  下载创建者 CSV（{batch.credentialsAvailable}）
+                </Button>}
+                {batch.adminCredentialAccess && <Button icon={<DownloadOutlined />}
+                  disabled={busy || !batch.canDownloadAdminCredentials}
+                  onClick={() => { setDownloadSlot('admin'); setDownloadOpen(true); }}>
+                  下载 Admin 共享 CSV（{batch.credentialsAvailable}）
+                </Button>}
+              </Space>
+              <Space wrap>
+                {batch.ownerCredentialsDownloadedAt && <Tag color="success">
+                  创建者副本已于 {new Date(batch.ownerCredentialsDownloadedAt).toLocaleString()} 消费
+                </Tag>}
+                {batch.adminCredentialsDownloadedAt && <Tag color="success">
+                  Admin 副本已于 {new Date(batch.adminCredentialsDownloadedAt).toLocaleString()} 消费
+                </Tag>}
+                {batch.done < batch.total && <Typography.Text type="secondary">批次完成后开放可用副本</Typography.Text>}
+                {batch.done === batch.total && batch.passwordSet === 0 && <Typography.Text type="secondary">
+                  本批次没有设置成功的密码，暂无 CSV
+                </Typography.Text>}
+                {batch.done === batch.total && batch.passwordSet > 0 && batch.credentialsAvailable === 0
+                  && <Typography.Text type="secondary">临时凭证已到期或两个副本均已消费</Typography.Text>}
+              </Space>
             </Space>}
-            {batch.credentialExpiresAt && !batch.credentialsDownloadedAt && <Typography.Text type="warning">
+            {batch.credentialExpiresAt && <Typography.Text type="warning">
               最早一项凭证将在 {new Date(batch.credentialExpiresAt).toLocaleString()} 自动销毁
             </Typography.Text>}
             {batch.batchCredentialCutoffAt && <Tag color="warning">
               已为凭证下载窗口停止剩余任务（{new Date(batch.batchCredentialCutoffAt).toLocaleString()}）
             </Tag>}
-            {batch.credentialsDownloadedAt && <Tag color="success">
-              已于 {new Date(batch.credentialsDownloadedAt).toLocaleString()} 下载并销毁服务器密文
-            </Tag>}
-            {!batch.credentialsDownloadedAt && batch.done === batch.total && batch.passwordSet > 0 && batch.credentialsAvailable === 0
-              && <Tag color="warning">临时凭证已过期或销毁</Tag>}
             {canOperate && batch.canManage && batch.done < batch.total && <Popconfirm title="停止本批次？"
               description="已发送的恢复邮件无法撤回；提交中的密码可能进入结果未知状态。" okText="停止批次" cancelText="取消" onConfirm={cancel}>
               <Button size="small" icon={<StopOutlined />} disabled={busy}>停止批次</Button>
@@ -326,18 +339,11 @@ const BulkRootResetPage: React.FC<{ canOperate?: boolean }> = ({ canOperate = fa
       </Space>
     </Modal>
 
-    <Modal title="一次性下载 Root 凭证" open={downloadOpen} confirmLoading={busy}
-      okText="验证并下载 CSV" okButtonProps={{ disabled: !/^\d{6}$/.test(downloadTotpCode) }} cancelText="取消"
-      closable={!busy} maskClosable={false} onCancel={() => { if (!busy) { setDownloadOpen(false); setDownloadTotpCode(''); } }}
-      onOk={downloadCredentials}>
-      <Space direction="vertical" size={12} style={{ width: '100%' }}>
-        <Alert type="warning" showIcon message="下载成功后不能再次下载"
-          description="服务器会在发送任何 CSV 字节前持久化一次性 claim；正常下载响应完成后销毁密文，若响应已开始后连接中断也按可能披露销毁。请把文件保存到受控位置，不要通过聊天或公共网盘传输。" />
-        <Typography.Text>输入当前 6 位 MFA 验证码：</Typography.Text>
-        <Input.Password aria-label="下载 MFA 验证码" value={downloadTotpCode}
-          onChange={event => setDownloadTotpCode(event.target.value.replace(/\D/g, '').slice(0, 6))}
-          placeholder="000000" disabled={busy} inputMode="numeric" autoComplete="one-time-code" />
-      </Space>
+    <Modal title={`${downloadSlot === 'admin' ? 'Admin 共享' : '创建者'} Root 凭证副本`} open={downloadOpen}
+      confirmLoading={busy} okText="确认下载 CSV" cancelText="取消" closable={!busy} maskClosable={false}
+      onCancel={() => { if (!busy) { setDownloadOpen(false); setDownloadSlot(null); } }} onOk={downloadCredentials}>
+      <Alert type="warning" showIcon message="本次下载不再要求额外 MFA"
+        description={`当前登录会话将消费此批次唯一的${downloadSlot === 'admin' ? ' Admin 共享' : '创建者'}副本。另一副本会继续加密保留，直到被下载或最迟 30 分钟到期；两份都消费后服务器立即销毁密文。请把文件保存到受控位置。`} />
     </Modal>
   </Space>;
 };

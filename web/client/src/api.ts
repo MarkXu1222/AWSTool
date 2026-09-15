@@ -37,7 +37,10 @@ export interface RootEmailAccount {
 }
 export interface RootEmailBatchView {
   canManage: boolean;
-  canDownloadCredentials: boolean;
+  ownerCredentialAccess: boolean;
+  adminCredentialAccess: boolean;
+  canDownloadOwnerCredentials: boolean;
+  canDownloadAdminCredentials: boolean;
   id: string;
   payerAccountId: string;
   payerName: string;
@@ -60,7 +63,8 @@ export interface RootEmailBatchView {
   passwordUnknown: number;
   credentialsAvailable: number;
   credentialExpiresAt?: string;
-  credentialsDownloadedAt?: string;
+  ownerCredentialsDownloadedAt?: string;
+  adminCredentialsDownloadedAt?: string;
   batchCredentialCutoffAt?: string;
   jobs?: RootEmailJobView[];
 }
@@ -699,12 +703,12 @@ export const api = {
     confirmPayerName: string; confirmAccountCount: number }) => request('/aws/root-email/batches', {
     method: 'POST', body: JSON.stringify({ ...body, confirmSetPassword: true }),
   }),
-  downloadRootCredentialCsv: async (id: string, totpCode: string): Promise<number> => {
+  downloadRootCredentialCsv: async (id: string, slot: 'owner' | 'admin'): Promise<number> => {
     const token = getToken();
     const res = await fetch(`${BASE}/aws/root-email/batches/${encodeURIComponent(id)}/credentials-csv`, {
       method: 'POST', cache: 'no-store',
       headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
-      body: JSON.stringify({ totpCode }),
+      body: JSON.stringify({ slot }),
     });
     if (res.status === 401) {
       localStorage.removeItem('token');
@@ -715,8 +719,10 @@ export const api = {
       const error = await res.json().catch(() => ({ error: '一次性凭证下载失败' }));
       throw new Error(error.error || '一次性凭证下载失败');
     }
+    const responseSlot = res.headers.get('X-Credential-Slot');
+    if (responseSlot !== slot) throw new Error('凭证下载副本响应不匹配');
     const disposition = res.headers.get('Content-Disposition') || '';
-    const filename = disposition.match(/filename="?([^";]+)"?/i)?.[1] || `root-passwords-${id}.csv`;
+    const filename = disposition.match(/filename="?([^";]+)"?/i)?.[1] || `root-passwords-${id}-${slot}.csv`;
     const count = Number(res.headers.get('X-Credential-Count') || 0);
     const blob = await res.blob();
     const url = URL.createObjectURL(blob);

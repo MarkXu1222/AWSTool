@@ -284,7 +284,7 @@ admin 恒有，其他角色必须显式授予，且**都不受 `allowed_pages` �
 
 - `root_access` → 账户页「根用户」敏感操作（Admin 临时凭证 / 删除 Root MFA / 恢复根密码 / 删除 Root Access Key）以及 Admin 控制台登录；`GET /root-credentials/:accountId` 的状态读取当前不经过该守卫
 - `bulk_quota_access` → 「批量提额」页；未授予时菜单完全不可见，后端 `requireBulkQuotaAccess` 也会拒绝
-- `root_reset_access` → 「批量设置 Root 密码」页，值为 `none` / `view` / `operate`；创建自动改密批次与下载凭证均要求 step-up TOTP。admin 可管理任务，但一次性 CSV 只允许批次创建者下载
+- `root_reset_access` → 「批量设置 Root 密码」页，值为 `none` / `view` / `operate`；非 admin 只看本人批次，admin 查看/管理全部。创建批次仍要求 step-up TOTP；CSV 下载不再额外 MFA，每批创建者副本和全体 Admin 共享副本各一次
 
 `requireRootAccess` 和 Admin 控制台门禁都会用 `db.getUser(username)` 实时读取数据库，严格要求字段为 `true`（admin 恒有），不信任旧 JWT 中缓存的权限。
 
@@ -481,7 +481,7 @@ HTML 模板 + Puppeteer 渲染。公司背景库在 `doc-templates.ts`（12 家�
 
 独立页面 `/rootreset` 受 `root_reset_access` 控制。每批最多 20 个 ACTIVE 成员账户；创建前必须精确输入 payer 名称、账户数量和当前 TOTP。任务严格串行执行：选择 Root 登录 → 如 AWS 要求则先完成登录安全验证码 → 打开 Forgot password → 完成恢复邮件验证码 → 精确匹配收件人/时间 → 校验 `signin.aws.amazon.com/resetpassword` 一次性链接 → 生成 24 位 CSPRNG 强密码 → 在 AWS 页面填写两处密码并提交。AWS 发信提交结果不明时只读查询邮箱而不重复发信；有效 reset 页面初始执行上下文短暂切换时会在提交前等待稳定。只有 AWS 页面出现明确成功文案才记为 `password_set`；确认尚未进入提交边界的浏览器加载异常最多执行 3 次独立 Chrome 尝试，同时只记录不含 URL/token 的阶段码和错误分类；提交后超时或页面异常记为 `password_unknown`，绝不自动重试。自动尝试耗尽且确认未提交密码时，任务创建者可在 2 小时内通过新的 MFA 按需重扫邮件、直接打开或显式复制链接；手工设置的密码不会进入平台 CSV。
 
-确认成功的密码以任务 ID、账户 ID、创建者 ID 作为 AAD，使用用途分离密钥和 AES-256-GCM 临时写入 `data/root-email-jobs.json`。密文最多保留 30 分钟；系统会在最早凭证到期前 10 分钟停止剩余任务。仅批次创建者可通过新的 TOTP 一次性下载 CSV（AWS Account ID、Root Email、New Root Password）；发送前持久化 claim；正常响应完成时销毁密文，若响应已开始后中断也按可能披露销毁。列表 API、审计和飞书通知都不包含密码或 reset URL。完整运行与恢复语义见 [`web/ROOT_EMAIL.md`](web/ROOT_EMAIL.md)。
+确认成功的密码以任务 ID、账户 ID、创建者 ID 作为 AAD，使用用途分离密钥和 AES-256-GCM 临时写入 `data/root-email-jobs.json`。密文最多保留 30 分钟；系统会在最早凭证到期前 10 分钟停止剩余任务。CSV 不再要求下载时额外 MFA：每批有创建者副本和全体 Admin 共享副本两个独立的一次性槽位，任一先下载后继续为另一槽保留密文，两槽都消费或到期时立即销毁。非 admin 只看本人批次，Admin 查看全部。列表 API、审计和飞书通知都不包含密码或 reset URL。完整运行与恢复语义见 [`web/ROOT_EMAIL.md`](web/ROOT_EMAIL.md)。
 
 ### 账户角色自愈
 

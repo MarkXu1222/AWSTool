@@ -25,7 +25,7 @@ import { pipeline } from 'stream/promises';
 import { cancelRootEmail, listRootEmails, rootEmailAvailability, submitRootEmail, rootEmailCatalog,
   listRootEmailBatches, getRootEmailBatch, submitRootEmailBatch, cancelRootEmailBatch, getRootResetLink,
   getManualRootResetLink, prepareRootCredentialCsv } from '../root-email-jobs';
-import { RootEmailError } from '../root-email-core';
+import { type CredentialDownloadSlot, RootEmailError } from '../root-email-core';
 import { MailApiError } from '../mail-api';
 import { createRootResetGuard } from '../root-reset-permissions';
 import { StepUpMfaError, verifyStepUpTotp } from '../step-up-mfa';
@@ -407,8 +407,10 @@ awsRouter.post('/root-email/batches', async (req, res) => {
 });
 awsRouter.post('/root-email/batches/:id/credentials-csv', (req, res) => {
   try {
-    verifyRootEmailStepUp(req, res, req.body?.totpCode);
-    const download = prepareRootCredentialCsv(String(req.params.id), res.locals.rootResetUser, req.ip);
+    const slot = req.body?.slot;
+    if (slot !== 'owner' && slot !== 'admin') throw new RootEmailError('下载副本类型必须为 owner 或 admin');
+    const download = prepareRootCredentialCsv(String(req.params.id), res.locals.rootResetUser,
+      slot as CredentialDownloadSlot, req.ip);
     let finished = false;
     res.once('finish', () => { finished = true; download.complete(true); });
     res.once('close', () => { if (!finished) download.complete(res.headersSent); });
@@ -420,6 +422,7 @@ awsRouter.post('/root-email/batches/:id/credentials-csv', (req, res) => {
       'Content-Type': 'text/csv; charset=utf-8',
       'Content-Disposition': `attachment; filename="${download.filename}"`,
       'X-Credential-Count': String(download.count),
+      'X-Credential-Slot': download.slot,
     });
     res.status(200).send(download.csv);
   } catch (error) { rootEmailFailure(res, error); }

@@ -2,8 +2,8 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import express from 'express';
 import type { AddressInfo } from 'node:net';
-import { canManageRootEmailJob, canRetrieveRootEmailManualLink, createRootResetGuard,
-  isRootResetAccess, resolveRootResetAccess } from '../server/root-reset-permissions';
+import { canManageRootEmailJob, canRetrieveRootEmailManualLink, canViewRootEmailJob,
+  createRootResetGuard, isRootResetAccess, resolveRootResetAccess } from '../server/root-reset-permissions';
 
 test('legacy page/root permissions do not implicitly grant bulk reset access', () => {
   for (const role of ['viewer', 'partadmin']) {
@@ -23,6 +23,9 @@ test('operators manage only their own jobs; viewers cannot retrieve even their o
   assert.equal(canManageRootEmailJob(user, foreign), false);
   assert.equal(canManageRootEmailJob({ ...user, root_reset_access: 'view' }, own), false);
   assert.equal(canManageRootEmailJob({ ...user, role: 'admin' }, foreign), true);
+  assert.equal(canViewRootEmailJob({ ...user, root_reset_access: 'view' }, own), true);
+  assert.equal(canViewRootEmailJob({ ...user, root_reset_access: 'view' }, foreign), false);
+  assert.equal(canViewRootEmailJob({ ...user, role: 'admin' }, foreign), true);
   assert.equal(canRetrieveRootEmailManualLink(user, own), true);
   assert.equal(canRetrieveRootEmailManualLink({ ...user, role: 'admin' }, foreign), false);
   assert.equal(canRetrieveRootEmailManualLink({ ...user, root_reset_access: 'view' }, own), false);

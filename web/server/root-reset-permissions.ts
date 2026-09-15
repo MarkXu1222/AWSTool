@@ -21,6 +21,12 @@ export function canManageRootEmailJob(user: PermissionUser & { id: number | stri
     && (user.role === 'admin' || String(user.id) === job.createdByUserId);
 }
 
+/** Non-admin users can only see jobs they created; admin visibility is global. */
+export function canViewRootEmailJob(user: PermissionUser & { id: number | string },
+  job: { createdByUserId: string }): boolean {
+  return user.role === 'admin' || String(user.id) === job.createdByUserId;
+}
+
 /** Reset links are owner-only credentials; admin task-management authority never overrides ownership. */
 export function canRetrieveRootEmailManualLink(user: PermissionUser & { id: number | string },
   job: { createdByUserId: string }): boolean {

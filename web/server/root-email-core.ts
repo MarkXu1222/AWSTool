@@ -6,6 +6,12 @@ export type RootEmailStatus = 'queued' | 'running' | 'email_sent' | 'waiting_mai
   | 'password_set' | 'password_failed' | 'password_unknown' | 'mail_failed' | 'failed' | 'cancelled' | 'interrupted';
 export type RootEmailPhase = 'queued' | 'opening' | 'captcha' | 'submitting' | 'waiting_mail' | 'setting_password' | 'done';
 export type RootManualFallbackReason = 'password_not_submitted';
+export type CredentialDownloadSlot = 'owner' | 'admin';
+export interface RootCredentialDownloadClaim {
+  id: string;
+  claimedAt: string;
+  actorUserId: string;
+}
 export interface RootEmailJob {
   id: string;
   accountId: string;
@@ -32,10 +38,17 @@ export interface RootEmailJob {
   mailReceivedAt?: string;
   encryptedPassword?: string;
   credentialExpiresAt?: string;
+  /** Legacy single-slot fields; migrated atomically by recover(). */
   credentialDownloadedAt?: string;
-  credentialDestroyedAt?: string;
   credentialDownloadClaimId?: string;
   credentialDownloadClaimedAt?: string;
+  credentialOwnerDownloadedAt?: string;
+  credentialOwnerDownloadedByUserId?: string;
+  credentialOwnerDownloadClaim?: RootCredentialDownloadClaim;
+  credentialAdminDownloadedAt?: string;
+  credentialAdminDownloadedByUserId?: string;
+  credentialAdminDownloadClaim?: RootCredentialDownloadClaim;
+  credentialDestroyedAt?: string;
   batchCredentialCutoffAt?: string;
   passwordSetAt?: string;
   passwordSubmitAttempted?: boolean;
@@ -62,6 +75,13 @@ export function canRetryRootEmailBrowser(error: unknown, phase: RootEmailPhase,
 
 export const ROOT_MANUAL_FALLBACK_TTL_MS = 2 * 60 * 60_000;
 const ROOT_MANUAL_FALLBACK_REASONS: RootManualFallbackReason[] = ['password_not_submitted'];
+const DOWNLOAD_CLAIM_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const validTimestamp = (value: unknown) => typeof value === 'string' && Number.isFinite(Date.parse(value));
+const validDownloadClaim = (value: unknown): value is RootCredentialDownloadClaim => {
+  if (!value || typeof value !== 'object') return false;
+  const claim = value as RootCredentialDownloadClaim;
+  return DOWNLOAD_CLAIM_ID.test(claim.id) && validTimestamp(claim.claimedAt) && /^\d+$/.test(claim.actorUserId);
+};
 
 /** Read only immutable, structured safety metadata when deciding whether a reset URL may be exposed. */
 export function manualRootResetFallbackExpiresAt(job: Pick<RootEmailJob,
@@ -115,6 +135,12 @@ export class RootEmailStore {
       || !/^\d{12}$/.test(j.accountId) || typeof j.email !== 'string' || !statuses.includes(j.status)
       || (j.encryptedPassword !== undefined && typeof j.encryptedPassword !== 'string')
       || (j.credentialDownloadClaimId !== undefined && typeof j.credentialDownloadClaimId !== 'string')
+      || (j.credentialOwnerDownloadedAt !== undefined && !validTimestamp(j.credentialOwnerDownloadedAt))
+      || (j.credentialOwnerDownloadedByUserId !== undefined && !/^\d+$/.test(j.credentialOwnerDownloadedByUserId))
+      || (j.credentialOwnerDownloadClaim !== undefined && !validDownloadClaim(j.credentialOwnerDownloadClaim))
+      || (j.credentialAdminDownloadedAt !== undefined && !validTimestamp(j.credentialAdminDownloadedAt))
+      || (j.credentialAdminDownloadedByUserId !== undefined && !/^\d+$/.test(j.credentialAdminDownloadedByUserId))
+      || (j.credentialAdminDownloadClaim !== undefined && !validDownloadClaim(j.credentialAdminDownloadClaim))
       || (j.autoSetPassword !== undefined && typeof j.autoSetPassword !== 'boolean')
       || (j.passwordSubmitAttempted !== undefined && typeof j.passwordSubmitAttempted !== 'boolean')
       || (j.manualFallbackReason !== undefined && !ROOT_MANUAL_FALLBACK_REASONS.includes(j.manualFallbackReason))
@@ -227,7 +253,33 @@ export class RootEmailStore {
   recover() {
     const now = new Date().toISOString();
     let changed = false;
-    let next = this.jobs.map(job => {
+    let next = this.list();
+    const legacy = new Map<string, { downloadedAt?: string; claimIds: Set<string>; claimedAt?: string; ownerId: string }>();
+    for (const job of next) {
+      if (!job.batchId || (!job.credentialDownloadedAt && !job.credentialDownloadClaimId)) continue;
+      const state = legacy.get(job.batchId) || { claimIds: new Set<string>(), ownerId: job.createdByUserId };
+      if (job.credentialDownloadedAt && (!state.downloadedAt
+        || Date.parse(job.credentialDownloadedAt) < Date.parse(state.downloadedAt))) state.downloadedAt = job.credentialDownloadedAt;
+      if (job.credentialDownloadClaimId) state.claimIds.add(job.credentialDownloadClaimId);
+      if (job.credentialDownloadClaimedAt) state.claimedAt = job.credentialDownloadClaimedAt;
+      legacy.set(job.batchId, state);
+    }
+    for (const [batchId, state] of legacy) {
+      changed = true;
+      const consumedAt = validTimestamp(state.downloadedAt) ? state.downloadedAt!
+        : validTimestamp(state.claimedAt) ? state.claimedAt! : now;
+      next = next.map(job => {
+        if (job.batchId !== batchId) return job;
+        return { ...job, encryptedPassword: undefined,
+          credentialDownloadedAt: undefined, credentialDownloadClaimId: undefined, credentialDownloadClaimedAt: undefined,
+          credentialOwnerDownloadedAt: consumedAt, credentialOwnerDownloadedByUserId: state.ownerId,
+          credentialOwnerDownloadClaim: undefined,
+          credentialAdminDownloadedAt: consumedAt, credentialAdminDownloadedByUserId: state.ownerId,
+          credentialAdminDownloadClaim: undefined,
+          credentialDestroyedAt: job.credentialDestroyedAt || consumedAt };
+      });
+    }
+    next = next.map(job => {
       if (job.manualFallbackReason || !job.autoSetPassword || job.passwordSubmitAttempted === true) return job;
       let reason: RootManualFallbackReason | undefined;
       if (job.status === 'password_failed' && job.mailReceivedAt
@@ -268,51 +320,115 @@ export class RootEmailStore {
       detail: j.status === 'password_set' ? '密码已设置；临时凭证已按 30 分钟策略销毁' : j.detail } : j));
     return structuredClone(expired);
   }
-  claimBatchCredentials(batchId: string, createdByUserId: string, claimId: string): RootEmailJob[] {
-    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(claimId)) {
+  claimBatchCredentials(batchId: string, slot: CredentialDownloadSlot, actorUserId: string, claimId: string): RootEmailJob[] {
+    if (!DOWNLOAD_CLAIM_ID.test(claimId) || !/^\d+$/.test(actorUserId) || !['owner', 'admin'].includes(slot)) {
       throw new RootEmailError('凭证下载 claim 无效');
     }
-    const matches = this.jobs.filter(j => j.batchId === batchId);
-    if (!matches.length || matches.some(j => j.createdByUserId !== createdByUserId)) throw new RootEmailError('无权下载此批次凭证', 403);
-    if (matches.some(j => j.credentialDownloadedAt)) throw new RootEmailError('此批次凭证已下载并销毁', 410);
-    if (matches.some(j => j.credentialDownloadClaimId)) throw new RootEmailError('此批次凭证已被一次性下载请求占用', 409);
-    if (!matches.some(j => j.encryptedPassword)) throw new RootEmailError('此批次没有可下载的临时凭证', 410);
-    const claimedAt = new Date().toISOString();
-    this.save(this.jobs.map(j => j.batchId === batchId ? { ...j, credentialDownloadClaimId: claimId,
-      credentialDownloadClaimedAt: claimedAt, updatedAt: claimedAt } : j));
-    return this.list().filter(j => j.batchId === batchId);
+    const matches = this.jobs.filter(job => job.batchId === batchId);
+    if (!matches.length || (slot === 'owner' && matches.some(job => job.createdByUserId !== actorUserId))) {
+      throw new RootEmailError('无权下载此批次凭证', 403);
+    }
+    const downloaded = matches.some(job => slot === 'owner'
+      ? !!job.credentialOwnerDownloadedAt : !!job.credentialAdminDownloadedAt);
+    const claimed = matches.some(job => slot === 'owner'
+      ? !!job.credentialOwnerDownloadClaim : !!job.credentialAdminDownloadClaim);
+    if (matches.some(job => job.credentialDownloadedAt) || downloaded) throw new RootEmailError('此下载副本已消费', 410);
+    if (claimed) throw new RootEmailError('此下载副本已被一次性请求占用', 409);
+    if (!matches.some(job => job.encryptedPassword)) throw new RootEmailError('此批次没有可下载的临时凭证', 410);
+    const claim: RootCredentialDownloadClaim = { id: claimId, claimedAt: new Date().toISOString(), actorUserId };
+    this.save(this.jobs.map(job => job.batchId !== batchId ? job : slot === 'owner'
+      ? { ...job, credentialOwnerDownloadClaim: claim, updatedAt: claim.claimedAt }
+      : { ...job, credentialAdminDownloadClaim: claim, updatedAt: claim.claimedAt }));
+    return this.list().filter(job => job.batchId === batchId);
   }
-  releaseBatchCredentialClaim(batchId: string, createdByUserId: string, claimId: string): void {
-    const matches = this.jobs.filter(j => j.batchId === batchId);
-    if (!matches.length || matches.some(j => j.createdByUserId !== createdByUserId
-      || j.credentialDownloadClaimId !== claimId)) throw new RootEmailError('凭证下载 claim 已变化', 409);
+  releaseBatchCredentialClaim(batchId: string, slot: CredentialDownloadSlot, actorUserId: string, claimId: string): void {
+    const matches = this.jobs.filter(job => job.batchId === batchId);
+    const claimOf = (job: RootEmailJob) => slot === 'owner' ? job.credentialOwnerDownloadClaim : job.credentialAdminDownloadClaim;
+    if (!matches.length || matches.some(job => {
+      const claim = claimOf(job);
+      return !claim || claim.id !== claimId || claim.actorUserId !== actorUserId;
+    })) throw new RootEmailError('凭证下载 claim 已变化', 409);
     const updatedAt = new Date().toISOString();
-    this.save(this.jobs.map(j => j.batchId === batchId ? { ...j, credentialDownloadClaimId: undefined,
-      credentialDownloadClaimedAt: undefined, updatedAt } : j));
+    this.save(this.jobs.map(job => job.batchId !== batchId ? job : slot === 'owner'
+      ? { ...job, credentialOwnerDownloadClaim: undefined, updatedAt }
+      : { ...job, credentialAdminDownloadClaim: undefined, updatedAt }));
   }
-  completeBatchCredentialDownload(batchId: string, createdByUserId: string, claimId: string): RootEmailJob[] {
-    const matches = this.jobs.filter(j => j.batchId === batchId);
-    if (!matches.length || matches.some(j => j.createdByUserId !== createdByUserId)) throw new RootEmailError('无权下载此批次凭证', 403);
-    if (matches.some(j => j.credentialDownloadedAt)) throw new RootEmailError('此批次凭证已下载并销毁', 410);
-    if (matches.some(j => j.credentialDownloadClaimId !== claimId)) throw new RootEmailError('凭证下载 claim 已变化', 409);
+  completeBatchCredentialDownload(batchId: string, slot: CredentialDownloadSlot,
+    actorUserId: string, claimId: string): RootEmailJob[] {
+    const matches = this.jobs.filter(job => job.batchId === batchId);
+    const claimOf = (job: RootEmailJob) => slot === 'owner' ? job.credentialOwnerDownloadClaim : job.credentialAdminDownloadClaim;
+    if (!matches.length || (slot === 'owner' && matches.some(job => job.createdByUserId !== actorUserId))) {
+      throw new RootEmailError('无权下载此批次凭证', 403);
+    }
+    if (matches.some(job => slot === 'owner' ? !!job.credentialOwnerDownloadedAt : !!job.credentialAdminDownloadedAt)) {
+      throw new RootEmailError('此下载副本已消费', 410);
+    }
+    if (matches.some(job => {
+      const claim = claimOf(job);
+      return !claim || claim.id !== claimId || claim.actorUserId !== actorUserId;
+    })) throw new RootEmailError('凭证下载 claim 已变化', 409);
     const downloadedAt = new Date().toISOString();
-    this.save(this.jobs.map(j => j.batchId === batchId ? { ...j, encryptedPassword: undefined,
-      credentialDownloadedAt: downloadedAt, credentialDestroyedAt: downloadedAt,
-      credentialDownloadClaimId: undefined, credentialDownloadClaimedAt: undefined, updatedAt: downloadedAt,
-      detail: j.status === 'password_set' ? '密码已设置；一次性下载响应已开始，服务器密文已销毁' : j.detail } : j));
-    return this.list().filter(j => j.batchId === batchId);
+    this.save(this.jobs.map(job => {
+      if (job.batchId !== batchId) return job;
+      const ownerDownloadedAt = slot === 'owner' ? downloadedAt : job.credentialOwnerDownloadedAt;
+      const adminDownloadedAt = slot === 'admin' ? downloadedAt : job.credentialAdminDownloadedAt;
+      const destroy = !!ownerDownloadedAt && !!adminDownloadedAt;
+      return { ...job,
+        credentialOwnerDownloadedAt: ownerDownloadedAt,
+        credentialOwnerDownloadedByUserId: slot === 'owner' ? actorUserId : job.credentialOwnerDownloadedByUserId,
+        credentialOwnerDownloadClaim: slot === 'owner' ? undefined : job.credentialOwnerDownloadClaim,
+        credentialAdminDownloadedAt: adminDownloadedAt,
+        credentialAdminDownloadedByUserId: slot === 'admin' ? actorUserId : job.credentialAdminDownloadedByUserId,
+        credentialAdminDownloadClaim: slot === 'admin' ? undefined : job.credentialAdminDownloadClaim,
+        encryptedPassword: destroy ? undefined : job.encryptedPassword,
+        credentialDestroyedAt: destroy ? downloadedAt : job.credentialDestroyedAt,
+        updatedAt: downloadedAt,
+        detail: job.status === 'password_set' ? destroy
+          ? '密码已设置；创建者和 Admin 下载副本均已消费，服务器密文已销毁'
+          : `密码已设置；${slot === 'owner' ? '创建者' : 'Admin'}下载副本已消费，另一副本保留至到期`
+          : job.detail };
+    }));
+    return this.list().filter(job => job.batchId === batchId);
   }
-  /** A restart after a durable claim is treated as possible disclosure and fails closed. */
-  consumeOrphanedCredentialClaims(): RootEmailJob[] {
-    const batchIds = new Set(this.jobs.filter(j => j.credentialDownloadClaimId && j.batchId).map(j => j.batchId!));
-    if (!batchIds.size) return [];
-    const destroyedAt = new Date().toISOString();
-    this.save(this.jobs.map(j => j.batchId && batchIds.has(j.batchId) ? { ...j, encryptedPassword: undefined,
-      credentialDownloadedAt: destroyedAt, credentialDestroyedAt: destroyedAt,
-      credentialDownloadClaimId: undefined, credentialDownloadClaimedAt: undefined, updatedAt: destroyedAt,
-      detail: j.status === 'password_set' ? '服务在一次性下载期间重启；按可能已披露处理并销毁密文' : j.detail } : j));
+  /** Treat each orphaned slot claim as possibly disclosed without consuming the other slot. */
+  consumeOrphanedCredentialClaims(): Array<{ job: RootEmailJob; slot: CredentialDownloadSlot; actorUserId: string }> {
+    const events = new Map<string, { batchId: string; slot: CredentialDownloadSlot; actorUserId: string }>();
+    for (const job of this.jobs) {
+      if (!job.batchId) continue;
+      if (job.credentialOwnerDownloadClaim) events.set(`${job.batchId}:owner`, {
+        batchId: job.batchId, slot: 'owner', actorUserId: job.credentialOwnerDownloadClaim.actorUserId });
+      if (job.credentialAdminDownloadClaim) events.set(`${job.batchId}:admin`, {
+        batchId: job.batchId, slot: 'admin', actorUserId: job.credentialAdminDownloadClaim.actorUserId });
+    }
+    if (!events.size) return [];
+    const consumedAt = new Date().toISOString();
+    this.save(this.jobs.map(job => {
+      if (!job.batchId) return job;
+      const ownerEvent = events.get(`${job.batchId}:owner`);
+      const adminEvent = events.get(`${job.batchId}:admin`);
+      if (!ownerEvent && !adminEvent) return job;
+      const ownerDownloadedAt = ownerEvent ? consumedAt : job.credentialOwnerDownloadedAt;
+      const adminDownloadedAt = adminEvent ? consumedAt : job.credentialAdminDownloadedAt;
+      const destroy = !!ownerDownloadedAt && !!adminDownloadedAt;
+      return { ...job,
+        credentialOwnerDownloadedAt: ownerDownloadedAt,
+        credentialOwnerDownloadedByUserId: ownerEvent?.actorUserId || job.credentialOwnerDownloadedByUserId,
+        credentialOwnerDownloadClaim: ownerEvent ? undefined : job.credentialOwnerDownloadClaim,
+        credentialAdminDownloadedAt: adminDownloadedAt,
+        credentialAdminDownloadedByUserId: adminEvent?.actorUserId || job.credentialAdminDownloadedByUserId,
+        credentialAdminDownloadClaim: adminEvent ? undefined : job.credentialAdminDownloadClaim,
+        encryptedPassword: destroy ? undefined : job.encryptedPassword,
+        credentialDestroyedAt: destroy ? consumedAt : job.credentialDestroyedAt,
+        updatedAt: consumedAt,
+        detail: job.status === 'password_set' ? destroy
+          ? '服务在双槽下载期间重启；两个副本均按可能已披露处理，密文已销毁'
+          : '服务在下载期间重启；对应副本按可能已披露处理，另一副本保留至到期'
+          : job.detail };
+    }));
     const current = this.list();
-    return [...batchIds].map(batchId => current.find(j => j.batchId === batchId)!).filter(Boolean);
+    return [...events.values()].map(event => ({
+      job: current.find(job => job.batchId === event.batchId)!, slot: event.slot, actorUserId: event.actorUserId,
+    })).filter(event => !!event.job);
   }
 }
 

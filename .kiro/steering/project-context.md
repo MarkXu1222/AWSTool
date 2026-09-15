@@ -223,7 +223,7 @@ web { port, adminPassword, jwtSecret, encryptionKey, feishuWebhook }
 - `root_access` → 账户页「根用户」敏感操作（Admin 临时凭证 / 删 Root MFA / 恢复根密码）、Admin 控制台登录；非 admin 即使有此权限也只能签发 1 小时凭证，2–12 小时仅限数据库当前角色为 admin
 - `bulk_quota_access` → 「批量提额」页；未授予时该菜单完全不可见，后端 `requireBulkQuotaAccess` 也会拒绝
 
-- `root_reset_access` → 批量设置 Root 新密码：none/view/operate，非 admin 缺省 none；view 查看全部批次进度，operate 创建和停止本人任务；admin 可管理任务，但一次性密码 CSV 始终只允许批次创建者下载。新批次单批最多 20 个账户，创建和下载都要求 step-up TOTP，创建还需精确输入 payer 名称与账户数。独立于 root_access。守卫与解析见 `root-reset-permissions.ts`。
+- `root_reset_access` → 批量设置 Root 新密码：none/view/operate，非 admin 缺省 none；非 admin（包括 view/operate）只看本人创建的批次，operate 可创建和停止本人任务；admin 可查看/管理全部。每批提供创建者一次和全体 Admin 共享一次两个 CSV 下载槽位，下载依赖已完成登录 MFA 的会话但不再额外 step-up；密文保留到两槽均消费或 30 分钟到期。创建批次与手工 fallback 仍要求 step-up TOTP，创建还需精确输入 payer 名称与账户数。独立于 root_access。守卫与解析见 `root-reset-permissions.ts`。
 
 新增独立权限的改动点：`auth.ts`（resolve 函数 + me + create/update）、`db.ts`（getAllUsers 暴露字段）、`routes/aws.ts`（中间件）、`MainLayout.tsx`（导航 gating）、`Settings.tsx`（授予勾选 + 列表列）、`api.ts`（createUser/updateUser 参数）。
 

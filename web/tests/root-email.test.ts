@@ -440,21 +440,104 @@ test('credential CSV contains the required columns and neutralizes spreadsheet f
   assert.equal(row, '"123456789012","\'=formula@example.test","Abcdefghijk2345!@#$%WXYZ"');
 });
 
-test('one-time credential claim destroys ciphertext after the download response starts', () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'root-password-csv-'));
+test('owner and admin credential slots can claim independently and destroy only after both complete', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'root-password-dual-slot-'));
   try {
     const store = new RootEmailStore(path.join(dir, 'jobs.json'));
     const meta = { batchId: randomUUID(), payerAccountId: '999999999999', payerName: 'payer-a', autoSetPassword: true as const };
     const { jobs: [job] } = store.createBatch([input], meta);
     store.update(job.id, { status: 'password_set', phase: 'done', encryptedPassword: 'authenticated-ciphertext',
       credentialExpiresAt: new Date(Date.now() + 60_000).toISOString() });
-    const claimId = randomUUID();
-    assert.equal(store.claimBatchCredentials(meta.batchId, input.createdByUserId, claimId)[0].credentialDownloadClaimId, claimId);
-    const completed = store.completeBatchCredentialDownload(meta.batchId, input.createdByUserId, claimId)[0];
-    assert.equal(completed.encryptedPassword, undefined);
-    assert.ok(completed.credentialDownloadedAt);
-    assert.ok(completed.credentialDestroyedAt);
-    assert.throws(() => store.claimBatchCredentials(meta.batchId, input.createdByUserId, randomUUID()), /已下载/);
+    const ownerClaim = randomUUID(), adminClaim = randomUUID();
+    store.claimBatchCredentials(meta.batchId, 'owner', input.createdByUserId, ownerClaim);
+    const dualClaimed = store.claimBatchCredentials(meta.batchId, 'admin', '99', adminClaim)[0];
+    assert.equal(dualClaimed.credentialOwnerDownloadClaim?.id, ownerClaim);
+    assert.equal(dualClaimed.credentialAdminDownloadClaim?.id, adminClaim);
+    assert.throws(() => store.claimBatchCredentials(meta.batchId, 'admin', '100', randomUUID()), /占用/);
+
+    const ownerCompleted = store.completeBatchCredentialDownload(
+      meta.batchId, 'owner', input.createdByUserId, ownerClaim,
+    )[0];
+    assert.ok(ownerCompleted.credentialOwnerDownloadedAt);
+    assert.equal(ownerCompleted.credentialAdminDownloadedAt, undefined);
+    assert.equal(ownerCompleted.encryptedPassword, 'authenticated-ciphertext');
+    assert.equal(ownerCompleted.credentialAdminDownloadClaim?.id, adminClaim);
+    assert.throws(() => store.claimBatchCredentials(
+      meta.batchId, 'owner', input.createdByUserId, randomUUID(),
+    ), /已消费/);
+
+    const adminCompleted = store.completeBatchCredentialDownload(meta.batchId, 'admin', '99', adminClaim)[0];
+    assert.ok(adminCompleted.credentialAdminDownloadedAt);
+    assert.equal(adminCompleted.encryptedPassword, undefined);
+    assert.ok(adminCompleted.credentialDestroyedAt);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('released and orphaned slot claims never consume the other download copy', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'root-password-orphan-slot-'));
+  try {
+    const file = path.join(dir, 'jobs.json');
+    const store = new RootEmailStore(file);
+    const meta = { batchId: randomUUID(), payerAccountId: '999999999999', payerName: 'payer-a', autoSetPassword: true as const };
+    const { jobs: [job] } = store.createBatch([input], meta);
+    store.update(job.id, { status: 'password_set', phase: 'done', encryptedPassword: 'authenticated-ciphertext',
+      credentialExpiresAt: new Date(Date.now() + 60_000).toISOString() });
+    const released = randomUUID();
+    store.claimBatchCredentials(meta.batchId, 'admin', '99', released);
+    store.releaseBatchCredentialClaim(meta.batchId, 'admin', '99', released);
+    assert.equal(store.get(job.id)?.credentialAdminDownloadClaim, undefined);
+
+    const ownerClaim = randomUUID();
+    store.claimBatchCredentials(meta.batchId, 'owner', input.createdByUserId, ownerClaim);
+    const restarted = new RootEmailStore(file);
+    restarted.recover();
+    const orphaned = restarted.consumeOrphanedCredentialClaims();
+    assert.equal(orphaned.length, 1);
+    assert.equal(orphaned[0].slot, 'owner');
+    const afterOrphan = restarted.get(job.id)!;
+    assert.ok(afterOrphan.credentialOwnerDownloadedAt);
+    assert.equal(afterOrphan.credentialAdminDownloadedAt, undefined);
+    assert.equal(afterOrphan.encryptedPassword, 'authenticated-ciphertext');
+    const adminClaim = randomUUID();
+    restarted.claimBatchCredentials(meta.batchId, 'admin', '99', adminClaim);
+    assert.equal(restarted.completeBatchCredentialDownload(meta.batchId, 'admin', '99', adminClaim)[0].encryptedPassword, undefined);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('legacy single-slot downloads migrate fail-closed to both consumed copies', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'root-password-legacy-slot-'));
+  try {
+    const file = path.join(dir, 'jobs.json');
+    const store = new RootEmailStore(file);
+    const meta = { batchId: randomUUID(), payerAccountId: '999999999999', payerName: 'payer-a', autoSetPassword: true as const };
+    const { jobs: [job] } = store.createBatch([input], meta);
+    const legacyDownloadedAt = new Date().toISOString();
+    store.update(job.id, { status: 'password_set', phase: 'done', encryptedPassword: 'legacy-ciphertext',
+      credentialExpiresAt: new Date(Date.now() + 60_000).toISOString(), credentialDownloadedAt: legacyDownloadedAt });
+    const restarted = new RootEmailStore(file);
+    restarted.recover();
+    const migrated = restarted.get(job.id)!;
+    assert.equal(migrated.credentialDownloadedAt, undefined);
+    assert.equal(migrated.credentialOwnerDownloadedAt, legacyDownloadedAt);
+    assert.equal(migrated.credentialAdminDownloadedAt, legacyDownloadedAt);
+    assert.equal(migrated.encryptedPassword, undefined);
+
+    const claimFile = path.join(dir, 'legacy-claim.json');
+    const claimStore = new RootEmailStore(claimFile);
+    const claimMeta = { ...meta, batchId: randomUUID() };
+    const { jobs: [claimJob] } = claimStore.createBatch([input], claimMeta);
+    const legacyClaimId = randomUUID();
+    claimStore.update(claimJob.id, { status: 'password_set', phase: 'done', encryptedPassword: 'legacy-ciphertext',
+      credentialExpiresAt: new Date(Date.now() + 60_000).toISOString(), credentialDownloadClaimId: legacyClaimId,
+      credentialDownloadClaimedAt: new Date().toISOString() });
+    const claimRestarted = new RootEmailStore(claimFile);
+    claimRestarted.recover();
+    const migratedClaim = claimRestarted.get(claimJob.id)!;
+    assert.equal(migratedClaim.credentialDownloadClaimId, undefined);
+    assert.ok(migratedClaim.credentialOwnerDownloadedAt);
+    assert.ok(migratedClaim.credentialAdminDownloadedAt);
+    assert.equal(migratedClaim.encryptedPassword, undefined);
+    assert.equal(claimRestarted.consumeOrphanedCredentialClaims().length, 0);
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 

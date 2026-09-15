@@ -6,7 +6,7 @@
 
 后台使用独立 Chrome 配置目录进入 AWS 忘记密码页面，通过本地 PP-OCRv6 模型处理 AWS 当前可能出现的两阶段验证码：登录安全验证码通过后进入 Forgot password，再处理恢复邮件验证码；每阶段最多 3 张图片。opening/captcha 阶段的泛化浏览器异常最多重建到 3 次会话；通过跨导航短轮询处理登录安全验证码，并兼容 AWS 先显示 `Verify`、点击后才加载验证码图片的中间态；验证码错误只通过 AWS 明确错误文案判定（兼容直/弯引号 contractions），无法确认时保持只读查邮箱且绝不重发，只有恢复邮件验证码提交前才持久化 `submitting`，此后只查邮箱、不重复发信。找到链接后，同一浏览器执行槽位只接受 `https://signin.aws.amazon.com/resetpassword` 的 `RootUser` 链接，使用不依赖 `tsx` 运行时 helper 的自包含页面函数，要求恰好两个可见密码框和唯一的 `Reset password` / `Set new password` / `Save new password` / `Change password` / `Submit` 按钮。密码页面仅在确认未进入提交边界时最多尝试 3 次。只有 AWS 返回明确成功文案才记录 `password_set`；提交后结果不明确时记录 `password_unknown`，绝不重试一次性链接。
 
-新密码由 Node.js CSPRNG 生成，固定 24 位并包含大小写、数字和符号。密码以任务上下文作为 AAD，使用用途分离密钥和 AES-256-GCM 临时写入任务文件；最多保留 30 分钟。若批次仍未完成，系统会在最早凭证到期前 10 分钟停止剩余任务。批次创建者通过新的 TOTP 下载一次 CSV；服务端发送任何字节前先持久化 claim；正常响应完成时销毁密文，若响应已开始后中断也按可能披露立即销毁。列表 API、审计和飞书通知均不包含明文密码或 reset URL。
+新密码由 Node.js CSPRNG 生成，固定 24 位并包含大小写、数字和符号。密码以任务上下文作为 AAD，使用用途分离密钥和 AES-256-GCM 临时写入任务文件；最多保留 30 分钟。若批次仍未完成，系统会在最早凭证到期前 10 分钟停止剩余任务。CSV 下载依赖已完成登录 MFA 的会话，但不再要求额外 TOTP；每批创建者副本和全体 Admin 共享副本各一次。服务端按副本分别持久化 claim；第一份响应完成后保留另一份密文，两份都消费或到期时销毁。列表 API、审计和飞书通知均不包含明文密码或 reset URL。
 
 ## 权限设置
 
@@ -15,10 +15,10 @@
 | 值 | 显示 | 范围 |
 | --- | --- | --- |
 | none | 不开放 | 菜单隐藏，接口拒绝访问 |
-| view | 仅查看 | 账户清单、所有批次进度；不能创建、停止或下载凭证 |
-| operate | 可使用 | 创建/停止本人任务；本人创建的批次完成后可一次性下载凭证 |
+| view | 仅查看 | 账户清单、本人创建的批次进度；不能创建、停止或下载凭证 |
+| operate | 可使用 | 查看/创建/停止本人任务；本人批次完成后可下载创建者副本 |
 
-管理员可管理全部任务，但不能覆盖创建者下载其他人的 Root 密码 CSV。其他用户缺少字段时默认不开放，原 root_access、allowed_pages 不会自动授予此功能。后台每次敏感操作复验权限；创建批次和下载 CSV 还必须通过 step-up TOTP。权限撤销后，旧会话不能继续操作，执行中的任务也会停止。
+非 admin 只能列出和读取自己创建的批次/任务。管理员可查看和管理全部任务，并消费每批唯一的 Admin 共享 CSV 副本；若管理员同时是创建者，页面会明确显示 owner/admin 两个槽位。CSV 下载不再 step-up MFA，但创建批次和手工 fallback 仍必须通过 step-up TOTP。其他用户缺少字段时默认不开放，原 root_access、allowed_pages 不会自动授予此功能。权限撤销后，旧会话不能继续操作，执行中的任务也会停止。
 
 ## 运行依赖
 
@@ -76,7 +76,7 @@ PY
 - API、邮件查询和每次浏览器敏感操作前都从数据库复验创建者身份、operate 权限、payer 归属及账户邮箱。
 - 状态流程：`queued → running → waiting_mail → link_ready → setting_password → password_set`。AWS 发信提交结果不明时进入 `waiting_mail` 做只读确认，不重复发信。有效 reset 页在 `DOMContentLoaded` 后短暂切换执行上下文时，提交前最多容忍 6 次 DOM 读取失败；明确失败为 `password_failed`。确认尚未进入提交边界的 Chrome 加载/导航异常最多执行 3 次独立浏览器尝试，并只持久化不含 URL/token 的阶段码与错误分类；点击提交后超时、服务中断或页面异常为 `password_unknown`，密码密文立即销毁且绝不自动重试。自动尝试耗尽、已精确绑定恢复邮件且明确未提交密码时，创建者可在 2 小时内通过新 TOTP 按需重扫同一接收时间的邮件并手工打开/复制链接；候选不唯一、存在同账户更新任务或 `password_unknown` 时拒绝返回。手工设置结果无法由平台确认，不进入 CSV。
 - 密码设置成功后仅保存 `gcm1` 密文、随机 96-bit IV、GCM tag 和到期时间。密钥由专用 encryptionKey 做用途分离，AAD 绑定 job/account/creator，防止跨任务替换。
-- CSV 只包含已明确 `password_set` 且未过期的账户。最早凭证进入最后 10 分钟前会中止剩余任务，保证批次进入终态并留下下载窗口。创建者重新输入未在当前 time-step 使用过的 TOTP 后，服务端先持久化一次性 claim，再在内存生成响应；正常 `finish` 时销毁整批密文，提前 `close` 且已发送 headers 时也按可能部分披露销毁。发送前中止可释放 claim；进程在 claim 期间重启则按可能已披露处理并销毁。
+- CSV 只包含下载时仍明确 `password_set`、有密文且未过期的账户。每批有 `owner` 与 `admin` 两个独立一次性槽位；owner 只允许创建者，admin 由所有当前 Admin 共享。下载不再要求额外 TOTP，请求必须显式选择槽位。服务端发送任何字节前为对应槽持久化 claim；正常 `finish` 或已发送 headers 的提前 `close` 只消费当前槽，另一个槽继续加密保留。两槽均消费时立即销毁，任一未消费也最迟按每条凭证原 30 分钟 TTL 销毁。发送前中止只释放当前 claim；进程在 claim 期间重启只把对应槽按可能已披露消费。两个槽下载时间不同，后下载者可能因逐条 TTL 获得更少行。
 - 用户停止会取消未提交的任务；若密码已可能提交则最终标记未知。已发送的恢复邮件无法撤回。
 - 服务重启把 `setting_password` 标记为 `password_unknown` 并销毁密文，不重放一次性链接；旧 `queued/running` 仍按保守策略标记 `interrupted`；`waiting_mail` 保留游标继续只读查询；新批次的 `link_ready` 可安全进入首次密码提交。
 - 元数据位于 `DB_PATH` 同目录的 `root-email-jobs.json`，原子写入、目录 `0700`、文件 `0600`。文件可能含有效期内的 GCM 密文，生产备份必须按敏感凭证处理并单独包含该文件。
@@ -91,10 +91,10 @@ PY
 | --- | --- | --- |
 | GET | `/root-email/availability` | Python、模型、Chrome 路径、显示器自检；结果缓存 60 秒 |
 | GET | `/root-email/catalog` | 配置的 payer、成员账户缓存与可选状态、缓存时间 |
-| GET | `/root-email/batches` | 可见的最近 20 个批次汇总 |
+| GET | `/root-email/batches` | 非 admin 返回本人最近 20 个批次；Admin 返回全局最近 20 个 |
 | GET | `/root-email/batches/:id` | 批次进度、密码状态、凭证可用数量与每个账户结果；不返回密文或邮件标识 |
 | POST | `/root-email/batches` | `{ payerAccountId, accountIds, requestId, confirmSetPassword: true, confirmPayerName, confirmAccountCount, totpCode }`；最多 20 个账户 |
-| POST | `/root-email/batches/:id/credentials-csv` | `{ totpCode }`；仅创建者、持久化一次性 claim 后下载，finish/已开始后 close 时销毁密文 |
+| POST | `/root-email/batches/:id/credentials-csv` | `{ slot: "owner" | "admin" }`；不额外验证 TOTP；每槽独立 claim/消费，两槽均消费或 TTL 到期后销毁密文 |
 | POST | `/root-email/batches/:id/cancel` | 停止批次；已发送邮件不可撤回，已提交密码可能标记未知 |
 | GET | `/root-email/accounts/:accountId/jobs` | 当前用户可见的最近 20 个账户任务 |
 | POST | `/root-email/accounts/:accountId/jobs` | 创建旧式手工发信任务，body 为 `{ "confirmSend": true }` |
