@@ -51,6 +51,31 @@ export function runRootEmailOcr(image: Buffer | null, signal?: AbortSignal): Pro
   });
 }
 
+export type RootEmailEntryState = 'waiting' | 'identity' | 'forgot' | 'blocked';
+export type RootEmailCaptchaResult = 'waiting' | 'sent' | 'identity_verified' | 'invalid' | 'blocked' | 'disabled';
+
+class RootEmailBrowserReadTimeout extends Error {}
+
+/** Self-contained browser function: AWS can replace the execution context immediately after Next. */
+export function readRootEmailEntryState(): RootEmailEntryState {
+  const text = String((globalThis as any).document.body?.innerText || '');
+  if (/too many|rate.?limit|try again later|temporarily blocked/i.test(text)) return 'blocked';
+  if ((globalThis as any).document.querySelector('#captcha_image')) return 'identity';
+  if (/Forgot password\?/i.test(text)) return 'forgot';
+  return 'waiting';
+}
+
+/** Self-contained browser function used repeatedly across CAPTCHA-triggered navigations. */
+export function readRootEmailCaptchaResult(identityStage: boolean): RootEmailCaptchaResult {
+  const text = String((globalThis as any).document.body?.innerText || '');
+  if (/too many|rate.?limit|try again later|temporarily blocked/i.test(text)) return 'blocked';
+  if (/Password email sent/i.test(text)) return 'sent';
+  if (identityStage && /Forgot password\?/i.test(text)) return 'identity_verified';
+  if (/incorrect verification|incorrect captcha|invalid captcha|characters.*(?:incorrect|did not match)|(?:incorrect|invalid).*characters/i.test(text)) return 'invalid';
+  if (/password recovery.*(?:disabled|not allowed)|contact.*administrator/i.test(text)) return 'disabled';
+  return 'waiting';
+}
+
 /** All selectors reflect the AWS root sign-in/recovery UI, not the federated PDF flow. */
 export class AwsRootEmailSession implements RootEmailSession {
   private browser?: Browser;
@@ -73,19 +98,66 @@ export class AwsRootEmailSession implements RootEmailSession {
     const page = this.checkedPage();
     await page.locator(`::-p-aria(${name})`).click();
   }
+  private async pause(milliseconds: number) {
+    await new Promise(resolve => setTimeout(resolve, milliseconds));
+    this.signal.throwIfAborted();
+  }
+  private async boundedEvaluate<T>(operation: Promise<T>, deadline: number): Promise<T> {
+    const timeoutMs = Math.max(1, Math.min(2_000, deadline - Date.now()));
+    let timer: NodeJS.Timeout | undefined;
+    let onAbort: (() => void) | undefined;
+    try {
+      return await Promise.race([
+        operation,
+        new Promise<T>((_resolve, reject) => {
+          timer = setTimeout(() => reject(new RootEmailBrowserReadTimeout('AWS 页面状态读取超时')), timeoutMs);
+          onAbort = () => reject(this.signal.reason || new Error('任务已停止'));
+          this.signal.addEventListener('abort', onAbort, { once: true });
+        }),
+      ]);
+    } finally {
+      if (timer) clearTimeout(timer);
+      if (onAbort) this.signal.removeEventListener('abort', onAbort);
+    }
+  }
   private async waitForEntry(): Promise<'identity' | 'forgot'> {
-    const page = this.checkedPage();
-    const handle = await page.waitForFunction(`(() => {
-      const text = String(document.body?.innerText || '');
-      if (/too many|rate.?limit|try again later|temporarily blocked/i.test(text)) return 'blocked';
-      if (document.querySelector('#captcha_image')) return 'identity';
-      if (/Forgot password\?/i.test(text)) return 'forgot';
-      return false;
-    })()`, { timeout: 30_000, signal: this.signal });
-    const result = await handle.jsonValue();
-    await handle.dispose();
-    if (result === 'blocked') throw new RootEmailError('AWS 提示登录验证请求受限，请稍后再试', 429);
-    return result === 'identity' ? 'identity' : 'forgot';
+    const deadline = Date.now() + 30_000;
+    let lastBrowserError: unknown;
+    while (Date.now() < deadline) {
+      try {
+        const result = await this.boundedEvaluate(
+          this.checkedPage().evaluate(readRootEmailEntryState), deadline,
+        );
+        lastBrowserError = undefined;
+        if (result === 'blocked') throw new RootEmailError('AWS 提示登录验证请求受限，请稍后再试', 429);
+        if (result === 'identity' || result === 'forgot') return result;
+      } catch (error) {
+        if (error instanceof RootEmailError || error instanceof RootEmailBrowserReadTimeout || this.signal.aborted) throw error;
+        lastBrowserError = error;
+      }
+      await this.pause(250);
+    }
+    if (lastBrowserError) throw lastBrowserError;
+    throw new Error('AWS login entry state did not become explicit');
+  }
+  private async waitForCaptchaResult(identityStage: boolean): Promise<Exclude<RootEmailCaptchaResult, 'waiting'>> {
+    const deadline = Date.now() + 30_000;
+    let lastBrowserError: unknown;
+    while (Date.now() < deadline) {
+      try {
+        const result = await this.boundedEvaluate(
+          this.checkedPage().evaluate(readRootEmailCaptchaResult, identityStage), deadline,
+        );
+        lastBrowserError = undefined;
+        if (result !== 'waiting') return result;
+      } catch (error) {
+        if (error instanceof RootEmailError || error instanceof RootEmailBrowserReadTimeout || this.signal.aborted) throw error;
+        lastBrowserError = error;
+      }
+      await this.pause(250);
+    }
+    if (lastBrowserError) throw lastBrowserError;
+    throw new Error('AWS CAPTCHA result did not become explicit');
   }
   private async enterRecoveryCaptcha() {
     const page = this.checkedPage();
@@ -164,19 +236,7 @@ export class AwsRootEmailSession implements RootEmailSession {
     const purpose = this.captchaPurpose;
     await page.locator('::-p-aria(Type the characters as shown above)').fill(candidate);
     await this.click('I’m not a robot');
-    const identitySuccess = purpose === 'identity'
-      ? "if (/Forgot password\\?/i.test(text)) return 'identity_verified';" : '';
-    const state = await page.waitForFunction(`(() => {
-      const text = document.body.innerText;
-      if (/too many|rate.?limit|try again later|temporarily blocked/i.test(text)) return 'blocked';
-      if (/Password email sent/.test(text)) return 'sent';
-      ${identitySuccess}
-      if (/incorrect verification|incorrect captcha|invalid captcha|characters.*(?:incorrect|did not match)|(?:incorrect|invalid).*characters/i.test(text)) return 'invalid';
-      if (/password recovery.*(?:disabled|not allowed)|contact.*administrator/i.test(text)) return 'disabled';
-      return false;
-    })()`, { timeout: 30_000, signal: this.signal });
-    const result = await state.jsonValue();
-    await state.dispose();
+    const result = await this.waitForCaptchaResult(purpose === 'identity');
     if (result === 'blocked') throw new RootEmailError('AWS 提示限制请求，请稍后再试', 429);
     if (result === 'disabled') throw new RootEmailError('AWS 未允许该账户恢复密码，请检查集中式根访问设置', 422);
     if (result === 'identity_verified') {

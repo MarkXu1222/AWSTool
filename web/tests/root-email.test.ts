@@ -50,6 +50,30 @@ test('identity captcha transitions to a separately budgeted recovery captcha wit
   assert.equal(progress.filter(item => item.phase === 'submitting').length, 1);
 });
 
+test('root email page helpers survive tsx serialization and prioritize blocked states', async () => {
+  const { readRootEmailCaptchaResult, readRootEmailEntryState } = await import('../server/root-email-browser');
+  assert.equal(readRootEmailEntryState.toString().includes('__name'), false);
+  assert.equal(readRootEmailCaptchaResult.toString().includes('__name'), false);
+  const previousDocument = (globalThis as any).document;
+  try {
+    const doc = { body: { innerText: 'Making sure its you' }, querySelector: (selector: string) => selector === '#captcha_image' ? {} : null };
+    (globalThis as any).document = doc;
+    assert.equal(readRootEmailEntryState(), 'identity');
+    doc.body.innerText = 'Too many requests, try again later';
+    assert.equal(readRootEmailEntryState(), 'blocked');
+    doc.body.innerText = 'Forgot password?';
+    doc.querySelector = () => null;
+    assert.equal(readRootEmailEntryState(), 'forgot');
+    assert.equal(readRootEmailCaptchaResult(true), 'identity_verified');
+    assert.equal(readRootEmailCaptchaResult(false), 'waiting');
+    doc.body.innerText = 'Password email sent';
+    assert.equal(readRootEmailCaptchaResult(false), 'sent');
+  } finally {
+    if (previousDocument === undefined) delete (globalThis as any).document;
+    else (globalThis as any).document = previousDocument;
+  }
+});
+
 test('bad lengths are never submitted; rejected candidates refresh within a three-image limit', async () => {
   const { session, calls } = fixture(['1234567', 'abc123', 'def456'], ['invalid', 'sent']);
   await sendRootEmail({ email, session, signal: new AbortController().signal, authorize() {}, progress() {} });
@@ -467,4 +491,18 @@ test('known legacy pre-submit failures migrate once to immutable manual-fallback
     restarted.update(job.id, { detail: '展示文案和 updatedAt 后续变化不影响资格截止时间' });
     assert.equal(restarted.get(job.id)?.manualFallbackExpiresAt, immutableExpiry);
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('root email DOM reads have per-call deadlines and react to cancellation', async () => {
+  const { AwsRootEmailSession } = await import('../server/root-email-browser');
+  const first = new AwsRootEmailSession(new AbortController().signal, () => {});
+  const timeoutStarted = Date.now();
+  await assert.rejects((first as any).boundedEvaluate(new Promise(() => {}), Date.now() + 25));
+  assert.ok(Date.now() - timeoutStarted < 500);
+
+  const controller = new AbortController();
+  const second = new AwsRootEmailSession(controller.signal, () => {});
+  const waiting = (second as any).boundedEvaluate(new Promise(() => {}), Date.now() + 2_000);
+  setTimeout(() => controller.abort(), 10);
+  await assert.rejects(waiting);
 });
