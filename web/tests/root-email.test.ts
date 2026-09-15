@@ -51,9 +51,10 @@ test('identity captcha transitions to a separately budgeted recovery captcha wit
 });
 
 test('root email page helpers survive tsx serialization and prioritize blocked states', async () => {
-  const { AwsRootEmailSession, readRootEmailCaptchaResult, readRootEmailEntryState,
-    startRootEmailVerification } = await import('../server/root-email-browser');
-  for (const helper of [startRootEmailVerification, readRootEmailEntryState, readRootEmailCaptchaResult]) {
+  const { AwsRootEmailSession, isRootEmailVerificationCandidate, readRootEmailCaptchaResult,
+    readRootEmailEntryState, validateRootEmailVerificationCandidate } = await import('../server/root-email-browser');
+  for (const helper of [isRootEmailVerificationCandidate, validateRootEmailVerificationCandidate,
+    readRootEmailEntryState, readRootEmailCaptchaResult]) {
     assert.equal(helper.toString().includes('__name'), false);
   }
   const previousDocument = (globalThis as any).document;
@@ -74,11 +75,12 @@ test('root email page helpers survive tsx serialization and prioritize blocked s
     doc.querySelector = () => null;
     doc.querySelectorAll = () => [verify];
     assert.equal(readRootEmailEntryState(), 'verify');
-    assert.equal(startRootEmailVerification(), 'clicked');
-    assert.equal(verifyClicked, true);
+    assert.equal(isRootEmailVerificationCandidate(verify), true);
+    assert.equal(validateRootEmailVerificationCandidate(verify), 'ready');
+    assert.equal(verifyClicked, false);
     doc.querySelectorAll = () => [verify, { ...verify, click() {} }];
     assert.equal(readRootEmailEntryState(), 'changed');
-    assert.equal(startRootEmailVerification(), 'changed');
+    assert.equal(validateRootEmailVerificationCandidate(verify), 'changed');
     doc.body.innerText = 'Forgot password?';
     doc.querySelectorAll = () => [];
     assert.equal(readRootEmailEntryState(), 'forgot');
@@ -95,35 +97,50 @@ test('root email page helpers survive tsx serialization and prioritize blocked s
 
   let reads = 0, clicks = 0;
   const session = new AwsRootEmailSession(new AbortController().signal, () => {});
+  const verifyHandle = {
+    evaluate(helper: Function) {
+      if (helper === isRootEmailVerificationCandidate) return Promise.resolve(true);
+      if (helper === validateRootEmailVerificationCandidate) return Promise.resolve('ready');
+      throw new Error('unexpected helper');
+    },
+    scrollIntoView() { return Promise.resolve(); },
+    boundingBox() { return Promise.resolve({ x: 10, y: 20, width: 100, height: 32 }); },
+    dispose() { return Promise.resolve(); },
+  };
   (session as any).page = {
     url: () => 'https://signin.aws.amazon.com/signin',
-    evaluate(helper: Function) {
-      if (helper === startRootEmailVerification) {
-        clicks++;
-        return Promise.reject(new Error('Execution context was destroyed after click'));
-      }
+    evaluate() {
       reads++;
       return Promise.resolve(reads >= 3 ? 'identity' : 'verify');
     },
+    $$() { return Promise.resolve([verifyHandle]); },
+    mouse: { click() { clicks++; return Promise.reject(new Error('Execution context was destroyed after click')); } },
   };
   (session as any).pause = async () => {};
   assert.equal(await (session as any).waitForEntry(), 'identity');
   assert.equal(clicks, 1);
 
   const controller = new AbortController();
-  let cancelledClicks = 0;
+  let cancelledClicks = 0, disposed = 0;
   const cancelled = new AwsRootEmailSession(controller.signal, () => {});
+  const cancelledHandle = {
+    evaluate(helper: Function) {
+      return Promise.resolve(helper === isRootEmailVerificationCandidate ? true : 'ready');
+    },
+    scrollIntoView() { controller.abort(); return Promise.resolve(); },
+    boundingBox() { return Promise.resolve({ x: 0, y: 0, width: 100, height: 32 }); },
+    dispose() { disposed++; return Promise.resolve(); },
+  };
   (cancelled as any).page = {
     url: () => 'https://signin.aws.amazon.com/signin',
-    evaluate(helper: Function) {
-      if (helper === readRootEmailEntryState) { controller.abort(); return Promise.resolve('verify'); }
-      cancelledClicks++;
-      return Promise.resolve('clicked');
-    },
+    evaluate() { return Promise.resolve('verify'); },
+    $$() { return Promise.resolve([cancelledHandle]); },
+    mouse: { click() { cancelledClicks++; return Promise.resolve(); } },
   };
   (cancelled as any).pause = async () => {};
   await assert.rejects((cancelled as any).waitForEntry());
   assert.equal(cancelledClicks, 0);
+  assert.equal(disposed, 1);
 });
 
 test('bad lengths are never submitted; rejected candidates refresh within a three-image limit', async () => {
