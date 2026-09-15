@@ -51,7 +51,7 @@ export const isPendingEmailJob = (job: RootEmailJob) => ['queued', 'running', 'w
   || (job.status === 'link_ready' && job.autoSetPassword === true);
 export const MAX_ROOT_EMAIL_TASKS = 500;
 export const MAX_ROOT_PASSWORD_BATCH = 20;
-export const ROOT_MANUAL_FALLBACK_TTL_MS = 60 * 60_000;
+export const ROOT_MANUAL_FALLBACK_TTL_MS = 2 * 60 * 60_000;
 const ROOT_MANUAL_FALLBACK_REASONS: RootManualFallbackReason[] = ['password_not_submitted'];
 
 /** Read only immutable, structured safety metadata when deciding whether a reset URL may be exposed. */
