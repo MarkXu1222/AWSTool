@@ -2,13 +2,14 @@ import path from 'path';
 import { randomUUID } from 'crypto';
 import { db } from './db';
 import { AwsRootEmailSession, AwsRootPasswordSession, RootPasswordAutomationError, runRootEmailOcr } from './root-email-browser';
-import { RootEmailError, RootEmailJob, RootEmailStore, isPendingEmailJob, sendRootEmail, selectRootEmailTargets,
-  MAX_ROOT_PASSWORD_BATCH } from './root-email-core';
+import { hasNewerRootEmailJob, RootEmailError, RootEmailJob, RootEmailStore, isPendingEmailJob,
+  manualRootResetFallbackExpiresAt, sendRootEmail, selectRootEmailTargets, MAX_ROOT_PASSWORD_BATCH,
+  ROOT_MANUAL_FALLBACK_TTL_MS } from './root-email-core';
 import { listConfiguredPayers } from './aws-service';
 import { mailbox, mailApiConfigured, MailApiError } from './mail-api';
 import { matchRootRecoveryMail } from './root-mail-links';
-import { scanRootMailPage } from './root-mail-poll';
-import { canManageRootEmailJob, resolveRootResetAccess } from './root-reset-permissions';
+import { findRootRecoveryLinks, scanRootMailPage } from './root-mail-poll';
+import { canManageRootEmailJob, canRetrieveRootEmailManualLink, resolveRootResetAccess } from './root-reset-permissions';
 import { assertRootPasswordEncryptionReady, buildRootCredentialCsv, decryptRootPassword, encryptRootPassword,
   generateRootPassword, ROOT_CREDENTIAL_TTL_MS } from './root-password-secrets';
 
@@ -23,6 +24,11 @@ let mailActive: { id: string; controller: AbortController; promise: Promise<void
 let lastCredentialCleanupAt = 0;
 const credentialDownloads = new Set<string>();
 const ROOT_CREDENTIAL_DOWNLOAD_RESERVE_MS = 10 * 60_000;
+
+function manualFallback(reason: NonNullable<RootEmailJob['manualFallbackReason']>) {
+  return { passwordSubmitAttempted: false, manualFallbackReason: reason,
+    manualFallbackExpiresAt: new Date(Date.now() + ROOT_MANUAL_FALLBACK_TTL_MS).toISOString() };
+}
 
 function getStore() {
   if (!store || stopping) throw new RootEmailError('恢复邮件任务执行器尚未就绪', 503);
@@ -122,9 +128,15 @@ function credentialAvailable(job: RootEmailJob, now = Date.now()): boolean {
 function jobView(job: RootEmailJob, user: RootEmailUser) {
   const { id, accountId, email, status, phase, attempts, createdBy, createdAt, sentAt, detail,
     autoSetPassword, credentialExpiresAt, passwordSetAt } = job;
+  const current = db.getUser(user.username);
+  const manualResetExpiresAt = manualRootResetFallbackExpiresAt(job);
+  const manualResetAvailable = !!manualResetExpiresAt && !!current
+    && String(current.id) === String(user.id) && canRetrieveRootEmailManualLink(current, job)
+    && !hasNewerRootEmailJob(store?.list() || [], job);
   return { id, accountId, email, status, phase, attempts, createdBy, createdAt, sentAt, detail,
     autoSetPassword: autoSetPassword === true, credentialsAvailable: credentialAvailable(job),
     credentialExpiresAt: credentialAvailable(job) ? credentialExpiresAt : undefined, passwordSetAt,
+    manualResetAvailable, manualResetExpiresAt: manualResetAvailable ? manualResetExpiresAt : undefined,
     canManage: canManageRootEmailJob(user, job) };
 }
 function batchSummary(jobs: RootEmailJob[], user: RootEmailUser) {
@@ -207,21 +219,26 @@ export function cancelRootEmailBatch(id: string, user: RootEmailUser) {
 
 export function cancelRootEmail(id: string, user: RootEmailUser) {
   const currentStore = getStore();
-  const job = currentStore.get(id);
-  if (!job || !canManageRootEmailJob(user, job)) throw new RootEmailError('无权停止此任务', 403);
-  if (active?.id === id) {
-    active.controller.abort();
-    if (!isPendingEmailJob(job)) return jobView(job, user);
-    const result = currentStore.update(id, { detail: job.status === 'setting_password'
-      ? '正在停止密码设置；若已提交，最终状态将标记为未知' : '正在停止；若验证码已提交，请检查邮箱是否已收到邮件' });
-    return jobView(result, user);
-  }
-  if (!isPendingEmailJob(job)) return jobView(job, user);
+  const initial = currentStore.get(id);
+  if (!initial || !canManageRootEmailJob(user, initial)) throw new RootEmailError('无权停止此任务', 403);
+  if (active?.id === id) active.controller.abort();
   if (mailActive?.id === id) mailActive.controller.abort();
-  const result = currentStore.update(id, { status: 'cancelled', phase: 'done',
-    detail: job.sentAt ? '已停止后续自动处理；恢复邮件此前已发送' : '任务已取消' });
-  audit(result, 'ROOT_EMAIL_CANCEL');
-  return jobView(result, user);
+  const latest = currentStore.get(id);
+  if (!latest || !isPendingEmailJob(latest)) return jobView(latest || initial, user);
+  if (latest.status === 'setting_password') {
+    const result = currentStore.updateIfStatus(id, ['setting_password'], {
+      detail: '正在停止密码设置；若已进入提交边界，最终状态将标记为未知',
+    });
+    return jobView(result || currentStore.get(id) || latest, user);
+  }
+  const result = currentStore.updateIfStatus(id, ['queued', 'running', 'waiting_mail', 'link_ready'], {
+    status: 'cancelled', phase: 'done', manualFallbackReason: undefined, manualFallbackExpiresAt: undefined,
+    detail: latest.status === 'queued' ? '任务已取消，此账户未发送恢复邮件'
+      : '已停止后续自动处理；恢复邮件可能已经发送，但不会继续自动改密',
+  });
+  const completed = result || currentStore.get(id) || latest;
+  if (result) audit(result, 'ROOT_EMAIL_CANCEL');
+  return jobView(completed, user);
 }
 
 async function execute(job: RootEmailJob, controller: AbortController) {
@@ -256,6 +273,16 @@ async function execute(job: RootEmailJob, controller: AbortController) {
     const latest = currentStore.get(job.id);
     if (!latest || latest.status !== 'running') return;
     const uncertain = latest.phase === 'submitting' && !(error instanceof RootEmailError);
+    const canCheckMailbox = uncertain && !stopping && !controller.signal.aborted && mailApiConfigured() && !!latest.requestedAt;
+    if (canCheckMailbox) {
+      const waiting = currentStore.updateIfStatus(job.id, ['running'], {
+        status: 'waiting_mail', phase: 'waiting_mail', mailCursor: 0,
+        mailNextCheckAt: new Date().toISOString(), mailDeadlineAt: new Date(Date.now() + 10 * 60_000).toISOString(),
+        detail: 'AWS 发信提交结果未确认；正在只读检查邮箱，不会自动重新发送',
+      });
+      if (waiting) audit(waiting, 'ROOT_EMAIL_SUBMIT_UNKNOWN');
+      return;
+    }
     const status = uncertain || stopping ? 'interrupted' : controller.signal.aborted ? 'cancelled' : 'failed';
     const detail = uncertain ? '提交后结果未确认，请先检查邮箱；系统不会自动再次发送'
       : stopping ? '服务停止，任务已中断，请检查收件箱后再决定是否重试'
@@ -286,6 +313,7 @@ async function checkMail(job: RootEmailJob, signal: AbortSignal) {
       if (!stillWaiting()) return;
       const result = currentStore.updateIfStatus(job.id, ['waiting_mail'], { status: 'link_ready',
         phase: job.autoSetPassword ? 'setting_password' : 'done', mailKey: page.mailKey, mailReceivedAt: page.receivedAt,
+        sentAt: job.sentAt || page.receivedAt,
         detail: job.autoSetPassword ? '已找到并验证恢复邮件，等待自动设置强密码' : '已找到本次恢复邮件，可打开 AWS 页面设置新密码' });
       if (result) audit(result, 'ROOT_EMAIL_LINK_READY');
       return;
@@ -343,11 +371,16 @@ async function executePassword(job: RootEmailJob, controller: AbortController) {
     const encryptedPassword = encryptRootPassword(password, context);
     const credentialExpiresAt = new Date(Date.now() + ROOT_CREDENTIAL_TTL_MS).toISOString();
     const started = currentStore.updateIfStatus(job.id, ['link_ready'], { status: 'setting_password', phase: 'setting_password',
-      encryptedPassword, credentialExpiresAt, detail: '正在 AWS 官方页面填写并提交强随机密码' });
+      encryptedPassword, credentialExpiresAt, passwordSubmitAttempted: false,
+      manualFallbackReason: undefined, manualFallbackExpiresAt: undefined,
+      detail: '正在 AWS 官方页面填写并提交强随机密码' });
     if (!started) return;
 
     const attempt = await AwsRootPasswordSession.runWithSafeRetry(
-      () => new AwsRootPasswordSession(controller.signal, () => ensureStatus('setting_password')),
+      () => new AwsRootPasswordSession(controller.signal, () => ensureStatus('setting_password'), () => {
+        const marked = currentStore.updateIfStatus(job.id, ['setting_password'], { passwordSubmitAttempted: true });
+        if (!marked) throw new RootEmailError('任务状态已变化，未提交新密码');
+      }),
       url,
       password,
       {
@@ -383,8 +416,12 @@ async function executePassword(job: RootEmailJob, controller: AbortController) {
       : cancelled ? '自动密码设置已在提交前停止；临时密码已销毁'
       : error instanceof RootEmailError || error instanceof MailApiError || error instanceof RootPasswordAutomationError
         ? error.message : '自动密码设置失败，未确认修改；临时密码已销毁';
+    const allowManualFallback = status === 'password_failed' && latest.passwordSubmitAttempted === false
+      && error instanceof RootPasswordAutomationError && error.retryable;
     const failed = currentStore.updateIfStatus(job.id, [latest.status], { status, phase: 'done', encryptedPassword: undefined,
-      credentialDestroyedAt: new Date().toISOString(), mailKey: undefined, detail });
+      credentialDestroyedAt: new Date().toISOString(), mailKey: undefined, detail,
+      ...(allowManualFallback ? manualFallback('password_not_submitted')
+        : { manualFallbackReason: undefined, manualFallbackExpiresAt: undefined }) });
     if (failed) audit(failed, outcome === 'unknown' ? 'ROOT_PASSWORD_SET_UNKNOWN' : 'ROOT_PASSWORD_SET_FAILED');
   } finally {
     clearTimeout(deadline);
@@ -392,7 +429,7 @@ async function executePassword(job: RootEmailJob, controller: AbortController) {
   }
 }
 
-/** Fetch on demand only for legacy/manual jobs. Automatic batches never expose their reset URL. */
+/** Fetch a reset URL only for a legacy/manual job that is already link_ready. */
 export async function getRootResetLink(id: string, user: RootEmailUser) {
   const job = getStore().get(id);
   if (!job) throw new RootEmailError('任务不存在', 404);
@@ -412,6 +449,44 @@ export async function getRootResetLink(id: string, user: RootEmailUser) {
   if (!url) throw new RootEmailError('邮件链接无法校验，请检查邮箱', 409);
   audit(job, 'ROOT_EMAIL_LINK_OPEN');
   return { url };
+}
+
+/** Rediscover a reset URL only for the owner after a confirmed pre-password-submit automation failure. */
+export async function getManualRootResetLink(id: string, user: RootEmailUser, requestIp?: string) {
+  const currentStore = getStore();
+  const checkAccess = () => {
+    const latest = currentStore.get(id);
+    if (!latest) throw new RootEmailError('任务不存在', 404);
+    const current = db.getUser(user.username);
+    if (!current || String(current.id) !== String(user.id)
+      || !canRetrieveRootEmailManualLink(current, latest)) {
+      throw new RootEmailError('仅任务创建者可获取手工兜底链接', 403);
+    }
+    if (!manualRootResetFallbackExpiresAt(latest)) {
+      throw new RootEmailError(latest.status === 'password_unknown'
+        ? '密码提交结果未知，禁止再次打开一次性链接' : '该任务不满足手工兜底条件或链接窗口已过期', 409);
+    }
+    if (hasNewerRootEmailJob(currentStore.list(), latest)) {
+      throw new RootEmailError('此账户已有更新的恢复任务，为避免返回其他任务的链接，旧任务已禁止手工兜底', 409);
+    }
+    authorize(latest);
+    return latest;
+  };
+  let job = checkAccess();
+  let links: string[];
+  try {
+    links = await findRootRecoveryLinks(mailbox, {
+      email: job.email, requestedAt: job.requestedAt!, mailReceivedAt: job.mailReceivedAt!,
+    }, () => { job = checkAccess(); }, AbortSignal.timeout(45_000));
+  } catch (error) {
+    if (error instanceof RootEmailError || error instanceof MailApiError) throw error;
+    throw new MailApiError('重新查找恢复邮件超时，请稍后再试');
+  }
+  job = checkAccess();
+  if (!links.length) throw new RootEmailError('未找到与此任务精确匹配的恢复邮件，链接可能尚未送达或已超出查询窗口', 404);
+  if (links.length !== 1) throw new RootEmailError('找到多封候选恢复邮件，为避免打开错误账户链接已拒绝返回', 409);
+  audit(job, 'ROOT_EMAIL_MANUAL_FALLBACK_LINK', '自动处理失败后，创建者通过 MFA 获取手工重置链接', requestIp);
+  return { url: links[0], expiresAt: manualRootResetFallbackExpiresAt(job) };
 }
 
 export function prepareRootCredentialCsv(id: string, user: RootEmailUser, requestIp?: string) {

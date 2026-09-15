@@ -21,6 +21,12 @@ export function canManageRootEmailJob(user: PermissionUser & { id: number | stri
     && (user.role === 'admin' || String(user.id) === job.createdByUserId);
 }
 
+/** Reset links are owner-only credentials; admin task-management authority never overrides ownership. */
+export function canRetrieveRootEmailManualLink(user: PermissionUser & { id: number | string },
+  job: { createdByUserId: string }): boolean {
+  return resolveRootResetAccess(user) === 'operate' && String(user.id) === job.createdByUserId;
+}
+
 /** Re-read identity and permission on every request, including link retrieval. */
 export function createRootResetGuard(readUser: (username: string) => CurrentUser | undefined | null): RequestHandler {
   return (req, res, next) => {

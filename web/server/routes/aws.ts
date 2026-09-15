@@ -24,7 +24,7 @@ import * as tagOnboarding from '../tag-onboarding';
 import { pipeline } from 'stream/promises';
 import { cancelRootEmail, listRootEmails, rootEmailAvailability, submitRootEmail, rootEmailCatalog,
   listRootEmailBatches, getRootEmailBatch, submitRootEmailBatch, cancelRootEmailBatch, getRootResetLink,
-  prepareRootCredentialCsv } from '../root-email-jobs';
+  getManualRootResetLink, prepareRootCredentialCsv } from '../root-email-jobs';
 import { RootEmailError } from '../root-email-core';
 import { MailApiError } from '../mail-api';
 import { createRootResetGuard } from '../root-reset-permissions';
@@ -364,6 +364,14 @@ const verifyRootEmailStepUp = (req: Request, res: Response, value: unknown) => {
 awsRouter.post('/root-email/jobs/:id/reset-link', async (req, res) => {
   try {
     const data = await getRootResetLink(String(req.params.id), res.locals.rootResetUser);
+    res.locals.audited = true;
+    res.json({ success: true, data });
+  } catch (error) { rootEmailFailure(res, error); }
+});
+awsRouter.post('/root-email/jobs/:id/manual-reset-link', async (req, res) => {
+  try {
+    verifyRootEmailStepUp(req, res, req.body?.totpCode);
+    const data = await getManualRootResetLink(String(req.params.id), res.locals.rootResetUser, req.ip);
     res.locals.audited = true;
     res.json({ success: true, data });
   } catch (error) { rootEmailFailure(res, error); }

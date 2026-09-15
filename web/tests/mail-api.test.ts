@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { MailApiClient, MailApiError, mailSignature, mailRecipients } from '../server/mail-api';
-import { scanRootMailPage } from '../server/root-mail-poll';
+import { findRootRecoveryLinks, scanRootMailPage } from '../server/root-mail-poll';
 import { readMailApiSsmConfig } from '../server/mail-api-config';
 
 const config = () => ({ keyId: 'toolbox', secret: 'test_secret_key_123' });
@@ -159,6 +159,53 @@ test('revoking access while listing prevents reading message bodies', async () =
     async detail() { details++; throw new Error('must not run'); },
   };
   await assert.rejects(scanRootMailPage(client, { email, requestedAt }, () => {
+    if (revoked) throw new Error('revoked');
+  }), /revoked/);
+  assert.equal(details, 0);
+});
+
+test('manual fallback rediscovery binds an exact mail timestamp and exposes ambiguity', async () => {
+  const secondKey = 'b'.repeat(64);
+  const secondUrl = 'https://signin.aws.amazon.com/resetpassword?type=RootUser&token=synthetic_token_67890&key=synthetic_key_67890';
+  const records = [record, { ...record, id: 11, msg_key: secondKey, timestamp: timestamp + 5 }];
+  let checks = 0;
+  const client = {
+    async list() { return { list: records, next_since: 11, has_more: false }; },
+    async detail(value: string) {
+      const selected = value === key ? records[0] : records[1];
+      return { id: String(selected.id), recipients: [email], receivedAt: new Date(selected.timestamp * 1000).toISOString(),
+        text: value === key ? url : secondUrl };
+    },
+  };
+  const exact = await findRootRecoveryLinks(client, {
+    email, requestedAt, mailReceivedAt: new Date(timestamp * 1000).toISOString(),
+  }, () => { checks++; });
+  assert.deepEqual(exact, [url]);
+  assert.ok(checks >= 4);
+
+  const ambiguousClient = {
+    async list() { return { list: [record, { ...record, id: 11, msg_key: secondKey }], next_since: 11, has_more: false }; },
+    async detail(value: string) {
+      return { id: value === key ? '10' : '11', recipients: [email],
+        receivedAt: new Date(timestamp * 1000).toISOString(), text: value === key ? url : secondUrl };
+    },
+  };
+  const ambiguous = await findRootRecoveryLinks(ambiguousClient, {
+    email, requestedAt, mailReceivedAt: new Date(timestamp * 1000).toISOString(),
+  }, () => {});
+  assert.deepEqual(new Set(ambiguous), new Set([url, secondUrl]));
+});
+
+test('manual fallback rediscovery rechecks permission before reading message bodies', async () => {
+  let revoked = false;
+  let details = 0;
+  const client = {
+    async list() { revoked = true; return { list: [record], next_since: 10, has_more: false }; },
+    async detail() { details++; throw new Error('must not read'); },
+  };
+  await assert.rejects(findRootRecoveryLinks(client, {
+    email, requestedAt, mailReceivedAt: new Date(timestamp * 1000).toISOString(),
+  }, () => {
     if (revoked) throw new Error('revoked');
   }), /revoked/);
   assert.equal(details, 0);

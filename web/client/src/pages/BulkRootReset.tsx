@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Alert, Button, Card, Input, message, Modal, Popconfirm, Progress, Select, Space, Table, Tag, Typography } from 'antd';
 import { CopyOutlined, DownloadOutlined, LockOutlined, ReloadOutlined, SearchOutlined, StopOutlined } from '@ant-design/icons';
 import { api, RootEmailAccount, RootEmailBatchView, RootEmailJobView } from '../api';
-import { showRootResetLink } from '../utils/root-reset-link';
+import { showManualRootResetLink, showRootResetLink } from '../utils/root-reset-link';
 
 const statusLabels: Record<RootEmailJobView['status'], string> = {
   queued: '排队中', running: '发送恢复邮件', email_sent: 'AWS 已确认发信', failed: '发信失败', cancelled: '已停止', interrupted: '结果待检查',
@@ -46,6 +46,8 @@ const BulkRootResetPage: React.FC<{ canOperate?: boolean }> = ({ canOperate = fa
   const [totpCode, setTotpCode] = useState('');
   const [downloadOpen, setDownloadOpen] = useState(false);
   const [downloadTotpCode, setDownloadTotpCode] = useState('');
+  const [manualLinkJob, setManualLinkJob] = useState<RootEmailJobView | null>(null);
+  const [manualLinkTotpCode, setManualLinkTotpCode] = useState('');
   const request = useRef<{ signature: string; id: string } | null>(null);
 
   useEffect(() => {
@@ -138,6 +140,18 @@ const BulkRootResetPage: React.FC<{ canOperate?: boolean }> = ({ canOperate = fa
       message.success(`已下载 ${count} 个已确认密码；服务器端临时密文已销毁`);
     } catch (cause: any) { setError(cause.message); }
     finally { setDownloadTotpCode(''); setBusy(false); }
+  };
+  const openManualLink = (job: RootEmailJobView) => {
+    setManualLinkJob(job); setManualLinkTotpCode(''); setError('');
+  };
+  const fetchManualLink = async () => {
+    if (!manualLinkJob?.manualResetAvailable || !/^\d{6}$/.test(manualLinkTotpCode)) return;
+    setBusy(true); setError('');
+    try {
+      await showManualRootResetLink(manualLinkJob.id, manualLinkTotpCode);
+      setManualLinkJob(null); setRefresh(value => value + 1);
+    } catch (cause: any) { setError(cause.message); }
+    finally { setManualLinkTotpCode(''); setBusy(false); }
   };
 
   return <Space direction="vertical" size={16} style={{ width: '100%' }}>
@@ -260,11 +274,17 @@ const BulkRootResetPage: React.FC<{ canOperate?: boolean }> = ({ canOperate = fa
                 render: (status: RootEmailJobView['status']) => <Tag color={statusColors[status]}>{statusLabels[status]}</Tag> },
               { title: '验证码', dataIndex: 'attempts', width: 80, render: value => `${value}/3` },
               { title: '说明', dataIndex: 'detail' },
-              { title: '下一步', width: 135, render: (_, job) => canOperate && job.canManage && !job.autoSetPassword && job.status === 'link_ready'
-                ? <Button size="small" disabled={busy} onClick={async () => {
+              { title: '下一步', width: 150, render: (_, job) => {
+                if (!canOperate || !job.canManage) return '—';
+                if (job.manualResetAvailable) return <Button size="small" danger disabled={busy} onClick={() => openManualLink(job)}>
+                  手工打开链接
+                </Button>;
+                if (!job.autoSetPassword && job.status === 'link_ready') return <Button size="small" disabled={busy} onClick={async () => {
                   setBusy(true); setError('');
                   try { await showRootResetLink(job.id); } catch (cause: any) { setError(cause.message); } finally { setBusy(false); }
-                }}>获取重置链接</Button> : '—' },
+                }}>获取重置链接</Button>;
+                return '—';
+              } },
             ]} />
         </> : <Typography.Text type="secondary">提交任务或选择历史批次后，可查看每个账户的发信、邮件和密码设置结果。</Typography.Text>}
       </Space>
@@ -284,6 +304,24 @@ const BulkRootResetPage: React.FC<{ canOperate?: boolean }> = ({ canOperate = fa
           placeholder="输入账户数量" disabled={busy} inputMode="numeric" autoComplete="off" />
         <Typography.Text>输入当前 6 位 MFA 验证码：</Typography.Text>
         <Input.Password aria-label="MFA 验证码" value={totpCode} onChange={event => setTotpCode(event.target.value.replace(/\D/g, '').slice(0, 6))}
+          placeholder="000000" disabled={busy} inputMode="numeric" autoComplete="one-time-code" />
+      </Space>
+    </Modal>
+
+    <Modal title="手工处理自动改密失败" open={!!manualLinkJob} confirmLoading={busy}
+      okText="验证并获取链接" okButtonProps={{ danger: true, disabled: !/^\d{6}$/.test(manualLinkTotpCode) }} cancelText="取消"
+      closable={!busy} maskClosable={false} onCancel={() => { if (!busy) { setManualLinkJob(null); setManualLinkTotpCode(''); } }}
+      onOk={fetchManualLink}>
+      <Space direction="vertical" size={12} style={{ width: '100%' }}>
+        <Alert type="warning" showIcon message="仅用于确认未提交密码的失败任务"
+          description="验证后可直接打开或显式复制 AWS 一次性链接。请手工设置并自行保管密码；平台无法确认手工结果，因此不会把该密码写入 CSV。password_unknown 任务永远不会开放此入口。" />
+        <Typography.Text>账户：<Typography.Text code>{manualLinkJob?.accountId}</Typography.Text></Typography.Text>
+        {manualLinkJob?.manualResetExpiresAt && <Typography.Text type="secondary">
+          平台兜底窗口截止：{new Date(manualLinkJob.manualResetExpiresAt).toLocaleString()}（AWS 仍可能更早判定链接失效）
+        </Typography.Text>}
+        <Typography.Text>输入当前 6 位 MFA 验证码：</Typography.Text>
+        <Input.Password aria-label="手工链接 MFA 验证码" value={manualLinkTotpCode}
+          onChange={event => setManualLinkTotpCode(event.target.value.replace(/\D/g, '').slice(0, 6))}
           placeholder="000000" disabled={busy} inputMode="numeric" autoComplete="one-time-code" />
       </Space>
     </Modal>

@@ -24,6 +24,8 @@ export interface RootEmailJobView {
   credentialsAvailable: boolean;
   credentialExpiresAt?: string;
   passwordSetAt?: string;
+  manualResetAvailable: boolean;
+  manualResetExpiresAt?: string;
 }
 export interface RootEmailAccount {
   accountId: string;
@@ -687,6 +689,9 @@ export const api = {
   recoverRootPassword: (accountId: string) => request(`/aws/root-credentials/${accountId}/recover-password`, { method: 'POST' }),
   rootEmailAvailability: () => request('/aws/root-email/availability'),
   rootResetLink: (id: string) => request(`/aws/root-email/jobs/${encodeURIComponent(id)}/reset-link`, { method: 'POST' }),
+  manualRootResetLink: (id: string, totpCode: string) => request(`/aws/root-email/jobs/${encodeURIComponent(id)}/manual-reset-link`, {
+    method: 'POST', cache: 'no-store', body: JSON.stringify({ totpCode }),
+  }),
   rootEmailCatalog: () => request('/aws/root-email/catalog'),
   rootEmailBatches: () => request('/aws/root-email/batches'),
   rootEmailBatch: (id: string) => request(`/aws/root-email/batches/${encodeURIComponent(id)}`),

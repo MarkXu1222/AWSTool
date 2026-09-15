@@ -2,7 +2,8 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import express from 'express';
 import type { AddressInfo } from 'node:net';
-import { canManageRootEmailJob, createRootResetGuard, isRootResetAccess, resolveRootResetAccess } from '../server/root-reset-permissions';
+import { canManageRootEmailJob, canRetrieveRootEmailManualLink, createRootResetGuard,
+  isRootResetAccess, resolveRootResetAccess } from '../server/root-reset-permissions';
 
 test('legacy page/root permissions do not implicitly grant bulk reset access', () => {
   for (const role of ['viewer', 'partadmin']) {
@@ -22,6 +23,9 @@ test('operators manage only their own jobs; viewers cannot retrieve even their o
   assert.equal(canManageRootEmailJob(user, foreign), false);
   assert.equal(canManageRootEmailJob({ ...user, root_reset_access: 'view' }, own), false);
   assert.equal(canManageRootEmailJob({ ...user, role: 'admin' }, foreign), true);
+  assert.equal(canRetrieveRootEmailManualLink(user, own), true);
+  assert.equal(canRetrieveRootEmailManualLink({ ...user, role: 'admin' }, foreign), false);
+  assert.equal(canRetrieveRootEmailManualLink({ ...user, root_reset_access: 'view' }, own), false);
   assert.equal(user.root_access, false);
 });
 
@@ -51,7 +55,8 @@ test('live HTTP guard protects every read/write endpoint and applies grants/revo
       assert.equal(await request(route), 200);
       assert.equal(await request(route, 'HEAD'), 200);
     }
-    for (const route of ['batches', 'batches/batch/cancel', 'accounts/123456789012/jobs', 'jobs/job/cancel', 'jobs/job/reset-link']) {
+    for (const route of ['batches', 'batches/batch/cancel', 'accounts/123456789012/jobs', 'jobs/job/cancel',
+      'jobs/job/reset-link', 'jobs/job/manual-reset-link']) {
       assert.equal(await request(route, 'POST'), 403);
     }
     current.root_reset_access = 'operate';

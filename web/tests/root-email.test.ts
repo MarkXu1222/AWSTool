@@ -3,7 +3,8 @@ import test from 'node:test';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { RootEmailSession, RootEmailStore, sendRootEmail, selectRootEmailTargets } from '../server/root-email-core';
+import { hasNewerRootEmailJob, manualRootResetFallbackExpiresAt, RootEmailSession, RootEmailStore,
+  sendRootEmail, selectRootEmailTargets } from '../server/root-email-core';
 import { randomUUID } from 'node:crypto';
 
 const email = 'owner@example.test';
@@ -305,5 +306,75 @@ test('one-time credential claim destroys ciphertext after the download response 
     assert.ok(completed.credentialDownloadedAt);
     assert.ok(completed.credentialDestroyedAt);
     assert.throws(() => store.claimBatchCredentials(meta.batchId, input.createdByUserId, randomUUID()), /已下载/);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('manual fallback uses immutable safety metadata and rejects superseded tasks', () => {
+  const now = Date.now();
+  const common = {
+    autoSetPassword: true, status: 'password_failed' as const,
+    mailReceivedAt: new Date(now - 60_000).toISOString(), passwordSubmitAttempted: false,
+    manualFallbackReason: 'password_not_submitted' as const,
+    manualFallbackExpiresAt: new Date(now + 60_000).toISOString(),
+  };
+  assert.ok(manualRootResetFallbackExpiresAt(common, now));
+  assert.equal(manualRootResetFallbackExpiresAt({ ...common, status: 'password_unknown' }, now), undefined);
+  assert.equal(manualRootResetFallbackExpiresAt({ ...common, mailReceivedAt: undefined }, now), undefined);
+  assert.equal(manualRootResetFallbackExpiresAt({ ...common, passwordSubmitAttempted: true }, now), undefined);
+  assert.equal(manualRootResetFallbackExpiresAt({ ...common, autoSetPassword: false }, now), undefined);
+  assert.equal(manualRootResetFallbackExpiresAt({ ...common,
+    manualFallbackExpiresAt: new Date(now - 1).toISOString() }, now), undefined);
+
+  const oldJob = { id: 'old', accountId: input.accountId, createdAt: new Date(now - 60_000).toISOString() };
+  const newerJob = { id: 'new', accountId: input.accountId, createdAt: new Date(now).toISOString() };
+  assert.equal(hasNewerRootEmailJob([oldJob, newerJob], oldJob), true);
+  assert.equal(hasNewerRootEmailJob([oldJob, newerJob], newerJob), false);
+});
+
+test('password form polling tolerates transient pre-submit execution-context changes only', async () => {
+  const { AwsRootPasswordSession } = await import('../server/root-email-browser');
+  const session = new AwsRootPasswordSession(new AbortController().signal, () => {});
+  let reads = 0;
+  (session as any).page = {
+    url: () => 'https://signin.aws.amazon.com/resetpassword',
+    async evaluate() {
+      reads++;
+      if (reads <= 2) throw new Error('Execution context is not available in detached frame');
+      return 'ready';
+    },
+  };
+  (session as any).pause = async () => {};
+  await (session as any).waitFor('ready', 5_000);
+  assert.equal(reads, 3);
+
+  reads = 0;
+  (session as any).submitted = true;
+  (session as any).page.evaluate = async () => {
+    reads++;
+    throw new Error('Execution context is not available in detached frame');
+  };
+  await assert.rejects((session as any).waitFor('success', 5_000));
+  assert.equal(reads, 1);
+});
+
+test('known legacy pre-submit failures migrate once to immutable manual-fallback metadata', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'root-fallback-migration-'));
+  try {
+    const file = path.join(dir, 'jobs.json');
+    const store = new RootEmailStore(file);
+    const meta = { batchId: randomUUID(), payerAccountId: '999999999999', payerName: 'payer-a', autoSetPassword: true as const };
+    const { jobs: [job] } = store.createBatch([input], meta);
+    const receivedAt = new Date().toISOString();
+    store.update(job.id, { status: 'password_failed', phase: 'done', mailReceivedAt: receivedAt,
+      detail: 'AWS 密码页面异常（wait_form/browser_error），未提交新密码' });
+    const restarted = new RootEmailStore(file);
+    restarted.recover();
+    const migrated = restarted.get(job.id)!;
+    assert.equal(migrated.passwordSubmitAttempted, false);
+    assert.equal(migrated.manualFallbackReason, 'password_not_submitted');
+    assert.ok(migrated.manualFallbackExpiresAt);
+    const immutableExpiry = migrated.manualFallbackExpiresAt;
+    restarted.update(job.id, { detail: '展示文案和 updatedAt 后续变化不影响资格截止时间' });
+    assert.equal(restarted.get(job.id)?.manualFallbackExpiresAt, immutableExpiry);
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });

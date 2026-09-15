@@ -5,6 +5,7 @@ import { randomUUID } from 'crypto';
 export type RootEmailStatus = 'queued' | 'running' | 'email_sent' | 'waiting_mail' | 'link_ready' | 'setting_password'
   | 'password_set' | 'password_failed' | 'password_unknown' | 'mail_failed' | 'failed' | 'cancelled' | 'interrupted';
 export type RootEmailPhase = 'queued' | 'opening' | 'captcha' | 'submitting' | 'waiting_mail' | 'setting_password' | 'done';
+export type RootManualFallbackReason = 'password_not_submitted';
 export interface RootEmailJob {
   id: string;
   accountId: string;
@@ -37,6 +38,9 @@ export interface RootEmailJob {
   credentialDownloadClaimedAt?: string;
   batchCredentialCutoffAt?: string;
   passwordSetAt?: string;
+  passwordSubmitAttempted?: boolean;
+  manualFallbackReason?: RootManualFallbackReason;
+  manualFallbackExpiresAt?: string;
 }
 
 export class RootEmailError extends Error {
@@ -47,6 +51,27 @@ export const isPendingEmailJob = (job: RootEmailJob) => ['queued', 'running', 'w
   || (job.status === 'link_ready' && job.autoSetPassword === true);
 export const MAX_ROOT_EMAIL_TASKS = 500;
 export const MAX_ROOT_PASSWORD_BATCH = 20;
+export const ROOT_MANUAL_FALLBACK_TTL_MS = 60 * 60_000;
+const ROOT_MANUAL_FALLBACK_REASONS: RootManualFallbackReason[] = ['password_not_submitted'];
+
+/** Read only immutable, structured safety metadata when deciding whether a reset URL may be exposed. */
+export function manualRootResetFallbackExpiresAt(job: Pick<RootEmailJob,
+  'autoSetPassword' | 'status' | 'mailReceivedAt' | 'passwordSubmitAttempted' | 'manualFallbackReason' | 'manualFallbackExpiresAt'>,
+  now = Date.now()): string | undefined {
+  if (!job.autoSetPassword || job.status !== 'password_failed' || !job.mailReceivedAt
+    || job.passwordSubmitAttempted !== false || job.manualFallbackReason !== 'password_not_submitted') return undefined;
+  const expiresAt = Date.parse(job.manualFallbackExpiresAt || '');
+  if (!Number.isFinite(Date.parse(job.mailReceivedAt)) || !Number.isFinite(expiresAt) || expiresAt <= now) return undefined;
+  return new Date(expiresAt).toISOString();
+}
+
+/** Refuse an old task once any later request exists for the same AWS account. */
+export function hasNewerRootEmailJob(jobs: Pick<RootEmailJob, 'id' | 'accountId' | 'createdAt'>[],
+  target: Pick<RootEmailJob, 'id' | 'accountId' | 'createdAt'>): boolean {
+  const createdAt = Date.parse(target.createdAt);
+  return jobs.some(job => job.id !== target.id && job.accountId === target.accountId
+    && Date.parse(job.createdAt) > createdAt);
+}
 type RootEmailInput = Pick<RootEmailJob, 'accountId' | 'email' | 'createdBy' | 'createdByUserId'>
   & Partial<Pick<RootEmailJob, 'createdFromIp'>>;
 export type RootEmailBatchMeta = Required<Pick<RootEmailJob, 'batchId' | 'payerAccountId' | 'payerName'>>
@@ -81,7 +106,11 @@ export class RootEmailStore {
       || !/^\d{12}$/.test(j.accountId) || typeof j.email !== 'string' || !statuses.includes(j.status)
       || (j.encryptedPassword !== undefined && typeof j.encryptedPassword !== 'string')
       || (j.credentialDownloadClaimId !== undefined && typeof j.credentialDownloadClaimId !== 'string')
-      || (j.autoSetPassword !== undefined && typeof j.autoSetPassword !== 'boolean'))) {
+      || (j.autoSetPassword !== undefined && typeof j.autoSetPassword !== 'boolean')
+      || (j.passwordSubmitAttempted !== undefined && typeof j.passwordSubmitAttempted !== 'boolean')
+      || (j.manualFallbackReason !== undefined && !ROOT_MANUAL_FALLBACK_REASONS.includes(j.manualFallbackReason))
+      || (j.manualFallbackExpiresAt !== undefined && (typeof j.manualFallbackExpiresAt !== 'string'
+        || !Number.isFinite(Date.parse(j.manualFallbackExpiresAt)))))) {
       throw new Error('恢复邮件任务文件格式无效，已拒绝覆盖');
     }
     this.jobs = value;
@@ -185,18 +214,39 @@ export class RootEmailStore {
     }));
     return { jobs: this.list().filter(j => j.batchId === batchId), changed: true };
   }
-  /** Mark uncertain browser submissions on restart; never retry a one-time reset link automatically. */
+  /** Migrate known legacy safe failures, then conservatively recover unfinished work. */
   recover() {
-    if (!this.jobs.some(j => ['queued', 'running', 'setting_password'].includes(j.status))) return;
     const now = new Date().toISOString();
-    this.save(this.jobs.map(j => {
-      if (j.status === 'setting_password') return { ...j, status: 'password_unknown' as const, phase: 'done' as const,
-        encryptedPassword: undefined, credentialDestroyedAt: now, updatedAt: now,
-        detail: '服务在提交新密码期间重启，结果无法确认；临时密码已销毁，系统不会自动重试' };
-      if (['queued', 'running'].includes(j.status)) return { ...j, status: 'interrupted' as const, phase: 'done' as const,
-        updatedAt: now, detail: '服务重启，任务已中断；请先检查收件箱，再决定是否重新发送' };
-      return j;
-    }));
+    let changed = false;
+    let next = this.jobs.map(job => {
+      if (job.manualFallbackReason || !job.autoSetPassword || job.passwordSubmitAttempted === true) return job;
+      let reason: RootManualFallbackReason | undefined;
+      if (job.status === 'password_failed' && job.mailReceivedAt
+        && /^AWS 密码页面(?:加载失败|异常（[a-z_]+\/[a-z_]+）)，未提交新密码$/.test(job.detail)) {
+        reason = 'password_not_submitted';
+      }
+      const anchor = Date.parse(job.mailReceivedAt || '');
+      if (!reason || !Number.isFinite(anchor)) return job;
+      changed = true;
+      return { ...job, passwordSubmitAttempted: false, manualFallbackReason: reason,
+        manualFallbackExpiresAt: new Date(anchor + ROOT_MANUAL_FALLBACK_TTL_MS).toISOString() };
+    });
+    next = next.map(job => {
+      if (job.status === 'setting_password') {
+        changed = true;
+        return { ...job, status: 'password_unknown' as const, phase: 'done' as const,
+          encryptedPassword: undefined, credentialDestroyedAt: now, updatedAt: now,
+          passwordSubmitAttempted: true, manualFallbackReason: undefined, manualFallbackExpiresAt: undefined,
+          detail: '服务在提交新密码期间重启，结果无法确认；临时密码已销毁，系统不会自动重试' };
+      }
+      if (['queued', 'running'].includes(job.status)) {
+        changed = true;
+        return { ...job, status: 'interrupted' as const, phase: 'done' as const,
+          updatedAt: now, detail: '服务重启，任务已中断；请先检查收件箱，再决定是否重新发送' };
+      }
+      return job;
+    });
+    if (changed) this.save(next);
   }
   destroyExpiredCredentials(now = Date.now()): RootEmailJob[] {
     const expired = this.jobs.filter(j => j.encryptedPassword && Number.isFinite(Date.parse(j.credentialExpiresAt || ''))

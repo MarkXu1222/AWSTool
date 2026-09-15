@@ -223,7 +223,7 @@ export function classifyRootPasswordAutomationError(error: unknown, stage: RootP
   const category: RootPasswordAutomationCategory = /ERR_ABORTED/i.test(value) ? 'navigation_aborted'
     : /net::ERR_|Navigation failed/i.test(value) ? 'network'
     : /Target closed|Session closed|browser has disconnected|Connection closed|Protocol error.*Target/i.test(value) ? 'target_closed'
-    : /Execution context was destroyed|frame was detached|Cannot find context/i.test(value) ? 'execution_context_changed'
+    : /Execution context (?:was destroyed|is not available)|detached frame|frame.*detached|Cannot find context/i.test(value) ? 'execution_context_changed'
     : /TimeoutError|timed out|timeout/i.test(value) ? 'timeout'
     : 'browser_error';
   const retryableStages: RootPasswordAutomationStage[] = [
@@ -306,7 +306,8 @@ export class AwsRootPasswordSession {
     }
   }
 
-  constructor(private readonly signal: AbortSignal, private readonly authorize: () => void) {}
+  constructor(private readonly signal: AbortSignal, private readonly authorize: () => void,
+    private readonly beforeSubmit: () => void = () => {}) {}
 
   private checkedPage(): Page {
     this.signal.throwIfAborted();
@@ -353,8 +354,21 @@ export class AwsRootPasswordSession {
 
   private async waitFor(expected: 'ready' | 'success', timeoutMs: number): Promise<void> {
     const deadline = Date.now() + timeoutMs;
+    let transientReadFailures = 0;
     while (Date.now() < deadline) {
-      const state = await this.pageState();
+      let state: Awaited<ReturnType<AwsRootPasswordSession['pageState']>>;
+      try {
+        state = await this.pageState();
+      } catch (error) {
+        // Valid reset links can briefly detach the execution context after DOMContentLoaded.
+        // Only that classified pre-submit race is tolerated, with one cumulative budget for the whole wait.
+        const category = error instanceof RootEmailError ? 'policy'
+          : classifyRootPasswordAutomationError(error, 'wait_form', false).category;
+        if (this.submitted || error instanceof RootEmailError || category !== 'execution_context_changed'
+          || ++transientReadFailures > 6) throw error;
+        await this.pause(400);
+        continue;
+      }
       if (state === expected) return;
       if (state === 'changed') throw new RootPasswordAutomationError('AWS 密码页面结构与安全选择器不一致，已停止', this.submitted ? 'unknown' : 'failed');
       if (state === 'rejected') throw new RootPasswordAutomationError(
@@ -427,6 +441,7 @@ export class AwsRootPasswordSession {
 
       // Conservative boundary: any failure after this point is unknown, even if evaluate fails before returning.
       stage = 'submit';
+      this.beforeSubmit();
       this.submitted = true;
       const clicked = await page.evaluate(() => {
         const doc = (globalThis as any).document;
