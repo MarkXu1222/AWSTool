@@ -1,10 +1,11 @@
 import path from 'path';
 import { randomUUID } from 'crypto';
 import { db } from './db';
-import { AwsRootEmailSession, AwsRootPasswordSession, RootPasswordAutomationError, runRootEmailOcr } from './root-email-browser';
-import { hasNewerRootEmailJob, RootEmailError, RootEmailJob, RootEmailStore, isPendingEmailJob,
-  manualRootResetFallbackExpiresAt, sendRootEmail, selectRootEmailTargets, MAX_ROOT_PASSWORD_BATCH,
-  ROOT_MANUAL_FALLBACK_TTL_MS } from './root-email-core';
+import { AwsRootEmailSession, AwsRootPasswordSession, MAX_ROOT_PASSWORD_BROWSER_ATTEMPTS,
+  RootPasswordAutomationError, runRootEmailOcr } from './root-email-browser';
+import { canRetryRootEmailBrowser, hasNewerRootEmailJob, RootEmailError, RootEmailJob, RootEmailStore,
+  isPendingEmailJob, manualRootResetFallbackExpiresAt, sendRootEmail, selectRootEmailTargets,
+  MAX_ROOT_EMAIL_BROWSER_ATTEMPTS, MAX_ROOT_PASSWORD_BATCH, ROOT_MANUAL_FALLBACK_TTL_MS } from './root-email-core';
 import { listConfiguredPayers } from './aws-service';
 import { mailbox, mailApiConfigured, MailApiError } from './mail-api';
 import { matchRootRecoveryMail } from './root-mail-links';
@@ -243,21 +244,47 @@ export function cancelRootEmail(id: string, user: RootEmailUser) {
 
 async function execute(job: RootEmailJob, controller: AbortController) {
   const currentStore = store!;
-  const deadline = setTimeout(() => controller.abort(), 180_000);
+  const deadline = setTimeout(() => controller.abort(), 300_000);
+  let session: AwsRootEmailSession | undefined;
   const ensureRunning = () => {
+    controller.signal.throwIfAborted();
+    if (stopping) throw new RootEmailError('任务执行器已停止，已取消后续发信操作');
     authorize(job);
     if (currentStore.get(job.id)?.status !== 'running') throw new RootEmailError('任务状态已变化，停止发信');
   };
-  const session = new AwsRootEmailSession(controller.signal, ensureRunning);
+  const progress = (phase: RootEmailJob['phase'], attempts: number, detail: string) => {
+    if (!currentStore.updateIfStatus(job.id, ['running'], { phase, attempts, detail,
+      ...(phase === 'opening' ? { requestedAt: new Date(Math.floor(Date.now() / 1000) * 1000).toISOString() } : {}) })) {
+      throw new RootEmailError('任务状态已变化，停止发信');
+    }
+  };
   try {
     if (!currentStore.updateIfStatus(job.id, ['queued'], { status: 'running' })) return;
-    await sendRootEmail({ email: job.email, session, signal: controller.signal, authorize: ensureRunning,
-      progress: (phase, attempts, detail) => {
-        if (!currentStore.updateIfStatus(job.id, ['running'], { phase, attempts, detail,
-          ...(phase === 'opening' ? { requestedAt: new Date(Math.floor(Date.now() / 1000) * 1000).toISOString() } : {}) })) {
-          throw new RootEmailError('任务状态已变化，停止发信');
-        }
-      } });
+    let sent = false;
+    for (let browserAttempt = 1; browserAttempt <= MAX_ROOT_EMAIL_BROWSER_ATTEMPTS; browserAttempt++) {
+      ensureRunning();
+      session = new AwsRootEmailSession(controller.signal, ensureRunning);
+      try {
+        await sendRootEmail({ email: job.email, session, signal: controller.signal, authorize: ensureRunning, progress });
+        sent = true;
+        break;
+      } catch (error) {
+        const latest = currentStore.get(job.id);
+        const retryable = latest?.status === 'running' && canRetryRootEmailBrowser(
+          error, latest.phase, browserAttempt, controller.signal.aborted || stopping,
+        );
+        if (!retryable) throw error;
+        const retrying = currentStore.updateIfStatus(job.id, ['running'], {
+          detail: `发信浏览器第 ${browserAttempt} 次异常，确认尚未提交恢复请求；准备第 ${browserAttempt + 1}/${MAX_ROOT_EMAIL_BROWSER_ATTEMPTS} 次尝试`,
+        });
+        if (!retrying) return;
+        audit(retrying, 'ROOT_EMAIL_BROWSER_RETRY');
+        try { await session.close(); }
+        catch { throw new RootEmailError('发信浏览器清理失败，已停止安全重试'); }
+        session = undefined;
+      }
+    }
+    if (!sent) throw new RootEmailError('发信浏览器安全重试次数已耗尽');
     const waitForMail = mailApiConfigured();
     const completed = currentStore.updateIfStatus(job.id, ['running'], {
       status: waitForMail ? 'waiting_mail' : job.autoSetPassword ? 'mail_failed' : 'email_sent',
@@ -286,13 +313,13 @@ async function execute(job: RootEmailJob, controller: AbortController) {
     const status = uncertain || stopping ? 'interrupted' : controller.signal.aborted ? 'cancelled' : 'failed';
     const detail = uncertain ? '提交后结果未确认，请先检查邮箱；系统不会自动再次发送'
       : stopping ? '服务停止，任务已中断，请检查收件箱后再决定是否重试'
-      : controller.signal.aborted ? '任务已停止（用户取消或超过 3 分钟）'
+      : controller.signal.aborted ? '任务已停止（用户取消或超过 5 分钟）'
       : error instanceof RootEmailError ? error.message : 'AWS 页面未在预期时间完成加载，或页面结构已变化；请检查后重试';
     const failed = currentStore.updateIfStatus(job.id, ['running'], { status, phase: 'done', detail });
     if (failed) audit(failed, 'ROOT_EMAIL_STOP');
   } finally {
     clearTimeout(deadline);
-    await session.close();
+    if (session) await session.close();
   }
 }
 
@@ -349,8 +376,8 @@ function tickMail() {
 
 async function executePassword(job: RootEmailJob, controller: AbortController) {
   const currentStore = store!;
-  // Two browser attempts may each need time to load, but no retry is allowed after the submit boundary.
-  const deadline = setTimeout(() => controller.abort(), 180_000);
+  // Three pre-submit browser attempts may each need time to load; no retry is allowed after the submit boundary.
+  const deadline = setTimeout(() => controller.abort(), 300_000);
   let session: AwsRootPasswordSession | undefined;
   const ensureStatus = (status: RootEmailJob['status']) => {
     controller.signal.throwIfAborted();
@@ -384,16 +411,16 @@ async function executePassword(job: RootEmailJob, controller: AbortController) {
       url,
       password,
       {
-        beforeRetry(error) {
+        beforeRetry(error, completedAttempts) {
           if (controller.signal.aborted || stopping) throw error;
           const retrying = currentStore.updateIfStatus(job.id, ['setting_password'], {
-            detail: `AWS 密码页面首次异常（${error.stage}/${error.category}），确认未提交；正在进行唯一一次安全重试`,
+            detail: `AWS 密码页面第 ${completedAttempts} 次异常（${error.stage}/${error.category}），确认未提交；准备第 ${completedAttempts + 1}/${MAX_ROOT_PASSWORD_BROWSER_ATTEMPTS} 次安全尝试`,
           });
           if (!retrying) return false;
           audit(retrying, 'ROOT_PASSWORD_SET_RETRY');
           return true;
         },
-        beforeSecondAttempt() { ensureStatus('setting_password'); },
+        beforeNextAttempt() { ensureStatus('setting_password'); },
       },
     );
     session = attempt.session;

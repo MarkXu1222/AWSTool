@@ -4,7 +4,7 @@
 
 独立导航「批量设置 Root 密码」（`/rootreset`）创建自动改密批次。系统按 payer 选择最多 20 个 ACTIVE 成员账户，发送恢复邮件、精确匹配收件人和请求时间、重新校验 AWS 一次性链接，然后生成并提交 24 位强随机密码。创建批次必须精确输入 payer 名称、账户数量和当前 TOTP。
 
-后台使用独立 Chrome 配置目录进入 AWS 忘记密码页面，通过本地 PP-OCRv6 模型识别验证码，最多处理 3 张图片。找到链接后，同一浏览器执行槽位只接受 `https://signin.aws.amazon.com/resetpassword` 的 `RootUser` 链接，要求恰好两个可见密码框和唯一的明确提交按钮。只有 AWS 返回明确成功文案才记录 `password_set`；提交后结果不明确时记录 `password_unknown`，绝不重试一次性链接。
+后台使用独立 Chrome 配置目录进入 AWS 忘记密码页面，通过本地 PP-OCRv6 模型识别验证码，每个浏览器会话最多处理 3 张图片；opening/captcha 阶段的泛化浏览器异常最多重建到 3 次会话，一旦提交恢复请求则只查邮箱、不重复发信。找到链接后，同一浏览器执行槽位只接受 `https://signin.aws.amazon.com/resetpassword` 的 `RootUser` 链接，使用不依赖 `tsx` 运行时 helper 的自包含页面函数，要求恰好两个可见密码框和唯一的 `Reset password` / `Set new password` / `Save new password` / `Change password` / `Submit` 按钮。密码页面仅在确认未进入提交边界时最多尝试 3 次。只有 AWS 返回明确成功文案才记录 `password_set`；提交后结果不明确时记录 `password_unknown`，绝不重试一次性链接。
 
 新密码由 Node.js CSPRNG 生成，固定 24 位并包含大小写、数字和符号。密码以任务上下文作为 AAD，使用用途分离密钥和 AES-256-GCM 临时写入任务文件；最多保留 30 分钟。若批次仍未完成，系统会在最早凭证到期前 10 分钟停止剩余任务。批次创建者通过新的 TOTP 下载一次 CSV；服务端发送任何字节前先持久化 claim；正常响应完成时销毁密文，若响应已开始后中断也按可能披露立即销毁。列表 API、审计和飞书通知均不包含明文密码或 reset URL。
 
@@ -74,7 +74,7 @@ PY
 - 只有新安全批次写入 `autoSetPassword=true`。升级前已存在或单账户手工创建的 `link_ready` 任务不会因部署而自动修改密码。
 - 客户端为每次选择生成请求 UUID；相同 UUID、创建者、payer 和账户集合的网络重试返回原批次，避免重复发信。
 - API、邮件查询和每次浏览器敏感操作前都从数据库复验创建者身份、operate 权限、payer 归属及账户邮箱。
-- 状态流程：`queued → running → waiting_mail → link_ready → setting_password → password_set`。AWS 发信提交结果不明时进入 `waiting_mail` 做只读确认，不重复发信。有效 reset 页在 `DOMContentLoaded` 后短暂切换执行上下文时，提交前最多容忍 6 次 DOM 读取失败；明确失败为 `password_failed`。确认尚未进入提交边界的 Chrome 加载/导航异常会关闭首次浏览器后最多安全重试一次，并只持久化不含 URL/token 的阶段码与错误分类；点击提交后超时、服务中断或页面异常为 `password_unknown`，密码密文立即销毁且绝不自动重试。自动尝试耗尽、已精确绑定恢复邮件且明确未提交密码时，创建者可在 2 小时内通过新 TOTP 按需重扫同一接收时间的邮件并手工打开/复制链接；候选不唯一、存在同账户更新任务或 `password_unknown` 时拒绝返回。手工设置结果无法由平台确认，不进入 CSV。
+- 状态流程：`queued → running → waiting_mail → link_ready → setting_password → password_set`。AWS 发信提交结果不明时进入 `waiting_mail` 做只读确认，不重复发信。有效 reset 页在 `DOMContentLoaded` 后短暂切换执行上下文时，提交前最多容忍 6 次 DOM 读取失败；明确失败为 `password_failed`。确认尚未进入提交边界的 Chrome 加载/导航异常最多执行 3 次独立浏览器尝试，并只持久化不含 URL/token 的阶段码与错误分类；点击提交后超时、服务中断或页面异常为 `password_unknown`，密码密文立即销毁且绝不自动重试。自动尝试耗尽、已精确绑定恢复邮件且明确未提交密码时，创建者可在 2 小时内通过新 TOTP 按需重扫同一接收时间的邮件并手工打开/复制链接；候选不唯一、存在同账户更新任务或 `password_unknown` 时拒绝返回。手工设置结果无法由平台确认，不进入 CSV。
 - 密码设置成功后仅保存 `gcm1` 密文、随机 96-bit IV、GCM tag 和到期时间。密钥由专用 encryptionKey 做用途分离，AAD 绑定 job/account/creator，防止跨任务替换。
 - CSV 只包含已明确 `password_set` 且未过期的账户。最早凭证进入最后 10 分钟前会中止剩余任务，保证批次进入终态并留下下载窗口。创建者重新输入未在当前 time-step 使用过的 TOTP 后，服务端先持久化一次性 claim，再在内存生成响应；正常 `finish` 时销毁整批密文，提前 `close` 且已发送 headers 时也按可能部分披露销毁。发送前中止可释放 claim；进程在 claim 期间重启则按可能已披露处理并销毁。
 - 用户停止会取消未提交的任务；若密码已可能提交则最终标记未知。已发送的恢复邮件无法撤回。

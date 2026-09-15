@@ -3,8 +3,8 @@ import test from 'node:test';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { hasNewerRootEmailJob, manualRootResetFallbackExpiresAt, RootEmailSession, RootEmailStore,
-  sendRootEmail, selectRootEmailTargets } from '../server/root-email-core';
+import { canRetryRootEmailBrowser, hasNewerRootEmailJob, manualRootResetFallbackExpiresAt,
+  RootEmailError, RootEmailSession, RootEmailStore, sendRootEmail, selectRootEmailTargets } from '../server/root-email-core';
 import { randomUUID } from 'node:crypto';
 
 const email = 'owner@example.test';
@@ -63,6 +63,16 @@ test('cancellation or permission revocation during recognition prevents submissi
       authorize() { if (revoked) throw new Error('revoked'); }, progress() {} }));
     assert.equal(calls.some(c => c.startsWith('submit')), false);
   }
+});
+
+test('recovery browser retries only generic pre-submit failures and stops at three attempts', () => {
+  const transient = new Error('browser target closed');
+  assert.equal(canRetryRootEmailBrowser(transient, 'opening', 1, false), true);
+  assert.equal(canRetryRootEmailBrowser(transient, 'captcha', 2, false), true);
+  assert.equal(canRetryRootEmailBrowser(transient, 'captcha', 3, false), false);
+  assert.equal(canRetryRootEmailBrowser(transient, 'submitting', 1, false), false);
+  assert.equal(canRetryRootEmailBrowser(new RootEmailError('policy'), 'opening', 1, false), false);
+  assert.equal(canRetryRootEmailBrowser(transient, 'opening', 1, true), false);
 });
 
 test('metadata survives restart; unfinished jobs become interrupted and never auto-resend', () => {
@@ -197,7 +207,8 @@ test('browser failures are safely classified and post-submit policy errors becom
   assert.equal(transient.stage, 'navigate');
   assert.equal(transient.category, 'navigation_aborted');
   assert.equal(transient.canRetry(1), true);
-  assert.equal(transient.canRetry(2), false);
+  assert.equal(transient.canRetry(2), true);
+  assert.equal(transient.canRetry(3), false);
   assert.equal(transient.message.includes('TOP_SECRET'), false);
 
   const uncertain = classifyRootPasswordAutomationError(
@@ -217,7 +228,7 @@ test('browser failures are safely classified and post-submit policy errors becom
   assert.equal(postSubmitPolicy.message.includes('sensitive@example.test'), false);
 });
 
-test('browser attempt runner closes the first session and never makes a third attempt', async () => {
+test('browser attempt runner closes failed sessions and never makes a fourth attempt', async () => {
   const { AwsRootPasswordSession, RootPasswordAutomationError } = await import('../server/root-email-browser');
   const transient = () => new RootPasswordAutomationError('safe transient', 'failed', {
     stage: 'navigate', category: 'network', retryable: true,
@@ -240,8 +251,14 @@ test('browser attempt runner closes the first session and never makes a third at
         },
       };
     }, 'redacted-url', 'redacted-password', {
-      beforeRetry() { calls.push('before-retry'); return options.beforeRetry !== false; },
-      beforeSecondAttempt() { calls.push('before-second'); if (stopped) throw new Error('runner stopped'); },
+      beforeRetry(_error, completedAttempts) {
+        calls.push(`before-retry:${completedAttempts}`);
+        return options.beforeRetry !== false;
+      },
+      beforeNextAttempt(nextAttempt) {
+        calls.push(`before-next:${nextAttempt}`);
+        if (stopped) throw new Error('runner stopped');
+      },
     });
     return { result, calls, created };
   };
@@ -249,7 +266,15 @@ test('browser attempt runner closes the first session and never makes a third at
   const success = await run([transient(), undefined]);
   assert.equal(success.result.kind, 'success');
   assert.equal(success.created, 2);
-  assert.deepEqual(success.calls, ['set:0', 'before-retry', 'close:0', 'before-second', 'set:1']);
+  assert.deepEqual(success.calls, ['set:0', 'before-retry:1', 'close:0', 'before-next:2', 'set:1']);
+
+  const thirdAttemptSuccess = await run([transient(), transient(), undefined]);
+  assert.equal(thirdAttemptSuccess.result.kind, 'success');
+  assert.equal(thirdAttemptSuccess.created, 3);
+  assert.deepEqual(thirdAttemptSuccess.calls, [
+    'set:0', 'before-retry:1', 'close:0', 'before-next:2',
+    'set:1', 'before-retry:2', 'close:1', 'before-next:3', 'set:2',
+  ]);
 
   const noRetryAfterSubmit = await run([unknown()]);
   assert.equal(noRetryAfterSubmit.result.kind, 'failed');
@@ -259,7 +284,7 @@ test('browser attempt runner closes the first session and never makes a third at
   const closeFailure = await run([transient()], { closeFails: true });
   assert.equal(closeFailure.result.kind, 'failed');
   assert.equal(closeFailure.created, 1);
-  assert.deepEqual(closeFailure.calls, ['set:0', 'before-retry', 'close:0']);
+  assert.deepEqual(closeFailure.calls, ['set:0', 'before-retry:1', 'close:0']);
 
   const casStopped = await run([transient()], { beforeRetry: false });
   assert.equal(casStopped.result.kind, 'stopped');
@@ -268,7 +293,7 @@ test('browser attempt runner closes the first session and never makes a third at
   const stoppedDuringClose = await run([transient()], { stopDuringClose: true });
   assert.equal(stoppedDuringClose.result.kind, 'failed');
   assert.equal(stoppedDuringClose.created, 1);
-  assert.deepEqual(stoppedDuringClose.calls, ['set:0', 'before-retry', 'close:0', 'before-second']);
+  assert.deepEqual(stoppedDuringClose.calls, ['set:0', 'before-retry:1', 'close:0', 'before-next:2']);
 
   const secondUnknown = await run([transient(), unknown()]);
   assert.equal(secondUnknown.result.kind, 'failed');
@@ -277,6 +302,10 @@ test('browser attempt runner closes the first session and never makes a third at
     assert.ok(secondUnknown.result.error instanceof RootPasswordAutomationError);
     assert.equal(secondUnknown.result.error.outcome, 'unknown');
   }
+
+  const attemptCap = await run([transient(), transient(), transient(), undefined]);
+  assert.equal(attemptCap.result.kind, 'failed');
+  assert.equal(attemptCap.created, 3);
 });
 
 test('credential CSV contains the required columns and neutralizes spreadsheet formulas', async () => {
@@ -331,8 +360,48 @@ test('manual fallback uses immutable safety metadata and rejects superseded task
   assert.equal(hasNewerRootEmailJob([oldJob, newerJob], newerJob), false);
 });
 
-test('password form polling tolerates transient pre-submit execution-context changes only', async () => {
-  const { AwsRootPasswordSession } = await import('../server/root-email-browser');
+test('password page helpers serialize without tsx-only names and tolerate transient contexts', async () => {
+  const { AwsRootPasswordSession, clickRootPasswordSubmit, fillRootPasswordFields,
+    readRootPasswordPageState } = await import('../server/root-email-browser');
+  for (const helper of [readRootPasswordPageState, fillRootPasswordFields, clickRootPasswordSubmit]) {
+    assert.equal(helper.toString().includes('__name'), false);
+  }
+  const previous = {
+    document: (globalThis as any).document,
+    getComputedStyle: (globalThis as any).getComputedStyle,
+    HTMLInputElement: (globalThis as any).HTMLInputElement,
+    Event: (globalThis as any).Event,
+  };
+  let clicked = false;
+  class FakeInput {
+    private currentValue = '';
+    disabled = false;
+    get value() { return this.currentValue; }
+    set value(value: string) { this.currentValue = value; }
+    getBoundingClientRect() { return { width: 200, height: 40 }; }
+    dispatchEvent() { return true; }
+  }
+  const fields = [new FakeInput(), new FakeInput()];
+  const submit = { disabled: false, innerText: 'Set new password', value: '',
+    getAttribute() { return null; }, getBoundingClientRect() { return { width: 200, height: 40 }; },
+    click() { clicked = true; } };
+  try {
+    (globalThis as any).document = { body: { innerText: '' }, querySelectorAll(selector: string) {
+      return selector === 'input[type="password"]' ? fields : [submit];
+    } };
+    (globalThis as any).getComputedStyle = () => ({ visibility: 'visible', display: 'block' });
+    (globalThis as any).HTMLInputElement = FakeInput;
+    (globalThis as any).Event = class { constructor(_name: string, _options: unknown) {} };
+    assert.equal(readRootPasswordPageState(), 'ready');
+    assert.equal(fillRootPasswordFields('StrongPassword123!'), true);
+    assert.deepEqual(fields.map(field => field.value), ['StrongPassword123!', 'StrongPassword123!']);
+    assert.equal(clickRootPasswordSubmit(), true);
+    assert.equal(clicked, true);
+  } finally {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete (globalThis as any)[key]; else (globalThis as any)[key] = value;
+    }
+  }
   const session = new AwsRootPasswordSession(new AbortController().signal, () => {});
   let reads = 0;
   (session as any).page = {

@@ -162,7 +162,7 @@ const BulkRootResetPage: React.FC<{ canOperate?: boolean }> = ({ canOperate = fa
     {!canOperate && <Alert type="info" showIcon message="当前为仅查看权限"
       description="可以查看账户清单和全部批次进度，但不能创建、停止任务或下载 Root 凭证。" />}
     <Alert type="warning" showIcon message="高风险操作：将真实修改 AWS Root 密码"
-      description="每批最多 20 个成员账户。系统生成 24 位强随机密码并严格串行提交；确认成功的密码使用 AES-256-GCM 临时保存，最多 30 分钟，且只能由批次创建者通过 MFA 下载一次。失败或结果未知的任务不会自动重试。" />
+      description="每批最多 20 个成员账户。系统生成 24 位强随机密码并严格串行提交；发信或密码页浏览器仅在确认未提交时最多尝试 3 次，结果未知绝不重试。确认成功的密码使用 AES-256-GCM 临时保存，最多 30 分钟，且只能由批次创建者通过 MFA 下载一次。" />
     {error && <Alert type="error" showIcon message={error} closable onClose={() => setError('')} />}
     {available && !available.ready && <Alert type="warning" showIcon message="发送环境尚未就绪" description={available.detail} />}
     {available && available.ready && !available.mailboxConfigured && <Alert type="error" showIcon message="邮箱 API 未配置"

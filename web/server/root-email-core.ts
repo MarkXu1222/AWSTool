@@ -51,6 +51,15 @@ export const isPendingEmailJob = (job: RootEmailJob) => ['queued', 'running', 'w
   || (job.status === 'link_ready' && job.autoSetPassword === true);
 export const MAX_ROOT_EMAIL_TASKS = 500;
 export const MAX_ROOT_PASSWORD_BATCH = 20;
+export const MAX_ROOT_EMAIL_BROWSER_ATTEMPTS = 3;
+
+/** Retry a fresh recovery browser only before the form can have submitted an email request. */
+export function canRetryRootEmailBrowser(error: unknown, phase: RootEmailPhase,
+  completedAttempts: number, blocked: boolean): boolean {
+  return !blocked && completedAttempts >= 1 && completedAttempts < MAX_ROOT_EMAIL_BROWSER_ATTEMPTS
+    && (phase === 'opening' || phase === 'captcha') && !(error instanceof RootEmailError);
+}
+
 export const ROOT_MANUAL_FALLBACK_TTL_MS = 2 * 60 * 60_000;
 const ROOT_MANUAL_FALLBACK_REASONS: RootManualFallbackReason[] = ['password_not_submitted'];
 

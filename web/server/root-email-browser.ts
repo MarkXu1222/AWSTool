@@ -183,6 +183,7 @@ export class AwsRootEmailSession implements RootEmailSession {
 
 
 export type RootPasswordAutomationOutcome = 'failed' | 'unknown';
+export const MAX_ROOT_PASSWORD_BROWSER_ATTEMPTS = 3;
 export type RootPasswordAutomationStage = 'validate_link' | 'authorize' | 'runtime' | 'load_driver' | 'launch_browser'
   | 'create_page' | 'configure_page' | 'navigate' | 'wait_form' | 'fill_form' | 'submit' | 'wait_result';
 export type RootPasswordAutomationCategory = 'policy' | 'timeout' | 'navigation_aborted' | 'network'
@@ -208,9 +209,10 @@ export class RootPasswordAutomationError extends RootEmailError {
     this.retryable = outcome === 'failed' && options.retryable === true;
   }
 
-  /** Permit at most one retry, and only for a classified pre-submit browser failure. */
+  /** Permit retries only for classified pre-submit failures, with a strict global attempt cap. */
   canRetry(completedAttempts: number): boolean {
-    return completedAttempts === 1 && this.outcome === 'failed' && this.retryable;
+    return completedAttempts >= 1 && completedAttempts < MAX_ROOT_PASSWORD_BROWSER_ATTEMPTS
+      && this.outcome === 'failed' && this.retryable;
   }
 }
 
@@ -262,8 +264,75 @@ export type RootPasswordAttemptResult<T extends RootPasswordAttemptSession> =
   | { kind: 'stopped'; session?: T };
 
 export interface RootPasswordAttemptHooks {
-  beforeRetry(error: RootPasswordAutomationError): boolean | Promise<boolean>;
-  beforeSecondAttempt(): void | Promise<void>;
+  beforeRetry(error: RootPasswordAutomationError, completedAttempts: number): boolean | Promise<boolean>;
+  beforeNextAttempt(nextAttempt: number): void | Promise<void>;
+}
+
+export type RootPasswordPageState = 'waiting' | 'ready' | 'success' | 'rejected' | 'changed';
+
+/** Puppeteer serializes this function into Chrome; it must not depend on module helpers or nested callbacks. */
+export function readRootPasswordPageState(): RootPasswordPageState {
+  const doc = (globalThis as any).document;
+  const text = String(doc.body?.innerText || '');
+  if (/password (?:has been|was) (?:successfully )?reset|password reset (?:was )?successful|new password (?:has been|was) saved|you can now sign in with your new password/i.test(text)) return 'success';
+  if (/reset link (?:is |has )?(?:invalid|expired|already used)|link (?:is |has )?(?:invalid|expired|already been used)|request a new password reset|passwords? do not match|password.*(?:does not meet|requirements|invalid)/i.test(text)) return 'rejected';
+  const fields: any[] = [];
+  for (const element of doc.querySelectorAll('input[type="password"]')) {
+    const style = (globalThis as any).getComputedStyle(element);
+    const rect = element.getBoundingClientRect();
+    if (style.visibility !== 'hidden' && style.display !== 'none' && rect.width > 0 && rect.height > 0 && !element.disabled) {
+      fields.push(element);
+    }
+  }
+  const buttons: any[] = [];
+  for (const element of doc.querySelectorAll('button, input[type="submit"]')) {
+    const style = (globalThis as any).getComputedStyle(element);
+    const rect = element.getBoundingClientRect();
+    if (style.visibility === 'hidden' || style.display === 'none' || rect.width <= 0 || rect.height <= 0 || element.disabled) continue;
+    const label = String(element.innerText || element.value || element.getAttribute('aria-label') || '').trim();
+    if (/^(reset password|set new password|save new password|change password|submit)$/i.test(label)) buttons.push(element);
+  }
+  if (fields.length > 2 || buttons.length > 1) return 'changed';
+  return fields.length === 2 && buttons.length === 1 ? 'ready' : 'waiting';
+}
+
+/** Fill exactly two visible password fields without closures that tsx could rewrite with __name. */
+export function fillRootPasswordFields(value: string): boolean {
+  const doc = (globalThis as any).document;
+  const fields: any[] = [];
+  for (const element of doc.querySelectorAll('input[type="password"]')) {
+    const style = (globalThis as any).getComputedStyle(element);
+    const rect = element.getBoundingClientRect();
+    if (style.visibility !== 'hidden' && style.display !== 'none' && rect.width > 0 && rect.height > 0 && !element.disabled) {
+      fields.push(element);
+    }
+  }
+  if (fields.length !== 2) return false;
+  const setter = Object.getOwnPropertyDescriptor((globalThis as any).HTMLInputElement.prototype, 'value')?.set;
+  if (!setter) return false;
+  for (const field of fields) {
+    setter.call(field, value);
+    field.dispatchEvent(new (globalThis as any).Event('input', { bubbles: true }));
+    field.dispatchEvent(new (globalThis as any).Event('change', { bubbles: true }));
+  }
+  for (const field of fields) if (field.value !== value) return false;
+  return true;
+}
+
+/** Click exactly one visible, explicitly labelled password-submit control. */
+export function clickRootPasswordSubmit(): boolean {
+  const doc = (globalThis as any).document;
+  const buttons: any[] = [];
+  for (const element of doc.querySelectorAll('button, input[type="submit"]')) {
+    const style = (globalThis as any).getComputedStyle(element);
+    const rect = element.getBoundingClientRect();
+    if (style.visibility === 'hidden' || style.display === 'none' || rect.width <= 0 || rect.height <= 0 || element.disabled) continue;
+    const label = String(element.innerText || element.value || element.getAttribute('aria-label') || '').trim();
+    if (/^(reset password|set new password|save new password|change password|submit)$/i.test(label)) buttons.push(element);
+  }
+  if (buttons.length !== 1) return false;
+  buttons[0].click();
+  return true;
 }
 
 /** Strict reset-link automation. It never retries after the submit button may have been clicked. */
@@ -273,37 +342,34 @@ export class AwsRootPasswordSession {
   private profile?: string;
   private submitted = false;
 
-  /** Run no more than two browser attempts; the second exists only for a classified pre-submit failure. */
+  /** Run up to three browser attempts, but only while every failure is classified pre-submit. */
   static async runWithSafeRetry<T extends RootPasswordAttemptSession>(createSession: () => T,
     resetUrl: string, password: string, hooks: RootPasswordAttemptHooks): Promise<RootPasswordAttemptResult<T>> {
     let session: T | undefined;
-    try {
-      session = createSession();
-      await session.setPassword(resetUrl, password);
-      return { kind: 'success', session };
-    } catch (error) {
-      if (!(error instanceof RootPasswordAutomationError) || !error.canRetry(1)) {
-        return { kind: 'failed', session, error };
-      }
-      let proceed: boolean;
-      try { proceed = await hooks.beforeRetry(error); }
-      catch (hookError) { return { kind: 'failed', session, error: hookError }; }
-      if (!proceed) return { kind: 'stopped', session };
-      try {
-        await session!.close();
-        session = undefined;
-        await hooks.beforeSecondAttempt();
-      } catch (preparationError) {
-        return { kind: 'failed', session, error: preparationError };
-      }
+    for (let attempt = 1; attempt <= MAX_ROOT_PASSWORD_BROWSER_ATTEMPTS; attempt++) {
       try {
         session = createSession();
         await session.setPassword(resetUrl, password);
         return { kind: 'success', session };
-      } catch (secondError) {
-        return { kind: 'failed', session, error: secondError };
+      } catch (error) {
+        if (!(error instanceof RootPasswordAutomationError) || !error.canRetry(attempt)) {
+          return { kind: 'failed', session, error };
+        }
+        let proceed: boolean;
+        try { proceed = await hooks.beforeRetry(error, attempt); }
+        catch (hookError) { return { kind: 'failed', session, error: hookError }; }
+        if (!proceed) return { kind: 'stopped', session };
+        try {
+          await session!.close();
+          session = undefined;
+          await hooks.beforeNextAttempt(attempt + 1);
+        } catch (preparationError) {
+          return { kind: 'failed', session, error: preparationError };
+        }
       }
     }
+    return { kind: 'failed', session, error: new RootPasswordAutomationError(
+      '密码页面安全重试次数已耗尽，未提交新密码', 'failed') };
   }
 
   constructor(private readonly signal: AbortSignal, private readonly authorize: () => void,
@@ -330,26 +396,8 @@ export class AwsRootPasswordSession {
     });
   }
 
-  private async pageState(): Promise<'waiting' | 'ready' | 'success' | 'rejected' | 'changed'> {
-    const page = this.checkedPage();
-    return page.evaluate(() => {
-      const doc = (globalThis as any).document;
-      const text = String(doc.body?.innerText || '');
-      if (/password (?:has been|was) (?:successfully )?reset|password reset (?:was )?successful|new password (?:has been|was) saved|you can now sign in with your new password/i.test(text)) return 'success';
-      if (/reset link (?:is |has )?(?:invalid|expired|already used)|link (?:is |has )?(?:invalid|expired|already been used)|request a new password reset|passwords? do not match|password.*(?:does not meet|requirements|invalid)/i.test(text)) return 'rejected';
-      const visible = (element: any) => {
-        const style = (globalThis as any).getComputedStyle(element);
-        const rect = element.getBoundingClientRect();
-        return style.visibility !== 'hidden' && style.display !== 'none' && rect.width > 0 && rect.height > 0 && !element.disabled;
-      };
-      const fields = [...doc.querySelectorAll('input[type="password"]')].filter(visible);
-      const buttons = [...doc.querySelectorAll('button, input[type="submit"]')].filter(visible).filter((element: any) => {
-        const label = String(element.innerText || element.value || element.getAttribute('aria-label') || '').trim();
-        return /^(reset password|save new password|change password|submit)$/i.test(label);
-      });
-      if (fields.length > 2 || buttons.length > 1) return 'changed';
-      return fields.length === 2 && buttons.length === 1 ? 'ready' : 'waiting';
-    });
+  private async pageState(): Promise<RootPasswordPageState> {
+    return this.checkedPage().evaluate(readRootPasswordPageState);
   }
 
   private async waitFor(expected: 'ready' | 'success', timeoutMs: number): Promise<void> {
@@ -416,24 +464,7 @@ export class AwsRootPasswordSession {
 
       const page = this.checkedPage();
       stage = 'fill_form';
-      const filled = await page.evaluate((value: string) => {
-        const doc = (globalThis as any).document;
-        const visible = (element: any) => {
-          const style = (globalThis as any).getComputedStyle(element);
-          const rect = element.getBoundingClientRect();
-          return style.visibility !== 'hidden' && style.display !== 'none' && rect.width > 0 && rect.height > 0 && !element.disabled;
-        };
-        const fields = [...doc.querySelectorAll('input[type="password"]')].filter(visible) as any[];
-        if (fields.length !== 2) return false;
-        const setter = Object.getOwnPropertyDescriptor((globalThis as any).HTMLInputElement.prototype, 'value')?.set;
-        if (!setter) return false;
-        for (const field of fields) {
-          setter.call(field, value);
-          field.dispatchEvent(new Event('input', { bubbles: true }));
-          field.dispatchEvent(new Event('change', { bubbles: true }));
-        }
-        return fields.every(field => field.value === value);
-      }, password);
+      const filled = await page.evaluate(fillRootPasswordFields, password);
       if (!filled) throw new RootPasswordAutomationError('无法安全识别并填写两处新密码输入框', 'failed');
       this.signal.throwIfAborted();
       stage = 'authorize';
@@ -443,21 +474,7 @@ export class AwsRootPasswordSession {
       stage = 'submit';
       this.beforeSubmit();
       this.submitted = true;
-      const clicked = await page.evaluate(() => {
-        const doc = (globalThis as any).document;
-        const visible = (element: any) => {
-          const style = (globalThis as any).getComputedStyle(element);
-          const rect = element.getBoundingClientRect();
-          return style.visibility !== 'hidden' && style.display !== 'none' && rect.width > 0 && rect.height > 0 && !element.disabled;
-        };
-        const buttons = [...doc.querySelectorAll('button, input[type="submit"]')].filter(visible).filter((element: any) => {
-          const label = String(element.innerText || element.value || element.getAttribute('aria-label') || '').trim();
-          return /^(reset password|save new password|change password|submit)$/i.test(label);
-        }) as any[];
-        if (buttons.length !== 1) return false;
-        buttons[0].click();
-        return true;
-      });
+      const clicked = await page.evaluate(clickRootPasswordSubmit);
       if (!clicked) throw new RootPasswordAutomationError('提交按钮状态已变化，密码设置结果未知；系统不会自动重试', 'unknown');
       stage = 'wait_result';
       await this.waitFor('success', 45_000);
