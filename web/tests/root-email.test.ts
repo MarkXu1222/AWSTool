@@ -86,6 +86,12 @@ test('root email page helpers survive tsx serialization and prioritize blocked s
     assert.equal(readRootEmailEntryState(), 'forgot');
     assert.equal(readRootEmailCaptchaResult(true), 'identity_verified');
     assert.equal(readRootEmailCaptchaResult(false), 'waiting');
+    doc.body.innerText = "The characters you entered didn't match the image shown";
+    assert.equal(readRootEmailCaptchaResult(false), 'invalid');
+    doc.body.innerText = 'Invalid characters entered';
+    assert.equal(readRootEmailCaptchaResult(false), 'invalid');
+    doc.body.innerText = 'Password recovery is disabled';
+    assert.equal(readRootEmailCaptchaResult(false), 'disabled');
     doc.body.innerText = 'Password email sent';
     assert.equal(readRootEmailCaptchaResult(false), 'sent');
   } finally {

@@ -115,8 +115,8 @@ export function readRootEmailCaptchaResult(identityStage: boolean): RootEmailCap
   if (/too many|rate.?limit|try again later|temporarily blocked/i.test(text)) return 'blocked';
   if (/Password email sent/i.test(text)) return 'sent';
   if (identityStage && /Forgot password\?/i.test(text)) return 'identity_verified';
-  if (/incorrect verification|incorrect captcha|invalid captcha|characters.*(?:incorrect|did not match)|(?:incorrect|invalid).*characters/i.test(text)) return 'invalid';
   if (/password recovery.*(?:disabled|not allowed)|contact.*administrator/i.test(text)) return 'disabled';
+  if (/incorrect verification|incorrect captcha|invalid captcha|characters.*(?:incorrect|did not match|didn['’]t match|do not match|don['’]t match)|(?:incorrect|invalid).*characters|verification code.*(?:incorrect|does not match|didn['’]t match)/i.test(text)) return 'invalid';
   return 'waiting';
 }
 
