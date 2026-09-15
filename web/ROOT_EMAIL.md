@@ -4,7 +4,7 @@
 
 独立导航「批量设置 Root 密码」（`/rootreset`）创建自动改密批次。系统按 payer 选择最多 20 个 ACTIVE 成员账户，发送恢复邮件、精确匹配收件人和请求时间、重新校验 AWS 一次性链接，然后生成并提交 24 位强随机密码。创建批次必须精确输入 payer 名称、账户数量和当前 TOTP。
 
-后台使用独立 Chrome 配置目录进入 AWS 忘记密码页面，通过本地 PP-OCRv6 模型识别验证码，每个浏览器会话最多处理 3 张图片；opening/captcha 阶段的泛化浏览器异常最多重建到 3 次会话，一旦提交恢复请求则只查邮箱、不重复发信。找到链接后，同一浏览器执行槽位只接受 `https://signin.aws.amazon.com/resetpassword` 的 `RootUser` 链接，使用不依赖 `tsx` 运行时 helper 的自包含页面函数，要求恰好两个可见密码框和唯一的 `Reset password` / `Set new password` / `Save new password` / `Change password` / `Submit` 按钮。密码页面仅在确认未进入提交边界时最多尝试 3 次。只有 AWS 返回明确成功文案才记录 `password_set`；提交后结果不明确时记录 `password_unknown`，绝不重试一次性链接。
+后台使用独立 Chrome 配置目录进入 AWS 忘记密码页面，通过本地 PP-OCRv6 模型处理 AWS 当前可能出现的两阶段验证码：登录安全验证码通过后进入 Forgot password，再处理恢复邮件验证码；每阶段最多 3 张图片。opening/captcha 阶段的泛化浏览器异常最多重建到 3 次会话；只有恢复邮件验证码提交前才持久化 `submitting`，此后只查邮箱、不重复发信。找到链接后，同一浏览器执行槽位只接受 `https://signin.aws.amazon.com/resetpassword` 的 `RootUser` 链接，使用不依赖 `tsx` 运行时 helper 的自包含页面函数，要求恰好两个可见密码框和唯一的 `Reset password` / `Set new password` / `Save new password` / `Change password` / `Submit` 按钮。密码页面仅在确认未进入提交边界时最多尝试 3 次。只有 AWS 返回明确成功文案才记录 `password_set`；提交后结果不明确时记录 `password_unknown`，绝不重试一次性链接。
 
 新密码由 Node.js CSPRNG 生成，固定 24 位并包含大小写、数字和符号。密码以任务上下文作为 AAD，使用用途分离密钥和 AES-256-GCM 临时写入任务文件；最多保留 30 分钟。若批次仍未完成，系统会在最早凭证到期前 10 分钟停止剩余任务。批次创建者通过新的 TOTP 下载一次 CSV；服务端发送任何字节前先持久化 claim；正常响应完成时销毁密文，若响应已开始后中断也按可能披露立即销毁。列表 API、审计和飞书通知均不包含明文密码或 reset URL。
 

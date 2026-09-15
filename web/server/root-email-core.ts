@@ -320,7 +320,8 @@ export interface RootEmailSession {
   open(email: string): Promise<void>;
   recognize(): Promise<{ candidate: string | null; imageId: string }>;
   refresh(previousImageId: string): Promise<void>;
-  submit(candidate: string): Promise<'sent' | 'invalid'>;
+  isRecoveryCaptcha(): boolean;
+  submit(candidate: string): Promise<'sent' | 'invalid' | 'next_captcha'>;
   close(): Promise<void>;
 }
 
@@ -337,20 +338,30 @@ export async function sendRootEmail(input: {
   check();
   progress('opening', 0, '正在打开 AWS 根用户密码恢复页面');
   await session.open(input.email);
-  for (let attempt = 1; attempt <= 3; attempt++) {
+  let stageAttempt = 0;
+  let stageTransitions = 0;
+  while (true) {
+    stageAttempt++;
     check();
-    progress('captcha', attempt, `正在识别第 ${attempt} 张验证码（最多 3 张）`);
+    const recoveryCaptcha = session.isRecoveryCaptcha();
+    const stageLabel = recoveryCaptcha ? '恢复邮件验证码' : '登录安全验证码';
+    progress('captcha', stageAttempt, `正在识别${stageLabel}第 ${stageAttempt} 张图片（本阶段最多 3 张）`);
     const { candidate, imageId } = await session.recognize();
     check();
     if (candidate && /^[a-zA-Z0-9]{6}$/.test(candidate)) {
-      progress('submitting', attempt, '正在提交验证码；等待 AWS 确认邮件已发送');
+      progress(recoveryCaptcha ? 'submitting' : 'captcha', stageAttempt,
+        recoveryCaptcha ? '正在提交恢复邮件验证码；等待 AWS 确认邮件已发送' : '正在提交登录安全验证码；尚未请求恢复邮件');
       check();
-      if (await session.submit(candidate) === 'sent') return;
+      const result = await session.submit(candidate);
+      if (result === 'sent') return;
+      if (result === 'next_captcha') {
+        if (recoveryCaptcha || ++stageTransitions > 1) throw new RootEmailError('AWS 验证码流程出现非预期的额外阶段', 422);
+        stageAttempt = 0;
+        continue;
+      }
     }
-    if (attempt < 3) {
-      check();
-      await session.refresh(imageId);
-    }
+    if (stageAttempt >= 3) throw new RootEmailError(`${stageLabel}连续 3 张均未通过，请稍后重试`, 422);
+    check();
+    await session.refresh(imageId);
   }
-  throw new RootEmailError('3 张验证码均未通过，请稍后重试', 422);
 }

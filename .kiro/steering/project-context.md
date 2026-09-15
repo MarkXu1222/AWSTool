@@ -53,7 +53,7 @@ web/
 │   ├── billing-export-jobs.ts  # 账单导出持久化 job、全局队列、永久历史、重复下载与重启恢复
 │   ├── billing-exporter.ts     # 严格只读抓取 AWS 官方账单 PDF + 可取消 zip 打包
 │   ├── root-email-jobs.ts      # Root 恢复邮件/自动改密队列、30分钟凭证TTL、一次性CSV（单浏览器并发）
-│   ├── root-email-browser.ts   # 独立 Chrome：OCR发信 + 严格AWS reset自动填充；无闭包页面函数、提交前最多3次尝试
+│   ├── root-email-browser.ts   # 独立 Chrome：两阶段OCR发信 + 严格AWS reset自动填充；提交前最多3次尝试
 │   ├── root-email-core.ts      # 原子任务存储、自动改密状态机、2小时手工链接兜底资格和旧任务兼容，见 web/ROOT_EMAIL.md
 │   ├── root-password-secrets.ts # 24位CSPRNG、AES-256-GCM任务绑定密文、CSV生成
 │   ├── mail-api.ts             # 自建邮箱 HMAC 只读客户端，共用节流队列

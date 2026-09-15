@@ -10,14 +10,23 @@ import { randomUUID } from 'node:crypto';
 const email = 'owner@example.test';
 const input = { accountId: '123456789012', email, createdBy: 'admin', createdByUserId: '1' };
 
-function fixture(candidates: Array<string | null>, responses: Array<'sent' | 'invalid' | Error>) {
+function fixture(candidates: Array<string | null>, responses: Array<'sent' | 'invalid' | 'next_captcha' | Error>,
+  initialRecoveryCaptcha = true) {
   const calls: string[] = [];
   let image = 0;
+  let recoveryCaptcha = initialRecoveryCaptcha;
   const session: RootEmailSession = {
     async open(value) { calls.push(`open:${value}`); },
     async recognize() { calls.push('recognize'); return { candidate: candidates[image++] ?? null, imageId: String(image) }; },
     async refresh(id) { calls.push(`refresh:${id}`); },
-    async submit(value) { calls.push(`submit:${value}`); const result = responses.shift(); if (result instanceof Error) throw result; return result || 'invalid'; },
+    isRecoveryCaptcha() { return recoveryCaptcha; },
+    async submit(value) {
+      calls.push(`submit:${value}`);
+      const result = responses.shift();
+      if (result instanceof Error) throw result;
+      if (result === 'next_captcha') recoveryCaptcha = true;
+      return result || 'invalid';
+    },
     async close() { calls.push('close'); },
   };
   return { session, calls };
@@ -27,6 +36,18 @@ test('email is considered sent only after explicit AWS confirmation', async () =
   const { session, calls } = fixture(['abc123'], ['sent']);
   await sendRootEmail({ email, session, signal: new AbortController().signal, authorize() {}, progress() {} });
   assert.deepEqual(calls, [`open:${email}`, 'recognize', 'submit:abc123']);
+});
+
+test('identity captcha transitions to a separately budgeted recovery captcha without sending twice', async () => {
+  const { session, calls } = fixture(['abc123', 'def456'], ['next_captcha', 'sent'], false);
+  const progress: Array<{ phase: string; attempts: number; detail: string }> = [];
+  await sendRootEmail({ email, session, signal: new AbortController().signal, authorize() {},
+    progress(phase, attempts, detail) { progress.push({ phase, attempts, detail }); } });
+  assert.deepEqual(calls.filter(call => call.startsWith('submit:')), ['submit:abc123', 'submit:def456']);
+  assert.equal(calls.some(call => call.startsWith('refresh:')), false);
+  assert.deepEqual(progress.filter(item => item.phase === 'captcha' && item.detail.includes('正在识别'))
+    .map(item => item.attempts), [1, 1]);
+  assert.equal(progress.filter(item => item.phase === 'submitting').length, 1);
 });
 
 test('bad lengths are never submitted; rejected candidates refresh within a three-image limit', async () => {

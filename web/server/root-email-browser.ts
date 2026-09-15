@@ -56,6 +56,8 @@ export class AwsRootEmailSession implements RootEmailSession {
   private browser?: Browser;
   private page?: Page;
   private profile?: string;
+  private captchaPurpose: 'identity' | 'recovery' = 'recovery';
+  private expectedEmail = '';
   constructor(private readonly signal: AbortSignal, private readonly authorize: () => void) {}
   private checkedPage() {
     this.signal.throwIfAborted();
@@ -71,9 +73,36 @@ export class AwsRootEmailSession implements RootEmailSession {
     const page = this.checkedPage();
     await page.locator(`::-p-aria(${name})`).click();
   }
+  private async waitForEntry(): Promise<'identity' | 'forgot'> {
+    const page = this.checkedPage();
+    const handle = await page.waitForFunction(`(() => {
+      const text = String(document.body?.innerText || '');
+      if (/too many|rate.?limit|try again later|temporarily blocked/i.test(text)) return 'blocked';
+      if (document.querySelector('#captcha_image')) return 'identity';
+      if (/Forgot password\?/i.test(text)) return 'forgot';
+      return false;
+    })()`, { timeout: 30_000, signal: this.signal });
+    const result = await handle.jsonValue();
+    await handle.dispose();
+    if (result === 'blocked') throw new RootEmailError('AWS 提示登录验证请求受限，请稍后再试', 429);
+    return result === 'identity' ? 'identity' : 'forgot';
+  }
+  private async enterRecoveryCaptcha() {
+    const page = this.checkedPage();
+    await page.locator('::-p-aria(Forgot password?)').wait();
+    const matches = await page.evaluate((address: string) => {
+      const doc = (globalThis as any).document;
+      return String(doc.body?.innerText || '').toLowerCase().includes(address.toLowerCase());
+    }, this.expectedEmail);
+    if (!matches) throw new RootEmailError('AWS 页面显示的账户邮箱不匹配', 422);
+    await this.click('Forgot password?');
+    await page.waitForSelector('#captcha_image', { visible: true });
+    this.captchaPurpose = 'recovery';
+  }
   async open(email: string) {
     const runtime = rootEmailRuntime();
     const { default: puppeteer } = await import('puppeteer-core');
+    this.expectedEmail = email;
     this.profile = fs.mkdtempSync(path.join(os.tmpdir(), 'aws-root-email-'));
     this.browser = await puppeteer.launch({
       executablePath: runtime.chrome, headless: false, userDataDir: this.profile,
@@ -88,22 +117,20 @@ export class AwsRootEmailSession implements RootEmailSession {
     await this.page.setExtraHTTPHeaders({ 'Accept-Language': 'en-US,en;q=0.9' });
     await this.page.goto('https://console.aws.amazon.com/', { waitUntil: 'domcontentloaded' });
     await this.page.waitForFunction(`!!document.querySelector('#root_account_signin, #root_user_radio_button')`, { signal: this.signal });
-    if (await this.page.$('#root_account_signin')) await this.click('Sign in using root user email');
+    if (await this.page.$('#root_account_signin')) await this.page.click('#root_account_signin');
     await this.page.waitForSelector('#root_user_radio_button', { visible: true });
     this.checkedPage();
     await this.page.click('#root_user_radio_button');
-    await this.page.locator('::-p-aria(Email address)').fill(email);
-    await this.click('Next');
-    await this.page.locator('::-p-aria(Forgot password?)').wait();
-    // Re-check the account displayed by AWS before requesting its password recovery.
-    const matches = await this.page.evaluate((address: string) => {
-      const doc = (globalThis as any).document;
-      return doc.body.innerText.toLowerCase().includes(address.toLowerCase());
-    }, email);
-    if (!matches) throw new RootEmailError('AWS 页面显示的账户邮箱不匹配', 422);
-    await this.click('Forgot password?');
-    await this.page.waitForSelector('#captcha_image', { visible: true });
+    await this.page.locator('#resolving_input').fill(email);
+    await this.page.click('#next_button');
+    const entry = await this.waitForEntry();
+    if (entry === 'identity') {
+      this.captchaPurpose = 'identity';
+      return;
+    }
+    await this.enterRecoveryCaptcha();
   }
+  isRecoveryCaptcha() { return this.captchaPurpose === 'recovery'; }
   private async capture() {
     const page = this.checkedPage();
     await page.waitForFunction(`(() => { const i = document.querySelector('#captcha_image'); return i && i.complete && i.naturalWidth > 0; })()`, { signal: this.signal });
@@ -132,14 +159,18 @@ export class AwsRootEmailSession implements RootEmailSession {
     }, { signal: this.signal }, previousSrc);
     if ((await this.capture()).imageId === previousImageId) throw new RootEmailError('验证码刷新后图片未变化，请稍后重试', 422);
   }
-  async submit(candidate: string): Promise<'sent' | 'invalid'> {
+  async submit(candidate: string): Promise<'sent' | 'invalid' | 'next_captcha'> {
     const page = this.checkedPage();
+    const purpose = this.captchaPurpose;
     await page.locator('::-p-aria(Type the characters as shown above)').fill(candidate);
     await this.click('I’m not a robot');
+    const identitySuccess = purpose === 'identity'
+      ? "if (/Forgot password\\?/i.test(text)) return 'identity_verified';" : '';
     const state = await page.waitForFunction(`(() => {
       const text = document.body.innerText;
-      if (/Password email sent/.test(text)) return 'sent';
       if (/too many|rate.?limit|try again later|temporarily blocked/i.test(text)) return 'blocked';
+      if (/Password email sent/.test(text)) return 'sent';
+      ${identitySuccess}
       if (/incorrect verification|incorrect captcha|invalid captcha|characters.*(?:incorrect|did not match)|(?:incorrect|invalid).*characters/i.test(text)) return 'invalid';
       if (/password recovery.*(?:disabled|not allowed)|contact.*administrator/i.test(text)) return 'disabled';
       return false;
@@ -148,6 +179,10 @@ export class AwsRootEmailSession implements RootEmailSession {
     await state.dispose();
     if (result === 'blocked') throw new RootEmailError('AWS 提示限制请求，请稍后再试', 429);
     if (result === 'disabled') throw new RootEmailError('AWS 未允许该账户恢复密码，请检查集中式根访问设置', 422);
+    if (result === 'identity_verified') {
+      await this.enterRecoveryCaptcha();
+      return 'next_captcha';
+    }
     return result === 'sent' ? 'sent' : 'invalid';
   }
   async close() {
