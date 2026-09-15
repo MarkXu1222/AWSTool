@@ -51,18 +51,36 @@ test('identity captcha transitions to a separately budgeted recovery captcha wit
 });
 
 test('root email page helpers survive tsx serialization and prioritize blocked states', async () => {
-  const { readRootEmailCaptchaResult, readRootEmailEntryState } = await import('../server/root-email-browser');
-  assert.equal(readRootEmailEntryState.toString().includes('__name'), false);
-  assert.equal(readRootEmailCaptchaResult.toString().includes('__name'), false);
+  const { AwsRootEmailSession, readRootEmailCaptchaResult, readRootEmailEntryState,
+    startRootEmailVerification } = await import('../server/root-email-browser');
+  for (const helper of [startRootEmailVerification, readRootEmailEntryState, readRootEmailCaptchaResult]) {
+    assert.equal(helper.toString().includes('__name'), false);
+  }
   const previousDocument = (globalThis as any).document;
+  const previousStyle = (globalThis as any).getComputedStyle;
+  let verifyClicked = false;
+  const verify = { innerText: 'Verify', disabled: false, getAttribute() { return null; },
+    getBoundingClientRect() { return { width: 100, height: 32 }; }, click() { verifyClicked = true; } };
   try {
-    const doc = { body: { innerText: 'Making sure its you' }, querySelector: (selector: string) => selector === '#captcha_image' ? {} : null };
+    const doc = { body: { innerText: 'Making sure its you' },
+      querySelector: (selector: string) => selector === '#captcha_image' ? {} : null,
+      querySelectorAll: () => [] as any[] };
     (globalThis as any).document = doc;
+    (globalThis as any).getComputedStyle = () => ({ visibility: 'visible', display: 'block' });
     assert.equal(readRootEmailEntryState(), 'identity');
     doc.body.innerText = 'Too many requests, try again later';
     assert.equal(readRootEmailEntryState(), 'blocked');
-    doc.body.innerText = 'Forgot password?';
+    doc.body.innerText = 'Making sure its you';
     doc.querySelector = () => null;
+    doc.querySelectorAll = () => [verify];
+    assert.equal(readRootEmailEntryState(), 'verify');
+    assert.equal(startRootEmailVerification(), 'clicked');
+    assert.equal(verifyClicked, true);
+    doc.querySelectorAll = () => [verify, { ...verify, click() {} }];
+    assert.equal(readRootEmailEntryState(), 'changed');
+    assert.equal(startRootEmailVerification(), 'changed');
+    doc.body.innerText = 'Forgot password?';
+    doc.querySelectorAll = () => [];
     assert.equal(readRootEmailEntryState(), 'forgot');
     assert.equal(readRootEmailCaptchaResult(true), 'identity_verified');
     assert.equal(readRootEmailCaptchaResult(false), 'waiting');
@@ -71,7 +89,41 @@ test('root email page helpers survive tsx serialization and prioritize blocked s
   } finally {
     if (previousDocument === undefined) delete (globalThis as any).document;
     else (globalThis as any).document = previousDocument;
+    if (previousStyle === undefined) delete (globalThis as any).getComputedStyle;
+    else (globalThis as any).getComputedStyle = previousStyle;
   }
+
+  let reads = 0, clicks = 0;
+  const session = new AwsRootEmailSession(new AbortController().signal, () => {});
+  (session as any).page = {
+    url: () => 'https://signin.aws.amazon.com/signin',
+    evaluate(helper: Function) {
+      if (helper === startRootEmailVerification) {
+        clicks++;
+        return Promise.reject(new Error('Execution context was destroyed after click'));
+      }
+      reads++;
+      return Promise.resolve(reads >= 3 ? 'identity' : 'verify');
+    },
+  };
+  (session as any).pause = async () => {};
+  assert.equal(await (session as any).waitForEntry(), 'identity');
+  assert.equal(clicks, 1);
+
+  const controller = new AbortController();
+  let cancelledClicks = 0;
+  const cancelled = new AwsRootEmailSession(controller.signal, () => {});
+  (cancelled as any).page = {
+    url: () => 'https://signin.aws.amazon.com/signin',
+    evaluate(helper: Function) {
+      if (helper === readRootEmailEntryState) { controller.abort(); return Promise.resolve('verify'); }
+      cancelledClicks++;
+      return Promise.resolve('clicked');
+    },
+  };
+  (cancelled as any).pause = async () => {};
+  await assert.rejects((cancelled as any).waitForEntry());
+  assert.equal(cancelledClicks, 0);
 });
 
 test('bad lengths are never submitted; rejected candidates refresh within a three-image limit', async () => {

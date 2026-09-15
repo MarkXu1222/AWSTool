@@ -51,18 +51,52 @@ export function runRootEmailOcr(image: Buffer | null, signal?: AbortSignal): Pro
   });
 }
 
-export type RootEmailEntryState = 'waiting' | 'identity' | 'forgot' | 'blocked';
+export type RootEmailEntryState = 'waiting' | 'verify' | 'identity' | 'forgot' | 'blocked' | 'changed';
+export type RootEmailVerifyAction = 'clicked' | 'not_ready' | 'blocked' | 'changed';
 export type RootEmailCaptchaResult = 'waiting' | 'sent' | 'identity_verified' | 'invalid' | 'blocked' | 'disabled';
 
 class RootEmailBrowserReadTimeout extends Error {}
 
 /** Self-contained browser function: AWS can replace the execution context immediately after Next. */
 export function readRootEmailEntryState(): RootEmailEntryState {
-  const text = String((globalThis as any).document.body?.innerText || '');
+  const doc = (globalThis as any).document;
+  const text = String(doc.body?.innerText || '');
   if (/too many|rate.?limit|try again later|temporarily blocked/i.test(text)) return 'blocked';
-  if ((globalThis as any).document.querySelector('#captcha_image')) return 'identity';
+  if (doc.querySelector('#captcha_image')) return 'identity';
   if (/Forgot password\?/i.test(text)) return 'forgot';
-  return 'waiting';
+  if (!/Making sure it(?:'|’)?s you/i.test(text)) return 'waiting';
+  let candidates = 0;
+  for (const element of doc.querySelectorAll('button')) {
+    const label = String(element.innerText || element.getAttribute('aria-label') || '').trim();
+    if (label !== 'Verify' || element.disabled) continue;
+    const style = (globalThis as any).getComputedStyle(element);
+    const rect = element.getBoundingClientRect();
+    if (style.visibility !== 'hidden' && style.display !== 'none' && rect.width > 0 && rect.height > 0) candidates++;
+  }
+  if (candidates > 1) return 'changed';
+  return candidates === 1 ? 'verify' : 'waiting';
+}
+
+/** Atomically re-check the identity challenge and click exactly one trusted Verify control. */
+export function startRootEmailVerification(): RootEmailVerifyAction {
+  const doc = (globalThis as any).document;
+  const text = String(doc.body?.innerText || '');
+  if (/too many|rate.?limit|try again later|temporarily blocked/i.test(text)) return 'blocked';
+  if (!/Making sure it(?:'|’)?s you/i.test(text) || doc.querySelector('#captcha_image') || /Forgot password\?/i.test(text)) {
+    return 'not_ready';
+  }
+  const candidates: any[] = [];
+  for (const element of doc.querySelectorAll('button')) {
+    const label = String(element.innerText || element.getAttribute('aria-label') || '').trim();
+    if (label !== 'Verify' || element.disabled) continue;
+    const style = (globalThis as any).getComputedStyle(element);
+    const rect = element.getBoundingClientRect();
+    if (style.visibility !== 'hidden' && style.display !== 'none' && rect.width > 0 && rect.height > 0) candidates.push(element);
+  }
+  if (candidates.length > 1) return 'changed';
+  if (candidates.length !== 1) return 'not_ready';
+  candidates[0].click();
+  return 'clicked';
 }
 
 /** Self-contained browser function used repeatedly across CAPTCHA-triggered navigations. */
@@ -123,14 +157,24 @@ export class AwsRootEmailSession implements RootEmailSession {
   private async waitForEntry(): Promise<'identity' | 'forgot'> {
     const deadline = Date.now() + 30_000;
     let lastBrowserError: unknown;
+    let verifyStarted = false;
     while (Date.now() < deadline) {
       try {
-        const result = await this.boundedEvaluate(
-          this.checkedPage().evaluate(readRootEmailEntryState), deadline,
-        );
+        const page = this.checkedPage();
+        const result = await this.boundedEvaluate(page.evaluate(readRootEmailEntryState), deadline);
         lastBrowserError = undefined;
         if (result === 'blocked') throw new RootEmailError('AWS 提示登录验证请求受限，请稍后再试', 429);
+        if (result === 'changed') throw new RootEmailError('AWS 登录验证页出现多个 Verify 控件，已停止', 422);
         if (result === 'identity' || result === 'forgot') return result;
+        if (result === 'verify' && !verifyStarted) {
+          // Lock before the side effect: a lost execution-context response must never click twice in this session.
+          verifyStarted = true;
+          const trustedPage = this.checkedPage();
+          const action = await this.boundedEvaluate(trustedPage.evaluate(startRootEmailVerification), deadline);
+          if (action === 'blocked') throw new RootEmailError('AWS 提示登录验证请求受限，请稍后再试', 429);
+          if (action === 'changed') throw new RootEmailError('AWS 登录验证页出现多个 Verify 控件，已停止', 422);
+          if (action === 'not_ready') verifyStarted = false;
+        }
       } catch (error) {
         if (error instanceof RootEmailError || error instanceof RootEmailBrowserReadTimeout || this.signal.aborted) throw error;
         lastBrowserError = error;
