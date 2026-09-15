@@ -223,10 +223,19 @@ const BulkRootResetPage: React.FC<{ canOperate?: boolean }> = ({ canOperate = fa
             <Tag color="error">发信失败 {batch.failed}</Tag><Tag color="warning">待检查 {batch.interrupted}</Tag><Tag>已停止 {batch.cancelled}</Tag>
           </Space>
           <Space wrap>
-            {batch.canDownloadCredentials && <Button type="primary" icon={<DownloadOutlined />} disabled={busy}
-              onClick={() => { setDownloadTotpCode(''); setDownloadOpen(true); }}>
-              一次性下载凭证 CSV（{batch.credentialsAvailable}）
-            </Button>}
+            {canOperate && batch.canManage && <Space direction="vertical" size={2}>
+              <Button type="primary" icon={<DownloadOutlined />} disabled={busy || !batch.canDownloadCredentials}
+                onClick={() => { setDownloadTotpCode(''); setDownloadOpen(true); }}>
+                {batch.canDownloadCredentials
+                  ? `一次性下载凭证 CSV（${batch.credentialsAvailable}）`
+                  : '下载 Root 凭证 CSV'}
+              </Button>
+              {!batch.canDownloadCredentials && !batch.credentialsDownloadedAt && <Typography.Text type="secondary">
+                {batch.done < batch.total ? '批次完成后，如当前用户是创建者且至少一个密码成功，即可通过 MFA 下载一次'
+                  : batch.passwordSet === 0 ? '本批次没有设置成功的密码，暂无 CSV'
+                  : '仅创建者可在临时凭证有效期内通过 MFA 下载一次'}
+              </Typography.Text>}
+            </Space>}
             {batch.credentialExpiresAt && !batch.credentialsDownloadedAt && <Typography.Text type="warning">
               最早一项凭证将在 {new Date(batch.credentialExpiresAt).toLocaleString()} 自动销毁
             </Typography.Text>}

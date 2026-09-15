@@ -183,9 +183,87 @@ export class AwsRootEmailSession implements RootEmailSession {
 
 
 export type RootPasswordAutomationOutcome = 'failed' | 'unknown';
+export type RootPasswordAutomationStage = 'validate_link' | 'authorize' | 'runtime' | 'load_driver' | 'launch_browser'
+  | 'create_page' | 'configure_page' | 'navigate' | 'wait_form' | 'fill_form' | 'submit' | 'wait_result';
+export type RootPasswordAutomationCategory = 'policy' | 'timeout' | 'navigation_aborted' | 'network'
+  | 'target_closed' | 'execution_context_changed' | 'browser_error';
+
+type RootPasswordAutomationErrorOptions = {
+  stage?: RootPasswordAutomationStage;
+  category?: RootPasswordAutomationCategory;
+  retryable?: boolean;
+};
 
 export class RootPasswordAutomationError extends RootEmailError {
-  constructor(message: string, public readonly outcome: RootPasswordAutomationOutcome) { super(message, 422); }
+  readonly stage: RootPasswordAutomationStage;
+  readonly category: RootPasswordAutomationCategory;
+  readonly retryable: boolean;
+
+  constructor(message: string, public readonly outcome: RootPasswordAutomationOutcome,
+    options: RootPasswordAutomationErrorOptions = {}) {
+    super(message, 422);
+    this.stage = options.stage || 'wait_form';
+    this.category = options.category || 'policy';
+    // Unknown outcomes may have crossed the submit boundary and can never be retried.
+    this.retryable = outcome === 'failed' && options.retryable === true;
+  }
+
+  /** Permit at most one retry, and only for a classified pre-submit browser failure. */
+  canRetry(completedAttempts: number): boolean {
+    return completedAttempts === 1 && this.outcome === 'failed' && this.retryable;
+  }
+}
+
+/** Convert raw browser failures into a URL/token-free category suitable for task history and audit. */
+export function classifyRootPasswordAutomationError(error: unknown, stage: RootPasswordAutomationStage,
+  submitted: boolean): RootPasswordAutomationError {
+  const name = error instanceof Error ? error.name : '';
+  const message = error instanceof Error ? error.message : '';
+  const value = `${name} ${message}`;
+  const category: RootPasswordAutomationCategory = /ERR_ABORTED/i.test(value) ? 'navigation_aborted'
+    : /net::ERR_|Navigation failed/i.test(value) ? 'network'
+    : /Target closed|Session closed|browser has disconnected|Connection closed|Protocol error.*Target/i.test(value) ? 'target_closed'
+    : /Execution context was destroyed|frame was detached|Cannot find context/i.test(value) ? 'execution_context_changed'
+    : /TimeoutError|timed out|timeout/i.test(value) ? 'timeout'
+    : 'browser_error';
+  const retryableStages: RootPasswordAutomationStage[] = [
+    'launch_browser', 'create_page', 'configure_page', 'navigate', 'wait_form', 'fill_form',
+  ];
+  const outcome: RootPasswordAutomationOutcome = submitted ? 'unknown' : 'failed';
+  const safeMessage = submitted
+    ? `提交新密码后页面异常（${stage}/${category}），状态未知；系统不会自动重试`
+    : `AWS 密码页面异常（${stage}/${category}），未提交新密码`;
+  return new RootPasswordAutomationError(safeMessage, outcome, {
+    stage, category, retryable: !submitted && retryableStages.includes(stage),
+  });
+}
+
+/** Preserve policy errors before submission, but make every post-submit policy failure unknown. */
+export function normalizeRootPasswordAutomationError(error: unknown, stage: RootPasswordAutomationStage,
+  submitted: boolean): RootEmailError {
+  if (error instanceof RootPasswordAutomationError) return error;
+  if (error instanceof RootEmailError) {
+    if (!submitted) return error;
+    return new RootPasswordAutomationError(
+      `提交新密码后安全校验中止（${stage}/policy），状态未知；系统不会自动重试`,
+      'unknown', { stage, category: 'policy' });
+  }
+  return classifyRootPasswordAutomationError(error, stage, submitted);
+}
+
+export interface RootPasswordAttemptSession {
+  setPassword(resetUrl: string, password: string): Promise<void>;
+  close(): Promise<void>;
+}
+
+export type RootPasswordAttemptResult<T extends RootPasswordAttemptSession> =
+  | { kind: 'success'; session: T }
+  | { kind: 'failed'; session?: T; error: unknown }
+  | { kind: 'stopped'; session?: T };
+
+export interface RootPasswordAttemptHooks {
+  beforeRetry(error: RootPasswordAutomationError): boolean | Promise<boolean>;
+  beforeSecondAttempt(): void | Promise<void>;
 }
 
 /** Strict reset-link automation. It never retries after the submit button may have been clicked. */
@@ -194,6 +272,39 @@ export class AwsRootPasswordSession {
   private page?: Page;
   private profile?: string;
   private submitted = false;
+
+  /** Run no more than two browser attempts; the second exists only for a classified pre-submit failure. */
+  static async runWithSafeRetry<T extends RootPasswordAttemptSession>(createSession: () => T,
+    resetUrl: string, password: string, hooks: RootPasswordAttemptHooks): Promise<RootPasswordAttemptResult<T>> {
+    let session: T | undefined;
+    try {
+      session = createSession();
+      await session.setPassword(resetUrl, password);
+      return { kind: 'success', session };
+    } catch (error) {
+      if (!(error instanceof RootPasswordAutomationError) || !error.canRetry(1)) {
+        return { kind: 'failed', session, error };
+      }
+      let proceed: boolean;
+      try { proceed = await hooks.beforeRetry(error); }
+      catch (hookError) { return { kind: 'failed', session, error: hookError }; }
+      if (!proceed) return { kind: 'stopped', session };
+      try {
+        await session!.close();
+        session = undefined;
+        await hooks.beforeSecondAttempt();
+      } catch (preparationError) {
+        return { kind: 'failed', session, error: preparationError };
+      }
+      try {
+        session = createSession();
+        await session.setPassword(resetUrl, password);
+        return { kind: 'success', session };
+      } catch (secondError) {
+        return { kind: 'failed', session, error: secondError };
+      }
+    }
+  }
 
   constructor(private readonly signal: AbortSignal, private readonly authorize: () => void) {}
 
@@ -256,15 +367,20 @@ export class AwsRootPasswordSession {
   }
 
   async setPassword(resetUrl: string, password: string): Promise<void> {
+    let stage: RootPasswordAutomationStage = 'validate_link';
     try {
       const { validateRootResetLink } = await import('./root-mail-links');
       const validated = validateRootResetLink(resetUrl);
       if (!validated) throw new RootPasswordAutomationError('恢复邮件中的 AWS 重置链接未通过严格校验', 'failed');
       this.signal.throwIfAborted();
+      stage = 'authorize';
       this.authorize();
+      stage = 'runtime';
       const runtime = rootEmailRuntime();
+      stage = 'load_driver';
       const { default: puppeteer } = await import('puppeteer-core');
       this.profile = fs.mkdtempSync(path.join(os.tmpdir(), 'aws-root-password-'));
+      stage = 'launch_browser';
       this.browser = await puppeteer.launch({
         executablePath: runtime.chrome, headless: false, userDataDir: this.profile,
         defaultViewport: { width: 1280, height: 900, deviceScaleFactor: 1 },
@@ -272,15 +388,20 @@ export class AwsRootPasswordSession {
         env: runtime.display ? { ...process.env, DISPLAY: runtime.display } : process.env,
         timeout: 15_000, signal: this.signal,
       });
+      stage = 'create_page';
       this.page = await this.browser.newPage();
       this.page.setDefaultTimeout(25_000);
       this.page.setDefaultNavigationTimeout(30_000);
+      stage = 'configure_page';
       await this.page.setExtraHTTPHeaders({ 'Accept-Language': 'en-US,en;q=0.9' });
+      stage = 'navigate';
       await this.page.goto(validated, { waitUntil: 'domcontentloaded' });
       this.checkedPage();
+      stage = 'wait_form';
       await this.waitFor('ready', 30_000);
 
       const page = this.checkedPage();
+      stage = 'fill_form';
       const filled = await page.evaluate((value: string) => {
         const doc = (globalThis as any).document;
         const visible = (element: any) => {
@@ -301,9 +422,11 @@ export class AwsRootPasswordSession {
       }, password);
       if (!filled) throw new RootPasswordAutomationError('无法安全识别并填写两处新密码输入框', 'failed');
       this.signal.throwIfAborted();
+      stage = 'authorize';
       this.authorize();
 
       // Conservative boundary: any failure after this point is unknown, even if evaluate fails before returning.
+      stage = 'submit';
       this.submitted = true;
       const clicked = await page.evaluate(() => {
         const doc = (globalThis as any).document;
@@ -321,12 +444,10 @@ export class AwsRootPasswordSession {
         return true;
       });
       if (!clicked) throw new RootPasswordAutomationError('提交按钮状态已变化，密码设置结果未知；系统不会自动重试', 'unknown');
+      stage = 'wait_result';
       await this.waitFor('success', 45_000);
     } catch (error) {
-      if (error instanceof RootPasswordAutomationError) throw error;
-      throw new RootPasswordAutomationError(
-        this.submitted ? '提交新密码后页面异常，状态未知；系统不会自动重试' : 'AWS 密码页面加载失败，未提交新密码',
-        this.submitted ? 'unknown' : 'failed');
+      throw normalizeRootPasswordAutomationError(error, stage, this.submitted);
     }
   }
 

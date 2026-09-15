@@ -321,10 +321,12 @@ function tickMail() {
 
 async function executePassword(job: RootEmailJob, controller: AbortController) {
   const currentStore = store!;
-  const deadline = setTimeout(() => controller.abort(), 120_000);
+  // Two browser attempts may each need time to load, but no retry is allowed after the submit boundary.
+  const deadline = setTimeout(() => controller.abort(), 180_000);
   let session: AwsRootPasswordSession | undefined;
   const ensureStatus = (status: RootEmailJob['status']) => {
     controller.signal.throwIfAborted();
+    if (stopping) throw new RootEmailError('任务执行器已停止，已取消后续密码操作');
     authorize(job);
     if (currentStore.get(job.id)?.status !== status) throw new RootEmailError('任务状态已变化，停止自动改密');
   };
@@ -343,8 +345,28 @@ async function executePassword(job: RootEmailJob, controller: AbortController) {
     const started = currentStore.updateIfStatus(job.id, ['link_ready'], { status: 'setting_password', phase: 'setting_password',
       encryptedPassword, credentialExpiresAt, detail: '正在 AWS 官方页面填写并提交强随机密码' });
     if (!started) return;
-    session = new AwsRootPasswordSession(controller.signal, () => ensureStatus('setting_password'));
-    await session.setPassword(url, password);
+
+    const attempt = await AwsRootPasswordSession.runWithSafeRetry(
+      () => new AwsRootPasswordSession(controller.signal, () => ensureStatus('setting_password')),
+      url,
+      password,
+      {
+        beforeRetry(error) {
+          if (controller.signal.aborted || stopping) throw error;
+          const retrying = currentStore.updateIfStatus(job.id, ['setting_password'], {
+            detail: `AWS 密码页面首次异常（${error.stage}/${error.category}），确认未提交；正在进行唯一一次安全重试`,
+          });
+          if (!retrying) return false;
+          audit(retrying, 'ROOT_PASSWORD_SET_RETRY');
+          return true;
+        },
+        beforeSecondAttempt() { ensureStatus('setting_password'); },
+      },
+    );
+    session = attempt.session;
+    if (attempt.kind === 'stopped') return;
+    if (attempt.kind === 'failed') throw attempt.error;
+
     const completed = currentStore.updateIfStatus(job.id, ['setting_password'], { status: 'password_set', phase: 'done',
       passwordSetAt: new Date().toISOString(), mailKey: undefined,
       detail: 'AWS 已明确确认新密码设置成功；临时凭证可一次性导出，最多保留 30 分钟' });
@@ -355,7 +377,9 @@ async function executePassword(job: RootEmailJob, controller: AbortController) {
     const outcome = error instanceof RootPasswordAutomationError ? error.outcome : 'failed';
     const cancelled = controller.signal.aborted && outcome === 'failed' && !stopping;
     const status: RootEmailJob['status'] = outcome === 'unknown' ? 'password_unknown' : cancelled ? 'cancelled' : 'password_failed';
-    const detail = outcome === 'unknown' ? '新密码提交后未收到 AWS 明确结果；临时密码已销毁，系统不会自动重试'
+    const detail = outcome === 'unknown'
+      ? error instanceof RootPasswordAutomationError ? error.message
+        : '新密码提交后未收到 AWS 明确结果；临时密码已销毁，系统不会自动重试'
       : cancelled ? '自动密码设置已在提交前停止；临时密码已销毁'
       : error instanceof RootEmailError || error instanceof MailApiError || error instanceof RootPasswordAutomationError
         ? error.message : '自动密码设置失败，未确认修改；临时密码已销毁';

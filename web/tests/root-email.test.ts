@@ -183,3 +183,127 @@ test('20 accounts fit in one automatic batch; larger batches are rejected and ca
     assert.equal(store.get(result.jobs[1].id)?.status, 'running');
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
+
+test('browser failures are safely classified and post-submit policy errors become unknown', async () => {
+  const { classifyRootPasswordAutomationError, normalizeRootPasswordAutomationError,
+    RootPasswordAutomationError } = await import('../server/root-email-browser');
+  const { RootEmailError } = await import('../server/root-email-core');
+  const secretUrl = 'https://signin.aws.amazon.com/resetpassword?type=RootUser&token=TOP_SECRET&key=TOP_SECRET';
+  const transient = classifyRootPasswordAutomationError(
+    new Error(`net::ERR_ABORTED at ${secretUrl}`), 'navigate', false,
+  );
+  assert.equal(transient.outcome, 'failed');
+  assert.equal(transient.stage, 'navigate');
+  assert.equal(transient.category, 'navigation_aborted');
+  assert.equal(transient.canRetry(1), true);
+  assert.equal(transient.canRetry(2), false);
+  assert.equal(transient.message.includes('TOP_SECRET'), false);
+
+  const uncertain = classifyRootPasswordAutomationError(
+    new Error(`Protocol error: Target closed ${secretUrl}`), 'wait_result', true,
+  );
+  assert.equal(uncertain.outcome, 'unknown');
+  assert.equal(uncertain.category, 'target_closed');
+  assert.equal(uncertain.canRetry(1), false);
+  assert.equal(uncertain.message.includes('TOP_SECRET'), false);
+
+  const policyError = new RootEmailError('账户邮箱已变化：sensitive@example.test');
+  assert.equal(normalizeRootPasswordAutomationError(policyError, 'authorize', false), policyError);
+  const postSubmitPolicy = normalizeRootPasswordAutomationError(policyError, 'wait_result', true);
+  assert.ok(postSubmitPolicy instanceof RootPasswordAutomationError);
+  assert.equal(postSubmitPolicy.outcome, 'unknown');
+  assert.equal(postSubmitPolicy.canRetry(1), false);
+  assert.equal(postSubmitPolicy.message.includes('sensitive@example.test'), false);
+});
+
+test('browser attempt runner closes the first session and never makes a third attempt', async () => {
+  const { AwsRootPasswordSession, RootPasswordAutomationError } = await import('../server/root-email-browser');
+  const transient = () => new RootPasswordAutomationError('safe transient', 'failed', {
+    stage: 'navigate', category: 'network', retryable: true,
+  });
+  const unknown = () => new RootPasswordAutomationError('safe unknown', 'unknown', {
+    stage: 'wait_result', category: 'target_closed', retryable: false,
+  });
+  const run = async (outcomes: unknown[], options: { closeFails?: boolean; beforeRetry?: boolean; stopDuringClose?: boolean } = {}) => {
+    const calls: string[] = [];
+    let created = 0;
+    let stopped = false;
+    const result = await AwsRootPasswordSession.runWithSafeRetry(() => {
+      const index = created++;
+      return {
+        async setPassword() { calls.push(`set:${index}`); if (outcomes[index]) throw outcomes[index]; },
+        async close() {
+          calls.push(`close:${index}`);
+          if (index === 0 && options.closeFails) throw new Error('close failed');
+          if (index === 0 && options.stopDuringClose) stopped = true;
+        },
+      };
+    }, 'redacted-url', 'redacted-password', {
+      beforeRetry() { calls.push('before-retry'); return options.beforeRetry !== false; },
+      beforeSecondAttempt() { calls.push('before-second'); if (stopped) throw new Error('runner stopped'); },
+    });
+    return { result, calls, created };
+  };
+
+  const success = await run([transient(), undefined]);
+  assert.equal(success.result.kind, 'success');
+  assert.equal(success.created, 2);
+  assert.deepEqual(success.calls, ['set:0', 'before-retry', 'close:0', 'before-second', 'set:1']);
+
+  const noRetryAfterSubmit = await run([unknown()]);
+  assert.equal(noRetryAfterSubmit.result.kind, 'failed');
+  assert.equal(noRetryAfterSubmit.created, 1);
+  assert.deepEqual(noRetryAfterSubmit.calls, ['set:0']);
+
+  const closeFailure = await run([transient()], { closeFails: true });
+  assert.equal(closeFailure.result.kind, 'failed');
+  assert.equal(closeFailure.created, 1);
+  assert.deepEqual(closeFailure.calls, ['set:0', 'before-retry', 'close:0']);
+
+  const casStopped = await run([transient()], { beforeRetry: false });
+  assert.equal(casStopped.result.kind, 'stopped');
+  assert.equal(casStopped.created, 1);
+
+  const stoppedDuringClose = await run([transient()], { stopDuringClose: true });
+  assert.equal(stoppedDuringClose.result.kind, 'failed');
+  assert.equal(stoppedDuringClose.created, 1);
+  assert.deepEqual(stoppedDuringClose.calls, ['set:0', 'before-retry', 'close:0', 'before-second']);
+
+  const secondUnknown = await run([transient(), unknown()]);
+  assert.equal(secondUnknown.result.kind, 'failed');
+  assert.equal(secondUnknown.created, 2);
+  if (secondUnknown.result.kind === 'failed') {
+    assert.ok(secondUnknown.result.error instanceof RootPasswordAutomationError);
+    assert.equal(secondUnknown.result.error.outcome, 'unknown');
+  }
+});
+
+test('credential CSV contains the required columns and neutralizes spreadsheet formulas', async () => {
+  const { buildRootCredentialCsv } = await import('../server/root-password-secrets');
+  const csv = buildRootCredentialCsv([{
+    accountId: input.accountId,
+    email: '=formula@example.test',
+    password: 'Abcdefghijk2345!@#$%WXYZ',
+  }]).toString('utf8');
+  const [header, row] = csv.trimEnd().split('\r\n');
+  assert.equal(header, '\uFEFF"AWS Account ID","Root Email","New Root Password"');
+  assert.equal(row, '"123456789012","\'=formula@example.test","Abcdefghijk2345!@#$%WXYZ"');
+});
+
+test('one-time credential claim destroys ciphertext after the download response starts', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'root-password-csv-'));
+  try {
+    const store = new RootEmailStore(path.join(dir, 'jobs.json'));
+    const meta = { batchId: randomUUID(), payerAccountId: '999999999999', payerName: 'payer-a', autoSetPassword: true as const };
+    const { jobs: [job] } = store.createBatch([input], meta);
+    store.update(job.id, { status: 'password_set', phase: 'done', encryptedPassword: 'authenticated-ciphertext',
+      credentialExpiresAt: new Date(Date.now() + 60_000).toISOString() });
+    const claimId = randomUUID();
+    assert.equal(store.claimBatchCredentials(meta.batchId, input.createdByUserId, claimId)[0].credentialDownloadClaimId, claimId);
+    const completed = store.completeBatchCredentialDownload(meta.batchId, input.createdByUserId, claimId)[0];
+    assert.equal(completed.encryptedPassword, undefined);
+    assert.ok(completed.credentialDownloadedAt);
+    assert.ok(completed.credentialDestroyedAt);
+    assert.throws(() => store.claimBatchCredentials(meta.batchId, input.createdByUserId, randomUUID()), /已下载/);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
