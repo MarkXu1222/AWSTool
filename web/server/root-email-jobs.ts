@@ -14,7 +14,7 @@ import { findRootRecoveryLinks, scanRootMailPage } from './root-mail-poll';
 import { canManageRootEmailJob, canRetrieveRootEmailManualLink, canViewRootEmailJob,
   resolveRootResetAccess } from './root-reset-permissions';
 import { assertRootPasswordEncryptionReady, buildRootCredentialCsv, decryptRootPassword, encryptRootPassword,
-  generateRootPassword, ROOT_CREDENTIAL_TTL_MS } from './root-password-secrets';
+  generateRootPassword, reencryptRootPassword } from './root-password-secrets';
 
 let store: RootEmailStore | undefined;
 let timer: NodeJS.Timeout | undefined;
@@ -24,10 +24,8 @@ let runtimeCheck: { checkedAt: number; ready: boolean; detail: string } | undefi
 let checkingRuntime: Promise<void> | undefined;
 let mailTimer: NodeJS.Timeout | undefined;
 let mailActive: { id: string; controller: AbortController; promise: Promise<void> } | undefined;
-let lastCredentialCleanupAt = 0;
 const credentialDownloads = new Set<string>();
 const credentialDownloadKey = (batchId: string, slot: CredentialDownloadSlot) => `${batchId}:${slot}`;
-const ROOT_CREDENTIAL_DOWNLOAD_RESERVE_MS = 10 * 60_000;
 
 function manualFallback(reason: NonNullable<RootEmailJob['manualFallbackReason']>) {
   return { passwordSubmitAttempted: false, manualFallbackReason: reason,
@@ -55,11 +53,15 @@ function authorize(job: Pick<RootEmailJob, 'createdBy' | 'createdByUserId' | 'ac
     selectRootEmailTargets(db.getAccountsCache().accounts, { accountId: job.payerAccountId, name: job.payerName }, [job.accountId]);
   }
 }
-function audit(job: RootEmailJob, action: string, detail = job.detail, sourceIp = job.createdFromIp) {
+function audit(job: RootEmailJob, action: string, detail = job.detail, sourceIp = job.createdFromIp): boolean {
   try {
     db.addAuditLog(Number(job.createdByUserId), action,
       `AWS 账户 ${job.accountId} · 任务 ${job.id} · ${detail}`, job.createdBy, sourceIp);
-  } catch { console.error('[RootEmail] 任务审计写入失败'); }
+    return true;
+  } catch {
+    console.error('[RootEmail] 任务审计写入失败');
+    return false;
+  }
 }
 function auditAs(job: RootEmailJob, actor: { id: number | string; username: string },
   action: string, detail: string, sourceIp?: string) {
@@ -133,24 +135,22 @@ export function rootEmailCatalog() {
       eligible: (a.State || a.Status) === 'ACTIVE' && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(a.Email || '') })) };
 }
 
-function credentialAvailable(job: RootEmailJob, now = Date.now()): boolean {
-  return job.status === 'password_set' && !!job.encryptedPassword
-    && Number.isFinite(Date.parse(job.credentialExpiresAt || '')) && Date.parse(job.credentialExpiresAt!) > now;
+function credentialAvailable(job: RootEmailJob): boolean {
+  return job.status === 'password_set' && job.credentialRetentionPolicy === 'permanent' && !!job.encryptedPassword;
 }
 function firstTimestamp(jobs: RootEmailJob[], field: 'credentialOwnerDownloadedAt' | 'credentialAdminDownloadedAt') {
   return jobs.map(job => job[field]).filter((value): value is string => !!value).sort()[0];
 }
 function jobView(job: RootEmailJob, user: RootEmailUser) {
   const { id, accountId, email, status, phase, attempts, createdBy, createdAt, sentAt, detail,
-    autoSetPassword, credentialExpiresAt, passwordSetAt } = job;
+    autoSetPassword, passwordSetAt } = job;
   const current = db.getUser(user.username);
   const manualResetExpiresAt = manualRootResetFallbackExpiresAt(job);
   const manualResetAvailable = !!manualResetExpiresAt && !!current
     && String(current.id) === String(user.id) && canRetrieveRootEmailManualLink(current, job)
     && !hasNewerRootEmailJob(store?.list() || [], job);
   return { id, accountId, email, status, phase, attempts, createdBy, createdAt, sentAt, detail,
-    autoSetPassword: autoSetPassword === true, credentialsAvailable: credentialAvailable(job),
-    credentialExpiresAt: credentialAvailable(job) ? credentialExpiresAt : undefined, passwordSetAt,
+    autoSetPassword: autoSetPassword === true, credentialsAvailable: credentialAvailable(job), passwordSetAt,
     manualResetAvailable, manualResetExpiresAt: manualResetAvailable ? manualResetExpiresAt : undefined,
     canManage: canManageRootEmailJob(user, job) };
 }
@@ -159,7 +159,6 @@ function batchSummary(jobs: RootEmailJob[], user: RootEmailUser) {
   const count = (status: RootEmailJob['status']) => jobs.filter(job => job.status === status).length;
   const done = jobs.filter(job => !isPendingEmailJob(job)).length;
   const availableJobs = jobs.filter(job => credentialAvailable(job));
-  const credentialExpiresAt = availableJobs.map(job => job.credentialExpiresAt!).sort()[0];
   const ownerCredentialsDownloadedAt = firstTimestamp(jobs, 'credentialOwnerDownloadedAt');
   const adminCredentialsDownloadedAt = firstTimestamp(jobs, 'credentialAdminDownloadedAt');
   const current = db.getUser(user.username);
@@ -169,10 +168,10 @@ function batchSummary(jobs: RootEmailJob[], user: RootEmailUser) {
   const adminCredentialAccess = identityMatches && current!.role === 'admin';
   const batchId = first.batchId!;
   const canDownloadOwnerCredentials = ownerCredentialAccess && done === jobs.length && availableJobs.length > 0
-    && !ownerCredentialsDownloadedAt && !jobs.some(job => job.credentialOwnerDownloadClaim)
+    && !jobs.some(job => job.credentialOwnerDownloadClaim)
     && !credentialDownloads.has(credentialDownloadKey(batchId, 'owner'));
   const canDownloadAdminCredentials = adminCredentialAccess && done === jobs.length && availableJobs.length > 0
-    && !adminCredentialsDownloadedAt && !jobs.some(job => job.credentialAdminDownloadClaim)
+    && !jobs.some(job => job.credentialAdminDownloadClaim)
     && !credentialDownloads.has(credentialDownloadKey(batchId, 'admin'));
   return { id: batchId, payerAccountId: first.payerAccountId!, payerName: first.payerName!,
     createdBy: first.createdBy, createdAt: first.createdAt, total: jobs.length,
@@ -180,9 +179,9 @@ function batchSummary(jobs: RootEmailJob[], user: RootEmailUser) {
     waitingMail: count('waiting_mail'), linkReady: count('link_ready'), mailFailed: count('mail_failed'),
     settingPassword: count('setting_password'), passwordSet: count('password_set'),
     passwordFailed: count('password_failed'), passwordUnknown: count('password_unknown'),
-    credentialsAvailable: availableJobs.length, credentialExpiresAt,
+    credentialsAvailable: availableJobs.length,
     ownerCredentialAccess, adminCredentialAccess, canDownloadOwnerCredentials, canDownloadAdminCredentials,
-    ownerCredentialsDownloadedAt, adminCredentialsDownloadedAt, batchCredentialCutoffAt: first.batchCredentialCutoffAt,
+    ownerCredentialsDownloadedAt, adminCredentialsDownloadedAt,
     cancelled: count('cancelled'), interrupted: count('interrupted'), done,
     canManage: jobs.every(job => canManageRootEmailJob(user, job)) };
 }
@@ -422,9 +421,8 @@ async function executePassword(job: RootEmailJob, controller: AbortController) {
     const password = generateRootPassword();
     const context = { jobId: job.id, accountId: job.accountId, createdByUserId: job.createdByUserId };
     const encryptedPassword = encryptRootPassword(password, context);
-    const credentialExpiresAt = new Date(Date.now() + ROOT_CREDENTIAL_TTL_MS).toISOString();
     const started = currentStore.updateIfStatus(job.id, ['link_ready'], { status: 'setting_password', phase: 'setting_password',
-      encryptedPassword, credentialExpiresAt, passwordSubmitAttempted: false,
+      encryptedPassword, credentialExpiresAt: undefined, credentialDestroyedAt: undefined, passwordSubmitAttempted: false,
       manualFallbackReason: undefined, manualFallbackExpiresAt: undefined,
       detail: '正在 AWS 官方页面填写并提交强随机密码' });
     if (!started) return;
@@ -454,8 +452,8 @@ async function executePassword(job: RootEmailJob, controller: AbortController) {
     if (attempt.kind === 'failed') throw attempt.error;
 
     const completed = currentStore.updateIfStatus(job.id, ['setting_password'], { status: 'password_set', phase: 'done',
-      passwordSetAt: new Date().toISOString(), mailKey: undefined,
-      detail: 'AWS 已明确确认新密码设置成功；临时凭证可一次性导出，最多保留 30 分钟' });
+      passwordSetAt: new Date().toISOString(), credentialRetentionPolicy: 'permanent', mailKey: undefined,
+      detail: 'AWS 已明确确认新密码设置成功；密码已永久加密归档，可按权限重复下载' });
     if (completed) audit(completed, 'ROOT_PASSWORD_SET');
   } catch (error) {
     const latest = currentStore.get(job.id);
@@ -558,12 +556,9 @@ export function prepareRootCredentialCsv(id: string, user: RootEmailUser,
   if (jobs.some(isPendingEmailJob)) throw new RootEmailError('批次尚未完成，不能提前下载不完整凭证', 409);
   const lockKey = credentialDownloadKey(id, slot);
   if (credentialDownloads.has(lockKey)) throw new RootEmailError('此下载副本正在生成，请勿重复提交', 409);
-  for (const expired of currentStore.destroyExpiredCredentials()) {
-    audit(expired, 'ROOT_PASSWORD_CREDENTIAL_DESTROY', '下载前检查发现凭证已到期，临时 Root 密码密文已销毁');
-  }
   const freshJobs = batchJobs(id);
   const availableIds = new Set(freshJobs.filter(job => credentialAvailable(job)).map(job => job.id));
-  if (!availableIds.size) throw new RootEmailError('此批次没有可下载的临时凭证，可能已过期或已销毁', 410);
+  if (!availableIds.size) throw new RootEmailError('此批次没有可下载的永久凭证；旧密码可能已在策略升级前销毁', 410);
 
   const claimId = randomUUID();
   credentialDownloads.add(lockKey);
@@ -586,9 +581,8 @@ export function prepareRootCredentialCsv(id: string, user: RootEmailUser,
         try {
           if (possiblyDisclosed) {
             const completed = currentStore.completeBatchCredentialDownload(id, slot, String(current.id), claimId);
-            const destroyed = !completed.some(job => job.encryptedPassword);
             auditAs(completed[0], current, 'ROOT_PASSWORD_CSV_DOWNLOAD',
-              `批次 ${id} ${slotLabel}副本响应已开始发送 ${rows.length} 个密码；${destroyed ? '两个副本均已消费，密文已销毁' : '另一副本保留至到期'}`,
+              `批次 ${id} ${slotLabel}视图发送 ${rows.length} 个密码；永久密文继续保留，可按权限再次下载`,
               requestIp);
           } else {
             currentStore.releaseBatchCredentialClaim(id, slot, String(current.id), claimId);
@@ -609,38 +603,8 @@ export function prepareRootCredentialCsv(id: string, user: RootEmailUser,
   }
 }
 
-function enforceCredentialDownloadWindows() {
-  if (!store) return;
-  const groups = new Map<string, RootEmailJob[]>();
-  for (const job of store.list()) {
-    if (job.batchId) groups.set(job.batchId, [...(groups.get(job.batchId) || []), job]);
-  }
-  for (const [batchId, jobs] of groups) {
-    if (jobs.some(job => job.batchCredentialCutoffAt) || !jobs.some(isPendingEmailJob)) continue;
-    const expirations = jobs.filter(job => job.encryptedPassword && job.credentialExpiresAt)
-      .map(job => Date.parse(job.credentialExpiresAt!)).filter(Number.isFinite);
-    if (!expirations.length || Math.min(...expirations) - Date.now() > ROOT_CREDENTIAL_DOWNLOAD_RESERVE_MS) continue;
-    const ids = new Set(jobs.map(job => job.id));
-    if (active && ids.has(active.id)) active.controller.abort();
-    if (mailActive && ids.has(mailActive.id)) mailActive.controller.abort();
-    const stopped = store.stopBatchForCredentialWindow(batchId);
-    if (stopped.changed) audit(stopped.jobs[0], 'ROOT_PASSWORD_BATCH_CUTOFF',
-      `批次 ${batchId} 为已设置密码预留至少 10 分钟一次性下载窗口，剩余任务已停止`);
-  }
-}
-
-function cleanupExpiredCredentials() {
-  if (!store || Date.now() - lastCredentialCleanupAt < 30_000) return;
-  lastCredentialCleanupAt = Date.now();
-  for (const job of store.destroyExpiredCredentials()) {
-    audit(job, 'ROOT_PASSWORD_CREDENTIAL_DESTROY', '30 分钟保留期届满，临时 Root 密码密文已自动销毁');
-  }
-}
-
 function tick() {
   if (!store || stopping) return;
-  enforceCredentialDownloadWindows();
-  cleanupExpiredCredentials();
   if (active) return;
   // Reset links are time-sensitive, so confirmed links take priority over new recovery-email requests.
   const job = store.list().find(j => j.status === 'link_ready' && j.autoSetPassword === true)
@@ -661,14 +625,30 @@ export function startRootEmailRunner() {
   const dbFile = process.env.DB_PATH || path.resolve(__dirname, '../../data/db.json');
   store = new RootEmailStore(path.join(path.dirname(dbFile), 'root-email-jobs.json'));
   store.recover();
+  const reencrypted = store.reencryptPermanentCredentials(job => reencryptRootPassword(job.encryptedPassword!, {
+    jobId: job.id,
+    accountId: job.accountId,
+    createdByUserId: job.createdByUserId,
+  }));
+  const pendingReencryptionAudits = store.listPendingCredentialReencryptionAudits();
+  if (pendingReencryptionAudits.length > 0) {
+    const batchCount = new Set(pendingReencryptionAudits.map(job => job.batchId).filter(Boolean)).size;
+    try {
+      db.addAuditLog(null, 'ROOT_PASSWORD_CREDENTIAL_REENCRYPT',
+        `系统启动已原子重加密 ${pendingReencryptionAudits.length} 条永久 Root 凭证到 current key，涉及 ${batchCount} 个批次`,
+        'system');
+    } catch {
+      throw new Error('Root 永久凭证轮换汇总审计未落盘，已停止启动并保留补偿标记');
+    }
+    // One bounded system event cannot evict itself from the 5,000-entry rolling audit log.
+    store.completeCredentialReencryptionAudits(pendingReencryptionAudits.map(job => job.id));
+  }
+  if (reencrypted.length > 0) console.log(`[RootEmail] 已将 ${reencrypted.length} 条永久凭证原子重加密到 current key`);
   for (const orphaned of store.consumeOrphanedCredentialClaims()) {
     const actor = db.getAllUsers().find(user => String(user.id) === orphaned.actorUserId);
     auditAs(orphaned.job, { id: orphaned.actorUserId, username: actor?.username || `user-${orphaned.actorUserId}` },
       'ROOT_PASSWORD_CSV_ORPHAN',
       `服务在 ${orphaned.slot === 'owner' ? '创建者' : 'Admin'}副本 claim 期间重启；该副本按可能已披露处理`);
-  }
-  for (const expired of store.destroyExpiredCredentials()) {
-    audit(expired, 'ROOT_PASSWORD_CREDENTIAL_DESTROY', '服务启动检查发现凭证已到期，临时 Root 密码密文已销毁');
   }
   stopping = false;
   timer = setInterval(tick, 1_000);

@@ -284,7 +284,7 @@ admin 恒有，其他角色必须显式授予，且**都不受 `allowed_pages` �
 
 - `root_access` → 账户页「根用户」敏感操作（Admin 临时凭证 / 删除 Root MFA / 恢复根密码 / 删除 Root Access Key）以及 Admin 控制台登录；`GET /root-credentials/:accountId` 的状态读取当前不经过该守卫
 - `bulk_quota_access` → 「批量提额」页；未授予时菜单完全不可见，后端 `requireBulkQuotaAccess` 也会拒绝
-- `root_reset_access` → 「批量设置 Root 密码」页，值为 `none` / `view` / `operate`；非 admin 只看本人批次，admin 查看/管理全部。创建批次仍要求 step-up TOTP；CSV 下载不再额外 MFA，每批创建者副本和全体 Admin 共享副本各一次
+- `root_reset_access` → 「批量设置 Root 密码」页，值为 `none` / `view` / `operate`；非 admin 只看本人批次，admin 查看/管理全部。创建批次仍要求 step-up TOTP；CSV 下载不再额外 MFA，Owner 可重复下载本人永久归档，Admin 可重复下载全部永久归档
 
 `requireRootAccess` 和 Admin 控制台门禁都会用 `db.getUser(username)` 实时读取数据库，严格要求字段为 `true`（admin 恒有），不信任旧 JWT 中缓存的权限。
 
@@ -320,11 +320,14 @@ admin 恒有，其他角色必须显式授予，且**都不受 `allowed_pages` �
     "port": 3000,
     "adminPassword": "登录密码",
     "jwtSecret": "128位hex随机串",
-    "encryptionKey": "至少32字符的独立密钥；MFA使用兼容CBC，临时Root密码使用用途分离的AES-256-GCM",
+    "encryptionKey": "32–4096字符的当前密钥；MFA等敏感字段新写带类型/key ID的认证GCM，并兼容迁移旧CBC；Root使用用途分离gcm2",
+    "encryptionKeyPrevious": ["轮换前的旧密钥，最多8个，仅用于认证解密和迁移历史密文"],
     "feishuWebhook": "留空则不通知"
   }
 }
 ```
+
+`encryptionKey` 是新密文的 current key；轮换时必须先把旧值移入 `encryptionKeyPrevious`，再替换 current key。历史项最多 8 个且只用于解密。服务启动会先认证并原子重加密在线 MFA、ExternalId 和永久 Root 凭证到 current key；DB 迁移审计同次写入，Root 使用可重试 marker 加一条有界 `system` 汇总审计。新 Root 密码写为带 16 位 key ID 的 `gcm2`，旧 `gcm1` 会依次尝试 current + historical key。首次从旧版 JWT-secret CBC 配置 dedicated key 时，启动迁移也会把 `jwtSecret` 作为仅限 legacy 字段的候选。在线迁移完成后，仍须等待包含旧密文的 7 天本地备份和异机快照完成轮替及恢复验证，才能删除历史 key。keyring 必须与 `data/root-email-jobs.json` 分开受控备份。
 
 `payers[].name` 格式为 `yanhuang编号-公司名`，用于提额文档与通知匹配公司。
 
@@ -346,7 +349,7 @@ admin 恒有，其他角色必须显式授予，且**都不受 `allowed_pages` �
 
 账单 ZIP 存在 `data/exports/billing/<jobId>/` 并在服务器长期保留；只通过鉴权下载端点访问，不写入 Git，也不会由 job runner 自动删除。历史记录通过分页接口查询，可重复下载。
 
-启动时：`migrateEncryptMFASecrets()` 迁移明文 MFA 密钥、`backupDB()` 备份到 `data/backups/db-YYYY-MM-DD.json`（保留 7 天）。
+启动和长时间运行期间每天首次 DB 读取时，`backupDB()` 会先校验源 JSON，再分别备份为 `data/backups/db-YYYY-MM-DD.json` 与 `data/backups/root-email-jobs-YYYY-MM-DD.json`；同日恢复点一旦创建便不覆盖，避免尚未认证的源密文破坏已有好备份。Root 快照只保留明确 `password_set` 且未在旧一次性策略下披露的密文，绝不归档 `setting_password`/failed/unknown 密文。两类各保留 7 天。自动备份不包含 `config.json`，匹配的 `encryptionKey` keyring 必须在独立受控位置备份。
 
 ---
 
@@ -481,7 +484,7 @@ HTML 模板 + Puppeteer 渲染。公司背景库在 `doc-templates.ts`（12 家�
 
 独立页面 `/rootreset` 受 `root_reset_access` 控制。每批最多 20 个 ACTIVE 成员账户；创建前必须精确输入 payer 名称、账户数量和当前 TOTP。任务严格串行执行：选择 Root 登录 → 如 AWS 要求则先完成登录安全验证码 → 打开 Forgot password → 完成恢复邮件验证码 → 精确匹配收件人/时间 → 校验 `signin.aws.amazon.com/resetpassword` 一次性链接 → 生成 24 位 CSPRNG 强密码 → 在 AWS 页面填写两处密码并提交。AWS 发信提交结果不明时只读查询邮箱而不重复发信；有效 reset 页面初始执行上下文短暂切换时会在提交前等待稳定。只有 AWS 页面出现明确成功文案才记为 `password_set`；确认尚未进入提交边界的浏览器加载异常最多执行 3 次独立 Chrome 尝试，同时只记录不含 URL/token 的阶段码和错误分类；提交后超时或页面异常记为 `password_unknown`，绝不自动重试。自动尝试耗尽且确认未提交密码时，任务创建者可在 2 小时内通过新的 MFA 按需重扫邮件、直接打开或显式复制链接；手工设置的密码不会进入平台 CSV。
 
-确认成功的密码以任务 ID、账户 ID、创建者 ID 作为 AAD，使用用途分离密钥和 AES-256-GCM 临时写入 `data/root-email-jobs.json`。密文最多保留 30 分钟；系统会在最早凭证到期前 10 分钟停止剩余任务。CSV 不再要求下载时额外 MFA：每批有创建者副本和全体 Admin 共享副本两个独立的一次性槽位，任一先下载后继续为另一槽保留密文，两槽都消费或到期时立即销毁。非 admin 只看本人批次，Admin 查看全部。列表 API、审计和飞书通知都不包含密码或 reset URL。完整运行与恢复语义见 [`web/ROOT_EMAIL.md`](web/ROOT_EMAIL.md)。
+确认成功的密码以任务 ID、账户 ID、创建者 ID 作为 AAD，使用用途分离密钥和 AES-256-GCM 永久写入 `data/root-email-jobs.json`，不会因下载或时间到期自动销毁。新记录使用 `gcm2` 并携带非敏感 key ID；旧 `gcm1` 通过 current + `web.encryptionKeyPrevious` 兼容解密。CSV 不再要求下载时额外 MFA：Owner 可重复下载本人批次，Admin 可重复下载全部批次；每次请求仍使用短期 durable claim 防止同一视图并发生成，并记录真实操作者。非 admin 只看本人批次，Admin 查看全部。`root-email-jobs.json` 每日与 `db.json` 分别做 7 天本地轮换备份；服务器文件、独立备份的匹配 keyring 和异机快照共同构成永久 Root 凭证库，必须按最高敏感级别保护。列表 API、审计和飞书通知都不包含密码或 reset URL。完整运行与恢复语义见 [`web/ROOT_EMAIL.md`](web/ROOT_EMAIL.md)。
 
 ### 账户角色自愈
 

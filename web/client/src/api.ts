@@ -22,7 +22,6 @@ export interface RootEmailJobView {
   detail: string;
   autoSetPassword: boolean;
   credentialsAvailable: boolean;
-  credentialExpiresAt?: string;
   passwordSetAt?: string;
   manualResetAvailable: boolean;
   manualResetExpiresAt?: string;
@@ -62,10 +61,8 @@ export interface RootEmailBatchView {
   passwordFailed: number;
   passwordUnknown: number;
   credentialsAvailable: number;
-  credentialExpiresAt?: string;
   ownerCredentialsDownloadedAt?: string;
   adminCredentialsDownloadedAt?: string;
-  batchCredentialCutoffAt?: string;
   jobs?: RootEmailJobView[];
 }
 
@@ -716,8 +713,8 @@ export const api = {
       throw new Error('Session expired');
     }
     if (!res.ok) {
-      const error = await res.json().catch(() => ({ error: '一次性凭证下载失败' }));
-      throw new Error(error.error || '一次性凭证下载失败');
+      const error = await res.json().catch(() => ({ error: '永久凭证下载失败' }));
+      throw new Error(error.error || '永久凭证下载失败');
     }
     const responseSlot = res.headers.get('X-Credential-Slot');
     if (responseSlot !== slot) throw new Error('凭证下载副本响应不匹配');

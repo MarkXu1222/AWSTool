@@ -37,6 +37,8 @@ export interface RootEmailJob {
   mailKey?: string;
   mailReceivedAt?: string;
   encryptedPassword?: string;
+  /** Explicitly marks credentials admitted to the permanent, repeatable-download policy. */
+  credentialRetentionPolicy?: 'permanent';
   credentialExpiresAt?: string;
   /** Legacy single-slot fields; migrated atomically by recover(). */
   credentialDownloadedAt?: string;
@@ -49,6 +51,8 @@ export interface RootEmailJob {
   credentialAdminDownloadedByUserId?: string;
   credentialAdminDownloadClaim?: RootCredentialDownloadClaim;
   credentialDestroyedAt?: string;
+  credentialReencryptedAt?: string;
+  credentialReencryptionAuditPending?: boolean;
   batchCredentialCutoffAt?: string;
   passwordSetAt?: string;
   passwordSubmitAttempted?: boolean;
@@ -134,6 +138,7 @@ export class RootEmailStore {
     if (!Array.isArray(value) || value.some(j => !j || typeof j.id !== 'string'
       || !/^\d{12}$/.test(j.accountId) || typeof j.email !== 'string' || !statuses.includes(j.status)
       || (j.encryptedPassword !== undefined && typeof j.encryptedPassword !== 'string')
+      || (j.credentialRetentionPolicy !== undefined && j.credentialRetentionPolicy !== 'permanent')
       || (j.credentialDownloadClaimId !== undefined && typeof j.credentialDownloadClaimId !== 'string')
       || (j.credentialOwnerDownloadedAt !== undefined && !validTimestamp(j.credentialOwnerDownloadedAt))
       || (j.credentialOwnerDownloadedByUserId !== undefined && !/^\d+$/.test(j.credentialOwnerDownloadedByUserId))
@@ -141,6 +146,8 @@ export class RootEmailStore {
       || (j.credentialAdminDownloadedAt !== undefined && !validTimestamp(j.credentialAdminDownloadedAt))
       || (j.credentialAdminDownloadedByUserId !== undefined && !/^\d+$/.test(j.credentialAdminDownloadedByUserId))
       || (j.credentialAdminDownloadClaim !== undefined && !validDownloadClaim(j.credentialAdminDownloadClaim))
+      || (j.credentialReencryptedAt !== undefined && !validTimestamp(j.credentialReencryptedAt))
+      || (j.credentialReencryptionAuditPending !== undefined && typeof j.credentialReencryptionAuditPending !== 'boolean')
       || (j.autoSetPassword !== undefined && typeof j.autoSetPassword !== 'boolean')
       || (j.passwordSubmitAttempted !== undefined && typeof j.passwordSubmitAttempted !== 'boolean')
       || (j.manualFallbackReason !== undefined && !ROOT_MANUAL_FALLBACK_REASONS.includes(j.manualFallbackReason))
@@ -235,20 +242,6 @@ export class RootEmailStore {
       ? { ...j, status: 'cancelled' as const, phase: 'done' as const, updatedAt: new Date().toISOString(),
         detail: j.sentAt ? '已停止自动处理；恢复邮件此前已发送' : '批次已停止，此账户未发送邮件' } : j));
   }
-  stopBatchForCredentialWindow(batchId: string): { jobs: RootEmailJob[]; changed: boolean } {
-    const matches = this.jobs.filter(j => j.batchId === batchId);
-    if (!matches.length) throw new RootEmailError('批次不存在', 404);
-    if (matches.some(j => j.batchCredentialCutoffAt)) return { jobs: structuredClone(matches), changed: false };
-    const cutoffAt = new Date().toISOString();
-    this.save(this.jobs.map(j => {
-      if (j.batchId !== batchId) return j;
-      if (['queued', 'waiting_mail', 'link_ready'].includes(j.status)) return { ...j,
-        status: 'cancelled' as const, phase: 'done' as const, batchCredentialCutoffAt: cutoffAt, updatedAt: cutoffAt,
-        detail: '为确保已设置密码仍有至少 10 分钟下载窗口，已停止剩余任务' };
-      return { ...j, batchCredentialCutoffAt: cutoffAt, updatedAt: cutoffAt };
-    }));
-    return { jobs: this.list().filter(j => j.batchId === batchId), changed: true };
-  }
   /** Migrate known legacy safe failures, then conservatively recover unfinished work. */
   recover() {
     const now = new Date().toISOString();
@@ -279,6 +272,32 @@ export class RootEmailStore {
           credentialDestroyedAt: job.credentialDestroyedAt || consumedAt };
       });
     }
+    // The immediately preceding one-shot owner/admin policy may already have disclosed a gcm1 value.
+    // Never reopen such legacy batches. Unconsumed successful records are explicitly admitted to the new policy once.
+    const consumedLegacyBatches = new Set(next.filter(job => job.batchId && job.encryptedPassword
+      && job.credentialRetentionPolicy !== 'permanent'
+      && (job.credentialOwnerDownloadedAt || job.credentialAdminDownloadedAt
+        || job.credentialOwnerDownloadClaim || job.credentialAdminDownloadClaim))
+      .map(job => job.batchId!));
+    if (consumedLegacyBatches.size > 0) {
+      changed = true;
+      next = next.map(job => !job.batchId || !consumedLegacyBatches.has(job.batchId) ? job : {
+        ...job,
+        encryptedPassword: undefined,
+        credentialOwnerDownloadClaim: undefined,
+        credentialAdminDownloadClaim: undefined,
+        credentialDestroyedAt: job.credentialDestroyedAt || now,
+        detail: job.status === 'password_set'
+          ? '旧一次性下载策略下已有凭证可能披露；升级时已保守销毁，不重新开放'
+          : job.detail,
+      });
+    }
+    next = next.map(job => {
+      if (job.status !== 'password_set' || !job.encryptedPassword || job.credentialRetentionPolicy === 'permanent') return job;
+      changed = true;
+      return { ...job, credentialRetentionPolicy: 'permanent' as const };
+    });
+
     next = next.map(job => {
       if (job.manualFallbackReason || !job.autoSetPassword || job.passwordSubmitAttempted === true) return job;
       let reason: RootManualFallbackReason | undefined;
@@ -309,17 +328,6 @@ export class RootEmailStore {
     });
     if (changed) this.save(next);
   }
-  destroyExpiredCredentials(now = Date.now()): RootEmailJob[] {
-    const expired = this.jobs.filter(j => j.encryptedPassword && Number.isFinite(Date.parse(j.credentialExpiresAt || ''))
-      && Date.parse(j.credentialExpiresAt!) <= now);
-    if (!expired.length) return [];
-    const ids = new Set(expired.map(j => j.id));
-    const destroyedAt = new Date(now).toISOString();
-    this.save(this.jobs.map(j => ids.has(j.id) ? { ...j, encryptedPassword: undefined,
-      credentialDestroyedAt: destroyedAt, updatedAt: destroyedAt,
-      detail: j.status === 'password_set' ? '密码已设置；临时凭证已按 30 分钟策略销毁' : j.detail } : j));
-    return structuredClone(expired);
-  }
   claimBatchCredentials(batchId: string, slot: CredentialDownloadSlot, actorUserId: string, claimId: string): RootEmailJob[] {
     if (!DOWNLOAD_CLAIM_ID.test(claimId) || !/^\d+$/.test(actorUserId) || !['owner', 'admin'].includes(slot)) {
       throw new RootEmailError('凭证下载 claim 无效');
@@ -328,13 +336,16 @@ export class RootEmailStore {
     if (!matches.length || (slot === 'owner' && matches.some(job => job.createdByUserId !== actorUserId))) {
       throw new RootEmailError('无权下载此批次凭证', 403);
     }
-    const downloaded = matches.some(job => slot === 'owner'
-      ? !!job.credentialOwnerDownloadedAt : !!job.credentialAdminDownloadedAt);
     const claimed = matches.some(job => slot === 'owner'
       ? !!job.credentialOwnerDownloadClaim : !!job.credentialAdminDownloadClaim);
-    if (matches.some(job => job.credentialDownloadedAt) || downloaded) throw new RootEmailError('此下载副本已消费', 410);
-    if (claimed) throw new RootEmailError('此下载副本已被一次性请求占用', 409);
-    if (!matches.some(job => job.encryptedPassword)) throw new RootEmailError('此批次没有可下载的临时凭证', 410);
+    if (matches.some(job => job.credentialDownloadedAt)) throw new RootEmailError('旧下载记录尚未迁移', 409);
+    if (claimed) throw new RootEmailError('此下载视图正在生成，请勿重复提交', 409);
+    if (matches.some(job => job.encryptedPassword && job.credentialRetentionPolicy !== 'permanent')) {
+      throw new RootEmailError('凭证保留策略尚未迁移，已拒绝下载', 409);
+    }
+    if (!matches.some(job => job.encryptedPassword && job.credentialRetentionPolicy === 'permanent')) {
+      throw new RootEmailError('此批次没有可下载的永久凭证', 410);
+    }
     const claim: RootCredentialDownloadClaim = { id: claimId, claimedAt: new Date().toISOString(), actorUserId };
     this.save(this.jobs.map(job => job.batchId !== batchId ? job : slot === 'owner'
       ? { ...job, credentialOwnerDownloadClaim: claim, updatedAt: claim.claimedAt }
@@ -360,9 +371,6 @@ export class RootEmailStore {
     if (!matches.length || (slot === 'owner' && matches.some(job => job.createdByUserId !== actorUserId))) {
       throw new RootEmailError('无权下载此批次凭证', 403);
     }
-    if (matches.some(job => slot === 'owner' ? !!job.credentialOwnerDownloadedAt : !!job.credentialAdminDownloadedAt)) {
-      throw new RootEmailError('此下载副本已消费', 410);
-    }
     if (matches.some(job => {
       const claim = claimOf(job);
       return !claim || claim.id !== claimId || claim.actorUserId !== actorUserId;
@@ -370,26 +378,54 @@ export class RootEmailStore {
     const downloadedAt = new Date().toISOString();
     this.save(this.jobs.map(job => {
       if (job.batchId !== batchId) return job;
-      const ownerDownloadedAt = slot === 'owner' ? downloadedAt : job.credentialOwnerDownloadedAt;
-      const adminDownloadedAt = slot === 'admin' ? downloadedAt : job.credentialAdminDownloadedAt;
-      const destroy = !!ownerDownloadedAt && !!adminDownloadedAt;
       return { ...job,
-        credentialOwnerDownloadedAt: ownerDownloadedAt,
+        credentialOwnerDownloadedAt: slot === 'owner' ? downloadedAt : job.credentialOwnerDownloadedAt,
         credentialOwnerDownloadedByUserId: slot === 'owner' ? actorUserId : job.credentialOwnerDownloadedByUserId,
         credentialOwnerDownloadClaim: slot === 'owner' ? undefined : job.credentialOwnerDownloadClaim,
-        credentialAdminDownloadedAt: adminDownloadedAt,
+        credentialAdminDownloadedAt: slot === 'admin' ? downloadedAt : job.credentialAdminDownloadedAt,
         credentialAdminDownloadedByUserId: slot === 'admin' ? actorUserId : job.credentialAdminDownloadedByUserId,
         credentialAdminDownloadClaim: slot === 'admin' ? undefined : job.credentialAdminDownloadClaim,
-        encryptedPassword: destroy ? undefined : job.encryptedPassword,
-        credentialDestroyedAt: destroy ? downloadedAt : job.credentialDestroyedAt,
         updatedAt: downloadedAt,
-        detail: job.status === 'password_set' ? destroy
-          ? '密码已设置；创建者和 Admin 下载副本均已消费，服务器密文已销毁'
-          : `密码已设置；${slot === 'owner' ? '创建者' : 'Admin'}下载副本已消费，另一副本保留至到期`
+        detail: job.status === 'password_set'
+          ? `密码已设置并永久加密保存；${slot === 'owner' ? '创建者' : 'Admin'}最近一次下载已记录`
           : job.detail };
     }));
     return this.list().filter(job => job.batchId === batchId);
   }
+  /** Authenticate every permanent credential first, then atomically persist all current-key ciphertexts. */
+  reencryptPermanentCredentials(transform: (job: RootEmailJob) => string): RootEmailJob[] {
+    const next = this.list();
+    const migrated: RootEmailJob[] = [];
+    const updatedAt = new Date().toISOString();
+    for (const job of next) {
+      if (job.status !== 'password_set' || job.credentialRetentionPolicy !== 'permanent' || !job.encryptedPassword) continue;
+      const encryptedPassword = transform(structuredClone(job));
+      if (encryptedPassword === job.encryptedPassword) continue;
+      job.encryptedPassword = encryptedPassword;
+      job.credentialReencryptedAt = updatedAt;
+      job.credentialReencryptionAuditPending = true;
+      job.updatedAt = updatedAt;
+      migrated.push(structuredClone(job));
+    }
+    if (migrated.length > 0) this.save(next);
+    return migrated;
+  }
+
+  listPendingCredentialReencryptionAudits(): RootEmailJob[] {
+    return this.list().filter(job => job.credentialReencryptionAuditPending === true);
+  }
+
+  /** Clear only audit markers that were durably recorded in db.json; retries may create duplicates but never omissions. */
+  completeCredentialReencryptionAudits(jobIds: string[]): void {
+    if (!jobIds.length) return;
+    const completed = new Set(jobIds);
+    this.save(this.jobs.map(job => !completed.has(job.id) ? job : {
+      ...job,
+      credentialReencryptionAuditPending: undefined,
+      updatedAt: new Date().toISOString(),
+    }));
+  }
+
   /** Treat each orphaned slot claim as possibly disclosed without consuming the other slot. */
   consumeOrphanedCredentialClaims(): Array<{ job: RootEmailJob; slot: CredentialDownloadSlot; actorUserId: string }> {
     const events = new Map<string, { batchId: string; slot: CredentialDownloadSlot; actorUserId: string }>();
@@ -407,22 +443,16 @@ export class RootEmailStore {
       const ownerEvent = events.get(`${job.batchId}:owner`);
       const adminEvent = events.get(`${job.batchId}:admin`);
       if (!ownerEvent && !adminEvent) return job;
-      const ownerDownloadedAt = ownerEvent ? consumedAt : job.credentialOwnerDownloadedAt;
-      const adminDownloadedAt = adminEvent ? consumedAt : job.credentialAdminDownloadedAt;
-      const destroy = !!ownerDownloadedAt && !!adminDownloadedAt;
       return { ...job,
-        credentialOwnerDownloadedAt: ownerDownloadedAt,
+        credentialOwnerDownloadedAt: ownerEvent ? consumedAt : job.credentialOwnerDownloadedAt,
         credentialOwnerDownloadedByUserId: ownerEvent?.actorUserId || job.credentialOwnerDownloadedByUserId,
         credentialOwnerDownloadClaim: ownerEvent ? undefined : job.credentialOwnerDownloadClaim,
-        credentialAdminDownloadedAt: adminDownloadedAt,
+        credentialAdminDownloadedAt: adminEvent ? consumedAt : job.credentialAdminDownloadedAt,
         credentialAdminDownloadedByUserId: adminEvent?.actorUserId || job.credentialAdminDownloadedByUserId,
         credentialAdminDownloadClaim: adminEvent ? undefined : job.credentialAdminDownloadClaim,
-        encryptedPassword: destroy ? undefined : job.encryptedPassword,
-        credentialDestroyedAt: destroy ? consumedAt : job.credentialDestroyedAt,
         updatedAt: consumedAt,
-        detail: job.status === 'password_set' ? destroy
-          ? '服务在双槽下载期间重启；两个副本均按可能已披露处理，密文已销毁'
-          : '服务在下载期间重启；对应副本按可能已披露处理，另一副本保留至到期'
+        detail: job.status === 'password_set'
+          ? '服务在下载 claim 期间重启；可能披露已记录，永久密文仍可按权限再次下载'
           : job.detail };
     }));
     const current = this.list();

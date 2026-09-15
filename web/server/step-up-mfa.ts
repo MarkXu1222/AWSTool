@@ -36,7 +36,7 @@ export function verifyStepUpTotp(identity: { id: number | string; username: stri
   }
   const token = typeof value === 'string' ? value.trim() : '';
   if (!/^\d{6}$/.test(token)) throw new StepUpMfaError('请输入 6 位 MFA 验证码', 400);
-  if (!authenticator.verify({ token, secret: decryptField(user.mfa_secret) })) {
+  if (!authenticator.verify({ token, secret: decryptField(user.mfa_secret, 'mfa') })) {
     // Use 403 rather than 401 so the API client does not discard an otherwise valid JWT.
     throw new StepUpMfaError('MFA 验证码错误', 403);
   }

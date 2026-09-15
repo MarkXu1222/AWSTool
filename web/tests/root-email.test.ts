@@ -5,7 +5,9 @@ import os from 'node:os';
 import path from 'node:path';
 import { canRetryRootEmailBrowser, hasNewerRootEmailJob, manualRootResetFallbackExpiresAt,
   RootEmailError, RootEmailSession, RootEmailStore, sendRootEmail, selectRootEmailTargets } from '../server/root-email-core';
-import { randomUUID } from 'node:crypto';
+import { createCipheriv, createHash, randomBytes, randomUUID } from 'node:crypto';
+import { backupJsonStores, decryptField, decryptLegacyFieldWithKeys, deriveEncryptionKeyringFromSources,
+  encryptedFieldUsesCurrentKey, encryptField } from '../server/db';
 
 const email = 'owner@example.test';
 const input = { accountId: '123456789012', email, createdBy: 'admin', createdByUserId: '1' };
@@ -440,20 +442,140 @@ test('credential CSV contains the required columns and neutralizes spreadsheet f
   assert.equal(row, '"123456789012","\'=formula@example.test","Abcdefghijk2345!@#$%WXYZ"');
 });
 
-test('owner and admin credential slots can claim independently and destroy only after both complete', () => {
+test('gcm2 key IDs preserve old ciphertext after rotation and legacy gcm1 remains decryptable', async () => {
+  const { decryptRootPassword, encryptRootPassword, reencryptRootPassword } = await import('../server/root-password-secrets');
+  const context = { jobId: randomUUID(), accountId: input.accountId, createdByUserId: input.createdByUserId };
+  const password = 'Abcdefghijkl2345!@#$WXYZ';
+  const oldSource = 'old-root-password-encryption-key-0001';
+  const newSource = 'new-root-password-encryption-key-0002';
+  const oldKeys = deriveEncryptionKeyringFromSources(oldSource, [], 'root-password');
+  const rotatedKeys = deriveEncryptionKeyringFromSources(newSource, [oldSource], 'root-password');
+
+  const gcm2 = encryptRootPassword(password, context, oldKeys);
+  assert.match(gcm2, new RegExp(`^gcm2:${oldKeys[0].keyId}:`));
+  assert.equal(decryptRootPassword(gcm2, context, rotatedKeys), password);
+  const currentGcm2 = reencryptRootPassword(gcm2, context, rotatedKeys);
+  assert.match(currentGcm2, new RegExp(`^gcm2:${rotatedKeys[0].keyId}:`));
+  assert.equal(decryptRootPassword(currentGcm2, context, rotatedKeys), password);
+  assert.equal(reencryptRootPassword(currentGcm2, context, rotatedKeys), currentGcm2);
+  const unknownKeyCiphertext = gcm2.replace(oldKeys[0].keyId, '0000000000000000');
+  assert.throws(() => decryptRootPassword(unknownKeyCiphertext, context, rotatedKeys), /未配置的 key ID/);
+
+  const iv = randomBytes(12);
+  const legacyCipher = createCipheriv('aes-256-gcm', oldKeys[0].key, iv);
+  legacyCipher.setAAD(Buffer.from(
+    `awstool:root-password:v1:${context.jobId}:${context.accountId}:${context.createdByUserId}`,
+    'utf8',
+  ));
+  const legacyBody = Buffer.concat([legacyCipher.update(password, 'utf8'), legacyCipher.final()]);
+  const gcm1 = ['gcm1', iv.toString('base64url'), legacyCipher.getAuthTag().toString('base64url'),
+    legacyBody.toString('base64url')].join(':');
+  assert.equal(decryptRootPassword(gcm1, context, rotatedKeys), password);
+  assert.throws(() => decryptRootPassword(gcm1, context, rotatedKeys.slice(0, 1)), /旧版密文无法/);
+});
+
+test('Root encryption keyring rejects unsafe or ambiguous rotation configuration', () => {
+  const valid = 'valid-root-password-key-material-0001';
+  assert.throws(() => deriveEncryptionKeyringFromSources('short', [], 'root-password'), /32–4096/);
+  assert.throws(() => deriveEncryptionKeyringFromSources(undefined, [valid], 'field-mfa'), /32–4096/);
+  assert.throws(() => deriveEncryptionKeyringFromSources(valid, 'not-an-array', 'root-password'), /字符串数组/);
+  assert.throws(() => deriveEncryptionKeyringFromSources(valid, ['short'], 'root-password'), /每个历史密钥/);
+  assert.throws(() => deriveEncryptionKeyringFromSources(valid, [valid], 'root-password'), /不得重复/);
+  assert.throws(() => deriveEncryptionKeyringFromSources(valid,
+    Array.from({ length: 9 }, (_, index) => `historical-root-password-key-${String(index).padStart(4, '0')}`),
+    'root-password'), /最多允许 8/);
+});
+
+test('typed sensitive fields authenticate new values and validate legacy CBC rotation candidates', () => {
+  const mfaSecret = 'JBSWY3DPEHPK3PXP';
+  const encryptedMfa = encryptField(mfaSecret, 'mfa');
+  assert.match(encryptedMfa, /^gcmf1:[0-9a-f]{16}:mfa:/);
+  assert.equal(encryptedFieldUsesCurrentKey(encryptedMfa, 'mfa'), true);
+  assert.equal(decryptField(encryptedMfa, 'mfa'), mfaSecret);
+  assert.throws(() => decryptField(encryptedMfa, 'external-id'), /格式无效/);
+
+  const oldKey = createHash('sha256').update('old-sensitive-field-key-material-0001').digest();
+  const wrongKey = createHash('sha256').update('wrong-sensitive-field-key-0000001').digest();
+  const iv = randomBytes(16);
+  const legacyCipher = createCipheriv('aes-256-cbc', oldKey, iv);
+  const body = Buffer.concat([legacyCipher.update(mfaSecret, 'utf8'), legacyCipher.final()]);
+  const legacyValue = `${iv.toString('hex')}:${body.toString('hex')}`;
+  assert.throws(() => decryptLegacyFieldWithKeys(legacyValue, 'mfa', [wrongKey]), /无法使用当前密钥环/);
+  assert.equal(decryptLegacyFieldWithKeys(legacyValue, 'mfa', [wrongKey, oldKey]), mfaSecret);
+});
+
+test('daily backup validates and retains both DB and permanent Root credential stores', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'root-password-backup-'));
+  try {
+    const dbFile = path.join(dir, 'db.json');
+    const jobsFile = path.join(dir, 'root-email-jobs.json');
+    fs.writeFileSync(dbFile, JSON.stringify({ users: [] }), { mode: 0o600 });
+    fs.writeFileSync(jobsFile, JSON.stringify([
+      { id: 'pre-submit', status: 'setting_password', encryptedPassword: 'must-not-be-backed-up' },
+      { id: 'permanent', status: 'password_set', encryptedPassword: 'keep-in-backup',
+        credentialRetentionPolicy: 'permanent' },
+      { id: 'legacy-consumed', status: 'password_set', encryptedPassword: 'must-not-reopen',
+        credentialOwnerDownloadedAt: '2026-01-01T00:00:00.000Z' },
+    ]), { mode: 0o600 });
+    for (let day = 1; day <= 8; day++) {
+      const destinations = backupJsonStores(dbFile, new Date(`2026-01-${String(day).padStart(2, '0')}T00:00:00.000Z`));
+      assert.equal(destinations.length, 2);
+    }
+    const backupDir = path.join(dir, 'backups');
+    const files = fs.readdirSync(backupDir).sort();
+    assert.equal(files.filter(file => /^db-/.test(file)).length, 7);
+    assert.equal(files.filter(file => /^root-email-jobs-/.test(file)).length, 7);
+    assert.equal(files.includes('db-2026-01-01.json'), false);
+    assert.equal(files.includes('root-email-jobs-2026-01-01.json'), false);
+    assert.equal(fs.statSync(backupDir).mode & 0o777, 0o700);
+    const rootBackup = JSON.parse(fs.readFileSync(path.join(backupDir, 'root-email-jobs-2026-01-08.json'), 'utf8'));
+    assert.equal(rootBackup.find((job: any) => job.id === 'pre-submit').encryptedPassword, undefined);
+    assert.equal(rootBackup.find((job: any) => job.id === 'permanent').encryptedPassword, 'keep-in-backup');
+    assert.equal(rootBackup.find((job: any) => job.id === 'legacy-consumed').encryptedPassword, undefined);
+    assert.equal(fs.statSync(path.join(backupDir, 'root-email-jobs-2026-01-08.json')).mode & 0o777, 0o600);
+
+    const stableRecoveryPoint = fs.readFileSync(path.join(backupDir, 'root-email-jobs-2026-01-08.json'), 'utf8');
+    fs.writeFileSync(jobsFile, JSON.stringify([{ id: 'corrupted', status: 'password_set',
+      credentialRetentionPolicy: 'permanent', encryptedPassword: 'corrupted-but-json-valid' }]));
+    backupJsonStores(dbFile, new Date('2026-01-08T12:00:00.000Z'));
+    assert.equal(fs.readFileSync(path.join(backupDir, 'root-email-jobs-2026-01-08.json'), 'utf8'), stableRecoveryPoint);
+
+    fs.writeFileSync(jobsFile, '');
+    assert.throws(() => backupJsonStores(dbFile, new Date('2026-01-09T00:00:00.000Z')), /为空/);
+    assert.equal(fs.existsSync(path.join(backupDir, 'db-2026-01-09.json')), false);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('first backup creates an empty Root store but never masks later loss of an established store', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'root-password-initial-backup-'));
+  try {
+    const dbFile = path.join(dir, 'db.json');
+    const rootFile = path.join(dir, 'root-email-jobs.json');
+    fs.writeFileSync(dbFile, JSON.stringify({ users: [] }), { mode: 0o600 });
+    assert.equal(backupJsonStores(dbFile, new Date('2026-02-01T00:00:00.000Z')).length, 2);
+    assert.deepEqual(JSON.parse(fs.readFileSync(rootFile, 'utf8')), []);
+    fs.rmSync(rootFile);
+    assert.throws(() => backupJsonStores(dbFile, new Date('2026-02-02T00:00:00.000Z')), /存在历史备份/);
+    assert.equal(fs.existsSync(path.join(dir, 'backups', 'db-2026-02-02.json')), false);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('owner and admin views can be downloaded repeatedly while claims remain mutually exclusive', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'root-password-dual-slot-'));
   try {
     const store = new RootEmailStore(path.join(dir, 'jobs.json'));
     const meta = { batchId: randomUUID(), payerAccountId: '999999999999', payerName: 'payer-a', autoSetPassword: true as const };
     const { jobs: [job] } = store.createBatch([input], meta);
-    store.update(job.id, { status: 'password_set', phase: 'done', encryptedPassword: 'authenticated-ciphertext',
-      credentialExpiresAt: new Date(Date.now() + 60_000).toISOString() });
+    store.update(job.id, { status: 'password_set', phase: 'done', encryptedPassword: 'authenticated-ciphertext', credentialRetentionPolicy: 'permanent',
+      credentialExpiresAt: new Date(0).toISOString() });
+    store.recover();
+    assert.equal(store.get(job.id)?.encryptedPassword, 'authenticated-ciphertext');
     const ownerClaim = randomUUID(), adminClaim = randomUUID();
     store.claimBatchCredentials(meta.batchId, 'owner', input.createdByUserId, ownerClaim);
     const dualClaimed = store.claimBatchCredentials(meta.batchId, 'admin', '99', adminClaim)[0];
     assert.equal(dualClaimed.credentialOwnerDownloadClaim?.id, ownerClaim);
     assert.equal(dualClaimed.credentialAdminDownloadClaim?.id, adminClaim);
-    assert.throws(() => store.claimBatchCredentials(meta.batchId, 'admin', '100', randomUUID()), /占用/);
+    assert.throws(() => store.claimBatchCredentials(meta.batchId, 'admin', '100', randomUUID()), /正在生成/);
 
     const ownerCompleted = store.completeBatchCredentialDownload(
       meta.batchId, 'owner', input.createdByUserId, ownerClaim,
@@ -462,14 +584,24 @@ test('owner and admin credential slots can claim independently and destroy only 
     assert.equal(ownerCompleted.credentialAdminDownloadedAt, undefined);
     assert.equal(ownerCompleted.encryptedPassword, 'authenticated-ciphertext');
     assert.equal(ownerCompleted.credentialAdminDownloadClaim?.id, adminClaim);
-    assert.throws(() => store.claimBatchCredentials(
-      meta.batchId, 'owner', input.createdByUserId, randomUUID(),
-    ), /已消费/);
+    const firstOwnerDownload = ownerCompleted.credentialOwnerDownloadedAt!;
+    const repeatOwnerClaim = randomUUID();
+    store.claimBatchCredentials(meta.batchId, 'owner', input.createdByUserId, repeatOwnerClaim);
+    const repeatedOwner = store.completeBatchCredentialDownload(
+      meta.batchId, 'owner', input.createdByUserId, repeatOwnerClaim,
+    )[0];
+    assert.ok(Date.parse(repeatedOwner.credentialOwnerDownloadedAt!) >= Date.parse(firstOwnerDownload));
+    assert.equal(repeatedOwner.encryptedPassword, 'authenticated-ciphertext');
 
     const adminCompleted = store.completeBatchCredentialDownload(meta.batchId, 'admin', '99', adminClaim)[0];
     assert.ok(adminCompleted.credentialAdminDownloadedAt);
-    assert.equal(adminCompleted.encryptedPassword, undefined);
-    assert.ok(adminCompleted.credentialDestroyedAt);
+    assert.equal(adminCompleted.encryptedPassword, 'authenticated-ciphertext');
+    assert.equal(adminCompleted.credentialDestroyedAt, undefined);
+    const repeatAdminClaim = randomUUID();
+    store.claimBatchCredentials(meta.batchId, 'admin', '100', repeatAdminClaim);
+    assert.equal(store.completeBatchCredentialDownload(
+      meta.batchId, 'admin', '100', repeatAdminClaim,
+    )[0].encryptedPassword, 'authenticated-ciphertext');
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -480,7 +612,7 @@ test('released and orphaned slot claims never consume the other download copy', 
     const store = new RootEmailStore(file);
     const meta = { batchId: randomUUID(), payerAccountId: '999999999999', payerName: 'payer-a', autoSetPassword: true as const };
     const { jobs: [job] } = store.createBatch([input], meta);
-    store.update(job.id, { status: 'password_set', phase: 'done', encryptedPassword: 'authenticated-ciphertext',
+    store.update(job.id, { status: 'password_set', phase: 'done', encryptedPassword: 'authenticated-ciphertext', credentialRetentionPolicy: 'permanent',
       credentialExpiresAt: new Date(Date.now() + 60_000).toISOString() });
     const released = randomUUID();
     store.claimBatchCredentials(meta.batchId, 'admin', '99', released);
@@ -500,7 +632,70 @@ test('released and orphaned slot claims never consume the other download copy', 
     assert.equal(afterOrphan.encryptedPassword, 'authenticated-ciphertext');
     const adminClaim = randomUUID();
     restarted.claimBatchCredentials(meta.batchId, 'admin', '99', adminClaim);
-    assert.equal(restarted.completeBatchCredentialDownload(meta.batchId, 'admin', '99', adminClaim)[0].encryptedPassword, undefined);
+    assert.equal(restarted.completeBatchCredentialDownload(
+      meta.batchId, 'admin', '99', adminClaim,
+    )[0].encryptedPassword, 'authenticated-ciphertext');
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('legacy dual-slot disclosures are destroyed while undisclosed credentials opt into permanent retention once', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'root-password-legacy-dual-slot-'));
+  try {
+    const consumedFile = path.join(dir, 'consumed.json');
+    const consumedStore = new RootEmailStore(consumedFile);
+    const consumedMeta = { batchId: randomUUID(), payerAccountId: '999999999999', payerName: 'payer-a', autoSetPassword: true as const };
+    const { jobs: [consumedJob] } = consumedStore.createBatch([input], consumedMeta);
+    consumedStore.update(consumedJob.id, { status: 'password_set', phase: 'done', encryptedPassword: 'legacy-ciphertext',
+      credentialOwnerDownloadedAt: new Date().toISOString(), credentialOwnerDownloadedByUserId: input.createdByUserId });
+    const consumedRestart = new RootEmailStore(consumedFile);
+    consumedRestart.recover();
+    assert.equal(consumedRestart.get(consumedJob.id)?.encryptedPassword, undefined);
+    assert.equal(consumedRestart.get(consumedJob.id)?.credentialRetentionPolicy, undefined);
+    assert.ok(consumedRestart.get(consumedJob.id)?.credentialDestroyedAt);
+    assert.throws(() => consumedRestart.claimBatchCredentials(
+      consumedMeta.batchId, 'admin', '99', randomUUID(),
+    ), /没有可下载的永久凭证/);
+
+    const undisclosedFile = path.join(dir, 'undisclosed.json');
+    const undisclosedStore = new RootEmailStore(undisclosedFile);
+    const undisclosedMeta = { ...consumedMeta, batchId: randomUUID() };
+    const { jobs: [undisclosedJob] } = undisclosedStore.createBatch([input], undisclosedMeta);
+    undisclosedStore.update(undisclosedJob.id, { status: 'password_set', phase: 'done',
+      encryptedPassword: 'undisclosed-legacy-ciphertext' });
+    const undisclosedRestart = new RootEmailStore(undisclosedFile);
+    undisclosedRestart.recover();
+    assert.equal(undisclosedRestart.get(undisclosedJob.id)?.credentialRetentionPolicy, 'permanent');
+    assert.equal(undisclosedRestart.get(undisclosedJob.id)?.encryptedPassword, 'undisclosed-legacy-ciphertext');
+    undisclosedRestart.claimBatchCredentials(undisclosedMeta.batchId, 'owner', input.createdByUserId, randomUUID());
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('permanent credential key rotation authenticates all rows before one atomic store replacement', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'root-password-atomic-rotation-'));
+  try {
+    const file = path.join(dir, 'jobs.json');
+    const store = new RootEmailStore(file);
+    const meta = { batchId: randomUUID(), payerAccountId: '999999999999', payerName: 'payer-a', autoSetPassword: true as const };
+    const inputs = [input, { ...input, accountId: '222222222222' }];
+    const { jobs } = store.createBatch(inputs, meta);
+    for (const [index, job] of jobs.entries()) {
+      store.update(job.id, { status: 'password_set', phase: 'done', credentialRetentionPolicy: 'permanent',
+        encryptedPassword: `old-ciphertext-${index}` });
+    }
+    const before = fs.readFileSync(file, 'utf8');
+    assert.throws(() => store.reencryptPermanentCredentials(job => {
+      if (job.accountId === '222222222222') throw new Error('missing historical key');
+      return 'new-ciphertext';
+    }), /missing historical key/);
+    assert.equal(fs.readFileSync(file, 'utf8'), before);
+    const migrated = store.reencryptPermanentCredentials(job => `current-${job.encryptedPassword}`);
+    assert.equal(migrated.length, 2);
+    assert.deepEqual(store.list().map(job => job.encryptedPassword), ['current-old-ciphertext-0', 'current-old-ciphertext-1']);
+    assert.equal(store.listPendingCredentialReencryptionAudits().length, 2);
+    store.completeCredentialReencryptionAudits([jobs[0].id]);
+    assert.deepEqual(store.listPendingCredentialReencryptionAudits().map(job => job.id), [jobs[1].id]);
+    const restarted = new RootEmailStore(file);
+    assert.deepEqual(restarted.listPendingCredentialReencryptionAudits().map(job => job.id), [jobs[1].id]);
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 

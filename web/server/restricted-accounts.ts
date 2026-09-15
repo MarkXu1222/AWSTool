@@ -115,7 +115,7 @@ export function isRestricted(accountId: string): boolean {
 export function getExternalId(accountId: string): string | undefined {
   const rec = db.getRestrictedAccounts().find((r: any) => r.account_id === accountId);
   if (!rec?.external_id_enc) return undefined;
-  try { return decryptField(rec.external_id_enc); } catch { return undefined; }
+  try { return decryptField(rec.external_id_enc, 'external-id'); } catch { return undefined; }
 }
 
 /**
@@ -262,7 +262,7 @@ export async function markRestricted(
       account_id: i.id,
       account_name: i.name,
       payer: payerName,
-      external_id_enc: encryptField(idToExtId.get(i.id)!),
+      external_id_enc: encryptField(idToExtId.get(i.id)!, 'external-id'),
       state: 'pending' as const,
       marked_by: opts.markedBy,
       marked_at: now,

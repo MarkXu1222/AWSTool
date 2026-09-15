@@ -8,46 +8,166 @@ import { isRootResetAccess } from './root-reset-permissions';
 
 const DB_PATH = process.env.DB_PATH || path.join(__dirname, '../../data/db.json');
 
-// Encryption key for sensitive fields (MFA secrets) — independent from JWT
-let ENC_KEY: Buffer;
-let dedicatedEncryptionKeyConfigured = false;
+// Encryption key for sensitive fields (MFA secrets) — independent from JWT.
+// Root passwords use purpose-separated keys and retain previous keys for decryption after rotation.
+const MAX_PREVIOUS_ENCRYPTION_KEYS = 8;
+let appConfig: any = {};
 try {
-  const configPath = path.join(__dirname, '../../config.json');
-  const config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
-  const dedicatedSource = config.web?.encryptionKey || process.env.ENCRYPTION_KEY;
-  const source = dedicatedSource
-    || config.web?.jwtSecret                // Fallback for backward compat
-    || 'default-fallback-key-32chars-xxx';
-  dedicatedEncryptionKeyConfigured = typeof dedicatedSource === 'string' && dedicatedSource.length >= 32;
-  ENC_KEY = createHash('sha256').update(source).digest();
-} catch {
-  ENC_KEY = createHash('sha256').update('default-fallback-key-32chars-xxx').digest();
+  appConfig = JSON.parse(fs.readFileSync(path.join(__dirname, '../../config.json'), 'utf-8'));
+} catch { /* Environment-only deployments remain supported. */ }
+
+const configuredEncryptionKey = appConfig.web?.encryptionKey;
+const dedicatedEncryptionKeySource = typeof configuredEncryptionKey === 'string' && configuredEncryptionKey.length > 0
+  ? configuredEncryptionKey
+  : process.env.ENCRYPTION_KEY;
+const encryptionKeyPreviousConfig = appConfig.web?.encryptionKeyPrevious;
+const legacyFieldFallbackSource = typeof appConfig.web?.jwtSecret === 'string' && appConfig.web.jwtSecret.length > 0
+  ? appConfig.web.jwtSecret
+  : 'default-fallback-key-32chars-xxx';
+
+export interface DerivedEncryptionKey {
+  keyId: string;
+  key: Buffer;
 }
 
-/** Derive a purpose-specific key. Root credentials fail closed unless a dedicated key is configured. */
-export function deriveEncryptionKey(purpose: string): Buffer {
-  if (!dedicatedEncryptionKeyConfigured) {
-    throw new Error('Root 密码临时存储要求配置至少 32 字符的 web.encryptionKey 或 ENCRYPTION_KEY');
-  }
+function validateEncryptionPurpose(purpose: string): void {
   if (!/^[a-z0-9-]{3,64}$/.test(purpose)) throw new Error('加密密钥用途无效');
-  return createHmac('sha256', ENC_KEY).update(`awstool:${purpose}:v1`, 'utf8').digest();
 }
 
-export function encryptField(text: string): string {
-  const iv = randomBytes(16);
-  const cipher = createCipheriv('aes-256-cbc', ENC_KEY, iv);
-  return iv.toString('hex') + ':' + cipher.update(text, 'utf8', 'hex') + cipher.final('hex');
+function derivePurposeKey(source: string, purpose: string): Buffer {
+  const baseKey = createHash('sha256').update(source).digest();
+  return createHmac('sha256', baseKey).update(`awstool:${purpose}:v1`, 'utf8').digest();
 }
 
-export function decryptField(data: string): string {
-  try {
-    const [ivHex, encrypted] = data.split(':');
-    if (!ivHex || !encrypted) return data; // Not encrypted, return as-is (migration)
-    const decipher = createDecipheriv('aes-256-cbc', ENC_KEY, Buffer.from(ivHex, 'hex'));
-    return decipher.update(encrypted, 'hex', 'utf8') + decipher.final('utf8');
-  } catch {
-    return data; // Return raw if decryption fails (not yet encrypted)
+/** Build and validate a current-first purpose-specific keyring without exposing source key material. */
+export function deriveEncryptionKeyringFromSources(
+  currentSource: unknown,
+  previousSources: unknown,
+  purpose: string,
+): DerivedEncryptionKey[] {
+  validateEncryptionPurpose(purpose);
+  if (typeof currentSource !== 'string' || currentSource.length < 32 || currentSource.length > 4096) {
+    throw new Error('Root 密码永久存储要求配置 32–4096 字符的 web.encryptionKey 或 ENCRYPTION_KEY');
   }
+  if (previousSources !== undefined && !Array.isArray(previousSources)) {
+    throw new Error('web.encryptionKeyPrevious 必须是字符串数组');
+  }
+  const previous = (previousSources || []) as unknown[];
+  if (previous.length > MAX_PREVIOUS_ENCRYPTION_KEYS) {
+    throw new Error(`web.encryptionKeyPrevious 最多允许 ${MAX_PREVIOUS_ENCRYPTION_KEYS} 个历史密钥`);
+  }
+  if (previous.some(source => typeof source !== 'string' || source.length < 32 || source.length > 4096)) {
+    throw new Error('web.encryptionKeyPrevious 中每个历史密钥必须为 32–4096 字符');
+  }
+  const sources = [currentSource, ...previous] as string[];
+  if (new Set(sources).size !== sources.length) throw new Error('当前与历史 encryptionKey 不得重复');
+
+  const keys = sources.map(source => {
+    const key = derivePurposeKey(source, purpose);
+    return { keyId: createHash('sha256').update(key).digest('hex').slice(0, 16), key };
+  });
+  if (new Set(keys.map(item => item.keyId)).size !== keys.length) throw new Error('encryptionKey key ID 冲突');
+  return keys;
+}
+
+/** Return the current-first purpose-specific keyring. Previous keys are decrypt-only. */
+export function deriveEncryptionKeyring(purpose: string): DerivedEncryptionKey[] {
+  return deriveEncryptionKeyringFromSources(dedicatedEncryptionKeySource, encryptionKeyPreviousConfig, purpose);
+}
+
+/** Derive the current purpose-specific key while preserving the pre-keyring API. */
+export function deriveEncryptionKey(purpose: string): Buffer {
+  return deriveEncryptionKeyring(purpose)[0].key;
+}
+
+export type EncryptedFieldKind = 'mfa' | 'external-id';
+
+function validateDecryptedField(value: string, kind: EncryptedFieldKind): boolean {
+  if (kind === 'mfa') return value.length >= 16 && value.length <= 128 && /^[A-Z2-7]+={0,6}$/i.test(value);
+  return value.length >= 2 && value.length <= 1224 && /^[A-Za-z0-9_+=,.@:/-]+$/.test(value);
+}
+
+function encryptedFieldKeys(kind: EncryptedFieldKind): DerivedEncryptionKey[] {
+  // JWT/default values are legacy CBC read candidates only; authenticated writes always require a dedicated current key.
+  return deriveEncryptionKeyringFromSources(dedicatedEncryptionKeySource, encryptionKeyPreviousConfig, `field-${kind}`);
+}
+
+/** Return whether a typed field is already authenticated with the current write key. */
+export function encryptedFieldUsesCurrentKey(data: string, kind: EncryptedFieldKind): boolean {
+  const parts = data.split(':');
+  return parts.length === 6 && parts[0] === 'gcmf1' && parts[1] === encryptedFieldKeys(kind)[0].keyId
+    && parts[2] === kind;
+}
+
+/** Encrypt a typed sensitive field with key-ID authenticated AES-256-GCM. */
+export function encryptField(text: string, kind: EncryptedFieldKind): string {
+  if (!validateDecryptedField(text, kind)) throw new Error('敏感字段明文格式无效');
+  const current = encryptedFieldKeys(kind)[0];
+  const iv = randomBytes(12);
+  const cipher = createCipheriv('aes-256-gcm', current.key, iv);
+  cipher.setAAD(Buffer.from(`awstool:field:v1:${kind}:${current.keyId}`, 'utf8'));
+  const ciphertext = Buffer.concat([cipher.update(text, 'utf8'), cipher.final()]);
+  return ['gcmf1', current.keyId, kind, iv.toString('base64url'), cipher.getAuthTag().toString('base64url'),
+    ciphertext.toString('base64url')].join(':');
+}
+
+/** Decrypt a legacy CBC field only when one candidate yields valid typed plaintext. */
+export function decryptLegacyFieldWithKeys(
+  data: string,
+  kind: EncryptedFieldKind,
+  candidateKeys: readonly Buffer[],
+): string {
+  const [ivHex, encrypted, extra] = data.split(':');
+  if (!candidateKeys.length || candidateKeys.some(key => key.length !== 32)
+    || !/^[0-9a-f]{32}$/i.test(ivHex) || !encrypted || !/^[0-9a-f]+$/i.test(encrypted)
+    || encrypted.length % 32 !== 0 || extra !== undefined) throw new Error('旧版敏感字段密文格式无效');
+  for (const key of candidateKeys) {
+    try {
+      const decipher = createDecipheriv('aes-256-cbc', key, Buffer.from(ivHex, 'hex'));
+      const plaintext = Buffer.concat([decipher.update(Buffer.from(encrypted, 'hex')), decipher.final()]).toString('utf8');
+      if (validateDecryptedField(plaintext, kind)) return plaintext;
+    } catch { /* Wrong legacy keys are rejected by padding and strict typed plaintext validation. */ }
+  }
+  throw new Error('旧版敏感字段无法使用当前密钥环解密');
+}
+
+/** Authenticate the current field format, or strictly validate legacy CBC plaintext before accepting a rotation key. */
+export function decryptField(data: string, kind: EncryptedFieldKind): string {
+  if (!data.includes(':')) {
+    if (!validateDecryptedField(data, kind)) throw new Error('敏感字段明文格式无效');
+    return data; // Plaintext migration compatibility.
+  }
+  const parts = data.split(':');
+  if (parts[0] === 'gcmf1') {
+    const [format, keyId, storedKind, ivValue, tagValue, ciphertextValue, extra] = parts;
+    if (format !== 'gcmf1' || !/^[0-9a-f]{16}$/.test(keyId) || storedKind !== kind
+      || !ivValue || !tagValue || !ciphertextValue || extra !== undefined) throw new Error('敏感字段密文格式无效');
+    const selected = encryptedFieldKeys(kind).find(item => item.keyId === keyId);
+    if (!selected) throw new Error('敏感字段密文引用未配置的 key ID');
+    const iv = Buffer.from(ivValue, 'base64url');
+    const tag = Buffer.from(tagValue, 'base64url');
+    const ciphertext = Buffer.from(ciphertextValue, 'base64url');
+    if (iv.length !== 12 || tag.length !== 16 || !ciphertext.length) throw new Error('敏感字段密文参数无效');
+    try {
+      const decipher = createDecipheriv('aes-256-gcm', selected.key, iv);
+      decipher.setAAD(Buffer.from(`awstool:field:v1:${kind}:${keyId}`, 'utf8'));
+      decipher.setAuthTag(tag);
+      const plaintext = Buffer.concat([decipher.update(ciphertext), decipher.final()]).toString('utf8');
+      if (!validateDecryptedField(plaintext, kind)) throw new Error('invalid plaintext');
+      return plaintext;
+    } catch { throw new Error('敏感字段密文认证失败'); }
+  }
+
+  const previousSources = Array.isArray(encryptionKeyPreviousConfig) ? encryptionKeyPreviousConfig as unknown[] : [];
+  // Validate a dedicated current write key before migrating any unauthenticated legacy record.
+  deriveEncryptionKeyringFromSources(dedicatedEncryptionKeySource, previousSources, `field-${kind}`);
+  const sources = [...new Set([
+    dedicatedEncryptionKeySource as string,
+    ...previousSources as string[],
+    legacyFieldFallbackSource,
+  ])];
+  return decryptLegacyFieldWithKeys(data, kind,
+    sources.map(source => createHash('sha256').update(source).digest()));
 }
 
 export type TagOnboardingStatus = 'queued' | 'running' | 'waiting_retry' | 'completed' | 'failed';
@@ -206,6 +326,7 @@ function normalizeDB(parsed: unknown): DBSchema {
 }
 
 function readDB(): DBSchema {
+  maybeBackup();
   // Return cache if written within last 5 seconds (same process)
   if (cache && Date.now() - cacheTime < 5000) return cache;
 
@@ -529,29 +650,129 @@ export function recoverBillingExportJobs(): number {
   return interrupted;
 }
 
-// === Auto-backup: keep a daily rotating copy of the DB ===
+// === Auto-backup: keep validated daily rotating copies of both permanent stores ===
+const BACKUP_RETENTION_DAYS = 7;
 let lastBackupDay = '';
-export function backupDB() {
-  try {
-    if (!fs.existsSync(DB_PATH)) return;
-    const dir = path.join(path.dirname(DB_PATH), 'backups');
-    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-    const today = new Date().toISOString().slice(0, 10);
-    const dest = path.join(dir, `db-${today}.json`);
-    fs.copyFileSync(DB_PATH, dest);
-    // Keep only last 7 daily backups
-    const files = fs.readdirSync(dir).filter(f => f.startsWith('db-') && f.endsWith('.json')).sort();
-    while (files.length > 7) {
-      const old = files.shift();
-      if (old) fs.unlinkSync(path.join(dir, old));
-    }
-    lastBackupDay = today;
-  } catch (e: any) {
-    console.error('[DB Backup] failed:', e.message);
+
+export class PermanentStoreIntegrityError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'PermanentStoreIntegrityError';
   }
 }
 
-// Run backup at most once per day, triggered on read
+function backupFilename(prefix: string, day: string): string {
+  return `${prefix}-${day}.json`;
+}
+
+function prepareJsonBackupSource(filename: string, permanentRootStore: boolean): Buffer {
+  const content = fs.readFileSync(filename);
+  if (!content.length) throw new Error(`${path.basename(filename)} 为空，已拒绝覆盖有效备份`);
+  const parsed = JSON.parse(content.toString('utf8'));
+  if (!permanentRootStore) return content;
+  if (!Array.isArray(parsed)) throw new Error('root-email-jobs.json 必须是任务数组');
+  const sanitized = parsed.map((value: unknown) => {
+    if (!value || typeof value !== 'object') throw new Error('root-email-jobs.json 包含无效任务');
+    const job = value as Record<string, unknown>;
+    if (job.encryptedPassword === undefined) return job;
+    const legacyDisclosed = job.credentialRetentionPolicy !== 'permanent'
+      && Boolean(job.credentialDownloadedAt || job.credentialDownloadClaimId
+        || job.credentialOwnerDownloadedAt || job.credentialAdminDownloadedAt
+        || job.credentialOwnerDownloadClaim || job.credentialAdminDownloadClaim);
+    if (job.status === 'password_set' && !legacyDisclosed) {
+      return { ...job, credentialRetentionPolicy: 'permanent' };
+    }
+    // Pre-submit passwords and previously consumed legacy credentials must never enter durable backups.
+    const safe = { ...job };
+    delete safe.encryptedPassword;
+    delete safe.credentialRetentionPolicy;
+    return safe;
+  });
+  return Buffer.from(JSON.stringify(sanitized), 'utf8');
+}
+
+function createInitialRootStore(filename: string): void {
+  const temporary = `${filename}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`;
+  const fd = fs.openSync(temporary, 'wx', 0o600);
+  try { fs.writeFileSync(fd, '[]', 'utf8'); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+  try { fs.renameSync(temporary, filename); }
+  finally { try { fs.rmSync(temporary, { force: true }); } catch { /* Preserve creation result. */ } }
+}
+
+/** Back up db.json and its sibling Root credential store after validating both source files. */
+export function backupJsonStores(dbPath: string, now = new Date()): string[] {
+  if (!fs.existsSync(dbPath)) return [];
+  const parent = path.dirname(dbPath);
+  const backupDir = path.join(parent, 'backups');
+  fs.mkdirSync(backupDir, { recursive: true, mode: 0o700 });
+  try { fs.chmodSync(backupDir, 0o700); } catch { /* Best effort on filesystems without POSIX modes. */ }
+
+  const day = now.toISOString().slice(0, 10);
+  const rootStorePath = path.join(parent, 'root-email-jobs.json');
+  if (!fs.existsSync(rootStorePath)) {
+    const priorRootBackups = fs.readdirSync(backupDir).some(file => /^root-email-jobs-\d{4}-\d{2}-\d{2}\.json$/.test(file));
+    if (priorRootBackups) throw new PermanentStoreIntegrityError(
+      'root-email-jobs.json 缺失但存在历史备份，已拒绝创建空库并停止启动',
+    );
+    createInitialRootStore(rootStorePath);
+  }
+  const candidates = [
+    { source: dbPath, prefix: 'db', permanentRootStore: false },
+    { source: rootStorePath, prefix: 'root-email-jobs', permanentRootStore: true },
+  ];
+  const staged: Array<{ temporary: string; destination: string }> = [];
+  const destinations: string[] = [];
+  try {
+    for (const item of candidates) {
+      const destination = path.join(backupDir, backupFilename(item.prefix, day));
+      destinations.push(destination);
+      if (fs.existsSync(destination)) {
+        // A same-day restart must never replace an earlier recovery point before ciphertext authentication completes.
+        prepareJsonBackupSource(destination, item.permanentRootStore);
+        continue;
+      }
+      const content = prepareJsonBackupSource(item.source, item.permanentRootStore);
+      const temporary = `${destination}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`;
+      const fd = fs.openSync(temporary, 'wx', 0o600);
+      try { fs.writeFileSync(fd, content); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+      staged.push({ temporary, destination });
+    }
+    for (const item of staged) fs.renameSync(item.temporary, item.destination);
+    try {
+      const dirFd = fs.openSync(backupDir, 'r');
+      try { fs.fsyncSync(dirFd); } finally { fs.closeSync(dirFd); }
+    } catch (error: any) {
+      console.warn(`[DB Backup] 目录 fsync 不可用: ${error.message}`);
+    }
+  } catch (error) {
+    for (const item of staged) {
+      try { fs.rmSync(item.temporary, { force: true }); } catch { /* Preserve the original backup error. */ }
+    }
+    throw error;
+  }
+
+  for (const prefix of ['db', 'root-email-jobs']) {
+    const pattern = new RegExp(`^${prefix}-\\d{4}-\\d{2}-\\d{2}\\.json$`);
+    const files = fs.readdirSync(backupDir).filter(file => pattern.test(file)).sort();
+    while (files.length > BACKUP_RETENTION_DAYS) {
+      const old = files.shift();
+      if (old) fs.unlinkSync(path.join(backupDir, old));
+    }
+  }
+  return destinations;
+}
+
+export function backupDB(now = new Date()) {
+  try {
+    const backedUp = backupJsonStores(DB_PATH, now);
+    if (backedUp.length === 2) lastBackupDay = now.toISOString().slice(0, 10);
+  } catch (error: any) {
+    console.error('[DB Backup] failed:', error.message);
+    if (error instanceof PermanentStoreIntegrityError) throw error;
+  }
+}
+
+// Long-running processes create a new pair on the first DB read of each UTC day.
 export function maybeBackup() {
   const today = new Date().toISOString().slice(0, 10);
   if (today !== lastBackupDay) backupDB();
@@ -801,16 +1022,40 @@ export const db = {
   },
 };
 
-// Migration: encrypt any plaintext MFA secrets on startup
+// Migration: authenticate plaintext/legacy fields and re-encrypt historical key IDs with the current key.
 export function migrateEncryptMFASecrets() {
   const data = readDB();
-  let changed = false;
+  let mfaMigrated = 0;
+  let externalIdsMigrated = 0;
   for (const user of data.users) {
-    if (user.mfa_secret && !user.mfa_secret.includes(':')) {
-      user.mfa_secret = encryptField(user.mfa_secret);
-      changed = true;
-      console.log(`✅ Migrated MFA secret for user: ${user.username}`);
-    }
+    if (!user.mfa_secret) continue;
+    const plaintext = decryptField(user.mfa_secret, 'mfa');
+    if (encryptedFieldUsesCurrentKey(user.mfa_secret, 'mfa')) continue;
+    user.mfa_secret = encryptField(plaintext, 'mfa');
+    mfaMigrated++;
   }
-  if (changed) writeDB(data);
+  for (const record of data.restricted_accounts || []) {
+    if (!record.external_id_enc) continue;
+    const plaintext = decryptField(record.external_id_enc, 'external-id');
+    if (encryptedFieldUsesCurrentKey(record.external_id_enc, 'external-id')) continue;
+    record.external_id_enc = encryptField(plaintext, 'external-id');
+    externalIdsMigrated++;
+  }
+  if (mfaMigrated > 0 || externalIdsMigrated > 0) {
+    const now = new Date().toISOString();
+    const lastAuditId = data.audit_log.reduce((max, log) => Math.max(max, Number(log.id) || 0), 0);
+    data.audit_log.push({
+      id: Math.max(Date.now(), lastAuditId + 1),
+      user_id: null,
+      username: 'system',
+      action: 'ENCRYPTION_KEY_ROTATION_MIGRATE',
+      detail: `已将 ${mfaMigrated} 个 MFA 密钥和 ${externalIdsMigrated} 个 ExternalId 原子重加密到 current key`,
+      ip: null,
+      created_at: now,
+    });
+    if (data.audit_log.length > 5000) data.audit_log = data.audit_log.slice(-5000);
+    // Sensitive fields and their audit event share one durable DB replacement.
+    writeDB(data);
+    console.log(`✅ Re-encrypted sensitive fields: MFA=${mfaMigrated}, ExternalId=${externalIdsMigrated}`);
+  }
 }

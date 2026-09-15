@@ -118,7 +118,7 @@ authRouter.post('/login', (req: Request, res: Response) => {
   // MFA check
   if (user.mfa_enabled && user.mfa_secret) {
     if (!totpCode) return res.json({ requireMFA: true, message: '请输入 MFA 验证码' });
-    const decryptedSecret = decryptField(user.mfa_secret);
+    const decryptedSecret = decryptField(user.mfa_secret, 'mfa');
     if (!authenticator.verify({ token: totpCode, secret: decryptedSecret })) {
       recordLoginFailure(user.username, req.ip, 'mfa');
       return res.status(401).json({ error: 'MFA 验证码错误' });
@@ -154,7 +154,7 @@ authRouter.post('/mfa/confirm', (req: Request, res: Response) => {
     const decoded = jwt.verify(authHeader.replace('Bearer ', ''), JWT_SECRET) as any;
     const { secret, code } = req.body;
     if (!authenticator.verify({ token: code, secret })) return res.status(400).json({ error: '验证码错误' });
-    db.updateUser(decoded.userId, { mfa_secret: encryptField(secret), mfa_enabled: true });
+    db.updateUser(decoded.userId, { mfa_secret: encryptField(secret, 'mfa'), mfa_enabled: true });
     res.json({ success: true });
   } catch { res.status(401).json({ error: 'Invalid token' }); }
 });

@@ -52,7 +52,7 @@ web/
 │   ├── account-roles.ts        # ★账户角色自愈：探测成员账户角色 → 缺失则触发 StackSet 补齐 → 超限告警
 │   ├── billing-export-jobs.ts  # 账单导出持久化 job、全局队列、永久历史、重复下载与重启恢复
 │   ├── billing-exporter.ts     # 严格只读抓取 AWS 官方账单 PDF + 可取消 zip 打包
-│   ├── root-email-jobs.ts      # Root 恢复邮件/自动改密队列、30分钟凭证TTL、一次性CSV（单浏览器并发）
+│   ├── root-email-jobs.ts      # Root 恢复邮件/自动改密队列、永久加密凭证、重复CSV下载（单浏览器并发）
 │   ├── root-email-browser.ts   # 独立 Chrome：两阶段OCR发信/跨导航轮询 + AWS reset自动填充；提交前最多3次尝试
 │   ├── root-email-core.ts      # 原子任务存储、自动改密状态机、2小时手工链接兜底资格和旧任务兼容，见 web/ROOT_EMAIL.md
 │   ├── root-password-secrets.ts # 24位CSPRNG、AES-256-GCM任务绑定密文、CSV生成
@@ -198,7 +198,8 @@ childRoleName        # OrganizationAccountAccessRole
 adminRoleName        # admin-console
 supportRoleName      # support-quota
 adminRoleExcludedAccounts[] { accountId, payer, reason } # 逐账户仅排除 Admin，保留 support-quota
-web { port, adminPassword, jwtSecret, encryptionKey, feishuWebhook }
+web { port, adminPassword, jwtSecret, encryptionKey, encryptionKeyPrevious[], feishuWebhook }
+# encryptionKey 为当前写入密钥；encryptionKeyPrevious 最多 8 个，仅用于解密历史 gcm1/gcm2；启动时在线数据会认证后原子重加密到 current key
 ```
 
 **`data/db.json`（gitignore，运行时数据库）**，顶层键：
@@ -215,7 +216,7 @@ web { port, adminPassword, jwtSecret, encryptionKey, feishuWebhook }
 
 账单 ZIP 位于 `data/exports/billing/<jobId>/`（gitignore）并在服务器长期保留，只能通过鉴权端点下载；历史记录通过分页接口查询。禁止提交，且需单独监控磁盘与规划备份。
 
-启动时：`migrateEncryptMFASecrets()` 迁移明文 MFA 密钥、`backupDB()` 备份到 `data/backups/db-YYYY-MM-DD.json`（保留 7 天）。
+启动和长时间运行期间每天首次 DB 读取时：先校验两个源 JSON，在 Root 快照中排除 `setting_password`/failed/unknown 及旧策略已披露的密文，再将 `data/db.json` 与同目录 `root-email-jobs.json` 分别原子备份到 `data/backups/db-YYYY-MM-DD.json`、`data/backups/root-email-jobs-YYYY-MM-DD.json`（两类各保留 7 天）。已有 Root 备份而主文件缺失时失败关闭。自动备份不含 `config.json`；匹配 keyring 必须独立受控备份。
 
 **权限模型（auth.ts）**：角色 `admin` / `partadmin` / `viewer`；`allowed_pages` 控制可见页面（admin=全部）；`authMiddleware` 强制未绑 MFA 用户不能访问业务接口。`ops` 属于敏感页面：admin 恒有，其他角色只有 `allowed_pages` 显式包含 `ops` 才能显示菜单并访问 `/api/ops`；旧用户缺少 `allowed_pages` 时只继承原有常规页面，不自动获得运维监控。
 
@@ -223,7 +224,7 @@ web { port, adminPassword, jwtSecret, encryptionKey, feishuWebhook }
 - `root_access` → 账户页「根用户」敏感操作（Admin 临时凭证 / 删 Root MFA / 恢复根密码）、Admin 控制台登录；非 admin 即使有此权限也只能签发 1 小时凭证，2–12 小时仅限数据库当前角色为 admin
 - `bulk_quota_access` → 「批量提额」页；未授予时该菜单完全不可见，后端 `requireBulkQuotaAccess` 也会拒绝
 
-- `root_reset_access` → 批量设置 Root 新密码：none/view/operate，非 admin 缺省 none；非 admin（包括 view/operate）只看本人创建的批次，operate 可创建和停止本人任务；admin 可查看/管理全部。每批提供创建者一次和全体 Admin 共享一次两个 CSV 下载槽位，下载依赖已完成登录 MFA 的会话但不再额外 step-up；密文保留到两槽均消费或 30 分钟到期。创建批次与手工 fallback 仍要求 step-up TOTP，创建还需精确输入 payer 名称与账户数。独立于 root_access。守卫与解析见 `root-reset-permissions.ts`。
+- `root_reset_access` → 批量设置 Root 新密码：none/view/operate，非 admin 缺省 none；非 admin（包括 view/operate）只看本人创建的批次，operate 可创建和停止本人任务；admin 可查看/管理全部。CSV 下载依赖已完成登录 MFA 的会话但不再额外 step-up；新密码以 AES-256-GCM 永久保存在本地任务文件和备份，owner 可重复下载本人批次，Admin 可重复下载全部批次。创建批次与手工 fallback 仍要求 step-up TOTP，创建还需精确输入 payer 名称与账户数。独立于 root_access。守卫与解析见 `root-reset-permissions.ts`。
 
 新增独立权限的改动点：`auth.ts`（resolve 函数 + me + create/update）、`db.ts`（getAllUsers 暴露字段）、`routes/aws.ts`（中间件）、`MainLayout.tsx`（导航 gating）、`Settings.tsx`（授予勾选 + 列表列）、`api.ts`（createUser/updateUser 参数）。
 
