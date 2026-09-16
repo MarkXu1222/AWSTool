@@ -2,11 +2,11 @@ import path from 'path';
 import { randomUUID } from 'crypto';
 import { db } from './db';
 import { AwsRootEmailSession, AwsRootPasswordSession, MAX_ROOT_PASSWORD_BROWSER_ATTEMPTS,
-  RootPasswordAutomationError, runRootEmailOcr } from './root-email-browser';
-import { canRetryRootEmailBrowser, type CredentialDownloadSlot, hasNewerRootEmailJob, RootEmailError,
-  RootEmailJob, RootEmailStore, isPendingEmailJob, manualRootResetFallbackExpiresAt, sendRootEmail,
-  selectRootEmailTargets, MAX_ROOT_EMAIL_BROWSER_ATTEMPTS, MAX_ROOT_PASSWORD_BATCH,
-  ROOT_MANUAL_FALLBACK_TTL_MS } from './root-email-core';
+  RootEmailBrowserAutomationError, RootPasswordAutomationError, runRootEmailOcr } from './root-email-browser';
+import { canRetryFailedRootEmailJob, canRetryRootEmailBrowser, type CredentialDownloadSlot, hasNewerRootEmailJob,
+  LEGACY_ROOT_EMAIL_BROWSER_FAILURE, RootEmailError, RootEmailJob, RootEmailStore, isPendingEmailJob,
+  manualRootResetFallbackExpiresAt, sendRootEmail, selectRootEmailTargets, MAX_ROOT_EMAIL_BROWSER_ATTEMPTS,
+  MAX_ROOT_PASSWORD_BATCH, ROOT_MANUAL_FALLBACK_TTL_MS } from './root-email-core';
 import { listConfiguredPayers } from './aws-service';
 import { mailbox, mailApiConfigured, MailApiError } from './mail-api';
 import { matchRootRecoveryMail } from './root-mail-links';
@@ -143,14 +143,20 @@ function firstTimestamp(jobs: RootEmailJob[], field: 'credentialOwnerDownloadedA
 }
 function jobView(job: RootEmailJob, user: RootEmailUser) {
   const { id, accountId, email, status, phase, attempts, createdBy, createdAt, sentAt, detail,
-    autoSetPassword, passwordSetAt } = job;
+    autoSetPassword, passwordSetAt, browserAttempts, failureStage, failureCategory, retryOfJobId, retriedByJobId } = job;
   const current = db.getUser(user.username);
+  const identityMatches = !!current && String(current.id) === String(user.id);
+  const allJobs = store?.list() || [];
   const manualResetExpiresAt = manualRootResetFallbackExpiresAt(job);
-  const manualResetAvailable = !!manualResetExpiresAt && !!current
-    && String(current.id) === String(user.id) && canRetrieveRootEmailManualLink(current, job)
-    && !hasNewerRootEmailJob(store?.list() || [], job);
+  const manualResetAvailable = !!manualResetExpiresAt && identityMatches
+    && canRetrieveRootEmailManualLink(current!, job) && !hasNewerRootEmailJob(allJobs, job);
+  const retryAvailableAt = new Date(Date.parse(job.createdAt) + 60_000).toISOString();
+  const retryAvailable = identityMatches && canManageRootEmailJob(current!, job) && canRetryFailedRootEmailJob(job)
+    && !hasNewerRootEmailJob(allJobs, job) && Date.now() >= Date.parse(retryAvailableAt);
   return { id, accountId, email, status, phase, attempts, createdBy, createdAt, sentAt, detail,
     autoSetPassword: autoSetPassword === true, credentialsAvailable: credentialAvailable(job), passwordSetAt,
+    browserAttempts: browserAttempts || 0, failureStage, failureCategory, retryOfJobId, retriedByJobId,
+    retryAvailable, retryAvailableAt: canRetryFailedRootEmailJob(job) ? retryAvailableAt : undefined,
     manualResetAvailable, manualResetExpiresAt: manualResetAvailable ? manualResetExpiresAt : undefined,
     canManage: canManageRootEmailJob(user, job) };
 }
@@ -232,6 +238,41 @@ export async function submitRootEmailBatch(payerAccountId: string, accountIds: u
   return { ...batchSummary(result.jobs, user), jobs: result.jobs.map(j => jobView(j, user)), reused: result.reused };
 }
 
+/** Retry one provably pre-submit failure as a new one-account batch; the old task remains immutable history. */
+export async function retryRootEmailJob(id: string, user: RootEmailUser, clientIp?: string) {
+  const currentStore = getStore();
+  const source = currentStore.get(id);
+  if (!source || !canViewRootEmailJob(user, source)) throw new RootEmailError('原任务不存在', 404);
+  const current = db.getUser(user.username);
+  if (!current || String(current.id) !== String(user.id) || !canManageRootEmailJob(current, source)) {
+    throw new RootEmailError('无权重试此任务', 403);
+  }
+  if (!canRetryFailedRootEmailJob(source) || hasNewerRootEmailJob(currentStore.list(), source)) {
+    throw new RootEmailError('该任务不满足安全重试条件，可能已提交恢复请求、已重试或存在更新任务', 409);
+  }
+  const remainingMs = 60_000 - (Date.now() - Date.parse(source.createdAt));
+  if (remainingMs > 0) throw new RootEmailError(`为避免重复请求，请 ${Math.ceil(remainingMs / 1000)} 秒后重试`, 429);
+  const email = accountEmail(source.accountId);
+  if (email.toLowerCase() !== source.email.toLowerCase()) throw new RootEmailError('账户邮箱已变化，请重新创建任务', 409);
+  const available = await rootEmailAvailability();
+  if (!available.ready) throw new RootEmailError(available.detail, 503);
+  if (!available.mailboxConfigured) throw new RootEmailError('自动改密要求先配置邮箱 API，重试任务未创建', 503);
+  if (!available.encryptionReady) throw new RootEmailError(available.encryptionDetail, 503);
+  // Availability may await OCR/runtime checks; re-enter the live runner boundary before the synchronous create CAS.
+  const readyStore = getStore();
+  const input = { accountId: source.accountId, email, createdBy: current.username,
+    createdByUserId: String(current.id), createdFromIp: clientIp };
+  authorize({ ...input, payerAccountId: source.payerAccountId, payerName: source.payerName });
+  const meta = { batchId: randomUUID(), payerAccountId: source.payerAccountId!, payerName: source.payerName!,
+    autoSetPassword: true as const };
+  const result = readyStore.createRetry(source.id, input, meta);
+  auditAs(result.source, current, 'ROOT_EMAIL_JOB_RETRY',
+    `确认原任务未提交恢复请求；已创建重试任务 ${result.job.id}`, clientIp);
+  audit(result.job, 'ROOT_EMAIL_REQUEST', `由失败任务 ${source.id} 单独安全重试`, clientIp);
+  tick();
+  return { ...batchSummary([result.job], current), jobs: [jobView(result.job, current)] };
+}
+
 export function cancelRootEmailBatch(id: string, user: RootEmailUser) {
   const jobs = batchJobs(id);
   if (!jobs.every(j => canManageRootEmailJob(user, j))) throw new RootEmailError('无权停止此批次', 403);
@@ -279,7 +320,8 @@ async function execute(job: RootEmailJob, controller: AbortController) {
   };
   const progress = (phase: RootEmailJob['phase'], attempts: number, detail: string) => {
     if (!currentStore.updateIfStatus(job.id, ['running'], { phase, attempts, detail,
-      ...(phase === 'opening' ? { requestedAt: new Date(Math.floor(Date.now() / 1000) * 1000).toISOString() } : {}) })) {
+      ...(phase === 'opening' ? { requestedAt: new Date(Math.floor(Date.now() / 1000) * 1000).toISOString() } : {}),
+      ...(phase === 'submitting' ? { emailSubmitAttempted: true } : {}) })) {
       throw new RootEmailError('任务状态已变化，停止发信');
     }
   };
@@ -288,6 +330,7 @@ async function execute(job: RootEmailJob, controller: AbortController) {
     let sent = false;
     for (let browserAttempt = 1; browserAttempt <= MAX_ROOT_EMAIL_BROWSER_ATTEMPTS; browserAttempt++) {
       ensureRunning();
+      if (!currentStore.updateIfStatus(job.id, ['running'], { browserAttempts: browserAttempt })) return;
       session = new AwsRootEmailSession(controller.signal, ensureRunning);
       try {
         await sendRootEmail({ email: job.email, session, signal: controller.signal, authorize: ensureRunning, progress });
@@ -335,12 +378,15 @@ async function execute(job: RootEmailJob, controller: AbortController) {
       if (waiting) audit(waiting, 'ROOT_EMAIL_SUBMIT_UNKNOWN');
       return;
     }
+    const browserError = error instanceof RootEmailBrowserAutomationError ? error : undefined;
     const status = uncertain || stopping ? 'interrupted' : controller.signal.aborted ? 'cancelled' : 'failed';
     const detail = uncertain ? '提交后结果未确认，请先检查邮箱；系统不会自动再次发送'
       : stopping ? '服务停止，任务已中断，请检查收件箱后再决定是否重试'
       : controller.signal.aborted ? '任务已停止（用户取消或超过 5 分钟）'
-      : error instanceof RootEmailError ? error.message : 'AWS 页面未在预期时间完成加载，或页面结构已变化；请检查后重试';
-    const failed = currentStore.updateIfStatus(job.id, ['running'], { status, phase: 'done', detail });
+      : error instanceof RootEmailError ? error.message
+      : browserError ? browserError.message : LEGACY_ROOT_EMAIL_BROWSER_FAILURE;
+    const failed = currentStore.updateIfStatus(job.id, ['running'], { status, phase: 'done', detail,
+      failureStage: browserError?.stage, failureCategory: browserError?.category });
     if (failed) audit(failed, 'ROOT_EMAIL_STOP');
   } finally {
     clearTimeout(deadline);

@@ -23,6 +23,13 @@ export interface RootEmailJobView {
   autoSetPassword: boolean;
   credentialsAvailable: boolean;
   passwordSetAt?: string;
+  browserAttempts: number;
+  failureStage?: string;
+  failureCategory?: string;
+  retryOfJobId?: string;
+  retriedByJobId?: string;
+  retryAvailable: boolean;
+  retryAvailableAt?: string;
   manualResetAvailable: boolean;
   manualResetExpiresAt?: string;
 }
@@ -692,6 +699,9 @@ export const api = {
   rootResetLink: (id: string) => request(`/aws/root-email/jobs/${encodeURIComponent(id)}/reset-link`, { method: 'POST' }),
   manualRootResetLink: (id: string, totpCode: string) => request(`/aws/root-email/jobs/${encodeURIComponent(id)}/manual-reset-link`, {
     method: 'POST', cache: 'no-store', body: JSON.stringify({ totpCode }),
+  }),
+  retryRootEmailJob: (id: string, totpCode: string) => request(`/aws/root-email/jobs/${encodeURIComponent(id)}/retry`, {
+    method: 'POST', cache: 'no-store', body: JSON.stringify({ totpCode, confirmRetry: true }),
   }),
   rootEmailCatalog: () => request('/aws/root-email/catalog'),
   rootEmailBatches: () => request('/aws/root-email/batches'),

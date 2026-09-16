@@ -6,6 +6,11 @@ export type RootEmailStatus = 'queued' | 'running' | 'email_sent' | 'waiting_mai
   | 'password_set' | 'password_failed' | 'password_unknown' | 'mail_failed' | 'failed' | 'cancelled' | 'interrupted';
 export type RootEmailPhase = 'queued' | 'opening' | 'captcha' | 'submitting' | 'waiting_mail' | 'setting_password' | 'done';
 export type RootManualFallbackReason = 'password_not_submitted';
+export type RootEmailBrowserStage = 'runtime' | 'load_driver' | 'create_profile' | 'launch_browser' | 'create_page'
+  | 'configure_page' | 'navigate' | 'wait_entry' | 'enter_recovery' | 'capture_captcha' | 'recognize_captcha'
+  | 'refresh_captcha' | 'submit_captcha' | 'wait_result';
+export type RootEmailBrowserCategory = 'timeout' | 'navigation_aborted' | 'network' | 'target_closed'
+  | 'execution_context_changed' | 'browser_error';
 export type CredentialDownloadSlot = 'owner' | 'admin';
 export interface RootCredentialDownloadClaim {
   id: string;
@@ -58,6 +63,13 @@ export interface RootEmailJob {
   passwordSubmitAttempted?: boolean;
   manualFallbackReason?: RootManualFallbackReason;
   manualFallbackExpiresAt?: string;
+  /** Persisted before a recovery-email CAPTCHA can submit, so terminal retries fail closed. */
+  emailSubmitAttempted?: boolean;
+  browserAttempts?: number;
+  failureStage?: RootEmailBrowserStage;
+  failureCategory?: RootEmailBrowserCategory;
+  retryOfJobId?: string;
+  retriedByJobId?: string;
 }
 
 export class RootEmailError extends Error {
@@ -77,9 +89,27 @@ export function canRetryRootEmailBrowser(error: unknown, phase: RootEmailPhase,
     && (phase === 'opening' || phase === 'captcha') && !(error instanceof RootEmailError);
 }
 
+export const LEGACY_ROOT_EMAIL_BROWSER_FAILURE = 'AWS 页面未在预期时间完成加载，或页面结构已变化；请检查后重试';
+
+/** Only terminal automatic jobs that provably never crossed the recovery-email submit boundary may be retried. */
+export function canRetryFailedRootEmailJob(job: Pick<RootEmailJob,
+  'status' | 'autoSetPassword' | 'batchId' | 'payerAccountId' | 'payerName' | 'emailSubmitAttempted'
+    | 'detail' | 'retriedByJobId'>): boolean {
+  const submitWasProvablyNotAttempted = job.emailSubmitAttempted === false
+    || (job.emailSubmitAttempted === undefined && job.detail === LEGACY_ROOT_EMAIL_BROWSER_FAILURE);
+  return job.status === 'failed' && job.autoSetPassword === true && !!job.batchId
+    && !!job.payerAccountId && !!job.payerName && !job.retriedByJobId && submitWasProvablyNotAttempted;
+}
+
 export const ROOT_MANUAL_FALLBACK_TTL_MS = 2 * 60 * 60_000;
 const ROOT_MANUAL_FALLBACK_REASONS: RootManualFallbackReason[] = ['password_not_submitted'];
-const DOWNLOAD_CLAIM_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const ROOT_EMAIL_BROWSER_STAGES: RootEmailBrowserStage[] = ['runtime', 'load_driver', 'create_profile', 'launch_browser',
+  'create_page', 'configure_page', 'navigate', 'wait_entry', 'enter_recovery', 'capture_captcha',
+  'recognize_captcha', 'refresh_captcha', 'submit_captcha', 'wait_result'];
+const ROOT_EMAIL_BROWSER_CATEGORIES: RootEmailBrowserCategory[] = ['timeout', 'navigation_aborted', 'network',
+  'target_closed', 'execution_context_changed', 'browser_error'];
+const JOB_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const DOWNLOAD_CLAIM_ID = JOB_ID;
 const validTimestamp = (value: unknown) => typeof value === 'string' && Number.isFinite(Date.parse(value));
 const validDownloadClaim = (value: unknown): value is RootCredentialDownloadClaim => {
   if (!value || typeof value !== 'object') return false;
@@ -150,12 +180,41 @@ export class RootEmailStore {
       || (j.credentialReencryptionAuditPending !== undefined && typeof j.credentialReencryptionAuditPending !== 'boolean')
       || (j.autoSetPassword !== undefined && typeof j.autoSetPassword !== 'boolean')
       || (j.passwordSubmitAttempted !== undefined && typeof j.passwordSubmitAttempted !== 'boolean')
+      || (j.emailSubmitAttempted !== undefined && typeof j.emailSubmitAttempted !== 'boolean')
+      || (j.browserAttempts !== undefined && (!Number.isInteger(j.browserAttempts) || j.browserAttempts < 0
+        || j.browserAttempts > MAX_ROOT_EMAIL_BROWSER_ATTEMPTS))
+      || (j.failureStage !== undefined && !ROOT_EMAIL_BROWSER_STAGES.includes(j.failureStage))
+      || (j.failureCategory !== undefined && !ROOT_EMAIL_BROWSER_CATEGORIES.includes(j.failureCategory))
+      || (j.retryOfJobId !== undefined && !JOB_ID.test(j.retryOfJobId))
+      || (j.retriedByJobId !== undefined && !JOB_ID.test(j.retriedByJobId))
       || (j.manualFallbackReason !== undefined && !ROOT_MANUAL_FALLBACK_REASONS.includes(j.manualFallbackReason))
       || (j.manualFallbackExpiresAt !== undefined && (typeof j.manualFallbackExpiresAt !== 'string'
         || !Number.isFinite(Date.parse(j.manualFallbackExpiresAt)))))) {
       throw new Error('恢复邮件任务文件格式无效，已拒绝覆盖');
     }
-    this.jobs = value;
+    const jobs = value as RootEmailJob[];
+    const byId = new Map(jobs.map(job => [job.id, job]));
+    if (byId.size !== jobs.length) throw new Error('恢复邮件任务 ID 重复，已拒绝覆盖');
+    const validRetryPair = (source: RootEmailJob, child: RootEmailJob) => source.id !== child.id
+      && source.status === 'failed' && source.autoSetPassword === true && child.autoSetPassword === true
+      && source.accountId === child.accountId && source.email.toLowerCase() === child.email.toLowerCase()
+      && source.payerAccountId === child.payerAccountId && source.payerName === child.payerName
+      && source.batchId !== child.batchId && Date.parse(child.createdAt) > Date.parse(source.createdAt);
+    for (const job of jobs) {
+      if (job.retryOfJobId) {
+        const source = byId.get(job.retryOfJobId);
+        if (!source || source.retriedByJobId !== job.id || !validRetryPair(source, job)) {
+          throw new Error('恢复邮件任务重试血缘无效，已拒绝覆盖');
+        }
+      }
+      if (job.retriedByJobId) {
+        const child = byId.get(job.retriedByJobId);
+        if (!child || child.retryOfJobId !== job.id || !validRetryPair(job, child)) {
+          throw new Error('恢复邮件任务重试血缘无效，已拒绝覆盖');
+        }
+      }
+    }
+    this.jobs = jobs;
   }
   list(): RootEmailJob[] { return structuredClone(this.jobs); }
   get(id: string): RootEmailJob | undefined { return this.list().find(j => j.id === id); }
@@ -204,6 +263,7 @@ export class RootEmailStore {
   private makeJob(input: RootEmailInput): RootEmailJob {
     const now = new Date().toISOString();
     return { ...input, id: randomUUID(), status: 'queued', phase: 'queued', attempts: 0,
+      emailSubmitAttempted: false, browserAttempts: 0,
       createdAt: now, updatedAt: now, detail: '等待发送恢复邮件' };
   }
   create(input: RootEmailInput): RootEmailJob {
@@ -212,6 +272,28 @@ export class RootEmailStore {
     const job = this.makeJob(input);
     this.save([...this.jobs, job]);
     return structuredClone(job);
+  }
+  /** Create one new automatic batch while atomically sealing the terminal source job against duplicate retries. */
+  createRetry(sourceId: string, input: RootEmailInput, meta: RootEmailBatchMeta): { source: RootEmailJob; job: RootEmailJob } {
+    const source = this.jobs.find(job => job.id === sourceId);
+    if (!source) throw new RootEmailError('原任务不存在', 404);
+    if (!canRetryFailedRootEmailJob(source) || hasNewerRootEmailJob(this.jobs, source)) {
+      throw new RootEmailError('该任务不满足安全重试条件，可能已提交恢复请求、已重试或存在更新任务', 409);
+    }
+    if (input.accountId !== source.accountId || input.email.toLowerCase() !== source.email.toLowerCase()
+      || meta.payerAccountId !== source.payerAccountId || meta.payerName !== source.payerName
+      || !JOB_ID.test(meta.batchId) || this.jobs.some(job => job.batchId === meta.batchId)) {
+      throw new RootEmailError('重试任务参数与原任务不匹配', 409);
+    }
+    this.validate(input);
+    if (this.jobs.filter(isPendingEmailJob).length >= MAX_ROOT_EMAIL_TASKS) throw new RootEmailError('队列已满，请稍后重试', 429);
+    const now = new Date().toISOString();
+    const job: RootEmailJob = { ...this.makeJob(input), ...meta, retryOfJobId: source.id,
+      detail: '等待重试发送恢复邮件' };
+    const next = this.jobs.map(current => current.id === source.id
+      ? { ...current, retriedByJobId: job.id, updatedAt: now } : current);
+    this.save([...next, job]);
+    return { source: structuredClone(next.find(current => current.id === source.id)!), job: structuredClone(job) };
   }
   /** Validate every target before one atomic write. A repeated request ID cannot send twice. */
   createBatch(inputs: RootEmailInput[], meta: RootEmailBatchMeta): { jobs: RootEmailJob[]; reused: boolean } {

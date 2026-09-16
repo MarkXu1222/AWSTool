@@ -4,7 +4,7 @@ import path from 'path';
 import { createHash } from 'crypto';
 import { spawn } from 'child_process';
 import type { Browser, Page } from 'puppeteer-core';
-import { RootEmailError, RootEmailSession } from './root-email-core';
+import { RootEmailBrowserCategory, RootEmailBrowserStage, RootEmailError, RootEmailSession } from './root-email-core';
 
 export function rootEmailRuntime() {
   const chrome = [process.env.CHROME_PATH, '/usr/bin/google-chrome-stable', '/usr/bin/google-chrome',
@@ -56,6 +56,32 @@ export type RootEmailVerifyAction = 'ready' | 'not_ready' | 'blocked' | 'changed
 export type RootEmailCaptchaResult = 'waiting' | 'sent' | 'identity_verified' | 'invalid' | 'blocked' | 'disabled';
 
 class RootEmailBrowserReadTimeout extends Error {}
+
+export class RootEmailBrowserAutomationError extends Error {
+  constructor(message: string, readonly stage: RootEmailBrowserStage,
+    readonly category: RootEmailBrowserCategory) { super(message); }
+}
+
+/** Convert raw recovery-browser failures into URL-free diagnostics suitable for persisted job history. */
+export function classifyRootEmailBrowserError(error: unknown,
+  stage: RootEmailBrowserStage): RootEmailBrowserAutomationError {
+  const name = error instanceof Error ? error.name : '';
+  const message = error instanceof Error ? error.message : '';
+  const value = `${name} ${message}`;
+  const category: RootEmailBrowserCategory = /ERR_ABORTED/i.test(value) ? 'navigation_aborted'
+    : /net::ERR_|Navigation failed/i.test(value) ? 'network'
+    : /Target closed|Session closed|browser has disconnected|Connection closed|Protocol error.*Target/i.test(value) ? 'target_closed'
+    : /Execution context (?:was destroyed|is not available)|detached frame|frame.*detached|Cannot find context/i.test(value)
+      ? 'execution_context_changed'
+    : /TimeoutError|timed out|timeout|deadline exceeded/i.test(value) ? 'timeout'
+    : 'browser_error';
+  return new RootEmailBrowserAutomationError(`AWS 恢复页面异常（${stage}/${category}），尚未提交恢复邮件`, stage, category);
+}
+
+function normalizeRootEmailBrowserError(error: unknown, stage: RootEmailBrowserStage): Error {
+  if (error instanceof RootEmailError || error instanceof RootEmailBrowserAutomationError) return error;
+  return classifyRootEmailBrowserError(error, stage);
+}
 
 /** Self-contained browser function: AWS can replace the execution context immediately after Next. */
 export function readRootEmailEntryState(): RootEmailEntryState {
@@ -255,35 +281,48 @@ export class AwsRootEmailSession implements RootEmailSession {
     this.captchaPurpose = 'recovery';
   }
   async open(email: string) {
-    const runtime = rootEmailRuntime();
-    const { default: puppeteer } = await import('puppeteer-core');
-    this.expectedEmail = email;
-    this.profile = fs.mkdtempSync(path.join(os.tmpdir(), 'aws-root-email-'));
-    this.browser = await puppeteer.launch({
-      executablePath: runtime.chrome, headless: false, userDataDir: this.profile,
-      defaultViewport: { width: 1280, height: 900, deviceScaleFactor: 1 },
-      args: ['--no-first-run', '--no-default-browser-check', '--lang=en-US', '--disable-dev-shm-usage'],
-      env: runtime.display ? { ...process.env, DISPLAY: runtime.display } : process.env,
-      timeout: 15_000, signal: this.signal,
-    });
-    this.page = await this.browser.newPage();
-    this.page.setDefaultTimeout(25_000);
-    this.page.setDefaultNavigationTimeout(30_000);
-    await this.page.setExtraHTTPHeaders({ 'Accept-Language': 'en-US,en;q=0.9' });
-    await this.page.goto('https://console.aws.amazon.com/', { waitUntil: 'domcontentloaded' });
-    await this.page.waitForFunction(`!!document.querySelector('#root_account_signin, #root_user_radio_button')`, { signal: this.signal });
-    if (await this.page.$('#root_account_signin')) await this.page.click('#root_account_signin');
-    await this.page.waitForSelector('#root_user_radio_button', { visible: true });
-    this.checkedPage();
-    await this.page.click('#root_user_radio_button');
-    await this.page.locator('#resolving_input').fill(email);
-    await this.page.click('#next_button');
-    const entry = await this.waitForEntry();
-    if (entry === 'identity') {
-      this.captchaPurpose = 'identity';
-      return;
+    let stage: RootEmailBrowserStage = 'runtime';
+    try {
+      const runtime = rootEmailRuntime();
+      stage = 'load_driver';
+      const { default: puppeteer } = await import('puppeteer-core');
+      this.expectedEmail = email;
+      stage = 'create_profile';
+      this.profile = fs.mkdtempSync(path.join(os.tmpdir(), 'aws-root-email-'));
+      stage = 'launch_browser';
+      this.browser = await puppeteer.launch({
+        executablePath: runtime.chrome, headless: false, userDataDir: this.profile,
+        defaultViewport: { width: 1280, height: 900, deviceScaleFactor: 1 },
+        args: ['--no-first-run', '--no-default-browser-check', '--lang=en-US', '--disable-dev-shm-usage'],
+        env: runtime.display ? { ...process.env, DISPLAY: runtime.display } : process.env,
+        timeout: 15_000, signal: this.signal,
+      });
+      stage = 'create_page';
+      this.page = await this.browser.newPage();
+      this.page.setDefaultTimeout(25_000);
+      this.page.setDefaultNavigationTimeout(30_000);
+      stage = 'configure_page';
+      await this.page.setExtraHTTPHeaders({ 'Accept-Language': 'en-US,en;q=0.9' });
+      stage = 'navigate';
+      await this.page.goto('https://console.aws.amazon.com/', { waitUntil: 'domcontentloaded' });
+      stage = 'wait_entry';
+      await this.page.waitForFunction(`!!document.querySelector('#root_account_signin, #root_user_radio_button')`, { signal: this.signal });
+      if (await this.page.$('#root_account_signin')) await this.page.click('#root_account_signin');
+      await this.page.waitForSelector('#root_user_radio_button', { visible: true });
+      this.checkedPage();
+      await this.page.click('#root_user_radio_button');
+      await this.page.locator('#resolving_input').fill(email);
+      await this.page.click('#next_button');
+      const entry = await this.waitForEntry();
+      if (entry === 'identity') {
+        this.captchaPurpose = 'identity';
+        return;
+      }
+      stage = 'enter_recovery';
+      await this.enterRecoveryCaptcha();
+    } catch (error) {
+      throw normalizeRootEmailBrowserError(error, stage);
     }
-    await this.enterRecoveryCaptcha();
   }
   isRecoveryCaptcha() { return this.captchaPurpose === 'recovery'; }
   private async capture() {
@@ -297,36 +336,52 @@ export class AwsRootEmailSession implements RootEmailSession {
     } finally { await element.dispose(); }
   }
   async recognize() {
-    const { image, imageId } = await this.capture();
-    const { candidate } = await runRootEmailOcr(image, this.signal);
-    return { imageId, candidate: typeof candidate === 'string' ? candidate : null };
+    let stage: RootEmailBrowserStage = 'capture_captcha';
+    try {
+      const { image, imageId } = await this.capture();
+      stage = 'recognize_captcha';
+      const { candidate } = await runRootEmailOcr(image, this.signal);
+      return { imageId, candidate: typeof candidate === 'string' ? candidate : null };
+    } catch (error) {
+      throw normalizeRootEmailBrowserError(error, stage);
+    }
   }
   async refresh(previousImageId: string) {
-    const page = this.checkedPage();
-    await page.locator('::-p-aria(Type the characters as shown above)').fill('');
-    // AWS can replace the image itself after rejection; only click refresh if it is still the old one.
-    if ((await this.capture()).imageId !== previousImageId) return;
-    const previousSrc = await page.$eval('#captcha_image', el => (el as any).src);
-    await this.click('Refresh Captcha');
-    await page.waitForFunction((src: string) => {
-      const image = (globalThis as any).document.querySelector('#captcha_image');
-      return image && image.src !== src && image.complete && image.naturalWidth > 0;
-    }, { signal: this.signal }, previousSrc);
-    if ((await this.capture()).imageId === previousImageId) throw new RootEmailError('验证码刷新后图片未变化，请稍后重试', 422);
+    try {
+      const page = this.checkedPage();
+      await page.locator('::-p-aria(Type the characters as shown above)').fill('');
+      // AWS can replace the image itself after rejection; only click refresh if it is still the old one.
+      if ((await this.capture()).imageId !== previousImageId) return;
+      const previousSrc = await page.$eval('#captcha_image', el => (el as any).src);
+      await this.click('Refresh Captcha');
+      await page.waitForFunction((src: string) => {
+        const image = (globalThis as any).document.querySelector('#captcha_image');
+        return image && image.src !== src && image.complete && image.naturalWidth > 0;
+      }, { signal: this.signal }, previousSrc);
+      if ((await this.capture()).imageId === previousImageId) throw new RootEmailError('验证码刷新后图片未变化，请稍后重试', 422);
+    } catch (error) {
+      throw normalizeRootEmailBrowserError(error, 'refresh_captcha');
+    }
   }
   async submit(candidate: string): Promise<'sent' | 'invalid' | 'next_captcha'> {
-    const page = this.checkedPage();
-    const purpose = this.captchaPurpose;
-    await page.locator('::-p-aria(Type the characters as shown above)').fill(candidate);
-    await this.click('I’m not a robot');
-    const result = await this.waitForCaptchaResult(purpose === 'identity');
-    if (result === 'blocked') throw new RootEmailError('AWS 提示限制请求，请稍后再试', 429);
-    if (result === 'disabled') throw new RootEmailError('AWS 未允许该账户恢复密码，请检查集中式根访问设置', 422);
-    if (result === 'identity_verified') {
-      await this.enterRecoveryCaptcha();
-      return 'next_captcha';
+    let stage: RootEmailBrowserStage = 'submit_captcha';
+    try {
+      const page = this.checkedPage();
+      const purpose = this.captchaPurpose;
+      await page.locator('::-p-aria(Type the characters as shown above)').fill(candidate);
+      await this.click('I’m not a robot');
+      stage = 'wait_result';
+      const result = await this.waitForCaptchaResult(purpose === 'identity');
+      if (result === 'blocked') throw new RootEmailError('AWS 提示限制请求，请稍后再试', 429);
+      if (result === 'disabled') throw new RootEmailError('AWS 未允许该账户恢复密码，请检查集中式根访问设置', 422);
+      if (result === 'identity_verified') {
+        await this.enterRecoveryCaptcha();
+        return 'next_captcha';
+      }
+      return result === 'sent' ? 'sent' : 'invalid';
+    } catch (error) {
+      throw normalizeRootEmailBrowserError(error, stage);
     }
-    return result === 'sent' ? 'sent' : 'invalid';
   }
   async close() {
     try {

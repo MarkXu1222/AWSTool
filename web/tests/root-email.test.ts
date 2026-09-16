@@ -3,8 +3,9 @@ import test from 'node:test';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { canRetryRootEmailBrowser, hasNewerRootEmailJob, manualRootResetFallbackExpiresAt,
-  RootEmailError, RootEmailSession, RootEmailStore, sendRootEmail, selectRootEmailTargets } from '../server/root-email-core';
+import { canRetryFailedRootEmailJob, canRetryRootEmailBrowser, hasNewerRootEmailJob,
+  LEGACY_ROOT_EMAIL_BROWSER_FAILURE, manualRootResetFallbackExpiresAt, RootEmailError, RootEmailSession,
+  RootEmailStore, sendRootEmail, selectRootEmailTargets } from '../server/root-email-core';
 import { createCipheriv, createHash, randomBytes, randomUUID } from 'node:crypto';
 import { backupJsonStores, decryptField, decryptLegacyFieldWithKeys, deriveEncryptionKeyringFromSources,
   encryptedFieldUsesCurrentKey, encryptField } from '../server/db';
@@ -195,6 +196,53 @@ test('recovery browser retries only generic pre-submit failures and stops at thr
   assert.equal(canRetryRootEmailBrowser(transient, 'submitting', 1, false), false);
   assert.equal(canRetryRootEmailBrowser(new RootEmailError('policy'), 'opening', 1, false), false);
   assert.equal(canRetryRootEmailBrowser(transient, 'opening', 1, true), false);
+});
+
+test('only provably pre-submit automatic failures qualify for a terminal retry', () => {
+  const base = { status: 'failed' as const, autoSetPassword: true, batchId: randomUUID(),
+    payerAccountId: '999999999999', payerName: 'payer-a', detail: 'classified failure' };
+  assert.equal(canRetryFailedRootEmailJob({ ...base, emailSubmitAttempted: false }), true);
+  assert.equal(canRetryFailedRootEmailJob({ ...base, emailSubmitAttempted: true }), false);
+  assert.equal(canRetryFailedRootEmailJob({ ...base, emailSubmitAttempted: undefined }), false);
+  assert.equal(canRetryFailedRootEmailJob({ ...base, emailSubmitAttempted: undefined,
+    detail: LEGACY_ROOT_EMAIL_BROWSER_FAILURE }), true);
+  assert.equal(canRetryFailedRootEmailJob({ ...base, emailSubmitAttempted: false, retriedByJobId: randomUUID() }), false);
+  assert.equal(canRetryFailedRootEmailJob({ ...base, status: 'interrupted' }), false);
+});
+
+test('a failed automatic job is atomically sealed and retried as a new one-account batch', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'root-email-retry-'));
+  try {
+    const store = new RootEmailStore(path.join(dir, 'jobs.json'));
+    const originalMeta = { batchId: randomUUID(), payerAccountId: '999999999999', payerName: 'payer-a', autoSetPassword: true as const };
+    const { jobs: [created] } = store.createBatch([input], originalMeta);
+    const source = store.update(created.id, { status: 'failed', phase: 'done', emailSubmitAttempted: false,
+      createdAt: new Date(Date.now() - 61_000).toISOString(), detail: 'AWS 恢复页面异常（navigate/network），尚未提交恢复邮件' });
+    const retryMeta = { ...originalMeta, batchId: randomUUID() };
+    const result = store.createRetry(source.id, input, retryMeta);
+    assert.equal(result.source.retriedByJobId, result.job.id);
+    assert.equal(result.job.retryOfJobId, source.id);
+    assert.equal(result.job.batchId, retryMeta.batchId);
+    assert.equal(result.job.status, 'queued');
+    assert.equal(result.job.emailSubmitAttempted, false);
+    assert.equal(store.list().length, 2);
+    assert.throws(() => store.createRetry(source.id, input, { ...retryMeta, batchId: randomUUID() }), /安全重试条件/);
+
+    const broken = store.list();
+    broken[0].retriedByJobId = randomUUID();
+    fs.writeFileSync(path.join(dir, 'jobs.json'), JSON.stringify(broken));
+    assert.throws(() => new RootEmailStore(path.join(dir, 'jobs.json')), /重试血缘无效/);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('recovery browser error classification is stage-specific and never persists a URL', async () => {
+  const { classifyRootEmailBrowserError } = await import('../server/root-email-browser');
+  const secretUrl = 'https://signin.aws.amazon.com/resetpassword?token=TOP_SECRET';
+  const error = classifyRootEmailBrowserError(new Error(`net::ERR_ABORTED at ${secretUrl}`), 'navigate');
+  assert.equal(error.stage, 'navigate');
+  assert.equal(error.category, 'navigation_aborted');
+  assert.equal(error.message, 'AWS 恢复页面异常（navigate/navigation_aborted），尚未提交恢复邮件');
+  assert.equal(error.message.includes('TOP_SECRET'), false);
 });
 
 test('metadata survives restart; unfinished jobs become interrupted and never auto-resend', () => {

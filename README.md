@@ -3,7 +3,7 @@
 企业级 AWS 多账户（多 Organizations）管理平台。带强制 MFA 登录、页面级权限与全量操作审计。
 
 **线上**：https://markxu.co（EC2 Singapore，PM2 进程 `aws-toolbox`）
-**当前版本**：`0.23.0`（见 `web/client/src/version.ts`，左下角展示）
+**当前版本**：`0.30.0`（见 `web/client/src/version.ts`，左下角展示）
 
 **生产接入规模**（快照 2026-09-06，取自线上 db.json）
 
@@ -482,7 +482,7 @@ HTML 模板 + Puppeteer 渲染。公司背景库在 `doc-templates.ts`（12 家�
 
 ### 批量自动设置 Root 新密码
 
-独立页面 `/rootreset` 受 `root_reset_access` 控制。每批最多 20 个 ACTIVE 成员账户；创建前必须精确输入 payer 名称、账户数量和当前 TOTP。任务严格串行执行：选择 Root 登录 → 如 AWS 要求则先完成登录安全验证码 → 打开 Forgot password → 完成恢复邮件验证码 → 精确匹配收件人/时间 → 校验 `signin.aws.amazon.com/resetpassword` 一次性链接 → 生成 24 位 CSPRNG 强密码 → 在 AWS 页面填写两处密码并提交。AWS 发信提交结果不明时只读查询邮箱而不重复发信；有效 reset 页面初始执行上下文短暂切换时会在提交前等待稳定。只有 AWS 页面出现明确成功文案才记为 `password_set`；确认尚未进入提交边界的浏览器加载异常最多执行 3 次独立 Chrome 尝试，同时只记录不含 URL/token 的阶段码和错误分类；提交后超时或页面异常记为 `password_unknown`，绝不自动重试。自动尝试耗尽且确认未提交密码时，任务创建者可在 2 小时内通过新的 MFA 按需重扫邮件、直接打开或显式复制链接；手工设置的密码不会进入平台 CSV。
+独立页面 `/rootreset` 受 `root_reset_access` 控制。每批最多 20 个 ACTIVE 成员账户；创建前必须精确输入 payer 名称、账户数量和当前 TOTP。任务严格串行执行：选择 Root 登录 → 如 AWS 要求则先完成登录安全验证码 → 打开 Forgot password → 完成恢复邮件验证码 → 精确匹配收件人/时间 → 校验 `signin.aws.amazon.com/resetpassword` 一次性链接 → 生成 24 位 CSPRNG 强密码 → 在 AWS 页面填写两处密码并提交。AWS 发信提交结果不明时只读查询邮箱而不重复发信；有效 reset 页面初始执行上下文短暂切换时会在提交前等待稳定。只有 AWS 页面出现明确成功文案才记为 `password_set`；确认尚未进入提交边界的浏览器加载异常最多执行 3 次独立 Chrome 尝试，同时只记录不含 URL/token 的阶段码和错误分类；提交后超时或页面异常记为 `password_unknown`，绝不自动重试。自动尝试耗尽且确认未提交密码时，任务创建者可在 2 小时内通过新的 MFA 按需重扫邮件、直接打开或显式复制链接；手工设置的密码不会进入平台 CSV。发恢复邮件阶段会记录独立 Chrome 尝试次数和不含 URL/token 的 `failureStage/failureCategory`；仅明确未跨过恢复邮件提交边界的 `failed` 任务可通过 MFA 创建新的单账户重试批次，旧任务保留并记录双向重试血缘，`interrupted`、已提交或结果未知任务不开放重试。
 
 确认成功的密码以任务 ID、账户 ID、创建者 ID 作为 AAD，使用用途分离密钥和 AES-256-GCM 永久写入 `data/root-email-jobs.json`，不会因下载或时间到期自动销毁。新记录使用 `gcm2` 并携带非敏感 key ID；旧 `gcm1` 通过 current + `web.encryptionKeyPrevious` 兼容解密。CSV 不再要求下载时额外 MFA：Owner 可重复下载本人批次，Admin 可重复下载全部批次；每次请求仍使用短期 durable claim 防止同一视图并发生成，并记录真实操作者。非 admin 只看本人批次，Admin 查看全部。`root-email-jobs.json` 每日与 `db.json` 分别做 7 天本地轮换备份；服务器文件、独立备份的匹配 keyring 和异机快照共同构成永久 Root 凭证库，必须按最高敏感级别保护。列表 API、审计和飞书通知都不包含密码或 reset URL。完整运行与恢复语义见 [`web/ROOT_EMAIL.md`](web/ROOT_EMAIL.md)。
 

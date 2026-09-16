@@ -4,7 +4,7 @@
 
 独立导航「批量设置 Root 密码」（`/rootreset`）创建自动改密批次。系统按 payer 选择最多 20 个 ACTIVE 成员账户，发送恢复邮件、精确匹配收件人和请求时间、重新校验 AWS 一次性链接，然后生成并提交 24 位强随机密码。创建批次必须精确输入 payer 名称、账户数量和当前 TOTP。
 
-后台使用独立 Chrome 配置目录进入 AWS 忘记密码页面，通过本地 PP-OCRv6 模型处理 AWS 当前可能出现的两阶段验证码：登录安全验证码通过后进入 Forgot password，再处理恢复邮件验证码；每阶段最多 3 张图片。opening/captcha 阶段的泛化浏览器异常最多重建到 3 次会话；通过跨导航短轮询处理登录安全验证码，并兼容 AWS 先显示 `Verify`、点击后才加载验证码图片的中间态；验证码错误只通过 AWS 明确错误文案判定（兼容直/弯引号 contractions），无法确认时保持只读查邮箱且绝不重发，只有恢复邮件验证码提交前才持久化 `submitting`，此后只查邮箱、不重复发信。找到链接后，同一浏览器执行槽位只接受 `https://signin.aws.amazon.com/resetpassword` 的 `RootUser` 链接，使用不依赖 `tsx` 运行时 helper 的自包含页面函数，要求恰好两个可见密码框和唯一的 `Reset password` / `Set new password` / `Save new password` / `Change password` / `Submit` 按钮。密码页面仅在确认未进入提交边界时最多尝试 3 次。只有 AWS 返回明确成功文案才记录 `password_set`；提交后结果不明确时记录 `password_unknown`，绝不重试一次性链接。
+后台使用独立 Chrome 配置目录进入 AWS 忘记密码页面，通过本地 PP-OCRv6 模型处理 AWS 当前可能出现的两阶段验证码：登录安全验证码通过后进入 Forgot password，再处理恢复邮件验证码；每阶段最多 3 张图片。opening/captcha 阶段的泛化浏览器异常最多重建到 3 次会话；通过跨导航短轮询处理登录安全验证码，并兼容 AWS 先显示 `Verify`、点击后才加载验证码图片的中间态；验证码错误只通过 AWS 明确错误文案判定（兼容直/弯引号 contractions），无法确认时保持只读查邮箱且绝不重发，只有恢复邮件验证码提交前才持久化 `submitting`，此后只查邮箱、不重复发信。找到链接后，同一浏览器执行槽位只接受 `https://signin.aws.amazon.com/resetpassword` 的 `RootUser` 链接，使用不依赖 `tsx` 运行时 helper 的自包含页面函数，要求恰好两个可见密码框和唯一的 `Reset password` / `Set new password` / `Save new password` / `Change password` / `Submit` 按钮。密码页面仅在确认未进入提交边界时最多尝试 3 次。只有 AWS 返回明确成功文案才记录 `password_set`；提交后结果不明确时记录 `password_unknown`，绝不重试一次性链接。恢复邮件浏览器同样逐账户使用独立 Chrome/profile/Page，并持久化浏览器尝试次数及不含 URL/token 的 `failureStage/failureCategory`。仅 `failed` 且持久化证明未跨过恢复邮件提交边界的自动任务可单独重试；重试通过新 TOTP 创建新的单账户批次，旧任务保留并记录 `retryOfJobId/retriedByJobId`，不确定状态一律拒绝。
 
 新密码由 Node.js CSPRNG 生成，固定 24 位并包含大小写、数字和符号。密码以任务上下文作为 AAD，使用用途分离密钥和 AES-256-GCM 永久写入任务文件及随后的备份，不设置 TTL，也不因下载销毁。CSV 下载依赖已完成登录 MFA 的会话，但不再要求额外 TOTP；Owner 可重复下载本人批次，Admin 可重复下载全部批次。服务端每次下载仍按 owner/admin 视图持久化短期 claim 防并发，响应结束后清 claim 并更新最近下载时间。列表 API、审计和飞书通知均不包含明文密码或 reset URL。
 
@@ -18,7 +18,7 @@
 | view | 仅查看 | 账户清单、本人创建的批次进度；不能创建、停止或下载凭证 |
 | operate | 可使用 | 查看/创建/停止本人任务；本人批次完成后可下载创建者副本 |
 
-非 admin 只能列出和读取自己创建的批次/任务。管理员可查看和管理全部任务，并重复下载任意批次的 Admin CSV 视图；若管理员同时是创建者，页面会显示 owner/admin 两个权限视图。CSV 下载不再 step-up MFA，但创建批次和手工 fallback 仍必须通过 step-up TOTP。成功密码永久加密保存在本地任务文件及备份，不因下载或时间自动销毁。其他用户缺少字段时默认不开放，原 root_access、allowed_pages 不会自动授予此功能。权限撤销后，旧会话不能继续操作，执行中的任务也会停止。
+非 admin 只能列出和读取自己创建的批次/任务。管理员可查看和管理全部任务，并重复下载任意批次的 Admin CSV 视图；若管理员同时是创建者，页面会显示 owner/admin 两个权限视图。CSV 下载不再 step-up MFA，但创建批次、单独重试失败账户和手工 fallback 仍必须通过 step-up TOTP。成功密码永久加密保存在本地任务文件及备份，不因下载或时间自动销毁。其他用户缺少字段时默认不开放，原 root_access、allowed_pages 不会自动授予此功能。权限撤销后，旧会话不能继续操作，执行中的任务也会停止。
 
 ## 运行依赖
 
@@ -100,6 +100,7 @@ PY
 | GET | `/root-email/accounts/:accountId/jobs` | 当前用户可见的最近 20 个账户任务 |
 | POST | `/root-email/accounts/:accountId/jobs` | 创建旧式手工发信任务，body 为 `{ "confirmSend": true }` |
 | POST | `/root-email/jobs/:id/cancel` | 取消排队、停止执行或等待邮件；终态请求幂等 |
+| POST | `/root-email/jobs/:id/retry` | `{ confirmRetry: true, totpCode }`；仅明确未提交恢复请求的自动 `failed` 任务，新建单账户批次并保留旧任务血缘 |
 | POST | `/root-email/jobs/:id/reset-link` | 仅旧式手工任务按需读取链接；自动改密批次拒绝返回 URL |
 | POST | `/root-email/jobs/:id/manual-reset-link` | `{ totpCode }`；仅自动任务创建者在已精确绑定邮件且确认未提交密码后的 2 小时内重扫同一邮件；候选非唯一、更新任务或 `password_unknown` 均拒绝 |
 

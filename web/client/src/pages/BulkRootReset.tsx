@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Alert, Button, Card, Input, message, Modal, Popconfirm, Progress, Select, Space, Table, Tag, Typography } from 'antd';
-import { CopyOutlined, DownloadOutlined, LockOutlined, ReloadOutlined, SearchOutlined, StopOutlined } from '@ant-design/icons';
+import { CopyOutlined, DownloadOutlined, LockOutlined, RedoOutlined, ReloadOutlined, SearchOutlined, StopOutlined } from '@ant-design/icons';
 import { api, RootEmailAccount, RootEmailBatchView, RootEmailJobView } from '../api';
 import { showManualRootResetLink, showRootResetLink } from '../utils/root-reset-link';
 
@@ -48,6 +48,8 @@ const BulkRootResetPage: React.FC<{ canOperate?: boolean }> = ({ canOperate = fa
   const [downloadSlot, setDownloadSlot] = useState<'owner' | 'admin' | null>(null);
   const [manualLinkJob, setManualLinkJob] = useState<RootEmailJobView | null>(null);
   const [manualLinkTotpCode, setManualLinkTotpCode] = useState('');
+  const [retryJob, setRetryJob] = useState<RootEmailJobView | null>(null);
+  const [retryTotpCode, setRetryTotpCode] = useState('');
   const request = useRef<{ signature: string; id: string } | null>(null);
 
   useEffect(() => {
@@ -155,6 +157,21 @@ const BulkRootResetPage: React.FC<{ canOperate?: boolean }> = ({ canOperate = fa
       setManualLinkJob(null); setRefresh(value => value + 1);
     } catch (cause: any) { setError(cause.message); }
     finally { setManualLinkTotpCode(''); setBusy(false); }
+  };
+  const openRetry = (job: RootEmailJobView) => {
+    setRetryJob(job); setRetryTotpCode(''); setError('');
+  };
+  const retryFailedJob = async () => {
+    if (!retryJob?.retryAvailable || !/^\d{6}$/.test(retryTotpCode)) return;
+    setBusy(true); setError('');
+    try {
+      const result = await api.retryRootEmailJob(retryJob.id, retryTotpCode);
+      if (!result.success) throw new Error(result.error || '重试失败');
+      setRetryJob(null); setBatch(result.data); setBatchId(result.data.id);
+      setRefresh(value => value + 1);
+      message.success(`已为账户 ${retryJob.accountId} 创建独立重试任务`);
+    } catch (cause: any) { setError(cause.message); }
+    finally { setRetryTotpCode(''); setBusy(false); }
   };
 
   return <Space direction="vertical" size={16} style={{ width: '100%' }}>
@@ -274,15 +291,24 @@ const BulkRootResetPage: React.FC<{ canOperate?: boolean }> = ({ canOperate = fa
             </Popconfirm>}
           </Space>
           <Table<RootEmailJobView> size="small" rowKey="id" dataSource={batch.jobs || []}
-            pagination={{ pageSize: 20, showSizeChanger: true }} scroll={{ x: 980 }} columns={[
+            pagination={{ pageSize: 20, showSizeChanger: true }} scroll={{ x: 1120 }} columns={[
               { title: '账户 ID', dataIndex: 'accountId', width: 140 },
               { title: '邮箱', dataIndex: 'email', width: 240, ellipsis: true },
               { title: '结果', dataIndex: 'status', width: 150,
                 render: (status: RootEmailJobView['status']) => <Tag color={statusColors[status]}>{statusLabels[status]}</Tag> },
-              { title: '验证码', dataIndex: 'attempts', width: 80, render: value => `${value}/3` },
-              { title: '说明', dataIndex: 'detail' },
-              { title: '下一步', width: 150, render: (_, job) => {
+              { title: '验证码图片', dataIndex: 'attempts', width: 105, render: value => `${value}/3` },
+              { title: '浏览器', dataIndex: 'browserAttempts', width: 90,
+                render: value => value ? `${value}/3` : '—' },
+              { title: '说明', dataIndex: 'detail', render: (value, job) => <Space direction="vertical" size={0}>
+                <span>{value}</span>
+                {job.failureStage && job.failureCategory && <Typography.Text type="secondary">
+                  诊断：{job.failureStage} / {job.failureCategory}
+                </Typography.Text>}
+              </Space> },
+              { title: '下一步', width: 170, render: (_, job) => {
                 if (!canOperate || !job.canManage) return '—';
+                if (job.retryAvailable) return <Button size="small" danger icon={<RedoOutlined />} disabled={busy}
+                  onClick={() => openRetry(job)}>单独重试</Button>;
                 if (job.manualResetAvailable) return <Button size="small" danger disabled={busy} onClick={() => openManualLink(job)}>
                   手工打开链接
                 </Button>;
@@ -311,6 +337,22 @@ const BulkRootResetPage: React.FC<{ canOperate?: boolean }> = ({ canOperate = fa
           placeholder="输入账户数量" disabled={busy} inputMode="numeric" autoComplete="off" />
         <Typography.Text>输入当前 6 位 MFA 验证码：</Typography.Text>
         <Input.Password aria-label="MFA 验证码" value={totpCode} onChange={event => setTotpCode(event.target.value.replace(/\D/g, '').slice(0, 6))}
+          placeholder="000000" disabled={busy} inputMode="numeric" autoComplete="one-time-code" />
+      </Space>
+    </Modal>
+
+    <Modal title="确认单独重试失败账户" open={!!retryJob} confirmLoading={busy}
+      okText="验证并创建重试任务" okButtonProps={{ danger: true, disabled: !/^\d{6}$/.test(retryTotpCode) }} cancelText="取消"
+      closable={!busy} maskClosable={false} onCancel={() => { if (!busy) { setRetryJob(null); setRetryTotpCode(''); } }}
+      onOk={retryFailedJob}>
+      <Space direction="vertical" size={12} style={{ width: '100%' }}>
+        <Alert type="warning" showIcon message="将重新发送恢复邮件并自动设置 Root 新密码"
+          description="系统已确认原任务没有跨过恢复邮件提交边界。重试会创建新的单账户批次，旧失败记录会永久保留；不确定或已提交的任务不会开放此操作。" />
+        <Typography.Text>账户：<Typography.Text code>{retryJob?.accountId}</Typography.Text></Typography.Text>
+        <Typography.Text>Root 邮箱：<Typography.Text code>{retryJob?.email}</Typography.Text></Typography.Text>
+        <Typography.Text>输入当前 6 位 MFA 验证码：</Typography.Text>
+        <Input.Password aria-label="单独重试 MFA 验证码" value={retryTotpCode}
+          onChange={event => setRetryTotpCode(event.target.value.replace(/\D/g, '').slice(0, 6))}
           placeholder="000000" disabled={busy} inputMode="numeric" autoComplete="one-time-code" />
       </Space>
     </Modal>
