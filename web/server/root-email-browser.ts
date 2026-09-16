@@ -3,8 +3,9 @@ import os from 'os';
 import path from 'path';
 import { createHash } from 'crypto';
 import { spawn } from 'child_process';
-import type { Browser, Frame, Page } from 'puppeteer-core';
+import type { Browser, Frame, Page, HTTPRequest } from 'puppeteer-core';
 import { RootEmailBrowserCategory, RootEmailBrowserStage, RootEmailError, RootEmailSession } from './root-email-core';
+import type { RecoverySubmissionState } from './root-email-reconcile';
 
 export function rootEmailRuntime() {
   const chrome = [process.env.CHROME_PATH, '/usr/bin/google-chrome-stable', '/usr/bin/google-chrome',
@@ -185,6 +186,27 @@ export function readRootEmailCaptchaResult(identityStage: boolean): RootEmailCap
   return 'waiting';
 }
 
+/** A loaded image alone is not enough: require the original editable recovery form. */
+export function readRootRecoveryRetryForm(): boolean {
+  const doc = (globalThis as any).document;
+  if (doc.querySelector('[role="dialog"] iframe#core-container')) return false;
+  let images = 0, answers = 0, buttons = 0;
+  for (const element of doc.querySelectorAll('#captcha_image, input, button')) {
+    const style = (globalThis as any).getComputedStyle(element);
+    const rect = element.getBoundingClientRect();
+    if (style.visibility === 'hidden' || style.display === 'none' || rect.width <= 0 || rect.height <= 0
+      || element.disabled || element.readOnly || element.getAttribute('aria-busy') === 'true') continue;
+    if (element.id === 'captcha_image' && element.complete && element.naturalWidth > 0) images++;
+    if (element.tagName === 'INPUT' && element.type === 'text') {
+      let label = String(element.getAttribute('aria-label') || '');
+      for (const item of element.labels || []) label += item.textContent || '';
+      if (/Type the characters as shown above/i.test(label)) answers++;
+    }
+    if (element.tagName === 'BUTTON' && /^I[’']m not a robot$/.test(String(element.innerText || '').trim())) buttons++;
+  }
+  return images === 1 && answers === 1 && buttons === 1;
+}
+
 /** All selectors reflect the AWS root sign-in/recovery UI, not the federated PDF flow. */
 export class AwsRootEmailSession implements RootEmailSession {
   private browser?: Browser;
@@ -193,6 +215,8 @@ export class AwsRootEmailSession implements RootEmailSession {
   private captchaPurpose: 'identity' | 'recovery' = 'recovery';
   private securityFrame?: Frame;
   private expectedEmail = '';
+  private pendingRequests = new Set<HTTPRequest>();
+  private lastRequestAt = 0;
   constructor(private readonly signal: AbortSignal, private readonly authorize: () => void) {}
   private checkedPage() {
     this.signal.throwIfAborted();
@@ -404,6 +428,16 @@ export class AwsRootEmailSession implements RootEmailSession {
       });
       stage = 'create_page';
       this.page = await this.browser.newPage();
+      this.page.on('request', request => {
+        if (['document', 'xhr', 'fetch'].includes(request.resourceType())) {
+          this.pendingRequests.add(request); this.lastRequestAt = Date.now();
+        }
+      });
+      const settled = (request: HTTPRequest) => {
+        if (this.pendingRequests.delete(request)) this.lastRequestAt = Date.now();
+      };
+      this.page.on('requestfinished', settled);
+      this.page.on('requestfailed', settled);
       this.page.setDefaultTimeout(25_000);
       this.page.setDefaultNavigationTimeout(30_000);
       stage = 'configure_page';
@@ -430,6 +464,17 @@ export class AwsRootEmailSession implements RootEmailSession {
     }
   }
   isRecoveryCaptcha() { return this.captchaPurpose === 'recovery'; }
+  async inspectRecoverySubmission(): Promise<RecoverySubmissionState> {
+    const page = this.checkedPage();
+    if (!this.isRecoveryCaptcha() || this.securityFrame) return 'unavailable';
+    const result = await this.boundedEvaluate(page.evaluate(readRootEmailCaptchaResult, false), Date.now() + 2_000);
+    if (result === 'sent') return 'sent';
+    if (result === 'blocked' || result === 'disabled') return 'blocked';
+    if (this.pendingRequests.size || Date.now() - this.lastRequestAt < 2_000) return 'unavailable';
+    const ready = await this.boundedEvaluate(page.evaluate(readRootRecoveryRetryForm), Date.now() + 2_000);
+    if (!ready) return 'unavailable';
+    return result === 'invalid' ? 'invalid' : 'ready';
+  }
   /** A cropped CAPTCHA only; no account details or recovery URL are exposed to the operator. */
   async captureCaptcha() {
     try { return await this.capture(); }

@@ -100,8 +100,8 @@ export function rootEmailMailTimeoutDetail(job: Pick<RootEmailJob, 'sentAt'>): s
 
 /** Retry a fresh recovery browser only before the form can have submitted an email request. */
 export function canRetryRootEmailBrowser(error: unknown, phase: RootEmailPhase,
-  completedAttempts: number, blocked: boolean): boolean {
-  return !blocked && completedAttempts >= 1 && completedAttempts < MAX_ROOT_EMAIL_BROWSER_ATTEMPTS
+  completedAttempts: number, blocked: boolean, emailSubmitAttempted = false): boolean {
+  return !blocked && !emailSubmitAttempted && completedAttempts >= 1 && completedAttempts < MAX_ROOT_EMAIL_BROWSER_ATTEMPTS
     && (phase === 'opening' || phase === 'captcha') && !(error instanceof RootEmailError);
 }
 
@@ -570,7 +570,7 @@ export interface RootEmailSession {
   close(): Promise<void>;
 }
 
-/** Only an explicit AWS rejection permits another attempt. Timeouts are ambiguous. */
+/** Keep uncertain requests in the existing session for bounded page/mail reconciliation. */
 export async function sendRootEmail(input: {
   email: string;
   session: RootEmailSession;
@@ -578,6 +578,7 @@ export async function sendRootEmail(input: {
   authorize: () => void;
   progress: (phase: RootEmailPhase, attempts: number, detail: string) => void;
   manualCaptcha?: (purpose: 'identity' | 'recovery') => Promise<string>;
+  resolveUnconfirmed?: (error: unknown, attempts: number) => Promise<'sent' | 'retry'>;
 }): Promise<void> {
   const { session, signal, progress } = input;
   const check = () => { signal.throwIfAborted(); input.authorize(); };
@@ -607,14 +608,27 @@ export async function sendRootEmail(input: {
       progress(recoveryCaptcha ? 'submitting' : manual ? 'manual_captcha' : 'captcha', stageAttempt,
         recoveryCaptcha ? '正在提交恢复邮件验证码；等待 AWS 确认邮件已发送' : '正在提交登录安全验证码；尚未请求恢复邮件');
       check();
-      const result = await session.submit(candidate);
+      let result: 'sent' | 'invalid' | 'next_captcha';
+      let reconciledRetry = false;
+      try { result = await session.submit(candidate); }
+      catch (error) {
+        check();
+        if (!recoveryCaptcha || !input.resolveUnconfirmed) throw error;
+        const resolved = await input.resolveUnconfirmed(error, stageAttempt);
+        check();
+        if (resolved === 'sent') return;
+        result = 'invalid';
+        reconciledRetry = true;
+      }
       if (result === 'sent') return;
       if (result === 'next_captcha') {
         if (recoveryCaptcha || ++stageTransitions > 1) throw new RootEmailError('AWS 验证码流程出现非预期的额外阶段', 422);
         stageAttempt = 0;
         continue;
       }
-      progress(manual ? 'manual_captcha' : 'captcha', stageAttempt, `AWS 明确拒绝${stageLabel}，尚未确认发信`);
+      progress(manual ? 'manual_captcha' : 'captcha', stageAttempt, reconciledRetry
+        ? '原验证码页面仍可操作，且未确认发信；继续处理下一张验证码'
+        : `AWS 明确拒绝${stageLabel}，尚未确认发信`);
     }
     check();
     if (stageAttempt < MAX_ROOT_EMAIL_CAPTCHA_ATTEMPTS) await session.refresh(imageId);

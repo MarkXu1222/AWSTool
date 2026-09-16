@@ -9,6 +9,7 @@ import { canRetryFailedRootEmailJob, canRetryRootEmailBrowser, type CredentialDo
   MAX_ROOT_PASSWORD_BATCH, ROOT_MANUAL_FALLBACK_TTL_MS } from './root-email-core';
 import { rootEmailDeliveryState, rootEmailMailTimeoutDetail } from './root-email-core';
 import { RootEmailManualInput, ROOT_MANUAL_CAPTCHA_TTL_MS } from './root-email-manual';
+import { reconcileRootEmailSubmission } from './root-email-reconcile';
 import { listConfiguredPayers } from './aws-service';
 import { mailbox, mailApiConfigured, MailApiError } from './mail-api';
 import { matchRootRecoveryMail } from './root-mail-links';
@@ -352,6 +353,7 @@ async function execute(job: RootEmailJob, controller: AbortController) {
   // Nine automatic images per stage plus up to ten minutes of human input per stage.
   const deadline = setTimeout(() => controller.abort(), 40 * 60_000);
   let session: AwsRootEmailSession | undefined;
+  let receivedMail: { mailKey: string; receivedAt: string } | undefined;
   const ensureRunning = () => {
     controller.signal.throwIfAborted();
     if (stopping) throw new RootEmailError('任务执行器已停止，已取消后续发信操作');
@@ -385,6 +387,33 @@ async function execute(job: RootEmailJob, controller: AbortController) {
       await session!.refresh(imageId);
     }
   };
+  const resolveUnconfirmed = async (error: unknown, attempts: number): Promise<'sent' | 'retry'> => {
+    // Only a result-read timeout can be reconciled. Never replay a failed click, navigation or policy error.
+    if (!(error instanceof RootEmailBrowserAutomationError) || error.stage !== 'wait_result'
+      || error.category !== 'timeout' || !mailApiConfigured()) throw error;
+    ensureRunning();
+    const latest = currentStore.get(job.id)!;
+    if (!latest.requestedAt) throw error;
+    progress('submitting', attempts, 'AWS 页面暂未确认结果；保留原会话，核查邮箱约 60 秒。无邮件且验证码表单仍可用时继续下一张');
+    currentStore.updateIfStatus(job.id, ['running'], { failureStage: error.stage, failureCategory: error.category });
+    const result = await reconcileRootEmailSubmission({ signal: controller.signal, check: ensureRunning,
+      inspect: () => session!.inspectRecoverySubmission(),
+      scan: (cursor, signal) => scanRootMailPage(mailbox,
+        { email: job.email, requestedAt: latest.requestedAt!, mailCursor: cursor }, ensureRunning, signal),
+    });
+    ensureRunning();
+    if (result.kind === 'confirmed') return 'sent';
+    if (result.kind === 'received') { receivedMail = result; return 'sent'; }
+    if (result.kind !== 'retry') throw error;
+    // Exclude mail already received before preparing this next attempt.
+    const retrying = currentStore.updateIfStatus(job.id, ['running'], {
+      requestedAt: new Date(Math.floor(Date.now() / 1_000) * 1_000).toISOString(),
+      detail: '已核查邮箱且原 AWS 验证码表单仍可操作，继续原会话的验证码尝试',
+    });
+    if (!retrying) throw new RootEmailError('任务状态已变化，停止重试');
+    audit(retrying, 'ROOT_EMAIL_CAPTCHA_RESUME');
+    return 'retry';
+  };
   try {
     if (!currentStore.updateIfStatus(job.id, ['queued'], { status: 'running' })) return;
     let sent = false;
@@ -393,13 +422,14 @@ async function execute(job: RootEmailJob, controller: AbortController) {
       if (!currentStore.updateIfStatus(job.id, ['running'], { browserAttempts: browserAttempt })) return;
       session = new AwsRootEmailSession(controller.signal, ensureRunning);
       try {
-        await sendRootEmail({ email: job.email, session, signal: controller.signal, authorize: ensureRunning, progress, manualCaptcha });
+        await sendRootEmail({ email: job.email, session, signal: controller.signal, authorize: ensureRunning,
+          progress, manualCaptcha, resolveUnconfirmed });
         sent = true;
         break;
       } catch (error) {
         const latest = currentStore.get(job.id);
         const retryable = latest?.status === 'running' && canRetryRootEmailBrowser(
-          error, latest.phase, browserAttempt, controller.signal.aborted || stopping,
+          error, latest.phase, browserAttempt, controller.signal.aborted || stopping, latest.emailSubmitAttempted === true,
         );
         if (!retryable) throw error;
         const retrying = currentStore.updateIfStatus(job.id, ['running'], {
@@ -413,10 +443,21 @@ async function execute(job: RootEmailJob, controller: AbortController) {
       }
     }
     if (!sent) throw new RootEmailError('发信浏览器安全重试次数已耗尽');
+    if (receivedMail) {
+      const linked = currentStore.updateIfStatus(job.id, ['running'], {
+        status: 'link_ready', phase: job.autoSetPassword ? 'setting_password' : 'done',
+        mailKey: receivedMail.mailKey, mailReceivedAt: receivedMail.receivedAt, sentAt: receivedMail.receivedAt,
+        failureStage: undefined, failureCategory: undefined,
+        detail: job.autoSetPassword ? '已找到并验证恢复邮件，等待自动设置强密码' : '已找到本次恢复邮件，可打开 AWS 页面设置新密码',
+      });
+      if (linked) audit(linked, 'ROOT_EMAIL_LINK_READY');
+      return;
+    }
     const waitForMail = mailApiConfigured();
     const completed = currentStore.updateIfStatus(job.id, ['running'], {
       status: waitForMail ? 'waiting_mail' : job.autoSetPassword ? 'mail_failed' : 'email_sent',
       phase: waitForMail ? 'waiting_mail' : 'done', sentAt: new Date().toISOString(),
+      failureStage: undefined, failureCategory: undefined,
       ...(waitForMail ? { mailCursor: 0, mailNextCheckAt: new Date().toISOString(),
         mailDeadlineAt: new Date(Date.now() + 10 * 60_000).toISOString() } : {}),
       detail: waitForMail ? 'AWS 已确认发信，正在查询对应邮箱的恢复邮件'
@@ -427,7 +468,7 @@ async function execute(job: RootEmailJob, controller: AbortController) {
   } catch (error) {
     const latest = currentStore.get(job.id);
     if (!latest || latest.status !== 'running') return;
-    const uncertain = latest.phase === 'submitting' && !(error instanceof RootEmailError);
+    const uncertain = latest.emailSubmitAttempted === true && !(error instanceof RootEmailError);
     const canCheckMailbox = uncertain && !stopping && !controller.signal.aborted && mailApiConfigured() && !!latest.requestedAt;
     if (canCheckMailbox) {
       const waiting = currentStore.updateIfStatus(job.id, ['running'], {

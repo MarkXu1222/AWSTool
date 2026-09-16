@@ -205,6 +205,35 @@ test('a timeout after submission is propagated without replaying the request', a
   assert.equal(calls.filter(c => c.startsWith('refresh')).length, 0);
 });
 
+test('reconciled timeouts retain the same browser and nine-image budget before manual input', async () => {
+  const { session, calls } = fixture(Array(9).fill('abc123'), [...Array(9).fill(new Error('timeout')), 'sent']);
+  const attempts: number[] = [];
+  let manual = 0;
+  await sendRootEmail({ email, session, signal: new AbortController().signal, authorize() {}, progress() {},
+    resolveUnconfirmed: async (_error, count) => { attempts.push(count); return 'retry'; },
+    manualCaptcha: async () => { manual++; return 'def456'; },
+  });
+  assert.deepEqual(attempts, [1, 2, 3, 4, 5, 6, 7, 8, 9]);
+  assert.equal(manual, 1);
+  assert.equal(calls.filter(x => x.startsWith('open')).length, 1);
+  assert.equal(calls.filter(x => x === 'recognize').length, 9);
+  assert.equal(calls.filter(x => x.startsWith('refresh')).length, 8);
+});
+
+test('reconciled delivery completes without another CAPTCHA; cancellation blocks resumption', async () => {
+  for (const cancel of [false, true]) {
+    const { session, calls } = fixture(['abc123'], [new Error('timeout')]);
+    const controller = new AbortController();
+    const work = sendRootEmail({ email, session, signal: controller.signal, authorize() {}, progress() {},
+      resolveUnconfirmed: async () => { if (cancel) controller.abort(); return 'sent'; },
+    });
+    if (cancel) await assert.rejects(work); else await work;
+    assert.equal(calls.filter(x => x.startsWith('submit')).length, 1);
+    assert.equal(calls.filter(x => x.startsWith('refresh')).length, 0);
+  }
+  assert.equal(canRetryRootEmailBrowser(new Error('timeout'), 'captcha', 1, false, true), false);
+});
+
 test('cancellation or permission revocation during recognition prevents submission', async () => {
   for (const abort of [true, false]) {
     const { session, calls } = fixture(['abc123'], ['sent']);

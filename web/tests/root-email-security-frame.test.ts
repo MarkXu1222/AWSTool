@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import test from 'node:test';
 import { AwsRootEmailSession, classifyRootEmailBrowserError, isRootEmailSecurityFrameUrl,
-  readRootEmailSecurityChallengeState } from '../server/root-email-browser';
+  readRootEmailSecurityChallengeState, readRootRecoveryRetryForm } from '../server/root-email-browser';
 import { RootEmailError } from '../server/root-email-core';
 
 test('security frame trust accepts only HTTPS AWS regional challenge hosts', () => {
@@ -113,7 +113,20 @@ test('real Chrome handles the isolated challenge, refresh, rejection and transit
       assert.equal(session.isRecoveryCaptcha(), true);
       assert.equal((session as any).securityFrame, undefined);
       assert.equal(await page.evaluate('window.recoverySubmits'), 0);
+      assert.equal(readRootRecoveryRetryForm.toString().includes('__name'), false);
+      assert.equal(await session.inspectRecoverySubmission(), 'ready');
+      await page.evaluate(`document.querySelector('#send').disabled=true`);
+      assert.equal(await session.inspectRecoverySubmission(), 'unavailable');
+      await page.evaluate(`document.querySelector('#send').disabled=false;
+        document.body.insertAdjacentHTML('beforeend', '<button id="second-send">I’m not a robot</button>')`);
+      assert.equal(await session.inspectRecoverySubmission(), 'unavailable');
+      await page.evaluate(`document.querySelector('#second-send').remove()`);
+      const inFlight = {};
+      (session as any).pendingRequests.add(inFlight);
+      assert.equal(await session.inspectRecoverySubmission(), 'unavailable');
+      (session as any).pendingRequests.delete(inFlight);
       assert.equal(await session.submit('abc123'), 'sent');
+      assert.equal(await session.inspectRecoverySubmission(), 'sent');
       assert.equal(await page.evaluate('window.recoverySubmits'), 1);
     } finally { await browser.close(); }
   });

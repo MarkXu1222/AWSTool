@@ -4,7 +4,7 @@
 
 独立导航「批量设置 Root 密码」（`/rootreset`）创建自动改密批次。系统按 payer 选择最多 20 个 ACTIVE 成员账户，发送恢复邮件、精确匹配收件人和请求时间、重新校验 AWS 一次性链接，然后生成并提交 24 位强随机密码。创建批次必须精确输入 payer 名称、账户数量和当前 TOTP。
 
-后台使用独立 Chrome 配置目录进入 AWS 忘记密码页面，通过本地 PP-OCRv6 模型处理 AWS 当前可能出现的两阶段验证码：登录安全验证码通过后进入 Forgot password，再处理恢复邮件验证码；每阶段最多 9 张图片。opening/captcha 阶段的泛化浏览器异常最多重建到 3 次会话；通过跨导航短轮询处理登录安全验证码，并兼容 AWS 先显示 `Verify`、点击后才加载验证码图片的中间态；验证码错误只通过 AWS 明确错误文案判定（兼容直/弯引号 contractions），无法确认时保持只读查邮箱且绝不重发，只有恢复邮件验证码提交前才持久化 `submitting`，此后只查邮箱、不重复发信。找到链接后，同一浏览器执行槽位只接受 `https://signin.aws.amazon.com/resetpassword` 的 `RootUser` 链接，使用不依赖 `tsx` 运行时 helper 的自包含页面函数，要求恰好两个可见密码框和唯一的 `Reset password` / `Set new password` / `Save new password` / `Change password` / `Submit` 按钮。密码页面仅在确认未进入提交边界时最多尝试 3 次。只有 AWS 返回明确成功文案才记录 `password_set`；提交后结果不明确时记录 `password_unknown`，绝不重试一次性链接。恢复邮件浏览器同样逐账户使用独立 Chrome/profile/Page，并持久化浏览器尝试次数及不含 URL/token 的 `failureStage/failureCategory`。仅 `failed` 且持久化证明未跨过恢复邮件提交边界的自动任务可单独重试；重试通过新 TOTP 创建新的单账户批次，旧任务保留并记录 `retryOfJobId/retriedByJobId`，不确定状态一律拒绝。
+后台使用独立 Chrome 配置目录进入 AWS 忘记密码页面，通过本地 PP-OCRv6 模型处理 AWS 当前可能出现的两阶段验证码：登录安全验证码通过后进入 Forgot password，再处理恢复邮件验证码；每阶段最多 9 张图片。尚未提交恢复请求时，opening/captcha 阶段的泛化浏览器异常最多重建到 3 次会话；通过跨导航短轮询处理登录安全验证码，并兼容 AWS 先显示 `Verify`、点击后才加载验证码图片的中间态；验证码错误通过 AWS 明确错误文案判定（兼容直/弯引号 contractions）；恢复验证码结果读取超时后保留原会话，按下述短时核查规则决定是否继续下一张。只有恢复邮件验证码提交前才持久化 `submitting`，提交标记不会因换图清除。找到链接后，同一浏览器执行槽位只接受 `https://signin.aws.amazon.com/resetpassword` 的 `RootUser` 链接，使用不依赖 `tsx` 运行时 helper 的自包含页面函数，要求恰好两个可见密码框和唯一的 `Reset password` / `Set new password` / `Save new password` / `Change password` / `Submit` 按钮。密码页面仅在确认未进入提交边界时最多尝试 3 次。只有 AWS 返回明确成功文案才记录 `password_set`；提交后结果不明确时记录 `password_unknown`，绝不重试一次性链接。恢复邮件浏览器同样逐账户使用独立 Chrome/profile/Page，并持久化浏览器尝试次数及不含 URL/token 的 `failureStage/failureCategory`。仅 `failed` 且持久化证明未跨过恢复邮件提交边界的自动任务可单独重试；重试通过新 TOTP 创建新的单账户批次，旧任务保留并记录 `retryOfJobId/retriedByJobId`，不确定状态一律拒绝。
 
 新密码由 Node.js CSPRNG 生成，固定 24 位并包含大小写、数字和符号。密码以任务上下文作为 AAD，使用用途分离密钥和 AES-256-GCM 永久写入任务文件及随后的备份，不设置 TTL，也不因下载销毁。CSV 下载依赖已完成登录 MFA 的会话，但不再要求额外 TOTP；Owner 可重复下载本人批次，Admin 可重复下载全部批次。服务端每次下载仍按 owner/admin 视图持久化短期 claim 防并发，响应结束后清 claim 并更新最近下载时间。列表 API、审计和飞书通知均不包含明文密码或 reset URL。
 
@@ -15,6 +15,12 @@ AWS 的 `Verify` 中间页可能打开 `Security Verification` 弹窗，文字�
 iframe 导航、域名变化、重复控件或不支持的挑战会停止；提交动作不会因失去 frame 响应而在同一调用内重放。等待入口超时归为 `timeout`，已出现但无法识别的独立验证窗口给出明确人工检查提示，避免旧版 `wait_entry/browser_error` 的无效循环。任务原有发信提交边界、邮箱核验及密码未知状态保护保持生效。
 
 2026-09-16：58 项测试、前后端类型检查及完整构建通过。使用生产服务器的隔离浏览器实测新版 iframe：第一张图片未取得可靠 OCR 候选，刷新后第二张通过 AWS 身份验证并进入 Forgot password 入口。检查在恢复邮件请求之前停止，未发送邮件、未修改密码；这验证了本次入口兼容修复，不代表所有验证码的 OCR 都能成功。
+
+### 提交超时后继续原验证码会话（0.31.1）
+
+恢复邮件验证码提交后，仅 `wait_result/timeout` 会进入短时核查；不重放点击失败、网络错误或安全校验错误。原浏览器保持打开，约 60 秒内同时检查页面与邮箱，核查硬上限 90 秒：AWS 明确确认发信则转入收件；找到严格匹配的恢复邮件则直接绑定并继续改密；完整分页核查未发现匹配邮件，且原官方页面仍有唯一可用的验证码图片、输入框与提交按钮、没有进行中的页面请求时，才继续原会话的下一张验证码。邮箱查询失败、未扫完分页、表单不可用、限流或页面失效都不会被当作“无邮件，可重试”。邮箱索引可能延迟；没有邮件并非发送失败的证明，因此仍可能遇到迟到的旧邮件。每次恢复尝试推进邮件匹配起点，并保留严格的恢复链接与密码提交结果校验。
+
+恢复尝试计入原来的每阶段 9 张上限，耗尽后继续使用既有手工入口；手工期限不会因核查延长。提交标记保持为 true，禁止通过浏览器重建清空次数。事件 `ROOT_EMAIL_CAPTCHA_RESUME` 记录恢复动作，只有无 URL/token 的失败阶段与分类进入任务记录。已结束的旧任务不会自动复活；密码提交后的未知结果仍绝不自动重试。
 
 ### 九张自动识别与手工接管（0.31.0）
 
@@ -90,7 +96,7 @@ PY
 - 只有新安全批次写入 `autoSetPassword=true`。升级前已存在或单账户手工创建的 `link_ready` 任务不会因部署而自动修改密码。
 - 客户端为每次选择生成请求 UUID；相同 UUID、创建者、payer 和账户集合的网络重试返回原批次，避免重复发信。
 - API、邮件查询和每次浏览器敏感操作前都从数据库复验创建者身份、operate 权限、payer 归属及账户邮箱。
-- 状态流程：`queued → running → waiting_mail → link_ready → setting_password → password_set`。AWS 发信提交结果不明时进入 `waiting_mail` 做只读确认，不重复发信。有效 reset 页在 `DOMContentLoaded` 后短暂切换执行上下文时，提交前最多容忍 6 次 DOM 读取失败；明确失败为 `password_failed`。确认尚未进入提交边界的 Chrome 加载/导航异常最多执行 3 次独立浏览器尝试，并只持久化不含 URL/token 的阶段码与错误分类；点击提交后超时、服务中断或页面异常为 `password_unknown`，密码密文立即销毁且绝不自动重试。自动尝试耗尽、已精确绑定恢复邮件且明确未提交密码时，创建者可在 2 小时内通过新 TOTP 按需重扫同一接收时间的邮件并手工打开/复制链接；候选不唯一、存在同账户更新任务或 `password_unknown` 时拒绝返回。手工设置结果无法由平台确认，不进入 CSV。
+- 状态流程：`queued → running → waiting_mail → link_ready → setting_password → password_set`。AWS 发信结果读取超时先在 `running/submitting` 保留会话并核查；无法满足原会话继续条件时才进入 `waiting_mail` 做只读确认，不再重发。有效 reset 页在 `DOMContentLoaded` 后短暂切换执行上下文时，提交前最多容忍 6 次 DOM 读取失败；明确失败为 `password_failed`。确认尚未进入提交边界的 Chrome 加载/导航异常最多执行 3 次独立浏览器尝试，并只持久化不含 URL/token 的阶段码与错误分类；点击提交后超时、服务中断或页面异常为 `password_unknown`，密码密文立即销毁且绝不自动重试。自动尝试耗尽、已精确绑定恢复邮件且明确未提交密码时，创建者可在 2 小时内通过新 TOTP 按需重扫同一接收时间的邮件并手工打开/复制链接；候选不唯一、存在同账户更新任务或 `password_unknown` 时拒绝返回。手工设置结果无法由平台确认，不进入 CSV。
 - 密码设置成功后，新记录永久保存 `gcm2:<keyId>:<iv>:<tag>:<ciphertext>`；随机 IV 为 96-bit。key ID 取用途分离密钥摘要的前 16 个十六进制字符，不泄露密钥，并作为 AAD 的一部分绑定 job/account/creator。`gcm2` 按 key ID 精确选择 current 或 historical key；旧 `gcm1` 没有 key ID，解密时依次用 current + previous key 做 GCM 认证，成功后才返回。未知 key ID、缺失历史 key 或认证失败都会拒绝整批 CSV。
 - 轮换顺序固定为：先把旧 `web.encryptionKey` 原值加入 `web.encryptionKeyPrevious`，再设置新 current key 并重启。启动会在写入前认证全部候选，并分别原子重加密在线 MFA/ExternalId 和永久 Root 凭证到 current key；DB 审计与字段密文同次写入，Root 迁移则持久化待审计补偿标记并写一条有界 `system` 汇总审计，审计未落盘会停止启动并在下次启动重试，允许重复记录但不允许永久缺失。任一历史值不可解时失败关闭且不写半批数据。首次从旧版 JWT-secret CBC 配置 dedicated key 时，`jwtSecret` 仅作为 legacy 字段迁移候选，不进入 Root keyring。在线迁移完成后仍须等待含旧密文的本地/异机备份轮替并完成恢复验证，才能删除 historical key。`encryptionKeyPrevious` 最多 8 个，禁止重复。
 - CSV 只包含明确 `password_set` 且仍有永久密文的账户。请求必须显式选择 `owner` 或 `admin` 权限视图：owner 仅创建者，admin 仅当前 Admin。下载不再要求额外 TOTP，可按权限重复执行。每次请求仍先持久化短期 claim 防同一视图并发生成；正常 `finish`、已发送 headers 的提前 `close` 或重启 orphan 都只记录最近下载并清 claim，不删除密文。发送前中止释放 claim。永久归档没有自动 TTL 或下载次数上限，只能通过未来显式删除功能或人工受控操作移除。
@@ -129,13 +135,13 @@ PY
 ## 验证
 
 ```sh
-node --import tsx --test tests/root-email.test.ts tests/root-email-manual.test.ts tests/root-email-security-frame.test.ts tests/root-mail-links.test.ts tests/mail-api.test.ts tests/root-reset-permissions.test.ts
+node --import tsx --test tests/root-email.test.ts tests/root-email-manual.test.ts tests/root-email-reconcile.test.ts tests/root-email-security-frame.test.ts tests/root-mail-links.test.ts tests/mail-api.test.ts tests/root-reset-permissions.test.ts
 npx tsc --noEmit -p server/tsconfig.json
 npx tsc -p client/tsconfig.json
 npx vite build --config client/vite.config.ts
 ```
 
-测试通过模拟外部 AWS 会话验证重试上限、超时不重发、权限撤销/取消、持久化、重启恢复和重复任务限制，不会发送真实邮件。独立窗口测试在有 Chrome 时使用真实浏览器和完全拦截网络的页面夹具，验证跨域 iframe 识别、截图、拒绝、刷新及恢复邮件阶段切换；无 Chrome 时跳过该项。上线后仍需选择授权测试账户验证平台执行器的实际页面兼容性。
+测试通过模拟外部 AWS 会话验证重试上限、超时后的原会话核查与条件重试、权限撤销/取消、持久化、重启恢复和重复任务限制，不会发送真实邮件。独立窗口测试在有 Chrome 时使用真实浏览器和完全拦截网络的页面夹具，验证跨域 iframe 识别、截图、拒绝、刷新及恢复邮件阶段切换；无 Chrome 时跳过该项。上线后仍需选择授权测试账户验证平台执行器的实际页面兼容性。
 
 2026-09-14：25 项离线测试、前后端类型检查与生产构建通过；模拟页面已验证三个邮件状态和获取链接弹窗；已从白名单服务器使用实际 TypeScript 客户端验证鉴权、列表分页、详情读取。测试账户的历史恢复邮件可提取 AWS 链接。该次为部署前验证，未触发新的真实恢复邮件。部署结果见下方。
 
