@@ -16,6 +16,12 @@ iframe 导航、域名变化、重复控件或不支持的挑战会停止；提�
 
 2026-09-16：58 项测试、前后端类型检查及完整构建通过。使用生产服务器的隔离浏览器实测新版 iframe：第一张图片未取得可靠 OCR 候选，刷新后第二张通过 AWS 身份验证并进入 Forgot password 入口。检查在恢复邮件请求之前停止，未发送邮件、未修改密码；这验证了本次入口兼容修复，不代表所有验证码的 OCR 都能成功。
 
+### 监控请求不阻塞验证码恢复（0.31.2）
+
+实测 AWS 恢复页面表单可用时，`https://us-east-2.monitoring.iam.signin.aws/` 的 POST fetch 可长期不结束。旧版将所有 document/xhr/fetch 都计入提交等待，导致表单持续被判为 unavailable。现在仅排除 HTTPS 区域 `*.monitoring.iam.signin.aws` 的 POST xhr/fetch；document、其他请求、非标准端口及相似域名仍参与等待。不会拦截或修改监控上报请求本身。登录/验证码请求结束后仍需 2 秒静默且表单可用，才可能继续重试。
+
+短时核查退出时区分页面不可操作、AWS 限制、邮箱分页未完成、邮箱接口失败、浏览器读取失败与核查超时，并把原因写入任务说明及提交未知审计。
+
 ### 提交超时后继续原验证码会话（0.31.1）
 
 恢复邮件验证码提交后，仅 `wait_result/timeout` 会进入短时核查；不重放点击失败、网络错误或安全校验错误。原浏览器保持打开，约 60 秒内同时检查页面与邮箱，核查硬上限 90 秒：AWS 明确确认发信则转入收件；找到严格匹配的恢复邮件则直接绑定并继续改密；完整分页核查未发现匹配邮件，且原官方页面仍有唯一可用的验证码图片、输入框与提交按钮、没有进行中的页面请求时，才继续原会话的下一张验证码。邮箱查询失败、未扫完分页、表单不可用、限流或页面失效都不会被当作“无邮件，可重试”。邮箱索引可能延迟；没有邮件并非发送失败的证明，因此仍可能遇到迟到的旧邮件。每次恢复尝试推进邮件匹配起点，并保留严格的恢复链接与密码提交结果校验。
@@ -135,7 +141,7 @@ PY
 ## 验证
 
 ```sh
-node --import tsx --test tests/root-email.test.ts tests/root-email-manual.test.ts tests/root-email-reconcile.test.ts tests/root-email-security-frame.test.ts tests/root-mail-links.test.ts tests/mail-api.test.ts tests/root-reset-permissions.test.ts
+node --import tsx --test tests/root-email.test.ts tests/root-email-manual.test.ts tests/root-email-reconcile.test.ts tests/root-email-network.test.ts tests/root-email-security-frame.test.ts tests/root-mail-links.test.ts tests/mail-api.test.ts tests/root-reset-permissions.test.ts
 npx tsc --noEmit -p server/tsconfig.json
 npx tsc -p client/tsconfig.json
 npx vite build --config client/vite.config.ts

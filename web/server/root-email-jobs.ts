@@ -354,6 +354,7 @@ async function execute(job: RootEmailJob, controller: AbortController) {
   const deadline = setTimeout(() => controller.abort(), 40 * 60_000);
   let session: AwsRootEmailSession | undefined;
   let receivedMail: { mailKey: string; receivedAt: string } | undefined;
+  let reconciliationFailure = '';
   const ensureRunning = () => {
     controller.signal.throwIfAborted();
     if (stopping) throw new RootEmailError('任务执行器已停止，已取消后续发信操作');
@@ -404,7 +405,13 @@ async function execute(job: RootEmailJob, controller: AbortController) {
     ensureRunning();
     if (result.kind === 'confirmed') return 'sent';
     if (result.kind === 'received') { receivedMail = result; return 'sent'; }
-    if (result.kind !== 'retry') throw error;
+    if (result.kind === 'unresolved') {
+      const reasons = { page_unavailable: '原验证码表单不可操作', blocked: 'AWS 限流或禁止恢复',
+        mailbox_incomplete: '邮箱分页未能完整检查', mailbox_error: '邮箱接口查询失败',
+        browser_error: '原浏览器页面读取失败', deadline: '页面与邮箱核查超过时限' };
+      reconciliationFailure = `；停止自动重试原因：${reasons[result.reason]}`;
+      throw error;
+    }
     // Exclude mail already received before preparing this next attempt.
     const retrying = currentStore.updateIfStatus(job.id, ['running'], {
       requestedAt: new Date(Math.floor(Date.now() / 1_000) * 1_000).toISOString(),
@@ -474,7 +481,7 @@ async function execute(job: RootEmailJob, controller: AbortController) {
       const waiting = currentStore.updateIfStatus(job.id, ['running'], {
         status: 'waiting_mail', phase: 'waiting_mail', mailCursor: 0,
         mailNextCheckAt: new Date().toISOString(), mailDeadlineAt: new Date(Date.now() + 10 * 60_000).toISOString(),
-        detail: '验证码已提交，但 AWS 未确认验证通过或发信；正在只读检查邮箱，不会自动重新发送',
+        detail: `验证码已提交，但 AWS 未确认验证通过或发信；正在只读检查邮箱，不会自动重新发送${reconciliationFailure}`,
       });
       if (waiting) audit(waiting, 'ROOT_EMAIL_SUBMIT_UNKNOWN');
       return;

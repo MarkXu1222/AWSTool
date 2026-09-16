@@ -42,6 +42,9 @@ test('missing forms, in-flight pages and incomplete or failed scans never author
       },
     });
     assert.equal(result.kind, 'unresolved', scenario);
+    if (result.kind === 'unresolved') assert.equal(result.reason, {
+      unavailable: 'page_unavailable', blocked: 'blocked', pages: 'deadline', stuck: 'mailbox_incomplete', error: 'mailbox_error',
+    }[scenario]);
   }
 });
 

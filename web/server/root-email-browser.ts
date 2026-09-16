@@ -207,6 +207,20 @@ export function readRootRecoveryRetryForm(): boolean {
   return images === 1 && answers === 1 && buttons === 1;
 }
 
+/** AWS telemetry can remain pending indefinitely; it does not acknowledge CAPTCHA submission. */
+export function isRootRecoveryBlockingRequest(request: Pick<HTTPRequest, 'resourceType' | 'url' | 'method'>): boolean {
+  const type = request.resourceType();
+  if (!['document', 'xhr', 'fetch'].includes(type)) return false;
+  if (type !== 'document' && request.method() === 'POST') {
+    try {
+      const url = new URL(request.url());
+      if (url.protocol === 'https:' && !url.username && !url.password && !url.port
+        && /^[a-z0-9-]+\.monitoring\.iam\.signin\.aws$/.test(url.hostname)) return false;
+    } catch { /* Unknown requests still block resubmission. */ }
+  }
+  return true;
+}
+
 /** All selectors reflect the AWS root sign-in/recovery UI, not the federated PDF flow. */
 export class AwsRootEmailSession implements RootEmailSession {
   private browser?: Browser;
@@ -217,6 +231,18 @@ export class AwsRootEmailSession implements RootEmailSession {
   private expectedEmail = '';
   private pendingRequests = new Set<HTTPRequest>();
   private lastRequestAt = 0;
+  private observeRecoveryRequests(page: Page) {
+    page.on('request', request => {
+      if (isRootRecoveryBlockingRequest(request)) {
+        this.pendingRequests.add(request); this.lastRequestAt = Date.now();
+      }
+    });
+    const settled = (request: HTTPRequest) => {
+      if (this.pendingRequests.delete(request)) this.lastRequestAt = Date.now();
+    };
+    page.on('requestfinished', settled);
+    page.on('requestfailed', settled);
+  }
   constructor(private readonly signal: AbortSignal, private readonly authorize: () => void) {}
   private checkedPage() {
     this.signal.throwIfAborted();
@@ -428,16 +454,7 @@ export class AwsRootEmailSession implements RootEmailSession {
       });
       stage = 'create_page';
       this.page = await this.browser.newPage();
-      this.page.on('request', request => {
-        if (['document', 'xhr', 'fetch'].includes(request.resourceType())) {
-          this.pendingRequests.add(request); this.lastRequestAt = Date.now();
-        }
-      });
-      const settled = (request: HTTPRequest) => {
-        if (this.pendingRequests.delete(request)) this.lastRequestAt = Date.now();
-      };
-      this.page.on('requestfinished', settled);
-      this.page.on('requestfailed', settled);
+      this.observeRecoveryRequests(this.page);
       this.page.setDefaultTimeout(25_000);
       this.page.setDefaultNavigationTimeout(30_000);
       stage = 'configure_page';
