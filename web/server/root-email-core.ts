@@ -152,9 +152,11 @@ export function hasNewerRootEmailJob(jobs: Pick<RootEmailJob, 'id' | 'accountId'
     && Date.parse(job.createdAt) > createdAt);
 }
 type RootEmailInput = Pick<RootEmailJob, 'accountId' | 'email' | 'createdBy' | 'createdByUserId'>
-  & Partial<Pick<RootEmailJob, 'createdFromIp'>>;
+  & Partial<Pick<RootEmailJob, 'createdFromIp' | 'payerAccountId' | 'payerName'>>;
 export type RootEmailBatchMeta = Required<Pick<RootEmailJob, 'batchId' | 'payerAccountId' | 'payerName'>>
   & { autoSetPassword: true };
+type RootEmailBatchRequest = Pick<RootEmailBatchMeta, 'batchId' | 'autoSetPassword'>
+  & Partial<Pick<RootEmailBatchMeta, 'payerAccountId' | 'payerName'>>;
 
 export function selectRootEmailTargets(accounts: any[], payer: { name: string; accountId: string }, values: unknown,
   maximum = MAX_ROOT_EMAIL_TASKS) {
@@ -171,6 +173,30 @@ export function selectRootEmailTargets(accounts: any[], payer: { name: string; a
     const email = String(account.Email || '').trim();
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw new RootEmailError(`账户 ${accountId} 缺少有效的根邮箱`);
     return { accountId, email };
+  });
+}
+
+/** Resolve each account's configured organization on the server; an optional payer only narrows the selection. */
+export function selectRootEmailBatchTargets(accounts: any[], payers: Array<{ name: string; accountId: string }>,
+  values: unknown, payerAccountId = '') {
+  if (!Array.isArray(values) || !values.length || values.length > MAX_ROOT_PASSWORD_BATCH
+    || values.some(id => typeof id !== 'string' || !/^\d{12}$/.test(id))) {
+    throw new RootEmailError(`请选择 1–${MAX_ROOT_PASSWORD_BATCH} 个有效账户`);
+  }
+  if (payerAccountId && !payers.some(p => p.accountId === payerAccountId)) {
+    throw new RootEmailError('所选 payer 不在平台配置中');
+  }
+  return [...new Set<string>(values)].map(accountId => {
+    const matches = accounts.filter(a => a.Id === accountId);
+    if (matches.length !== 1) throw new RootEmailError(`账户 ${accountId} 不存在或账户缓存存在重复记录`, 409);
+    const owners = payers.filter(p => p.name === matches[0]._payer);
+    if (owners.length !== 1 || (payerAccountId && owners[0].accountId !== payerAccountId)) {
+      throw new RootEmailError(`账户 ${accountId} 无法匹配所选或已配置的 payer`, 409);
+    }
+    const payer = owners[0];
+    if (payers.some(p => p.accountId === accountId)) throw new RootEmailError(`账户 ${accountId} 是管理账户，不能批量重置`, 409);
+    const [target] = selectRootEmailTargets(accounts, payer, [accountId]);
+    return { ...target, payerAccountId: payer.accountId, payerName: payer.name };
   });
 }
 
@@ -313,17 +339,23 @@ export class RootEmailStore {
     return { source: structuredClone(next.find(current => current.id === source.id)!), job: structuredClone(job) };
   }
   /** Validate every target before one atomic write. A repeated request ID cannot send twice. */
-  createBatch(inputs: RootEmailInput[], meta: RootEmailBatchMeta): { jobs: RootEmailJob[]; reused: boolean } {
+  createBatch(inputs: RootEmailInput[], meta: RootEmailBatchRequest): { jobs: RootEmailJob[]; reused: boolean } {
+    const targets = inputs.map(input => ({ ...input,
+      payerAccountId: input.payerAccountId ?? meta.payerAccountId,
+      payerName: input.payerName ?? meta.payerName }));
     if (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(meta.batchId)
-      || !/^\d{12}$/.test(meta.payerAccountId) || !meta.payerName || meta.autoSetPassword !== true
+      || targets.some(i => !/^\d{12}$/.test(i.payerAccountId || '') || !i.payerName
+        || (meta.payerAccountId !== undefined && meta.payerAccountId !== i.payerAccountId)
+        || (meta.payerName !== undefined && meta.payerName !== i.payerName)) || meta.autoSetPassword !== true
       || !inputs.length || inputs.length > MAX_ROOT_PASSWORD_BATCH
       || new Set(inputs.map(i => i.accountId)).size !== inputs.length
       || new Set(inputs.map(i => i.createdByUserId)).size !== 1) throw new RootEmailError('批次参数无效');
     const previous = this.jobs.filter(j => j.batchId === meta.batchId);
     if (previous.length) {
-      if (previous.length !== inputs.length || previous.some(j => j.payerAccountId !== meta.payerAccountId
-        || j.createdByUserId !== inputs[0].createdByUserId || j.autoSetPassword !== true
-        || !inputs.some(i => i.accountId === j.accountId))) {
+      if (previous.length !== targets.length || previous.some(j => j.autoSetPassword !== true
+        || !targets.some(i => i.accountId === j.accountId && i.createdByUserId === j.createdByUserId
+          && i.payerAccountId === j.payerAccountId && i.payerName === j.payerName
+          && i.email.toLowerCase() === j.email.toLowerCase()))) {
         throw new RootEmailError('请求标识已用于另一个批次，请刷新后重试', 409);
       }
       return { jobs: structuredClone(previous), reused: true };
@@ -332,7 +364,7 @@ export class RootEmailStore {
     if (this.jobs.filter(isPendingEmailJob).length + inputs.length > MAX_ROOT_EMAIL_TASKS) {
       throw new RootEmailError(`当前队列容量不足（上限 ${MAX_ROOT_EMAIL_TASKS} 个账户），本批次未创建`, 429);
     }
-    const jobs = inputs.map(input => ({ ...this.makeJob(input), ...meta }));
+    const jobs = targets.map(input => ({ ...this.makeJob(input), batchId: meta.batchId, autoSetPassword: true }));
     this.save([...this.jobs, ...jobs]);
     return { jobs: structuredClone(jobs), reused: false };
   }

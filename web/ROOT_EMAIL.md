@@ -2,7 +2,15 @@
 
 账户详情 → 根用户 →「发送 Root 密码恢复邮件」仍创建单账户手工任务：邮箱从服务器账户缓存读取，调用方不能覆盖；找到恢复链接后由有权限的操作者手工打开 AWS 页面设置密码。
 
-独立导航「批量设置 Root 密码」（`/rootreset`）创建自动改密批次。系统按 payer 选择最多 20 个 ACTIVE 成员账户，发送恢复邮件、精确匹配收件人和请求时间、重新校验 AWS 一次性链接，然后生成并提交 24 位强随机密码。创建批次必须精确输入 payer 名称、账户数量和当前 TOTP。
+独立导航「批量设置 Root 密码」（`/rootreset`）创建自动改密批次。系统支持全局搜索账户 ID、名称或邮箱并单独重置，也可勾选或 Excel 导入最多 20 个 ACTIVE 成员账户，支持同批跨 payer。发送恢复邮件、精确匹配收件人和请求时间、重新校验 AWS 一次性链接后，生成并提交 24 位强随机密码。创建批次核对账户清单，输入账户数量和当前 TOTP，无需输入 payer 名称。
+
+### 全局账户选择与 Excel 导入（0.32.0）
+
+- Payer 为可选的列表筛选，默认展示全部可管理的成员账户。搜索和切换筛选不清空选择，「只看已选」可复核名单；每行「单独重置」仅为该账户打开确认窗口。
+- 「导入 Excel」复用账单模块的浏览器 Worker 解析器，支持 `.xlsx`（5 MB 内）、所有工作表、独立 12 位数字和文本账户 ID。含前导零的 ID 必须以文本保存；不猜测缺失的数字。文件不上传，解析超时与解压大小限制继续生效。
+- 导入先展示匹配、重复、未匹配及不可操作账户；使用匹配结果会替换当前选择，不自动创建任务。超出 20 个匹配账户时要求拆分文件，不静默截断。
+- `POST /api/aws/root-email/batches` 接受 `accountIds`、`requestId`、`confirmAccountCount`、`confirmSetPassword: true`、`totpCode`，`payerAccountId` 可省略；旧客户端传入时仍按该 payer 限定目标。`confirmPayerName` 不再需要。邮箱及每个账户的 payer 元数据均从服务端当前配置和缓存解析，不能由文件或请求覆盖。
+- 同批不同 payer 的元数据逐任务保存，历史显示「跨 N 个 payer」。批次原子写入、请求 ID 幂等、运行时权限及归属复核、单账户安全重试均保留；任一目标无效则整批拒绝。
 
 后台使用独立 Chrome 配置目录进入 AWS 忘记密码页面，通过本地 PP-OCRv6 模型处理 AWS 当前可能出现的两阶段验证码：登录安全验证码通过后进入 Forgot password，再处理恢复邮件验证码；每阶段最多 9 张图片。尚未提交恢复请求时，opening/captcha 阶段的泛化浏览器异常最多重建到 3 次会话；通过跨导航短轮询处理登录安全验证码，并兼容 AWS 先显示 `Verify`、点击后才加载验证码图片的中间态；验证码错误通过 AWS 明确错误文案判定（兼容直/弯引号 contractions）；恢复验证码结果读取超时后保留原会话，按下述短时核查规则决定是否继续下一张。只有恢复邮件验证码提交前才持久化 `submitting`，提交标记不会因换图清除。找到链接后，同一浏览器执行槽位只接受 `https://signin.aws.amazon.com/resetpassword` 的 `RootUser` 链接，使用不依赖 `tsx` 运行时 helper 的自包含页面函数，要求恰好两个可见密码框和唯一的 `Reset password` / `Set new password` / `Save new password` / `Change password` / `Submit` 按钮。密码页面仅在确认未进入提交边界时最多尝试 3 次。只有 AWS 返回明确成功文案才记录 `password_set`；提交后结果不明确时记录 `password_unknown`，绝不重试一次性链接。恢复邮件浏览器同样逐账户使用独立 Chrome/profile/Page，并持久化浏览器尝试次数及不含 URL/token 的 `failureStage/failureCategory`。仅 `failed` 且持久化证明未跨过恢复邮件提交边界的自动任务可单独重试；重试通过新 TOTP 创建新的单账户批次，旧任务保留并记录 `retryOfJobId/retriedByJobId`，不确定状态一律拒绝。
 
@@ -141,7 +149,7 @@ PY
 ## 验证
 
 ```sh
-node --import tsx --test tests/root-email.test.ts tests/root-email-manual.test.ts tests/root-email-reconcile.test.ts tests/root-email-network.test.ts tests/root-email-security-frame.test.ts tests/root-mail-links.test.ts tests/mail-api.test.ts tests/root-reset-permissions.test.ts
+node --import tsx --test tests/root-email-selection.test.ts tests/root-email.test.ts tests/root-email-manual.test.ts tests/root-email-reconcile.test.ts tests/root-email-network.test.ts tests/root-email-security-frame.test.ts tests/root-mail-links.test.ts tests/mail-api.test.ts tests/root-reset-permissions.test.ts
 npx tsc --noEmit -p server/tsconfig.json
 npx tsc -p client/tsconfig.json
 npx vite build --config client/vite.config.ts

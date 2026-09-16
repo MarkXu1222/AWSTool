@@ -1,10 +1,12 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { Alert, Button, Card, Input, message, Modal, Popconfirm, Progress, Select, Space, Table, Tag, Typography } from 'antd';
-import { CopyOutlined, DownloadOutlined, LockOutlined, RedoOutlined, ReloadOutlined, SearchOutlined, StopOutlined } from '@ant-design/icons';
+import { Alert, Button, Card, Checkbox, Input, message, Modal, Popconfirm, Progress, Select, Space, Table, Tag, Typography, Upload } from 'antd';
+import { CopyOutlined, DownloadOutlined, LockOutlined, RedoOutlined, ReloadOutlined, SearchOutlined, StopOutlined, UploadOutlined } from '@ant-design/icons';
 import { api, RootEmailAccount, RootEmailBatchView, RootEmailJobView } from '../api';
 import { showManualRootResetLink, showRootResetLink } from '../utils/root-reset-link';
 import RootManualCaptchaModal from '../components/RootManualCaptchaModal';
 import { rootEmailStatusLabel } from '../utils/root-email-status';
+import { scanAccountIdsFromXlsx, type AccountWorkbookScanResult } from '../utils/account-import';
+import { filterRootAccounts, matchRootAccountImport } from '../utils/root-account-selection';
 
 const statusLabels: Record<RootEmailJobView['status'], string> = {
   queued: '排队中', running: '发送恢复邮件', email_sent: 'AWS 已确认发信', failed: '发信失败', cancelled: '已停止', interrupted: '结果待检查',
@@ -32,6 +34,10 @@ const BulkRootResetPage: React.FC<{ canOperate?: boolean }> = ({ canOperate = fa
   const [payer, setPayer] = useState('');
   const [search, setSearch] = useState('');
   const [selected, setSelected] = useState<string[]>([]);
+  const [selectedOnly, setSelectedOnly] = useState(false);
+  const [importing, setImporting] = useState(false);
+  const [importPreview, setImportPreview] = useState<(AccountWorkbookScanResult & { fileName: string }) | null>(null);
+  const importSequence = useRef(0);
   const [cachedAt, setCachedAt] = useState('');
   const [maxBatchSize, setMaxBatchSize] = useState(20);
   const [available, setAvailable] = useState<Availability | null>(null);
@@ -43,7 +49,6 @@ const BulkRootResetPage: React.FC<{ canOperate?: boolean }> = ({ canOperate = fa
   const [error, setError] = useState('');
   const [refresh, setRefresh] = useState(0);
   const [confirmOpen, setConfirmOpen] = useState(false);
-  const [confirmPayerName, setConfirmPayerName] = useState('');
   const [confirmAccountCount, setConfirmAccountCount] = useState('');
   const [totpCode, setTotpCode] = useState('');
   const [downloadOpen, setDownloadOpen] = useState(false);
@@ -54,6 +59,7 @@ const BulkRootResetPage: React.FC<{ canOperate?: boolean }> = ({ canOperate = fa
   const [manualCaptchaJobId, setManualCaptchaJobId] = useState<string | null>(null);
   const [retryTotpCode, setRetryTotpCode] = useState('');
   const request = useRef<{ signature: string; id: string } | null>(null);
+  useEffect(() => () => { importSequence.current++; }, []);
 
   useEffect(() => {
     let disposed = false;
@@ -94,34 +100,53 @@ const BulkRootResetPage: React.FC<{ canOperate?: boolean }> = ({ canOperate = fa
     return () => { disposed = true; clearTimeout(timer); };
   }, [batchId, refresh]);
 
-  const selectedPayer = payers.find(item => item.accountId === payer);
-  const eligible = useMemo(() => accounts.filter(account => account.payerAccountId === payer), [accounts, payer]);
-  const filtered = eligible.filter(account => `${account.accountId} ${account.name} ${account.email}`.toLowerCase().includes(search.trim().toLowerCase()));
-  const selectedAccounts = eligible.filter(account => selected.includes(account.accountId) && account.eligible);
+  const filtered = useMemo(() => filterRootAccounts(accounts, payer, search, selectedOnly, selected),
+    [accounts, payer, search, selectedOnly, selected]);
+  const selectedAccounts = accounts.filter(account => selected.includes(account.accountId) && account.eligible);
+  const importMatches = useMemo(() => matchRootAccountImport(importPreview?.accountIds || [], accounts), [importPreview, accounts]);
+  const payerLabel = (id: string) => payers.find(item => item.accountId === id)?.name || id;
   const domains = [...new Set(selectedAccounts.map(account => account.email.split('@')[1].toLowerCase()))].sort();
-  const canStart = canOperate && !!available?.passwordAutomationReady && !busy && !loading
+  const canSelect = canOperate && !!available?.passwordAutomationReady && !busy && !loading && !importing;
+  const canStart = canSelect
     && selectedAccounts.length > 0 && selectedAccounts.length <= maxBatchSize;
-  const confirmationMatches = confirmPayerName === selectedPayer?.name
-    && confirmAccountCount === String(selectedAccounts.length) && /^\d{6}$/.test(totpCode);
+  const confirmationMatches = confirmAccountCount === String(selectedAccounts.length) && /^\d{6}$/.test(totpCode);
 
-  const openConfirmation = () => {
-    if (!canStart) return;
-    setConfirmPayerName(''); setConfirmAccountCount(''); setTotpCode(''); setError(''); setConfirmOpen(true);
+  const openConfirmation = (account?: RootEmailAccount) => {
+    if (account ? !canSelect || !account.eligible : !canStart) return;
+    if (account) setSelected([account.accountId]);
+    setConfirmAccountCount(''); setTotpCode(''); setError(''); setConfirmOpen(true);
+  };
+  const importExcel = async (file: File) => {
+    const sequence = ++importSequence.current;
+    setImporting(true); setError(''); setImportPreview(null);
+    try {
+      const result = await scanAccountIdsFromXlsx(file);
+      if (sequence !== importSequence.current) return;
+      if (!result.accountIds.length) throw new Error('Excel 中未找到 12 位账户 ID；含前导零的 ID 请设为文本');
+      setImportPreview({ ...result, fileName: file.name });
+    } catch (cause: any) { if (sequence === importSequence.current) setError(cause.message); }
+    finally { if (sequence === importSequence.current) setImporting(false); }
+  };
+  const applyImport = () => {
+    if (!canOperate || loading || busy || !importMatches.matched.length || importMatches.matched.length > maxBatchSize) return;
+    setSelected(importMatches.matched.map(account => account.accountId));
+    setPayer(''); setSearch(''); setSelectedOnly(true); setImportPreview(null); request.current = null;
+    message.success(`已选择 ${importMatches.matched.length} 个匹配账户，请核对后创建任务`);
   };
   const submit = async () => {
-    if (!canStart || !confirmationMatches || !selectedPayer) return;
+    if (!canStart || !confirmationMatches) return;
     const ids = selectedAccounts.map(account => account.accountId).sort();
-    const signature = JSON.stringify([payer, ids]);
+    const signature = JSON.stringify(ids);
     if (request.current?.signature !== signature) request.current = { signature, id: crypto.randomUUID() };
     setBusy(true); setError('');
     try {
       const result = await api.sendRootEmailBatch({
-        payerAccountId: payer, accountIds: ids, requestId: request.current.id, totpCode,
-        confirmPayerName, confirmAccountCount: Number(confirmAccountCount),
+        accountIds: ids, requestId: request.current.id, totpCode,
+        confirmAccountCount: Number(confirmAccountCount),
       });
       if (!result.success) throw new Error(result.error || '批量提交失败');
       setBatch(result.data); setBatchId(result.data.id); setSelected([]); request.current = null;
-      setConfirmOpen(false); setConfirmPayerName(''); setConfirmAccountCount(''); setRefresh(value => value + 1);
+      setConfirmOpen(false); setConfirmAccountCount(''); setSelectedOnly(false); setRefresh(value => value + 1);
       message.success(`已创建 ${result.data.total} 个账户的自动改密任务`);
     } catch (cause: any) {
       setError(`${cause.message}。请求未确认时可用相同选择重试，系统会防止重复创建同一批次。`);
@@ -196,36 +221,50 @@ const BulkRootResetPage: React.FC<{ canOperate?: boolean }> = ({ canOperate = fa
     <Card size="small" title="选择账户">
       <Space direction="vertical" size={12} style={{ width: '100%' }}>
         <Space wrap>
-          <Select aria-label="选择 Payer" style={{ width: 320, maxWidth: '100%' }} placeholder="选择 payer（组织管理账户）"
-            showSearch optionFilterProp="label" value={payer || undefined} disabled={busy || loading}
+          <Input aria-label="搜索账户" prefix={<SearchOutlined />} placeholder="全局搜索账户 ID、名称或邮箱" value={search}
+            onChange={event => setSearch(event.target.value)} allowClear style={{ width: 300 }} disabled={busy || importing} />
+          <Select aria-label="筛选 Payer（可选）" style={{ width: 300, maxWidth: '100%' }} placeholder="全部 payer（可选筛选）"
+            allowClear showSearch optionFilterProp="label" value={payer || undefined} disabled={busy || loading || importing}
             options={payers.map(item => ({ value: item.accountId, label: `${item.name} (${item.accountId})` }))}
-            onChange={value => { setPayer(value); setSelected([]); setSearch(''); request.current = null; }} />
-          <Input aria-label="搜索账户" prefix={<SearchOutlined />} placeholder="搜索账户 ID、名称或邮箱" value={search}
-            onChange={event => setSearch(event.target.value)} allowClear style={{ width: 280 }} disabled={!payer || busy} />
-          <Button icon={<ReloadOutlined />} loading={loading} disabled={busy}
+            onChange={value => setPayer(value || '')} />
+          {canOperate && <Upload accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            showUploadList={false} disabled={busy || loading || importing} beforeUpload={file => {
+              void importExcel(file); return Upload.LIST_IGNORE;
+            }}>
+            <Button icon={<UploadOutlined />} loading={importing} disabled={busy || loading}>导入 Excel</Button>
+          </Upload>}
+          <Button icon={<ReloadOutlined />} loading={loading} disabled={busy || importing}
             onClick={() => { setError(''); setRefresh(value => value + 1); }}>刷新列表</Button>
         </Space>
+        <Typography.Text type="secondary">直接搜索账户即可单独重置；也可导入 .xlsx 批量选择，支持跨 payer。Excel 中每行填写一个 12 位账户 ID，含前导零的 ID 请设为文本。</Typography.Text>
         <Space wrap>
-          {canOperate && <><Button disabled={!payer || busy}
+          {canOperate && <><Button disabled={busy || loading || importing || !filtered.some(account => account.eligible)}
             onClick={() => setSelected(filtered.filter(account => account.eligible).slice(0, maxBatchSize).map(account => account.accountId))}>
             选择前 {maxBatchSize} 个筛选结果
           </Button>
-          <Button disabled={!selected.length || busy} onClick={() => setSelected([])}>清空选择</Button>
+          <Button disabled={!selected.length || busy || importing} onClick={() => { setSelected([]); setSelectedOnly(false); }}>清空选择</Button>
+          <Checkbox checked={selectedOnly} disabled={busy || importing} onChange={event => setSelectedOnly(event.target.checked)}>只看已选</Checkbox>
           <Typography.Text>已选 {selectedAccounts.length} 个账户 · 每批最多 {maxBatchSize} 个</Typography.Text></>}
           {cachedAt && <Typography.Text type="secondary">账户缓存：{new Date(cachedAt).toLocaleString()}</Typography.Text>}
         </Space>
         <Table<RootEmailAccount> size="small" rowKey="accountId" loading={loading} dataSource={filtered}
           pagination={{ pageSize: 20, showSizeChanger: true, showTotal: total => `共 ${total} 个账户` }} scroll={{ x: 760 }}
-          locale={{ emptyText: payer ? '该 payer 下没有匹配的成员账户' : '请先选择 payer' }}
+          locale={{ emptyText: selectedOnly ? '当前筛选下没有已选账户，可取消“只看已选”或清除筛选' : '没有匹配的成员账户，请检查账户 ID 或刷新列表' }}
           rowSelection={canOperate ? { selectedRowKeys: selected, preserveSelectedRowKeys: true,
-            onChange: keys => setSelected(keys.map(String)), getCheckboxProps: account => ({ disabled: !account.eligible || busy }) } : undefined}
+            onChange: keys => setSelected(keys.map(String)), getCheckboxProps: account => ({ disabled: !account.eligible || busy || importing }) } : undefined}
           columns={[
             { title: '账户 ID', dataIndex: 'accountId', width: 150 },
             { title: '名称', dataIndex: 'name', ellipsis: true },
+            { title: '所属 Payer', dataIndex: 'payerAccountId', width: 150, render: payerLabel },
             { title: 'Root 邮箱', dataIndex: 'email', width: 260, ellipsis: true },
             { title: '状态', dataIndex: 'state', width: 120,
               render: (value, account) => <Tag color={account.eligible ? 'success' : 'default'}>{account.eligible ? value : `${value} · 不可选`}</Tag> },
+            ...(canOperate ? [{ title: '操作', key: 'action', width: 110,
+              render: (_: unknown, account: RootEmailAccount) => <Button size="small" danger disabled={!canSelect || !account.eligible}
+                onClick={() => openConfirmation(account)}>单独重置</Button> }] : []),
           ]} />
+        {selectedAccounts.length > maxBatchSize && <Alert type="warning" showIcon
+          message={`已选 ${selectedAccounts.length} 个账户，超出单批 ${maxBatchSize} 个上限，请取消部分选择后继续`} />}
         {!!domains.length && <Space wrap>
           <Typography.Text type="secondary">所选收件邮箱域名：</Typography.Text>
           {domains.map(domain => <Tag key={domain}>{domain}</Tag>)}
@@ -234,7 +273,7 @@ const BulkRootResetPage: React.FC<{ canOperate?: boolean }> = ({ canOperate = fa
             复制域名清单
           </Button>
         </Space>}
-        {canOperate && <Button type="primary" danger icon={<LockOutlined />} loading={busy} disabled={!canStart} onClick={openConfirmation}>
+        {canOperate && <Button type="primary" danger icon={<LockOutlined />} loading={busy} disabled={!canStart} onClick={() => openConfirmation()}>
           创建自动改密批次（{selectedAccounts.length}）
         </Button>}
       </Space>
@@ -333,15 +372,33 @@ const BulkRootResetPage: React.FC<{ canOperate?: boolean }> = ({ canOperate = fa
     <RootManualCaptchaModal key={manualCaptchaJobId || 'closed'}
       job={batch?.jobs?.find(job => job.id === manualCaptchaJobId) || null}
       onClose={() => setManualCaptchaJobId(null)} onProgress={() => setRefresh(value => value + 1)} />
+    <Modal title="核对 Excel 导入账户" open={!!importPreview} width={800} onCancel={() => setImportPreview(null)}
+      okText={`使用匹配的 ${importMatches.matched.length} 个账户`} onOk={applyImport}
+      okButtonProps={{ disabled: !canOperate || busy || loading || !importMatches.matched.length || importMatches.matched.length > maxBatchSize }}
+      cancelText="取消">
+      <Space direction="vertical" size={12} style={{ width: '100%' }}>
+        <Typography.Text>{importPreview?.fileName} · {importPreview?.sheetCount} 个工作表 · 识别 {importPreview?.accountIds.length} 个账户 ID · 去重 {importPreview?.duplicateCount} 次</Typography.Text>
+        <Typography.Text type="secondary">导入会替换当前选择；文件在浏览器本地解析，核对并确认创建任务后才开始重置。</Typography.Text>
+        {importMatches.matched.length > maxBatchSize && <Alert type="warning" showIcon
+          message={`匹配 ${importMatches.matched.length} 个账户，单批最多 ${maxBatchSize} 个，请拆分 Excel 后重新导入；不会截断名单`} />}
+        <Table<RootEmailAccount> size="small" rowKey="accountId" dataSource={importMatches.matched} pagination={{ pageSize: 10 }}
+          columns={[{ title: '匹配账户 ID', dataIndex: 'accountId' }, { title: '名称', dataIndex: 'name' },
+            { title: '所属 Payer', dataIndex: 'payerAccountId', render: payerLabel }, { title: 'Root 邮箱', dataIndex: 'email' }]} />
+        {!!importMatches.rejected.length && <>
+          <Alert type="warning" showIcon message={`${importMatches.rejected.length} 个账户未匹配或不可重置，将不加入任务`} />
+          <Table size="small" rowKey="accountId" dataSource={importMatches.rejected} pagination={{ pageSize: 5 }}
+            columns={[{ title: '账户 ID', dataIndex: 'accountId' }, { title: '原因', dataIndex: 'reason' }]} />
+        </>}
+      </Space>
+    </Modal>
     <Modal title="确认批量设置 Root 新密码" open={confirmOpen} confirmLoading={busy}
       okText="确认并开始自动改密" okButtonProps={{ danger: true, disabled: !confirmationMatches }}
       cancelText="取消" closable={!busy} maskClosable={false} onCancel={() => { if (!busy) setConfirmOpen(false); }} onOk={submit}>
       <Space direction="vertical" size={12} style={{ width: '100%' }}>
         <Alert type="error" showIcon message={`将修改 ${selectedAccounts.length} 个 AWS 账户的 Root 密码`}
           description="操作开始后，已发送的恢复邮件无法撤回。系统不会重试结果未知的一次性链接。" />
-        <Typography.Text>请准确输入 payer 名称：<Typography.Text code>{selectedPayer?.name}</Typography.Text></Typography.Text>
-        <Input aria-label="确认 Payer 名称" value={confirmPayerName} onChange={event => setConfirmPayerName(event.target.value)}
-          placeholder="完整输入 payer 名称（区分大小写）" disabled={busy} autoComplete="off" />
+        <Table<RootEmailAccount> size="small" rowKey="accountId" dataSource={selectedAccounts} pagination={false} scroll={{ y: 240 }}
+          columns={[{ title: '账户 ID', dataIndex: 'accountId' }, { title: '所属 Payer', dataIndex: 'payerAccountId', render: payerLabel }]} />
         <Typography.Text>请输入账户数量：<Typography.Text code>{selectedAccounts.length}</Typography.Text></Typography.Text>
         <Input aria-label="确认账户数量" value={confirmAccountCount} onChange={event => setConfirmAccountCount(event.target.value.replace(/\D/g, ''))}
           placeholder="输入账户数量" disabled={busy} inputMode="numeric" autoComplete="off" />

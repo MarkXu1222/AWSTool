@@ -422,7 +422,6 @@ awsRouter.post('/root-email/batches', async (req, res) => {
     verifyRootEmailStepUp(req, res, req.body?.totpCode);
     const result = await submitRootEmailBatch(String(req.body.payerAccountId || ''), req.body.accountIds,
       String(req.body.requestId || ''), {
-        payerName: req.body?.confirmPayerName,
         accountCount: req.body?.confirmAccountCount,
       }, res.locals.rootResetUser, req.ip);
     res.locals.audited = true;

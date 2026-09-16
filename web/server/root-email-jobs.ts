@@ -5,7 +5,7 @@ import { AwsRootEmailSession, AwsRootPasswordSession, MAX_ROOT_PASSWORD_BROWSER_
   RootEmailBrowserAutomationError, RootPasswordAutomationError, runRootEmailOcr } from './root-email-browser';
 import { canRetryFailedRootEmailJob, canRetryRootEmailBrowser, type CredentialDownloadSlot, hasNewerRootEmailJob,
   LEGACY_ROOT_EMAIL_BROWSER_FAILURE, RootEmailError, RootEmailJob, RootEmailStore, isPendingEmailJob,
-  manualRootResetFallbackExpiresAt, sendRootEmail, selectRootEmailTargets, MAX_ROOT_EMAIL_BROWSER_ATTEMPTS,
+  manualRootResetFallbackExpiresAt, sendRootEmail, selectRootEmailBatchTargets, MAX_ROOT_EMAIL_BROWSER_ATTEMPTS,
   MAX_ROOT_PASSWORD_BATCH, ROOT_MANUAL_FALLBACK_TTL_MS } from './root-email-core';
 import { rootEmailDeliveryState, rootEmailMailTimeoutDetail } from './root-email-core';
 import { RootEmailManualInput, ROOT_MANUAL_CAPTCHA_TTL_MS } from './root-email-manual';
@@ -54,7 +54,9 @@ function authorize(job: Pick<RootEmailJob, 'createdBy' | 'createdByUserId' | 'ac
   }
   if (accountEmail(job.accountId).toLowerCase() !== job.email.toLowerCase()) throw new RootEmailError('账户邮箱已变化，请重新创建任务', 409);
   if (job.payerAccountId && job.payerName) {
-    selectRootEmailTargets(db.getAccountsCache().accounts, { accountId: job.payerAccountId, name: job.payerName }, [job.accountId]);
+    const [target] = selectRootEmailBatchTargets(db.getAccountsCache().accounts, listConfiguredPayers(),
+      [job.accountId], job.payerAccountId);
+    if (target.payerName !== job.payerName) throw new RootEmailError('账户所属 payer 已变化，请重新创建任务', 409);
   }
 }
 function audit(job: RootEmailJob, action: string, detail = job.detail, sourceIp = job.createdFromIp): boolean {
@@ -219,7 +221,9 @@ function batchSummary(jobs: RootEmailJob[], user: RootEmailUser) {
   const canDownloadAdminCredentials = adminCredentialAccess && done === jobs.length && availableJobs.length > 0
     && !jobs.some(job => job.credentialAdminDownloadClaim)
     && !credentialDownloads.has(credentialDownloadKey(batchId, 'admin'));
-  return { id: batchId, payerAccountId: first.payerAccountId!, payerName: first.payerName!,
+  const payerCount = new Set(jobs.map(job => job.payerAccountId)).size;
+  return { id: batchId, payerAccountId: payerCount === 1 ? first.payerAccountId! : '',
+    payerName: payerCount === 1 ? first.payerName! : `跨 ${payerCount} 个 payer`,
     createdBy: first.createdBy, createdAt: first.createdAt, total: jobs.length,
     queued: count('queued'), running: count('running'), sent: jobs.filter(job => !!job.sentAt).length, failed: count('failed'),
     waitingMail: count('waiting_mail'), linkReady: count('link_ready'), mailFailed: count('mail_failed'),
@@ -251,15 +255,13 @@ export function getRootEmailBatch(id: string, user: RootEmailUser) {
 }
 
 export async function submitRootEmailBatch(payerAccountId: string, accountIds: unknown, requestId: string,
-  confirmation: { payerName: unknown; accountCount: unknown }, user: RootEmailUser, clientIp?: string) {
+  confirmation: { accountCount: unknown }, user: RootEmailUser, clientIp?: string) {
   const currentStore = getStore();
-  const payer = listConfiguredPayers().find(p => p.accountId === payerAccountId);
-  if (!payer) throw new RootEmailError('所选 payer 不在平台配置中');
-  const collect = () => selectRootEmailTargets(db.getAccountsCache().accounts, payer, accountIds, MAX_ROOT_PASSWORD_BATCH)
+  const collect = () => selectRootEmailBatchTargets(db.getAccountsCache().accounts, listConfiguredPayers(), accountIds, payerAccountId)
     .map(a => ({ ...a, createdBy: user.username, createdByUserId: String(user.id), createdFromIp: clientIp }));
   const initial = collect();
-  if (confirmation.payerName !== payer.name || confirmation.accountCount !== initial.length) {
-    throw new RootEmailError('高风险确认不匹配：请准确输入 payer 名称和账户数量');
+  if (confirmation.accountCount !== initial.length) {
+    throw new RootEmailError('高风险确认不匹配：请准确输入账户数量');
   }
   const available = await rootEmailAvailability();
   if (!available.ready) throw new RootEmailError(available.detail, 503);
@@ -267,11 +269,12 @@ export async function submitRootEmailBatch(payerAccountId: string, accountIds: u
   if (!available.encryptionReady) throw new RootEmailError(available.encryptionDetail, 503);
   getStore();
   const inputs = collect();
+  if (JSON.stringify(inputs) !== JSON.stringify(initial)) throw new RootEmailError('账户信息已变化，请刷新后重新确认', 409);
   inputs.forEach(authorize);
-  const result = currentStore.createBatch(inputs, { batchId: requestId, payerAccountId, payerName: payer.name,
-    autoSetPassword: true });
+  const result = currentStore.createBatch(inputs, { batchId: requestId, autoSetPassword: true });
   if (!result.reused) {
-    audit({ ...result.jobs[0], detail: `创建自动改密批次 ${requestId}，payer ${payer.name}，共 ${inputs.length} 个账户` },
+    const payerNames = [...new Set(inputs.map(input => input.payerName))].join('、');
+    audit({ ...result.jobs[0], detail: `创建自动改密批次 ${requestId}，payer ${payerNames}，共 ${inputs.length} 个账户` },
       'ROOT_PASSWORD_BATCH_CREATE');
     tick();
   }

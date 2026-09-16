@@ -723,8 +723,8 @@ export const api = {
   rootEmailCatalog: () => request('/aws/root-email/catalog'),
   rootEmailBatches: () => request('/aws/root-email/batches'),
   rootEmailBatch: (id: string) => request(`/aws/root-email/batches/${encodeURIComponent(id)}`),
-  sendRootEmailBatch: (body: { payerAccountId: string; accountIds: string[]; requestId: string; totpCode: string;
-    confirmPayerName: string; confirmAccountCount: number }) => request('/aws/root-email/batches', {
+  sendRootEmailBatch: (body: { payerAccountId?: string; accountIds: string[]; requestId: string; totpCode: string;
+    confirmAccountCount: number }) => request('/aws/root-email/batches', {
     method: 'POST', body: JSON.stringify({ ...body, confirmSetPassword: true }),
   }),
   downloadRootCredentialCsv: async (id: string, slot: 'owner' | 'admin'): Promise<number> => {

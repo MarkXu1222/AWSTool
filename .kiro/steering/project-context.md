@@ -11,7 +11,7 @@ AWS 多账户管理平台。用于跨组织管理成员账户：配额提升、�
 
 | 应用 | 位置 | 包名 / 版本 | 状态 | 说明 |
 |------|------|-------------|------|------|
-| **Web 版（生产）** | `web/` | `aws-toolbox-web` / `APP_VERSION 0.31.2` | ✅ **在维护** | 部署在 EC2（https://markxu.co）。日常改动几乎都在这里。 |
+| **Web 版（生产）** | `web/` | `aws-toolbox-web` / `APP_VERSION 0.32.0` | ✅ **在维护** | 部署在 EC2（https://markxu.co）。日常改动几乎都在这里。 |
 | 桌面版（旧） | 根 `src/` + `electron/` | `aws-toolbox` / `0.1.0` | ⚠️ 旧版/基本冻结 | 早期 Electron macOS 版，`main: dist/main/index.js`。除非专门维护桌面版，否则**不要动**。 |
 
 **结论：接到"平台/网站"相关的需求，一律在 `web/` 下操作。**
@@ -87,7 +87,7 @@ web/
 │       │   ├── DangerConfirm.tsx         # 危险操作二次确认
 │       │   ├── EmptyState.tsx / ErrorBoundary.tsx
 │       ├── pages/              # 每个业务页面一个文件（见下表）
-│       │   ├── BulkRootReset.tsx # /rootreset：单批20自动改密、失败账户MFA单独重试、永久CSV下载
+│       │   ├── BulkRootReset.tsx # /rootreset：全局搜索/单独重置、Excel导入跨payer、单批20自动改密、失败账户MFA单独重试、永久CSV下载
 │       ├── styles/global.css
 │       └── utils/              # cache.ts（前端缓存）、color.ts、export.ts
 │
@@ -226,7 +226,7 @@ web { port, adminPassword, jwtSecret, encryptionKey, encryptionKeyPrevious[], fe
 - `root_access` → 账户页「根用户」敏感操作（Admin 临时凭证 / 删 Root MFA / 恢复根密码）、Admin 控制台登录；非 admin 即使有此权限也只能签发 1 小时凭证，2–12 小时仅限数据库当前角色为 admin
 - `bulk_quota_access` → 「批量提额」页；未授予时该菜单完全不可见，后端 `requireBulkQuotaAccess` 也会拒绝
 
-- `root_reset_access` → 批量设置 Root 新密码：none/view/operate，非 admin 缺省 none；非 admin（包括 view/operate）只看本人创建的批次，operate 可创建和停止本人任务；admin 可查看/管理全部。CSV 下载依赖已完成登录 MFA 的会话但不再额外 step-up；新密码以 AES-256-GCM 永久保存在本地任务文件和备份，owner 可重复下载本人批次，Admin 可重复下载全部批次。创建批次、确认未提交恢复请求的失败账户单独重试与手工 fallback 均要求 step-up TOTP；创建批次还需精确输入 payer 名称与账户数。单独重试创建新的单账户批次并保留旧 job 双向血缘，`interrupted`、已提交和结果未知状态禁止重试。独立于 root_access。守卫与解析见 `root-reset-permissions.ts`。
+- `root_reset_access` → 批量设置 Root 新密码：none/view/operate，非 admin 缺省 none；非 admin（包括 view/operate）只看本人创建的批次，operate 可创建和停止本人任务；admin 可查看/管理全部。CSV 下载依赖已完成登录 MFA 的会话但不再额外 step-up；新密码以 AES-256-GCM 永久保存在本地任务文件和备份，owner 可重复下载本人批次，Admin 可重复下载全部批次。创建批次、确认未提交恢复请求的失败账户单独重试与手工 fallback 均要求 step-up TOTP；创建批次还需精确输入账户数；不再要求输入 payer 名称，支持全局搜索和 Excel 导入跨 payer 账户。单独重试创建新的单账户批次并保留旧 job 双向血缘，`interrupted`、已提交和结果未知状态禁止重试。独立于 root_access。守卫与解析见 `root-reset-permissions.ts`。
 
 新增独立权限的改动点：`auth.ts`（resolve 函数 + me + create/update）、`db.ts`（getAllUsers 暴露字段）、`routes/aws.ts`（中间件）、`MainLayout.tsx`（导航 gating）、`Settings.tsx`（授予勾选 + 列表列）、`api.ts`（createUser/updateUser 参数）。
 
