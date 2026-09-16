@@ -8,6 +8,14 @@
 
 新密码由 Node.js CSPRNG 生成，固定 24 位并包含大小写、数字和符号。密码以任务上下文作为 AAD，使用用途分离密钥和 AES-256-GCM 永久写入任务文件及随后的备份，不设置 TTL，也不因下载销毁。CSV 下载依赖已完成登录 MFA 的会话，但不再要求额外 TOTP；Owner 可重复下载本人批次，Admin 可重复下载全部批次。服务端每次下载仍按 owner/admin 视图持久化短期 claim 防并发，响应结束后清 claim 并更新最近下载时间。列表 API、审计和飞书通知均不包含明文密码或 reset URL。
 
+### AWS 独立安全验证窗口（0.30.1）
+
+AWS 的 `Verify` 中间页可能打开 `Security Verification` 弹窗，文字验证码位于独立 iframe，不在主页面的 `#captcha_image` 中。执行器同时支持旧版主页面验证码和新版 iframe：仅接受 AWS 官方登录页直接嵌入的 HTTPS `cdn.<region>.threat-mitigation.aws.amazon.com`，在该 frame 内检查唯一图片、输入框和 Submit 控件，截图交给现有本地 OCR，最多 3 张。刷新使用图片刷新按钮，不使用重置整个验证流程的 Reset 按钮。身份验证完成后回到主页面核对邮箱，再进入恢复邮件验证码。
+
+iframe 导航、域名变化、重复控件或不支持的挑战会停止；提交动作不会因失去 frame 响应而在同一调用内重放。等待入口超时归为 `timeout`，已出现但无法识别的独立验证窗口给出明确人工检查提示，避免旧版 `wait_entry/browser_error` 的无效循环。任务原有发信提交边界、邮箱核验及密码未知状态保护保持生效。
+
+2026-09-16：58 项测试、前后端类型检查及完整构建通过。使用生产服务器的隔离浏览器实测新版 iframe：第一张图片未取得可靠 OCR 候选，刷新后第二张通过 AWS 身份验证并进入 Forgot password 入口。检查在恢复邮件请求之前停止，未发送邮件、未修改密码；这验证了本次入口兼容修复，不代表所有验证码的 OCR 都能成功。
+
 ## 权限设置
 
 入口：设置 → 用户 → 编辑用户 → 批量重置 Root 密码权限。创建用户时也可配置。
@@ -111,13 +119,13 @@ PY
 ## 验证
 
 ```sh
-node --import tsx --test tests/root-email.test.ts tests/root-mail-links.test.ts tests/mail-api.test.ts tests/root-reset-permissions.test.ts
+node --import tsx --test tests/root-email.test.ts tests/root-email-security-frame.test.ts tests/root-mail-links.test.ts tests/mail-api.test.ts tests/root-reset-permissions.test.ts
 npx tsc --noEmit -p server/tsconfig.json
 npx tsc -p client/tsconfig.json
 npx vite build --config client/vite.config.ts
 ```
 
-测试通过模拟外部 AWS 会话验证重试上限、超时不重发、权限撤销/取消、持久化、重启恢复和重复任务限制，不会发送真实邮件。上线后仍需选择授权测试账户验证平台执行器的实际页面兼容性。
+测试通过模拟外部 AWS 会话验证重试上限、超时不重发、权限撤销/取消、持久化、重启恢复和重复任务限制，不会发送真实邮件。独立窗口测试在有 Chrome 时使用真实浏览器和完全拦截网络的页面夹具，验证跨域 iframe 识别、截图、拒绝、刷新及恢复邮件阶段切换；无 Chrome 时跳过该项。上线后仍需选择授权测试账户验证平台执行器的实际页面兼容性。
 
 2026-09-14：25 项离线测试、前后端类型检查与生产构建通过；模拟页面已验证三个邮件状态和获取链接弹窗；已从白名单服务器使用实际 TypeScript 客户端验证鉴权、列表分页、详情读取。测试账户的历史恢复邮件可提取 AWS 链接。该次为部署前验证，未触发新的真实恢复邮件。部署结果见下方。
 

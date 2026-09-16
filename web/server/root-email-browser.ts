@@ -3,7 +3,7 @@ import os from 'os';
 import path from 'path';
 import { createHash } from 'crypto';
 import { spawn } from 'child_process';
-import type { Browser, Page } from 'puppeteer-core';
+import type { Browser, Frame, Page } from 'puppeteer-core';
 import { RootEmailBrowserCategory, RootEmailBrowserStage, RootEmailError, RootEmailSession } from './root-email-core';
 
 export function rootEmailRuntime() {
@@ -51,11 +51,48 @@ export function runRootEmailOcr(image: Buffer | null, signal?: AbortSignal): Pro
   });
 }
 
-export type RootEmailEntryState = 'waiting' | 'verify' | 'identity' | 'forgot' | 'blocked' | 'changed';
+export type RootEmailEntryState = 'waiting' | 'verify' | 'security_challenge' | 'identity' | 'forgot' | 'blocked' | 'changed';
 export type RootEmailVerifyAction = 'ready' | 'not_ready' | 'blocked' | 'changed';
 export type RootEmailCaptchaResult = 'waiting' | 'sent' | 'identity_verified' | 'invalid' | 'blocked' | 'disabled';
 
-class RootEmailBrowserReadTimeout extends Error {}
+class RootEmailBrowserReadTimeout extends Error {
+  override name = 'TimeoutError';
+}
+
+/** Only AWS's regional security frame, directly embedded by its sign-in page, is supported. */
+export function isRootEmailSecurityFrameUrl(value: string): boolean {
+  try {
+    const url = new URL(value);
+    return url.protocol === 'https:' && !url.username && !url.password && !url.port
+      && /^cdn\.[a-z0-9-]+\.threat-mitigation\.aws\.amazon\.com$/.test(url.hostname);
+  } catch { return false; }
+}
+
+export type RootEmailSecurityChallengeState = 'waiting' | 'ready' | 'invalid' | 'blocked' | 'unsupported';
+
+/** Serialized into the AWS iframe; keep self-contained for the production tsx runtime. */
+export function readRootEmailSecurityChallengeState(candidate?: any): RootEmailSecurityChallengeState {
+  const doc = (globalThis as any).document;
+  const text = String(doc.body?.innerText || '');
+  if (/too many|rate.?limit|try again later|temporarily blocked/i.test(text)) return 'blocked';
+  const invalid = /incorrect|invalid (?:answer|response|characters|captcha)|(?:characters|answer|response).*(?:did not match|does not match|didn['’]t match)/i.test(text);
+  let images = 0, inputs = 0, submits = 0;
+  let selected = !candidate;
+  for (const element of doc.querySelectorAll('img[alt="captcha"], input[placeholder="Verification answer"], button[type="submit"]')) {
+    const style = (globalThis as any).getComputedStyle(element);
+    const rect = element.getBoundingClientRect();
+    if (style.visibility === 'hidden' || style.display === 'none' || rect.width <= 0 || rect.height <= 0 || element.disabled) continue;
+    if (element.tagName === 'IMG' && element.complete && element.naturalWidth > 0) images++;
+    if (element.tagName === 'INPUT' && element.type === 'text') inputs++;
+    if (element.tagName === 'BUTTON' && String(element.innerText || '').trim() === 'Submit') {
+      submits++;
+      if (element === candidate) selected = true;
+    }
+  }
+  if (images > 1 || inputs > 1 || submits > 1) return 'unsupported';
+  if (images === 1 && inputs === 1 && submits === 1 && selected) return invalid ? 'invalid' : 'ready';
+  return 'waiting';
+}
 
 export class RootEmailBrowserAutomationError extends Error {
   constructor(message: string, readonly stage: RootEmailBrowserStage,
@@ -88,6 +125,7 @@ export function readRootEmailEntryState(): RootEmailEntryState {
   const doc = (globalThis as any).document;
   const text = String(doc.body?.innerText || '');
   if (/too many|rate.?limit|try again later|temporarily blocked/i.test(text)) return 'blocked';
+  if (doc.querySelector('[role="dialog"] iframe#core-container')) return 'security_challenge';
   if (doc.querySelector('#captcha_image')) return 'identity';
   if (/Forgot password\?/i.test(text)) return 'forgot';
   if (!/Making sure it(?:'|’)?s you/i.test(text)) return 'waiting';
@@ -117,7 +155,8 @@ export function validateRootEmailVerificationCandidate(candidate: any): RootEmai
   const doc = (globalThis as any).document;
   const text = String(doc.body?.innerText || '');
   if (/too many|rate.?limit|try again later|temporarily blocked/i.test(text)) return 'blocked';
-  if (!/Making sure it(?:'|’)?s you/i.test(text) || doc.querySelector('#captcha_image') || /Forgot password\?/i.test(text)) {
+  if (!/Making sure it(?:'|’)?s you/i.test(text) || doc.querySelector('#captcha_image')
+    || doc.querySelector('[role="dialog"] iframe#core-container') || /Forgot password\?/i.test(text)) {
     return 'not_ready';
   }
   let matches = 0;
@@ -152,6 +191,7 @@ export class AwsRootEmailSession implements RootEmailSession {
   private page?: Page;
   private profile?: string;
   private captchaPurpose: 'identity' | 'recovery' = 'recovery';
+  private securityFrame?: Frame;
   private expectedEmail = '';
   constructor(private readonly signal: AbortSignal, private readonly authorize: () => void) {}
   private checkedPage() {
@@ -167,6 +207,54 @@ export class AwsRootEmailSession implements RootEmailSession {
   private async click(name: string) {
     const page = this.checkedPage();
     await page.locator(`::-p-aria(${name})`).click();
+  }
+  private checkedCaptchaContext(): Page | Frame {
+    const page = this.checkedPage();
+    if (!this.securityFrame) return page;
+    if (this.securityFrame.detached || this.securityFrame.parentFrame() !== page.mainFrame()
+      || !isRootEmailSecurityFrameUrl(this.securityFrame.url())) {
+      throw new RootEmailError('AWS 安全验证窗口已变化，已停止；尚未提交恢复邮件', 422);
+    }
+    return this.securityFrame;
+  }
+  private async findSecurityChallenge(deadline: number): Promise<boolean> {
+    const page = this.checkedPage();
+    const handles = await this.boundedEvaluate(page.$$('[role="dialog"] iframe#core-container'), deadline);
+    try {
+      if (handles.length > 1) throw new RootEmailError('AWS 安全验证窗口数量异常，已停止', 422);
+      if (!handles.length) return false;
+      const frame = await this.boundedEvaluate(handles[0].contentFrame(), deadline);
+      if (!frame || frame.url() === 'about:blank') return false;
+      if (!isRootEmailSecurityFrameUrl(frame.url()) || frame.parentFrame() !== page.mainFrame()) {
+        throw new RootEmailError('AWS 安全验证窗口来源不可信，已停止', 422);
+      }
+      const state = await this.boundedEvaluate(frame.evaluate(readRootEmailSecurityChallengeState), deadline);
+      if (state === 'blocked') throw new RootEmailError('AWS 提示安全验证请求受限，请稍后再试', 429);
+      if (state === 'unsupported') throw new RootEmailError('AWS 安全验证类型不受支持，需要人工检查', 422);
+      if (state !== 'ready') return false;
+      this.securityFrame = frame;
+      return true;
+    } finally { await Promise.allSettled(handles.map(handle => handle.dispose())); }
+  }
+  private async submitSecurityChallenge() {
+    const context = this.checkedCaptchaContext();
+    const handles = await context.$$('button[type="submit"]');
+    try {
+      for (const handle of handles) {
+        const state = await handle.evaluate(readRootEmailSecurityChallengeState);
+        if (state === 'blocked') throw new RootEmailError('AWS 提示安全验证请求受限，请稍后再试', 429);
+        if (state !== 'ready' && state !== 'invalid') continue;
+        await handle.scrollIntoView();
+        const box = await handle.boundingBox();
+        const current = await handle.evaluate(readRootEmailSecurityChallengeState);
+        if (!box || box.width <= 0 || box.height <= 0 || (current !== 'ready' && current !== 'invalid')) break;
+        this.checkedCaptchaContext();
+        // One trusted dispatch to the same validated handle; no locator action retry.
+        await this.checkedPage().mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+        return;
+      }
+      throw new RootEmailError('AWS 安全验证表单已变化，需要人工检查', 422);
+    } finally { await Promise.allSettled(handles.map(handle => handle.dispose())); }
   }
   private async pause(milliseconds: number) {
     await new Promise(resolve => setTimeout(resolve, milliseconds));
@@ -226,6 +314,7 @@ export class AwsRootEmailSession implements RootEmailSession {
     const deadline = Date.now() + 30_000;
     let lastBrowserError: unknown;
     let verifyStarted = false;
+    let securityChallengeSeen = false;
     while (Date.now() < deadline) {
       try {
         const page = this.checkedPage();
@@ -233,6 +322,10 @@ export class AwsRootEmailSession implements RootEmailSession {
         lastBrowserError = undefined;
         if (result === 'blocked') throw new RootEmailError('AWS 提示登录验证请求受限，请稍后再试', 429);
         if (result === 'changed') throw new RootEmailError('AWS 登录验证页出现多个 Verify 控件，已停止', 422);
+        if (result === 'security_challenge') {
+          securityChallengeSeen = true;
+          if (await this.findSecurityChallenge(deadline)) return 'identity';
+        }
         if (result === 'identity' || result === 'forgot') return result;
         if (result === 'verify' && !verifyStarted) {
           // Lock before the side effect: a lost execution-context response must never click twice in this session.
@@ -247,7 +340,8 @@ export class AwsRootEmailSession implements RootEmailSession {
       await this.pause(250);
     }
     if (lastBrowserError) throw lastBrowserError;
-    throw new Error('AWS login entry state did not become explicit');
+    if (securityChallengeSeen) throw new RootEmailError('AWS 独立安全验证窗口未加载出受支持的文字验证码，需要人工检查；尚未提交恢复邮件', 422);
+    throw new RootEmailBrowserReadTimeout('AWS login entry state timed out');
   }
   private async waitForCaptchaResult(identityStage: boolean): Promise<Exclude<RootEmailCaptchaResult, 'waiting'>> {
     const deadline = Date.now() + 30_000;
@@ -259,6 +353,16 @@ export class AwsRootEmailSession implements RootEmailSession {
         );
         lastBrowserError = undefined;
         if (result !== 'waiting') return result;
+        // A successful identity challenge removes its frame. Observe the top page first;
+        // never replay Submit just because the iframe detached during that transition.
+        if (identityStage && this.securityFrame && !this.securityFrame.detached) {
+          const state = await this.boundedEvaluate(
+            this.checkedCaptchaContext().evaluate(readRootEmailSecurityChallengeState), deadline,
+          );
+          if (state === 'blocked') return 'blocked';
+          if (state === 'invalid') return 'invalid';
+          if (state === 'unsupported') throw new RootEmailError('AWS 安全验证类型已变化，需要人工检查', 422);
+        }
       } catch (error) {
         if (error instanceof RootEmailError || error instanceof RootEmailBrowserReadTimeout || this.signal.aborted) throw error;
         lastBrowserError = error;
@@ -266,7 +370,7 @@ export class AwsRootEmailSession implements RootEmailSession {
       await this.pause(250);
     }
     if (lastBrowserError) throw lastBrowserError;
-    throw new Error('AWS CAPTCHA result did not become explicit');
+    throw new RootEmailBrowserReadTimeout('AWS CAPTCHA result timed out');
   }
   private async enterRecoveryCaptcha() {
     const page = this.checkedPage();
@@ -276,6 +380,7 @@ export class AwsRootEmailSession implements RootEmailSession {
       return String(doc.body?.innerText || '').toLowerCase().includes(address.toLowerCase());
     }, this.expectedEmail);
     if (!matches) throw new RootEmailError('AWS 页面显示的账户邮箱不匹配', 422);
+    this.securityFrame = undefined;
     await this.click('Forgot password?');
     await page.waitForSelector('#captcha_image', { visible: true });
     this.captchaPurpose = 'recovery';
@@ -326,9 +431,14 @@ export class AwsRootEmailSession implements RootEmailSession {
   }
   isRecoveryCaptcha() { return this.captchaPurpose === 'recovery'; }
   private async capture() {
-    const page = this.checkedPage();
-    await page.waitForFunction(`(() => { const i = document.querySelector('#captcha_image'); return i && i.complete && i.naturalWidth > 0; })()`, { signal: this.signal });
-    const element = await page.$('#captcha_image');
+    const context = this.checkedCaptchaContext();
+    const selector = this.securityFrame ? 'img[alt="captcha"]' : '#captcha_image';
+    await context.waitForFunction((selector: string) => {
+      const image = (globalThis as any).document.querySelector(selector);
+      return image && image.complete && image.naturalWidth > 0;
+    }, { signal: this.signal }, selector);
+    this.checkedCaptchaContext();
+    const element = await context.$(selector);
     if (!element) throw new RootEmailError('验证码类型已变化，需要人工检查', 422);
     try {
       const image = Buffer.from(await element.screenshot({ type: 'png' }));
@@ -348,6 +458,20 @@ export class AwsRootEmailSession implements RootEmailSession {
   }
   async refresh(previousImageId: string) {
     try {
+      if (this.securityFrame) {
+        const frame = this.checkedCaptchaContext();
+        await frame.locator('input[placeholder="Verification answer"]').fill('');
+        if ((await this.capture()).imageId !== previousImageId) return;
+        const previousSrc = await frame.$eval('img[alt="captcha"]', el => (el as any).src);
+        this.checkedCaptchaContext();
+        await frame.locator('button:has(img[alt="Display new security image."])').click();
+        await frame.waitForFunction((src: string) => {
+          const image = (globalThis as any).document.querySelector('img[alt="captcha"]');
+          return image && image.src !== src && image.complete && image.naturalWidth > 0;
+        }, { signal: this.signal }, previousSrc);
+        if ((await this.capture()).imageId === previousImageId) throw new RootEmailError('验证码刷新后图片未变化，请稍后重试', 422);
+        return;
+      }
       const page = this.checkedPage();
       await page.locator('::-p-aria(Type the characters as shown above)').fill('');
       // AWS can replace the image itself after rejection; only click refresh if it is still the old one.
@@ -368,8 +492,14 @@ export class AwsRootEmailSession implements RootEmailSession {
     try {
       const page = this.checkedPage();
       const purpose = this.captchaPurpose;
-      await page.locator('::-p-aria(Type the characters as shown above)').fill(candidate);
-      await this.click('I’m not a robot');
+      if (this.securityFrame) {
+        const frame = this.checkedCaptchaContext();
+        await frame.locator('input[placeholder="Verification answer"]').fill(candidate);
+        await this.submitSecurityChallenge();
+      } else {
+        await page.locator('::-p-aria(Type the characters as shown above)').fill(candidate);
+        await this.click('I’m not a robot');
+      }
       stage = 'wait_result';
       const result = await this.waitForCaptchaResult(purpose === 'identity');
       if (result === 'blocked') throw new RootEmailError('AWS 提示限制请求，请稍后再试', 429);
