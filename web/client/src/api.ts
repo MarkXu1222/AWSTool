@@ -52,6 +52,10 @@ export interface RootEmailAccount {
   eligible: boolean;
 }
 export interface RootEmailBatchView {
+  submissionId?: string;
+  batchIndex?: number;
+  batchCount?: number;
+  relatedBatches?: RootEmailBatchView[];
   canManage: boolean;
   ownerCredentialAccess: boolean;
   adminCredentialAccess: boolean;

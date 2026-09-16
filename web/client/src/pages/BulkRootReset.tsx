@@ -6,7 +6,7 @@ import { showManualRootResetLink, showRootResetLink } from '../utils/root-reset-
 import RootManualCaptchaModal from '../components/RootManualCaptchaModal';
 import { rootEmailStatusLabel } from '../utils/root-email-status';
 import { scanAccountIdsFromXlsx, type AccountWorkbookScanResult } from '../utils/account-import';
-import { filterRootAccounts, matchRootAccountImport } from '../utils/root-account-selection';
+import { filterRootAccounts, matchRootAccountImport, rootAccountBatchPlan } from '../utils/root-account-selection';
 
 const statusLabels: Record<RootEmailJobView['status'], string> = {
   queued: '排队中', running: '发送恢复邮件', email_sent: 'AWS 已确认发信', failed: '发信失败', cancelled: '已停止', interrupted: '结果待检查',
@@ -40,6 +40,7 @@ const BulkRootResetPage: React.FC<{ canOperate?: boolean }> = ({ canOperate = fa
   const importSequence = useRef(0);
   const [cachedAt, setCachedAt] = useState('');
   const [maxBatchSize, setMaxBatchSize] = useState(20);
+  const [maxSubmissionSize, setMaxSubmissionSize] = useState(500);
   const [available, setAvailable] = useState<Availability | null>(null);
   const [history, setHistory] = useState<RootEmailBatchView[]>([]);
   const [batchId, setBatchId] = useState('');
@@ -72,7 +73,7 @@ const BulkRootResetPage: React.FC<{ canOperate?: boolean }> = ({ canOperate = fa
         if (failed) throw new Error(failed.error || '加载失败');
         const [catalog, runtime, batches] = results.map(result => result.data);
         setPayers(catalog.payers); setAccounts(catalog.accounts); setCachedAt(catalog.cachedAt);
-        setMaxBatchSize(catalog.maxBatchSize); setAvailable(runtime); setHistory(batches);
+        setMaxBatchSize(catalog.maxBatchSize); setMaxSubmissionSize(catalog.maxSubmissionSize || catalog.maxBatchSize); setAvailable(runtime); setHistory(batches);
         setSelected(ids => ids.filter(id => catalog.accounts.some((account: RootEmailAccount) => account.accountId === id && account.eligible)));
       } catch (cause: any) { if (!disposed) setError(cause.message); }
       finally { if (!disposed) setLoading(false); }
@@ -91,7 +92,7 @@ const BulkRootResetPage: React.FC<{ canOperate?: boolean }> = ({ canOperate = fa
         if (disposed) return;
         if (!result.success) throw new Error(result.error || '读取批次失败');
         setBatch(result.data);
-        if (result.data.done < result.data.total) timer = setTimeout(poll, 5_000);
+        if (result.data.done < result.data.total || result.data.relatedBatches?.some((item: RootEmailBatchView) => item.done < item.total)) timer = setTimeout(poll, 5_000);
       } catch (cause: any) {
         if (!disposed) { setError(cause.message); timer = setTimeout(poll, 5_000); }
       }
@@ -108,7 +109,7 @@ const BulkRootResetPage: React.FC<{ canOperate?: boolean }> = ({ canOperate = fa
   const domains = [...new Set(selectedAccounts.map(account => account.email.split('@')[1].toLowerCase()))].sort();
   const canSelect = canOperate && !!available?.passwordAutomationReady && !busy && !loading && !importing;
   const canStart = canSelect
-    && selectedAccounts.length > 0 && selectedAccounts.length <= maxBatchSize;
+    && selectedAccounts.length > 0 && selectedAccounts.length <= maxSubmissionSize;
   const confirmationMatches = confirmAccountCount === String(selectedAccounts.length) && /^\d{6}$/.test(totpCode);
 
   const openConfirmation = (account?: RootEmailAccount) => {
@@ -128,7 +129,7 @@ const BulkRootResetPage: React.FC<{ canOperate?: boolean }> = ({ canOperate = fa
     finally { if (sequence === importSequence.current) setImporting(false); }
   };
   const applyImport = () => {
-    if (!canOperate || loading || busy || !importMatches.matched.length || importMatches.matched.length > maxBatchSize) return;
+    if (!canOperate || loading || busy || !importMatches.matched.length || importMatches.matched.length > maxSubmissionSize) return;
     setSelected(importMatches.matched.map(account => account.accountId));
     setPayer(''); setSearch(''); setSelectedOnly(true); setImportPreview(null); request.current = null;
     message.success(`已选择 ${importMatches.matched.length} 个匹配账户，请核对后创建任务`);
@@ -147,7 +148,7 @@ const BulkRootResetPage: React.FC<{ canOperate?: boolean }> = ({ canOperate = fa
       if (!result.success) throw new Error(result.error || '批量提交失败');
       setBatch(result.data); setBatchId(result.data.id); setSelected([]); request.current = null;
       setConfirmOpen(false); setConfirmAccountCount(''); setSelectedOnly(false); setRefresh(value => value + 1);
-      message.success(`已创建 ${result.data.total} 个账户的自动改密任务`);
+      message.success(`已为 ${ids.length} 个账户创建 ${Math.ceil(ids.length / maxBatchSize)} 个批次，后台将依次处理`);
     } catch (cause: any) {
       setError(`${cause.message}。请求未确认时可用相同选择重试，系统会防止重复创建同一批次。`);
     } finally { setTotpCode(''); setBusy(false); }
@@ -210,7 +211,7 @@ const BulkRootResetPage: React.FC<{ canOperate?: boolean }> = ({ canOperate = fa
     {!canOperate && <Alert type="info" showIcon message="当前为仅查看权限"
       description="只能查看自己创建的批次进度，不能创建、停止任务或下载 Root 凭证。" />}
     <Alert type="warning" showIcon message="高风险操作：将真实修改 AWS Root 密码"
-      description="每批最多 20 个成员账户。普通用户只看到本人批次，Admin 可查看全部。下载 CSV 不再二次验证 MFA；新密码以 AES-256-GCM 密文永久保存在本地，可由创建者和 Admin 按权限重复下载。服务器与备份必须按永久 Root 凭证库保护。" />
+      description="一次最多选择 500 个成员账户，系统按每批 20 个自动拆分。普通用户只看到本人批次，Admin 可查看全部。下载 CSV 不再二次验证 MFA；新密码以 AES-256-GCM 密文永久保存在本地，可由创建者和 Admin 按权限重复下载。服务器与备份必须按永久 Root 凭证库保护。" />
     {error && <Alert type="error" showIcon message={error} closable onClose={() => setError('')} />}
     {available && !available.ready && <Alert type="warning" showIcon message="发送环境尚未就绪" description={available.detail} />}
     {available && available.ready && !available.mailboxConfigured && <Alert type="error" showIcon message="邮箱 API 未配置"
@@ -239,12 +240,12 @@ const BulkRootResetPage: React.FC<{ canOperate?: boolean }> = ({ canOperate = fa
         <Typography.Text type="secondary">直接搜索账户即可单独重置；也可导入 .xlsx 批量选择，支持跨 payer。Excel 中每行填写一个 12 位账户 ID，含前导零的 ID 请设为文本。</Typography.Text>
         <Space wrap>
           {canOperate && <><Button disabled={busy || loading || importing || !filtered.some(account => account.eligible)}
-            onClick={() => setSelected(filtered.filter(account => account.eligible).slice(0, maxBatchSize).map(account => account.accountId))}>
-            选择前 {maxBatchSize} 个筛选结果
+            onClick={() => setSelected(filtered.filter(account => account.eligible).slice(0, maxSubmissionSize).map(account => account.accountId))}>
+            选择前 {maxSubmissionSize} 个筛选结果
           </Button>
           <Button disabled={!selected.length || busy || importing} onClick={() => { setSelected([]); setSelectedOnly(false); }}>清空选择</Button>
           <Checkbox checked={selectedOnly} disabled={busy || importing} onChange={event => setSelectedOnly(event.target.checked)}>只看已选</Checkbox>
-          <Typography.Text>已选 {selectedAccounts.length} 个账户 · 每批最多 {maxBatchSize} 个</Typography.Text></>}
+          <Typography.Text>已选 {selectedAccounts.length} 个账户 · 自动分为 {Math.ceil(selectedAccounts.length / maxBatchSize)} 批 · 每批最多 {maxBatchSize} 个</Typography.Text></>}
           {cachedAt && <Typography.Text type="secondary">账户缓存：{new Date(cachedAt).toLocaleString()}</Typography.Text>}
         </Space>
         <Table<RootEmailAccount> size="small" rowKey="accountId" loading={loading} dataSource={filtered}
@@ -263,8 +264,8 @@ const BulkRootResetPage: React.FC<{ canOperate?: boolean }> = ({ canOperate = fa
               render: (_: unknown, account: RootEmailAccount) => <Button size="small" danger disabled={!canSelect || !account.eligible}
                 onClick={() => openConfirmation(account)}>单独重置</Button> }] : []),
           ]} />
-        {selectedAccounts.length > maxBatchSize && <Alert type="warning" showIcon
-          message={`已选 ${selectedAccounts.length} 个账户，超出单批 ${maxBatchSize} 个上限，请取消部分选择后继续`} />}
+        {selectedAccounts.length > maxSubmissionSize && <Alert type="warning" showIcon
+          message={`已选 ${selectedAccounts.length} 个账户，超出单次 ${maxSubmissionSize} 个上限，请取消部分选择后继续`} />}
         {!!domains.length && <Space wrap>
           <Typography.Text type="secondary">所选收件邮箱域名：</Typography.Text>
           {domains.map(domain => <Tag key={domain}>{domain}</Tag>)}
@@ -283,10 +284,25 @@ const BulkRootResetPage: React.FC<{ canOperate?: boolean }> = ({ canOperate = fa
       <Space direction="vertical" size={12} style={{ width: '100%' }}>
         <Select aria-label="查看历史批次" style={{ width: '100%' }} placeholder="查看最近批次" value={batchId || undefined} disabled={busy}
           options={history.map(item => ({ value: item.id,
-            label: `${new Date(item.createdAt).toLocaleString()} · ${item.payerName} · ${item.total} 个账户 · ${item.createdBy}` }))}
+            label: `${new Date(item.createdAt).toLocaleString()} · ${item.batchIndex ? `第 ${item.batchIndex}/${item.batchCount} 批 · ` : ''}${item.payerName} · ${item.total} 个账户 · ${item.createdBy}` }))}
           onChange={id => { setBatch(null); setBatchId(id); }} />
         {batch ? <>
-          <Typography.Text strong>{batch.payerName} · {batch.total} 个账户</Typography.Text>
+          {!!batch.relatedBatches?.length && <>
+            <Typography.Text strong>本次提交共 {batch.relatedBatches.reduce((sum, item) => sum + item.total, 0)} 个账户，
+              自动分为 {batch.relatedBatches.length} 批，已完成 {batch.relatedBatches.reduce((sum, item) => sum + item.done, 0)} 个</Typography.Text>
+            <Table<RootEmailBatchView> size="small" rowKey="id" dataSource={batch.relatedBatches} pagination={false}
+              columns={[
+                { title: '批次', dataIndex: 'batchIndex', render: value => `第 ${value} 批` },
+                { title: '账户数', dataIndex: 'total' },
+                { title: '已结束', render: (_, item) => `${item.done}/${item.total}` },
+                { title: '密码成功', dataIndex: 'passwordSet' },
+                { title: '状态', render: (_, item) => item.done === item.total ? '已结束'
+                  : item.queued === item.total ? '排队中' : '处理中' },
+                { title: '操作', render: (_, item) => <Button size="small" disabled={busy || item.id === batchId}
+                  onClick={() => { setBatch(null); setBatchId(item.id); }}>查看本批次</Button> },
+              ]} />
+          </>}
+          <Typography.Text strong>{batch.batchIndex ? `第 ${batch.batchIndex}/${batch.batchCount} 批 · ` : ''}{batch.payerName} · {batch.total} 个账户</Typography.Text>
           <Progress percent={Math.round(batch.done / batch.total * 100)}
             status={batch.failed || batch.interrupted || batch.mailFailed || batch.passwordFailed || batch.passwordUnknown
               ? 'exception' : batch.done === batch.total ? 'normal' : 'active'} />
@@ -374,13 +390,16 @@ const BulkRootResetPage: React.FC<{ canOperate?: boolean }> = ({ canOperate = fa
       onClose={() => setManualCaptchaJobId(null)} onProgress={() => setRefresh(value => value + 1)} />
     <Modal title="核对 Excel 导入账户" open={!!importPreview} width={800} onCancel={() => setImportPreview(null)}
       okText={`使用匹配的 ${importMatches.matched.length} 个账户`} onOk={applyImport}
-      okButtonProps={{ disabled: !canOperate || busy || loading || !importMatches.matched.length || importMatches.matched.length > maxBatchSize }}
+      okButtonProps={{ disabled: !canOperate || busy || loading || !importMatches.matched.length || importMatches.matched.length > maxSubmissionSize }}
       cancelText="取消">
       <Space direction="vertical" size={12} style={{ width: '100%' }}>
         <Typography.Text>{importPreview?.fileName} · {importPreview?.sheetCount} 个工作表 · 识别 {importPreview?.accountIds.length} 个账户 ID · 去重 {importPreview?.duplicateCount} 次</Typography.Text>
         <Typography.Text type="secondary">导入会替换当前选择；文件在浏览器本地解析，核对并确认创建任务后才开始重置。</Typography.Text>
-        {importMatches.matched.length > maxBatchSize && <Alert type="warning" showIcon
-          message={`匹配 ${importMatches.matched.length} 个账户，单批最多 ${maxBatchSize} 个，请拆分 Excel 后重新导入；不会截断名单`} />}
+        {!!importMatches.matched.length && importMatches.matched.length <= maxSubmissionSize && <Alert type="info" showIcon
+          message={`匹配 ${importMatches.matched.length} 个账户，将自动分为 ${rootAccountBatchPlan(importMatches.matched.length, maxBatchSize)}`}
+          description="无需拆分 Excel，只需确认一次总账户数和 MFA，所有批次会进入后台队列。" />}
+        {importMatches.matched.length > maxSubmissionSize && <Alert type="warning" showIcon
+          message={`匹配 ${importMatches.matched.length} 个账户，超出单次 ${maxSubmissionSize} 个上限，请减少账户后重新导入`} />}
         <Table<RootEmailAccount> size="small" rowKey="accountId" dataSource={importMatches.matched} pagination={{ pageSize: 10 }}
           columns={[{ title: '匹配账户 ID', dataIndex: 'accountId' }, { title: '名称', dataIndex: 'name' },
             { title: '所属 Payer', dataIndex: 'payerAccountId', render: payerLabel }, { title: 'Root 邮箱', dataIndex: 'email' }]} />
@@ -397,6 +416,7 @@ const BulkRootResetPage: React.FC<{ canOperate?: boolean }> = ({ canOperate = fa
       <Space direction="vertical" size={12} style={{ width: '100%' }}>
         <Alert type="error" showIcon message={`将修改 ${selectedAccounts.length} 个 AWS 账户的 Root 密码`}
           description="操作开始后，已发送的恢复邮件无法撤回。系统不会重试结果未知的一次性链接。" />
+        <Typography.Text>自动分为 {rootAccountBatchPlan(selectedAccounts.length, maxBatchSize)}，全部批次一次确认，后台依次处理。</Typography.Text>
         <Table<RootEmailAccount> size="small" rowKey="accountId" dataSource={selectedAccounts} pagination={false} scroll={{ y: 240 }}
           columns={[{ title: '账户 ID', dataIndex: 'accountId' }, { title: '所属 Payer', dataIndex: 'payerAccountId', render: payerLabel }]} />
         <Typography.Text>请输入账户数量：<Typography.Text code>{selectedAccounts.length}</Typography.Text></Typography.Text>

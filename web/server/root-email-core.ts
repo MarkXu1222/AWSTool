@@ -35,6 +35,9 @@ export interface RootEmailJob {
   batchId?: string;
   payerAccountId?: string;
   payerName?: string;
+  submissionId?: string;
+  batchIndex?: number;
+  batchCount?: number;
   autoSetPassword?: boolean;
   requestedAt?: string;
   mailCursor?: number;
@@ -178,10 +181,10 @@ export function selectRootEmailTargets(accounts: any[], payer: { name: string; a
 
 /** Resolve each account's configured organization on the server; an optional payer only narrows the selection. */
 export function selectRootEmailBatchTargets(accounts: any[], payers: Array<{ name: string; accountId: string }>,
-  values: unknown, payerAccountId = '') {
-  if (!Array.isArray(values) || !values.length || values.length > MAX_ROOT_PASSWORD_BATCH
+  values: unknown, payerAccountId = '', maximum = MAX_ROOT_PASSWORD_BATCH) {
+  if (!Array.isArray(values) || !values.length || values.length > maximum
     || values.some(id => typeof id !== 'string' || !/^\d{12}$/.test(id))) {
-    throw new RootEmailError(`请选择 1–${MAX_ROOT_PASSWORD_BATCH} 个有效账户`);
+    throw new RootEmailError(`请选择 1–${maximum} 个有效账户`);
   }
   if (payerAccountId && !payers.some(p => p.accountId === payerAccountId)) {
     throw new RootEmailError('所选 payer 不在平台配置中');
@@ -340,6 +343,13 @@ export class RootEmailStore {
   }
   /** Validate every target before one atomic write. A repeated request ID cannot send twice. */
   createBatch(inputs: RootEmailInput[], meta: RootEmailBatchRequest): { jobs: RootEmailJob[]; reused: boolean } {
+    return this.enqueueBatches(inputs, meta, false);
+  }
+  /** One confirmation, one atomic write; each persisted child batch still contains at most 20 accounts. */
+  createBatchGroup(inputs: RootEmailInput[], meta: RootEmailBatchRequest): { jobs: RootEmailJob[]; reused: boolean } {
+    return this.enqueueBatches(inputs, meta, true);
+  }
+  private enqueueBatches(inputs: RootEmailInput[], meta: RootEmailBatchRequest, split: boolean): { jobs: RootEmailJob[]; reused: boolean } {
     const targets = inputs.map(input => ({ ...input,
       payerAccountId: input.payerAccountId ?? meta.payerAccountId,
       payerName: input.payerName ?? meta.payerName }));
@@ -347,10 +357,10 @@ export class RootEmailStore {
       || targets.some(i => !/^\d{12}$/.test(i.payerAccountId || '') || !i.payerName
         || (meta.payerAccountId !== undefined && meta.payerAccountId !== i.payerAccountId)
         || (meta.payerName !== undefined && meta.payerName !== i.payerName)) || meta.autoSetPassword !== true
-      || !inputs.length || inputs.length > MAX_ROOT_PASSWORD_BATCH
+      || !inputs.length || inputs.length > (split ? MAX_ROOT_EMAIL_TASKS : MAX_ROOT_PASSWORD_BATCH)
       || new Set(inputs.map(i => i.accountId)).size !== inputs.length
       || new Set(inputs.map(i => i.createdByUserId)).size !== 1) throw new RootEmailError('批次参数无效');
-    const previous = this.jobs.filter(j => j.batchId === meta.batchId);
+    const previous = this.jobs.filter(j => j.batchId === meta.batchId || j.submissionId === meta.batchId);
     if (previous.length) {
       if (previous.length !== targets.length || previous.some(j => j.autoSetPassword !== true
         || !targets.some(i => i.accountId === j.accountId && i.createdByUserId === j.createdByUserId
@@ -364,7 +374,11 @@ export class RootEmailStore {
     if (this.jobs.filter(isPendingEmailJob).length + inputs.length > MAX_ROOT_EMAIL_TASKS) {
       throw new RootEmailError(`当前队列容量不足（上限 ${MAX_ROOT_EMAIL_TASKS} 个账户），本批次未创建`, 429);
     }
-    const jobs = targets.map(input => ({ ...this.makeJob(input), batchId: meta.batchId, autoSetPassword: true }));
+    const batchCount = Math.ceil(targets.length / MAX_ROOT_PASSWORD_BATCH);
+    const batchIds = Array.from({ length: batchCount }, (_, index) => index === 0 ? meta.batchId : randomUUID());
+    const jobs = targets.map((input, index) => ({ ...this.makeJob(input),
+      batchId: batchIds[Math.floor(index / MAX_ROOT_PASSWORD_BATCH)], autoSetPassword: true,
+      ...(batchCount > 1 ? { submissionId: meta.batchId, batchIndex: Math.floor(index / MAX_ROOT_PASSWORD_BATCH) + 1, batchCount } : {}) }));
     this.save([...this.jobs, ...jobs]);
     return { jobs: structuredClone(jobs), reused: false };
   }

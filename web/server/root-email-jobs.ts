@@ -6,7 +6,7 @@ import { AwsRootEmailSession, AwsRootPasswordSession, MAX_ROOT_PASSWORD_BROWSER_
 import { canRetryFailedRootEmailJob, canRetryRootEmailBrowser, type CredentialDownloadSlot, hasNewerRootEmailJob,
   LEGACY_ROOT_EMAIL_BROWSER_FAILURE, RootEmailError, RootEmailJob, RootEmailStore, isPendingEmailJob,
   manualRootResetFallbackExpiresAt, sendRootEmail, selectRootEmailBatchTargets, MAX_ROOT_EMAIL_BROWSER_ATTEMPTS,
-  MAX_ROOT_PASSWORD_BATCH, ROOT_MANUAL_FALLBACK_TTL_MS } from './root-email-core';
+  MAX_ROOT_PASSWORD_BATCH, MAX_ROOT_EMAIL_TASKS, ROOT_MANUAL_FALLBACK_TTL_MS } from './root-email-core';
 import { rootEmailDeliveryState, rootEmailMailTimeoutDetail } from './root-email-core';
 import { RootEmailManualInput, ROOT_MANUAL_CAPTCHA_TTL_MS } from './root-email-manual';
 import { reconcileRootEmailSubmission } from './root-email-reconcile';
@@ -134,7 +134,7 @@ export function rootEmailCatalog() {
   const { accounts, cachedAt } = db.getAccountsCache();
   const payers = listConfiguredPayers().map(p => ({ accountId: p.accountId, name: p.name }));
   const byName = new Map(payers.map(p => [p.name, p.accountId]));
-  return { payers, cachedAt, maxBatchSize: MAX_ROOT_PASSWORD_BATCH, accounts: accounts
+  return { payers, cachedAt, maxBatchSize: MAX_ROOT_PASSWORD_BATCH, maxSubmissionSize: MAX_ROOT_EMAIL_TASKS, accounts: accounts
     .filter((a: any) => byName.has(a._payer) && !a._isPayer && a.Id !== byName.get(a._payer))
     .map((a: any) => ({ accountId: String(a.Id), name: String(a.Name || ''), email: String(a.Email || ''),
       payerAccountId: byName.get(a._payer), state: a.State || a.Status || 'UNKNOWN',
@@ -224,6 +224,7 @@ function batchSummary(jobs: RootEmailJob[], user: RootEmailUser) {
   const payerCount = new Set(jobs.map(job => job.payerAccountId)).size;
   return { id: batchId, payerAccountId: payerCount === 1 ? first.payerAccountId! : '',
     payerName: payerCount === 1 ? first.payerName! : `跨 ${payerCount} 个 payer`,
+    submissionId: first.submissionId, batchIndex: first.batchIndex, batchCount: first.batchCount,
     createdBy: first.createdBy, createdAt: first.createdAt, total: jobs.length,
     queued: count('queued'), running: count('running'), sent: jobs.filter(job => !!job.sentAt).length, failed: count('failed'),
     waitingMail: count('waiting_mail'), linkReady: count('link_ready'), mailFailed: count('mail_failed'),
@@ -251,13 +252,23 @@ export function listRootEmailBatches(user: RootEmailUser) {
 export function getRootEmailBatch(id: string, user: RootEmailUser) {
   const jobs = batchJobs(id);
   if (!jobs.every(job => canViewRootEmailJob(user, job))) throw new RootEmailError('批次不存在', 404);
-  return { ...batchSummary(jobs, user), jobs: jobs.map(job => jobView(job, user)) };
+  const related = new Map<string, RootEmailJob[]>();
+  if (jobs[0].submissionId) {
+    for (const job of getStore().list()) {
+      if (job.submissionId !== jobs[0].submissionId || !canViewRootEmailJob(user, job)) continue;
+      const group = related.get(job.batchId!) || [];
+      group.push(job); related.set(job.batchId!, group);
+    }
+  }
+  return { ...batchSummary(jobs, user), jobs: jobs.map(job => jobView(job, user)),
+    relatedBatches: [...related.values()].map(group => batchSummary(group, user))
+      .sort((a, b) => (a.batchIndex || 0) - (b.batchIndex || 0)) };
 }
 
 export async function submitRootEmailBatch(payerAccountId: string, accountIds: unknown, requestId: string,
   confirmation: { accountCount: unknown }, user: RootEmailUser, clientIp?: string) {
   const currentStore = getStore();
-  const collect = () => selectRootEmailBatchTargets(db.getAccountsCache().accounts, listConfiguredPayers(), accountIds, payerAccountId)
+  const collect = () => selectRootEmailBatchTargets(db.getAccountsCache().accounts, listConfiguredPayers(), accountIds, payerAccountId, MAX_ROOT_EMAIL_TASKS)
     .map(a => ({ ...a, createdBy: user.username, createdByUserId: String(user.id), createdFromIp: clientIp }));
   const initial = collect();
   if (confirmation.accountCount !== initial.length) {
@@ -271,14 +282,14 @@ export async function submitRootEmailBatch(payerAccountId: string, accountIds: u
   const inputs = collect();
   if (JSON.stringify(inputs) !== JSON.stringify(initial)) throw new RootEmailError('账户信息已变化，请刷新后重新确认', 409);
   inputs.forEach(authorize);
-  const result = currentStore.createBatch(inputs, { batchId: requestId, autoSetPassword: true });
+  const result = currentStore.createBatchGroup(inputs, { batchId: requestId, autoSetPassword: true });
   if (!result.reused) {
     const payerNames = [...new Set(inputs.map(input => input.payerName))].join('、');
-    audit({ ...result.jobs[0], detail: `创建自动改密批次 ${requestId}，payer ${payerNames}，共 ${inputs.length} 个账户` },
+    audit({ ...result.jobs[0], detail: `创建自动改密任务 ${requestId}，payer ${payerNames}，共 ${inputs.length} 个账户，自动分为 ${new Set(result.jobs.map(job => job.batchId)).size} 批` },
       'ROOT_PASSWORD_BATCH_CREATE');
     tick();
   }
-  return { ...batchSummary(result.jobs, user), jobs: result.jobs.map(j => jobView(j, user)), reused: result.reused };
+  return { ...getRootEmailBatch(result.jobs[0].batchId!, user), reused: result.reused };
 }
 
 /** Retry one provably pre-submit failure as a new one-account batch; the old task remains immutable history. */

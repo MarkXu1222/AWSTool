@@ -11,7 +11,7 @@ AWS 多账户管理平台。用于跨组织管理成员账户：配额提升、�
 
 | 应用 | 位置 | 包名 / 版本 | 状态 | 说明 |
 |------|------|-------------|------|------|
-| **Web 版（生产）** | `web/` | `aws-toolbox-web` / `APP_VERSION 0.32.0` | ✅ **在维护** | 部署在 EC2（https://markxu.co）。日常改动几乎都在这里。 |
+| **Web 版（生产）** | `web/` | `aws-toolbox-web` / `APP_VERSION 0.32.1` | ✅ **在维护** | 部署在 EC2（https://markxu.co）。日常改动几乎都在这里。 |
 | 桌面版（旧） | 根 `src/` + `electron/` | `aws-toolbox` / `0.1.0` | ⚠️ 旧版/基本冻结 | 早期 Electron macOS 版，`main: dist/main/index.js`。除非专门维护桌面版，否则**不要动**。 |
 
 **结论：接到"平台/网站"相关的需求，一律在 `web/` 下操作。**
@@ -87,7 +87,7 @@ web/
 │       │   ├── DangerConfirm.tsx         # 危险操作二次确认
 │       │   ├── EmptyState.tsx / ErrorBoundary.tsx
 │       ├── pages/              # 每个业务页面一个文件（见下表）
-│       │   ├── BulkRootReset.tsx # /rootreset：全局搜索/单独重置、Excel导入跨payer、单批20自动改密、失败账户MFA单独重试、永久CSV下载
+│       │   ├── BulkRootReset.tsx # /rootreset：全局搜索/单独重置、Excel导入跨payer、单次500按20自动分批改密、失败账户MFA单独重试、永久CSV下载
 │       ├── styles/global.css
 │       └── utils/              # cache.ts（前端缓存）、color.ts、export.ts
 │

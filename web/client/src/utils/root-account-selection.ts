@@ -1,5 +1,12 @@
 import type { RootEmailAccount } from '../api';
 
+export function rootAccountBatchPlan(count: number, size: number): string {
+  if (count <= 0 || size <= 0) return '0 批';
+  const full = Math.floor(count / size), remainder = count % size;
+  const parts = [full ? `${size}×${full}` : '', remainder ? String(remainder) : ''].filter(Boolean);
+  return `${Math.ceil(count / size)} 批（${parts.join('＋')}）`;
+}
+
 export function matchRootAccountImport(ids: string[], accounts: RootEmailAccount[]) {
   const matched: RootEmailAccount[] = [];
   const rejected: Array<{ accountId: string; reason: string }> = [];

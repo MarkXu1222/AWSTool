@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { RootEmailStore, selectRootEmailBatchTargets } from '../server/root-email-core';
-import { filterRootAccounts, matchRootAccountImport } from '../client/src/utils/root-account-selection';
+import { filterRootAccounts, matchRootAccountImport, rootAccountBatchPlan } from '../client/src/utils/root-account-selection';
 
 const payers = [{ name: 'payer-a', accountId: '999999999999' }, { name: 'payer-b', accountId: '888888888888' }];
 const accounts = [
@@ -99,4 +99,78 @@ test('global search works without a payer and filters never expand the selected-
   assert.deepEqual(filterRootAccounts(catalog, payers[0].accountId, 'Second', false, []), []);
   assert.deepEqual(filterRootAccounts(catalog, '', '', true, ['123456789012']), [catalog[1]]);
   assert.deepEqual(filterRootAccounts(catalog, payers[0].accountId, '', true, ['123456789012']), []);
+});
+
+const manyInputs = (count: number) => Array.from({ length: count }, (_, index) => ({
+  accountId: String(100000000000 + index), email: `account${index}@example.test`,
+  createdBy: 'operator', createdByUserId: '2', payerAccountId: payers[index % 2].accountId,
+  payerName: payers[index % 2].name,
+}));
+
+test('102 accounts become six durable batches in one submission and retries never duplicate any child', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'root-split-'));
+  try {
+    const file = path.join(dir, 'jobs.json');
+    let store = new RootEmailStore(file);
+    const inputs = manyInputs(102), meta = { batchId: randomUUID(), autoSetPassword: true as const };
+    const result = store.createBatchGroup(inputs, meta);
+    const ids = [...new Set(result.jobs.map(j => j.batchId))];
+    assert.equal(ids[0], meta.batchId);
+    assert.deepEqual(ids.map(id => result.jobs.filter(j => j.batchId === id).length), [20, 20, 20, 20, 20, 2]);
+    assert.ok(result.jobs.every(j => j.submissionId === meta.batchId && j.batchCount === 6));
+    assert.deepEqual([...new Set(result.jobs.map(j => j.batchIndex))], [1, 2, 3, 4, 5, 6]);
+    store.cancelQueuedBatch(ids[0]!);
+    store = new RootEmailStore(file);
+    const repeat = store.createBatchGroup([...inputs].reverse(), meta);
+    assert.equal(repeat.reused, true);
+    assert.equal(store.list().length, 102);
+    assert.equal(repeat.jobs.filter(j => j.status === 'cancelled').length, 20);
+    assert.equal(repeat.jobs.filter(j => j.status === 'queued').length, 82);
+    assert.throws(() => store.createBatchGroup(inputs.slice(0, 20), meta));
+    assert.throws(() => store.createBatchGroup(inputs.map(i => ({ ...i, createdByUserId: '3' })), meta));
+    assert.throws(() => store.createBatchGroup(inputs, { ...meta, batchId: ids[1]! }));
+    assert.deepEqual(store.list().map(j => j.id), result.jobs.map(j => j.id));
+    assert.equal(rootAccountBatchPlan(102, 20), '6 批（20×5＋2）');
+    assert.equal(rootAccountBatchPlan(20, 20), '1 批（20×1）');
+    assert.equal(rootAccountBatchPlan(1, 20), '1 批（1）');
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('a conflict in the last split batch rejects the whole submission before any new jobs are saved', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'root-split-'));
+  try {
+    const file = path.join(dir, 'jobs.json'), store = new RootEmailStore(file), inputs = manyInputs(102);
+    store.create(inputs[101]);
+    const before = fs.readFileSync(file, 'utf8');
+    assert.throws(() => store.createBatchGroup(inputs, { batchId: randomUUID(), autoSetPassword: true }), /已有/);
+    assert.equal(fs.readFileSync(file, 'utf8'), before);
+    assert.throws(() => store.createBatchGroup([...inputs.slice(0, 101), { ...inputs[101], email: 'bad' }],
+      { batchId: randomUUID(), autoSetPassword: true }));
+    assert.equal(fs.readFileSync(file, 'utf8'), before);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('500-account queue capacity applies to all splits together, and more than 500 is rejected', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'root-split-'));
+  try {
+    const store = new RootEmailStore(path.join(dir, 'jobs.json'));
+    const meta = { batchId: randomUUID(), autoSetPassword: true as const };
+    const inputs = manyInputs(501);
+    assert.throws(() => store.createBatchGroup(inputs, meta), /批次参数/);
+    assert.equal(store.list().length, 0);
+    store.create(inputs[500]);
+    assert.throws(() => store.createBatchGroup(inputs.slice(0, 500), meta), /容量/);
+    assert.equal(store.list().length, 1);
+    const result = store.createBatchGroup(inputs.slice(0, 499), meta);
+    assert.equal(result.jobs.length, 499);
+    assert.equal(new Set(result.jobs.map(j => j.batchId)).size, 25);
+    assert.equal(store.list().length, 500);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('bulk target resolution allows 102 validated accounts while retaining the default single-batch bound', () => {
+  const source = manyInputs(102).map(i => ({ Id: i.accountId, Email: i.email, _payer: i.payerName, State: 'ACTIVE' }));
+  const ids = source.map(a => a.Id);
+  assert.throws(() => selectRootEmailBatchTargets(source, payers, ids));
+  assert.equal(selectRootEmailBatchTargets(source, payers, ids, '', 500).length, 102);
 });
