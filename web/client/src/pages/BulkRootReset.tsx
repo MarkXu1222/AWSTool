@@ -3,6 +3,8 @@ import { Alert, Button, Card, Input, message, Modal, Popconfirm, Progress, Selec
 import { CopyOutlined, DownloadOutlined, LockOutlined, RedoOutlined, ReloadOutlined, SearchOutlined, StopOutlined } from '@ant-design/icons';
 import { api, RootEmailAccount, RootEmailBatchView, RootEmailJobView } from '../api';
 import { showManualRootResetLink, showRootResetLink } from '../utils/root-reset-link';
+import RootManualCaptchaModal from '../components/RootManualCaptchaModal';
+import { rootEmailStatusLabel } from '../utils/root-email-status';
 
 const statusLabels: Record<RootEmailJobView['status'], string> = {
   queued: '排队中', running: '发送恢复邮件', email_sent: 'AWS 已确认发信', failed: '发信失败', cancelled: '已停止', interrupted: '结果待检查',
@@ -49,6 +51,7 @@ const BulkRootResetPage: React.FC<{ canOperate?: boolean }> = ({ canOperate = fa
   const [manualLinkJob, setManualLinkJob] = useState<RootEmailJobView | null>(null);
   const [manualLinkTotpCode, setManualLinkTotpCode] = useState('');
   const [retryJob, setRetryJob] = useState<RootEmailJobView | null>(null);
+  const [manualCaptchaJobId, setManualCaptchaJobId] = useState<string | null>(null);
   const [retryTotpCode, setRetryTotpCode] = useState('');
   const request = useRef<{ signature: string; id: string } | null>(null);
 
@@ -295,8 +298,9 @@ const BulkRootResetPage: React.FC<{ canOperate?: boolean }> = ({ canOperate = fa
               { title: '账户 ID', dataIndex: 'accountId', width: 140 },
               { title: '邮箱', dataIndex: 'email', width: 240, ellipsis: true },
               { title: '结果', dataIndex: 'status', width: 150,
-                render: (status: RootEmailJobView['status']) => <Tag color={statusColors[status]}>{statusLabels[status]}</Tag> },
-              { title: '验证码图片', dataIndex: 'attempts', width: 105, render: value => `${value}/3` },
+                render: (status: RootEmailJobView['status'], job) => <Tag color={job.phase === 'manual_captcha' ? 'warning' : statusColors[status]}>
+                  {rootEmailStatusLabel(job, statusLabels[status])}</Tag> },
+              { title: '验证码图片', dataIndex: 'attempts', width: 105, render: (value, job) => `${value}/${job.maxCaptchaAttempts || 3}` },
               { title: '浏览器', dataIndex: 'browserAttempts', width: 90,
                 render: value => value ? `${value}/3` : '—' },
               { title: '说明', dataIndex: 'detail', render: (value, job) => <Space direction="vertical" size={0}>
@@ -307,6 +311,9 @@ const BulkRootResetPage: React.FC<{ canOperate?: boolean }> = ({ canOperate = fa
               </Space> },
               { title: '下一步', width: 170, render: (_, job) => {
                 if (!canOperate || !job.canManage) return '—';
+                if (job.manualCaptchaAvailable) return <Button type="link" size="small" onClick={() => setManualCaptchaJobId(job.id)}>
+                  手工输入验证码
+                </Button>;
                 if (job.retryAvailable) return <Button size="small" danger icon={<RedoOutlined />} disabled={busy}
                   onClick={() => openRetry(job)}>单独重试</Button>;
                 if (job.manualResetAvailable) return <Button size="small" danger disabled={busy} onClick={() => openManualLink(job)}>
@@ -323,6 +330,9 @@ const BulkRootResetPage: React.FC<{ canOperate?: boolean }> = ({ canOperate = fa
       </Space>
     </Card>
 
+    <RootManualCaptchaModal key={manualCaptchaJobId || 'closed'}
+      job={batch?.jobs?.find(job => job.id === manualCaptchaJobId) || null}
+      onClose={() => setManualCaptchaJobId(null)} onProgress={() => setRefresh(value => value + 1)} />
     <Modal title="确认批量设置 Root 新密码" open={confirmOpen} confirmLoading={busy}
       okText="确认并开始自动改密" okButtonProps={{ danger: true, disabled: !confirmationMatches }}
       cancelText="取消" closable={!busy} maskClosable={false} onCancel={() => { if (!busy) setConfirmOpen(false); }} onOk={submit}>

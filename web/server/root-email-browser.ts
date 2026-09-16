@@ -430,6 +430,11 @@ export class AwsRootEmailSession implements RootEmailSession {
     }
   }
   isRecoveryCaptcha() { return this.captchaPurpose === 'recovery'; }
+  /** A cropped CAPTCHA only; no account details or recovery URL are exposed to the operator. */
+  async captureCaptcha() {
+    try { return await this.capture(); }
+    catch (error) { throw normalizeRootEmailBrowserError(error, 'capture_captcha'); }
+  }
   private async capture() {
     const context = this.checkedCaptchaContext();
     const selector = this.securityFrame ? 'img[alt="captcha"]' : '#captcha_image';

@@ -59,7 +59,7 @@ test('live HTTP guard protects every read/write endpoint and applies grants/revo
       assert.equal(await request(route, 'HEAD'), 200);
     }
     for (const route of ['batches', 'batches/batch/cancel', 'accounts/123456789012/jobs', 'jobs/job/cancel',
-      'jobs/job/reset-link', 'jobs/job/manual-reset-link']) {
+      'jobs/job/reset-link', 'jobs/job/manual-reset-link', 'jobs/job/manual-captcha', 'jobs/job/manual-captcha/answer']) {
       assert.equal(await request(route, 'POST'), 403);
     }
     current.root_reset_access = 'operate';

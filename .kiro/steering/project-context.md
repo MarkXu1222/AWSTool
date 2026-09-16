@@ -11,7 +11,7 @@ AWS 多账户管理平台。用于跨组织管理成员账户：配额提升、�
 
 | 应用 | 位置 | 包名 / 版本 | 状态 | 说明 |
 |------|------|-------------|------|------|
-| **Web 版（生产）** | `web/` | `aws-toolbox-web` / `APP_VERSION 0.30.1` | ✅ **在维护** | 部署在 EC2（https://markxu.co）。日常改动几乎都在这里。 |
+| **Web 版（生产）** | `web/` | `aws-toolbox-web` / `APP_VERSION 0.31.0` | ✅ **在维护** | 部署在 EC2（https://markxu.co）。日常改动几乎都在这里。 |
 | 桌面版（旧） | 根 `src/` + `electron/` | `aws-toolbox` / `0.1.0` | ⚠️ 旧版/基本冻结 | 早期 Electron macOS 版，`main: dist/main/index.js`。除非专门维护桌面版，否则**不要动**。 |
 
 **结论：接到"平台/网站"相关的需求，一律在 `web/` 下操作。**
@@ -54,6 +54,7 @@ web/
 │   ├── billing-exporter.ts     # 严格只读抓取 AWS 官方账单 PDF + 可取消 zip 打包
 │   ├── root-email-jobs.ts      # Root 恢复邮件/自动改密队列、单账户安全重试、永久加密凭证、重复CSV下载（单浏览器并发）
 │   ├── root-email-browser.ts   # 独立 Chrome：兼容原页面与 AWS 独立安全验证 iframe 的两阶段OCR + reset填充；提交前最多3次尝试
+│   ├── root-email-manual.ts    # 九张OCR用尽后原会话手工接管；一次性图片ID、权限复验、10分钟超时
 │   ├── root-email-core.ts      # 原子任务存储、提交边界/重试血缘、自动改密状态机和旧任务兼容，见 web/ROOT_EMAIL.md
 │   ├── root-password-secrets.ts # 24位CSPRNG、AES-256-GCM任务绑定密文、CSV生成
 │   ├── mail-api.ts             # 自建邮箱 HMAC 只读客户端，共用节流队列

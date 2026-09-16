@@ -7,6 +7,8 @@ import { canRetryFailedRootEmailJob, canRetryRootEmailBrowser, type CredentialDo
   LEGACY_ROOT_EMAIL_BROWSER_FAILURE, RootEmailError, RootEmailJob, RootEmailStore, isPendingEmailJob,
   manualRootResetFallbackExpiresAt, sendRootEmail, selectRootEmailTargets, MAX_ROOT_EMAIL_BROWSER_ATTEMPTS,
   MAX_ROOT_PASSWORD_BATCH, ROOT_MANUAL_FALLBACK_TTL_MS } from './root-email-core';
+import { rootEmailDeliveryState, rootEmailMailTimeoutDetail } from './root-email-core';
+import { RootEmailManualInput, ROOT_MANUAL_CAPTCHA_TTL_MS } from './root-email-manual';
 import { listConfiguredPayers } from './aws-service';
 import { mailbox, mailApiConfigured, MailApiError } from './mail-api';
 import { matchRootRecoveryMail } from './root-mail-links';
@@ -25,6 +27,7 @@ let checkingRuntime: Promise<void> | undefined;
 let mailTimer: NodeJS.Timeout | undefined;
 let mailActive: { id: string; controller: AbortController; promise: Promise<void> } | undefined;
 const credentialDownloads = new Set<string>();
+const manualInputs = new Map<string, RootEmailManualInput>();
 const credentialDownloadKey = (batchId: string, slot: CredentialDownloadSlot) => `${batchId}:${slot}`;
 
 function manualFallback(reason: NonNullable<RootEmailJob['manualFallbackReason']>) {
@@ -153,12 +156,48 @@ function jobView(job: RootEmailJob, user: RootEmailUser) {
   const retryAvailableAt = new Date(Date.parse(job.createdAt) + 60_000).toISOString();
   const retryAvailable = identityMatches && canManageRootEmailJob(current!, job) && canRetryFailedRootEmailJob(job)
     && !hasNewerRootEmailJob(allJobs, job) && Date.now() >= Date.parse(retryAvailableAt);
-  return { id, accountId, email, status, phase, attempts, createdBy, createdAt, sentAt, detail,
+  const manualInput = manualInputs.get(id);
+  const manualCaptchaAvailable = status === 'running' && phase === 'manual_captcha' && !!manualInput?.available
+    && identityMatches && canManageRootEmailJob(current!, job);
+  const displayDetail = status === 'mail_failed' && /等待恢复邮件超过 10 分钟/.test(detail)
+    ? rootEmailMailTimeoutDetail(job) : detail;
+  return { id, accountId, email, status, phase, attempts, createdBy, createdAt, sentAt, detail: displayDetail,
+    maxCaptchaAttempts: job.maxCaptchaAttempts || 3, emailDeliveryState: rootEmailDeliveryState(job),
+    manualCaptchaAvailable, manualCaptchaExpiresAt: manualCaptchaAvailable ? manualInput?.expiresAt : undefined,
     autoSetPassword: autoSetPassword === true, credentialsAvailable: credentialAvailable(job), passwordSetAt,
     browserAttempts: browserAttempts || 0, failureStage, failureCategory, retryOfJobId, retriedByJobId,
     retryAvailable, retryAvailableAt: canRetryFailedRootEmailJob(job) ? retryAvailableAt : undefined,
     manualResetAvailable, manualResetExpiresAt: manualResetAvailable ? manualResetExpiresAt : undefined,
     canManage: canManageRootEmailJob(user, job) };
+}
+
+function authorizedManualInput(id: string, user: RootEmailUser) {
+  const job = getStore().get(id);
+  const current = db.getUser(user.username);
+  if (!job || !current || String(current.id) !== String(user.id) || !canManageRootEmailJob(current, job)) {
+    throw new RootEmailError('无权操作此任务的验证码', 403);
+  }
+  authorize(job);
+  const input = manualInputs.get(id);
+  if (job.status !== 'running' || job.phase !== 'manual_captcha' || !input?.available) {
+    throw new RootEmailError('此任务当前没有待输入的验证码，请刷新任务状态', 409);
+  }
+  return { job, input, current };
+}
+
+/** Serve only the active cropped challenge to its operator, never in ordinary task lists. */
+export function getRootEmailManualCaptcha(id: string, user: RootEmailUser) {
+  return authorizedManualInput(id, user).input.view();
+}
+
+/** Consume a challenge once; the existing runner performs the subsequent AWS action. */
+export function answerRootEmailManualCaptcha(id: string, user: RootEmailUser,
+  values: { challengeId?: unknown; action?: unknown; captchaAnswer?: unknown }, clientIp?: string) {
+  const { job, input, current } = authorizedManualInput(id, user);
+  input.respond(values.challengeId, values.action, values.captchaAnswer);
+  auditAs(job, current, 'ROOT_EMAIL_MANUAL_CAPTCHA',
+    values.action === 'refresh' ? '操作员请求刷新人工验证码' : '操作员提交人工验证码；等待 AWS 确认结果', clientIp);
+  return { accepted: true };
 }
 function batchSummary(jobs: RootEmailJob[], user: RootEmailUser) {
   const first = jobs[0];
@@ -310,7 +349,8 @@ export function cancelRootEmail(id: string, user: RootEmailUser) {
 
 async function execute(job: RootEmailJob, controller: AbortController) {
   const currentStore = store!;
-  const deadline = setTimeout(() => controller.abort(), 300_000);
+  // Nine automatic images per stage plus up to ten minutes of human input per stage.
+  const deadline = setTimeout(() => controller.abort(), 40 * 60_000);
   let session: AwsRootEmailSession | undefined;
   const ensureRunning = () => {
     controller.signal.throwIfAborted();
@@ -325,6 +365,26 @@ async function execute(job: RootEmailJob, controller: AbortController) {
       throw new RootEmailError('任务状态已变化，停止发信');
     }
   };
+  const manualInput = new RootEmailManualInput(controller.signal, ensureRunning);
+  manualInputs.set(job.id, manualInput);
+  let manualDeadline: { purpose: 'identity' | 'recovery'; expires: number } | undefined;
+  const manualCaptcha = async (purpose: 'identity' | 'recovery'): Promise<string> => {
+    if (manualDeadline?.purpose !== purpose) manualDeadline = { purpose, expires: Date.now() + ROOT_MANUAL_CAPTCHA_TTL_MS };
+    while (true) {
+      ensureRunning();
+      const { image, imageId } = await session!.captureCaptcha();
+      const response = await manualInput.wait(image, purpose, manualDeadline.expires);
+      ensureRunning();
+      if (response.action === 'submit') {
+        if ((await session!.captureCaptcha()).imageId !== imageId) {
+          progress('manual_captcha', currentStore.get(job.id)!.attempts, 'AWS 验证码图片已变化，请重新打开手工输入');
+          continue;
+        }
+        return response.captchaAnswer;
+      }
+      await session!.refresh(imageId);
+    }
+  };
   try {
     if (!currentStore.updateIfStatus(job.id, ['queued'], { status: 'running' })) return;
     let sent = false;
@@ -333,7 +393,7 @@ async function execute(job: RootEmailJob, controller: AbortController) {
       if (!currentStore.updateIfStatus(job.id, ['running'], { browserAttempts: browserAttempt })) return;
       session = new AwsRootEmailSession(controller.signal, ensureRunning);
       try {
-        await sendRootEmail({ email: job.email, session, signal: controller.signal, authorize: ensureRunning, progress });
+        await sendRootEmail({ email: job.email, session, signal: controller.signal, authorize: ensureRunning, progress, manualCaptcha });
         sent = true;
         break;
       } catch (error) {
@@ -373,7 +433,7 @@ async function execute(job: RootEmailJob, controller: AbortController) {
       const waiting = currentStore.updateIfStatus(job.id, ['running'], {
         status: 'waiting_mail', phase: 'waiting_mail', mailCursor: 0,
         mailNextCheckAt: new Date().toISOString(), mailDeadlineAt: new Date(Date.now() + 10 * 60_000).toISOString(),
-        detail: 'AWS 发信提交结果未确认；正在只读检查邮箱，不会自动重新发送',
+        detail: '验证码已提交，但 AWS 未确认验证通过或发信；正在只读检查邮箱，不会自动重新发送',
       });
       if (waiting) audit(waiting, 'ROOT_EMAIL_SUBMIT_UNKNOWN');
       return;
@@ -382,7 +442,7 @@ async function execute(job: RootEmailJob, controller: AbortController) {
     const status = uncertain || stopping ? 'interrupted' : controller.signal.aborted ? 'cancelled' : 'failed';
     const detail = uncertain ? '提交后结果未确认，请先检查邮箱；系统不会自动再次发送'
       : stopping ? '服务停止，任务已中断，请检查收件箱后再决定是否重试'
-      : controller.signal.aborted ? '任务已停止（用户取消或超过 5 分钟）'
+      : controller.signal.aborted ? '任务已停止（用户取消或超过执行时限）'
       : error instanceof RootEmailError ? error.message
       : browserError ? browserError.message : LEGACY_ROOT_EMAIL_BROWSER_FAILURE;
     const failed = currentStore.updateIfStatus(job.id, ['running'], { status, phase: 'done', detail,
@@ -390,6 +450,7 @@ async function execute(job: RootEmailJob, controller: AbortController) {
     if (failed) audit(failed, 'ROOT_EMAIL_STOP');
   } finally {
     clearTimeout(deadline);
+    manualInputs.delete(job.id);
     if (session) await session.close();
   }
 }
@@ -401,7 +462,7 @@ async function checkMail(job: RootEmailJob, signal: AbortSignal) {
   try {
     authorize(job);
     if (!job.requestedAt || !job.mailDeadlineAt || Date.now() > Date.parse(job.mailDeadlineAt)) {
-      throw new MailApiError('等待恢复邮件超过 10 分钟，请检查邮箱或索引状态；不会自动重发');
+      throw new MailApiError(rootEmailMailTimeoutDetail(job));
     }
     const page = await scanRootMailPage(mailbox, { ...job, requestedAt: job.requestedAt }, () => {
       if (!stillWaiting()) throw new RootEmailError('邮件查询已停止');

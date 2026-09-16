@@ -4,17 +4,25 @@
 
 独立导航「批量设置 Root 密码」（`/rootreset`）创建自动改密批次。系统按 payer 选择最多 20 个 ACTIVE 成员账户，发送恢复邮件、精确匹配收件人和请求时间、重新校验 AWS 一次性链接，然后生成并提交 24 位强随机密码。创建批次必须精确输入 payer 名称、账户数量和当前 TOTP。
 
-后台使用独立 Chrome 配置目录进入 AWS 忘记密码页面，通过本地 PP-OCRv6 模型处理 AWS 当前可能出现的两阶段验证码：登录安全验证码通过后进入 Forgot password，再处理恢复邮件验证码；每阶段最多 3 张图片。opening/captcha 阶段的泛化浏览器异常最多重建到 3 次会话；通过跨导航短轮询处理登录安全验证码，并兼容 AWS 先显示 `Verify`、点击后才加载验证码图片的中间态；验证码错误只通过 AWS 明确错误文案判定（兼容直/弯引号 contractions），无法确认时保持只读查邮箱且绝不重发，只有恢复邮件验证码提交前才持久化 `submitting`，此后只查邮箱、不重复发信。找到链接后，同一浏览器执行槽位只接受 `https://signin.aws.amazon.com/resetpassword` 的 `RootUser` 链接，使用不依赖 `tsx` 运行时 helper 的自包含页面函数，要求恰好两个可见密码框和唯一的 `Reset password` / `Set new password` / `Save new password` / `Change password` / `Submit` 按钮。密码页面仅在确认未进入提交边界时最多尝试 3 次。只有 AWS 返回明确成功文案才记录 `password_set`；提交后结果不明确时记录 `password_unknown`，绝不重试一次性链接。恢复邮件浏览器同样逐账户使用独立 Chrome/profile/Page，并持久化浏览器尝试次数及不含 URL/token 的 `failureStage/failureCategory`。仅 `failed` 且持久化证明未跨过恢复邮件提交边界的自动任务可单独重试；重试通过新 TOTP 创建新的单账户批次，旧任务保留并记录 `retryOfJobId/retriedByJobId`，不确定状态一律拒绝。
+后台使用独立 Chrome 配置目录进入 AWS 忘记密码页面，通过本地 PP-OCRv6 模型处理 AWS 当前可能出现的两阶段验证码：登录安全验证码通过后进入 Forgot password，再处理恢复邮件验证码；每阶段最多 9 张图片。opening/captcha 阶段的泛化浏览器异常最多重建到 3 次会话；通过跨导航短轮询处理登录安全验证码，并兼容 AWS 先显示 `Verify`、点击后才加载验证码图片的中间态；验证码错误只通过 AWS 明确错误文案判定（兼容直/弯引号 contractions），无法确认时保持只读查邮箱且绝不重发，只有恢复邮件验证码提交前才持久化 `submitting`，此后只查邮箱、不重复发信。找到链接后，同一浏览器执行槽位只接受 `https://signin.aws.amazon.com/resetpassword` 的 `RootUser` 链接，使用不依赖 `tsx` 运行时 helper 的自包含页面函数，要求恰好两个可见密码框和唯一的 `Reset password` / `Set new password` / `Save new password` / `Change password` / `Submit` 按钮。密码页面仅在确认未进入提交边界时最多尝试 3 次。只有 AWS 返回明确成功文案才记录 `password_set`；提交后结果不明确时记录 `password_unknown`，绝不重试一次性链接。恢复邮件浏览器同样逐账户使用独立 Chrome/profile/Page，并持久化浏览器尝试次数及不含 URL/token 的 `failureStage/failureCategory`。仅 `failed` 且持久化证明未跨过恢复邮件提交边界的自动任务可单独重试；重试通过新 TOTP 创建新的单账户批次，旧任务保留并记录 `retryOfJobId/retriedByJobId`，不确定状态一律拒绝。
 
 新密码由 Node.js CSPRNG 生成，固定 24 位并包含大小写、数字和符号。密码以任务上下文作为 AAD，使用用途分离密钥和 AES-256-GCM 永久写入任务文件及随后的备份，不设置 TTL，也不因下载销毁。CSV 下载依赖已完成登录 MFA 的会话，但不再要求额外 TOTP；Owner 可重复下载本人批次，Admin 可重复下载全部批次。服务端每次下载仍按 owner/admin 视图持久化短期 claim 防并发，响应结束后清 claim 并更新最近下载时间。列表 API、审计和飞书通知均不包含明文密码或 reset URL。
 
 ### AWS 独立安全验证窗口（0.30.1）
 
-AWS 的 `Verify` 中间页可能打开 `Security Verification` 弹窗，文字验证码位于独立 iframe，不在主页面的 `#captcha_image` 中。执行器同时支持旧版主页面验证码和新版 iframe：仅接受 AWS 官方登录页直接嵌入的 HTTPS `cdn.<region>.threat-mitigation.aws.amazon.com`，在该 frame 内检查唯一图片、输入框和 Submit 控件，截图交给现有本地 OCR，最多 3 张。刷新使用图片刷新按钮，不使用重置整个验证流程的 Reset 按钮。身份验证完成后回到主页面核对邮箱，再进入恢复邮件验证码。
+AWS 的 `Verify` 中间页可能打开 `Security Verification` 弹窗，文字验证码位于独立 iframe，不在主页面的 `#captcha_image` 中。执行器同时支持旧版主页面验证码和新版 iframe：仅接受 AWS 官方登录页直接嵌入的 HTTPS `cdn.<region>.threat-mitigation.aws.amazon.com`，在该 frame 内检查唯一图片、输入框和 Submit 控件，截图交给现有本地 OCR，最多 9 张。刷新使用图片刷新按钮，不使用重置整个验证流程的 Reset 按钮。身份验证完成后回到主页面核对邮箱，再进入恢复邮件验证码。
 
 iframe 导航、域名变化、重复控件或不支持的挑战会停止；提交动作不会因失去 frame 响应而在同一调用内重放。等待入口超时归为 `timeout`，已出现但无法识别的独立验证窗口给出明确人工检查提示，避免旧版 `wait_entry/browser_error` 的无效循环。任务原有发信提交边界、邮箱核验及密码未知状态保护保持生效。
 
 2026-09-16：58 项测试、前后端类型检查及完整构建通过。使用生产服务器的隔离浏览器实测新版 iframe：第一张图片未取得可靠 OCR 候选，刷新后第二张通过 AWS 身份验证并进入 Forgot password 入口。检查在恢复邮件请求之前停止，未发送邮件、未修改密码；这验证了本次入口兼容修复，不代表所有验证码的 OCR 都能成功。
+
+### 九张自动识别与手工接管（0.31.0）
+
+新任务每个验证码阶段最多自动识别 9 张，浏览器重建仍最多 3 次。9 张用尽后保留当前 AWS 会话，任务进入 `running/manual_captcha`，列表显示「手工输入验证码」链接。操作者在站内弹窗查看裁剪后的验证码、手动刷新或输入 6 位字符；每次图片使用一次性 challenge ID，重复点击、旧图片和其他任务的输入不能复用。提交前重新截图核对图片哈希，AWS 已换图时要求重新输入。只有明确拒绝才允许继续填写；提交结果不明仍转为只读查邮箱，不自动重发。
+
+每个手工阶段从首次进入起保留 10 分钟，刷新或输错不会延长；发信浏览器总执行期限为 40 分钟。等待期间后续浏览器任务暂缓，用户可取消该账户或批次。图片和输入只在进程/弹窗内存中存在，普通列表不返回图片、答案或 URL；持久化只保存阶段及次数。接口沿用登录 MFA 会话并逐次复验 owner/admin 操作权限，无权查看的用户也不能读取图片；验证码字段在通用审计中脱敏。取消、权限撤销和服务停止会解除等待；重启把旧运行会话标记 interrupted，不恢复图片或重放输入。
+
+`emailDeliveryState` 区分 `not_submitted`、`unconfirmed`、`aws_confirmed`、`received`。等待邮箱不代表验证码已通过：未见 AWS 发信确认时显示「发信未确认·核查邮箱」，超时说明也明确可能验证未通过或页面异常。只有 AWS 明确确认才显示「已发信·等待收件」。旧版同类超时记录仅在展示时修正文案，不改写历史任务。成功收到并核对邮件后才继续原来的密码设置流程。
 
 ## 权限设置
 
@@ -98,6 +106,8 @@ PY
 
 | 方法 | 路径（前缀 `/api/aws`） | 用途 |
 | --- | --- | --- |
+| POST | `/root-email/jobs/:id/manual-captcha` | 仅本人操作者或 Admin 获取当前验证码快照，no-store |
+| POST | `/root-email/jobs/:id/manual-captcha/answer` | `{ challengeId, action: "submit"或"refresh", captchaAnswer? }`；一次性消费，由原 runner 继续 |
 | GET | `/root-email/availability` | Python、模型、Chrome 路径、显示器自检；结果缓存 60 秒 |
 | GET | `/root-email/catalog` | 配置的 payer、成员账户缓存与可选状态、缓存时间 |
 | GET | `/root-email/batches` | 非 admin 返回本人最近 20 个批次；Admin 返回全局最近 20 个 |
@@ -119,7 +129,7 @@ PY
 ## 验证
 
 ```sh
-node --import tsx --test tests/root-email.test.ts tests/root-email-security-frame.test.ts tests/root-mail-links.test.ts tests/mail-api.test.ts tests/root-reset-permissions.test.ts
+node --import tsx --test tests/root-email.test.ts tests/root-email-manual.test.ts tests/root-email-security-frame.test.ts tests/root-mail-links.test.ts tests/mail-api.test.ts tests/root-reset-permissions.test.ts
 npx tsc --noEmit -p server/tsconfig.json
 npx tsc -p client/tsconfig.json
 npx vite build --config client/vite.config.ts

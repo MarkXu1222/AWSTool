@@ -16,7 +16,7 @@ const SENSITIVE_KEYS = new Set([
   'password', 'newPassword', 'currentPassword',
   'secret', 'mfa_secret', 'totpCode', 'token',
   'accessKeyId', 'secretAccessKey', 'jwtSecret',
-  'encryptionKey', 'adminPassword',
+  'encryptionKey', 'adminPassword', 'captchaAnswer', 'challengeId',
 ]);
 
 function maskSensitive(obj: any): any {

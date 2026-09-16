@@ -24,7 +24,8 @@ import * as tagOnboarding from '../tag-onboarding';
 import { pipeline } from 'stream/promises';
 import { cancelRootEmail, listRootEmails, rootEmailAvailability, submitRootEmail, rootEmailCatalog,
   listRootEmailBatches, getRootEmailBatch, submitRootEmailBatch, cancelRootEmailBatch, getRootResetLink,
-  getManualRootResetLink, prepareRootCredentialCsv, retryRootEmailJob } from '../root-email-jobs';
+  getManualRootResetLink, prepareRootCredentialCsv, retryRootEmailJob,
+  getRootEmailManualCaptcha, answerRootEmailManualCaptcha } from '../root-email-jobs';
 import { type CredentialDownloadSlot, RootEmailError } from '../root-email-core';
 import { MailApiError } from '../mail-api';
 import { createRootResetGuard } from '../root-reset-permissions';
@@ -381,6 +382,20 @@ awsRouter.post('/root-email/jobs/:id/retry', async (req, res) => {
     if (req.body?.confirmRetry !== true) throw new RootEmailError('请确认重新发送恢复邮件并自动设置 Root 新密码');
     verifyRootEmailStepUp(req, res, req.body?.totpCode);
     const data = await retryRootEmailJob(String(req.params.id), res.locals.rootResetUser, req.ip);
+    res.locals.audited = true;
+    res.status(202).json({ success: true, data });
+  } catch (error) { rootEmailFailure(res, error); }
+});
+awsRouter.post('/root-email/jobs/:id/manual-captcha', (req, res) => {
+  try {
+    const data = getRootEmailManualCaptcha(String(req.params.id), res.locals.rootResetUser);
+    res.locals.audited = true;
+    res.json({ success: true, data });
+  } catch (error) { rootEmailFailure(res, error); }
+});
+awsRouter.post('/root-email/jobs/:id/manual-captcha/answer', (req, res) => {
+  try {
+    const data = answerRootEmailManualCaptcha(String(req.params.id), res.locals.rootResetUser, req.body || {}, req.ip);
     res.locals.audited = true;
     res.status(202).json({ success: true, data });
   } catch (error) { rootEmailFailure(res, error); }

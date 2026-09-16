@@ -4,7 +4,7 @@ import { randomUUID } from 'crypto';
 
 export type RootEmailStatus = 'queued' | 'running' | 'email_sent' | 'waiting_mail' | 'link_ready' | 'setting_password'
   | 'password_set' | 'password_failed' | 'password_unknown' | 'mail_failed' | 'failed' | 'cancelled' | 'interrupted';
-export type RootEmailPhase = 'queued' | 'opening' | 'captcha' | 'submitting' | 'waiting_mail' | 'setting_password' | 'done';
+export type RootEmailPhase = 'queued' | 'opening' | 'captcha' | 'manual_captcha' | 'submitting' | 'waiting_mail' | 'setting_password' | 'done';
 export type RootManualFallbackReason = 'password_not_submitted';
 export type RootEmailBrowserStage = 'runtime' | 'load_driver' | 'create_profile' | 'launch_browser' | 'create_page'
   | 'configure_page' | 'navigate' | 'wait_entry' | 'enter_recovery' | 'capture_captcha' | 'recognize_captcha'
@@ -27,6 +27,7 @@ export interface RootEmailJob {
   status: RootEmailStatus;
   phase: RootEmailPhase;
   attempts: number;
+  maxCaptchaAttempts?: number;
   createdAt: string;
   updatedAt: string;
   sentAt?: string;
@@ -81,6 +82,21 @@ export const isPendingEmailJob = (job: RootEmailJob) => ['queued', 'running', 'w
 export const MAX_ROOT_EMAIL_TASKS = 500;
 export const MAX_ROOT_PASSWORD_BATCH = 20;
 export const MAX_ROOT_EMAIL_BROWSER_ATTEMPTS = 3;
+export const MAX_ROOT_EMAIL_CAPTCHA_ATTEMPTS = 9;
+
+/** An attempted CAPTCHA is not evidence that AWS accepted it or sent mail. */
+export function rootEmailDeliveryState(job: Pick<RootEmailJob, 'sentAt' | 'mailReceivedAt' | 'emailSubmitAttempted' | 'status'>) {
+  if (job.mailReceivedAt) return 'received' as const;
+  if (job.sentAt) return 'aws_confirmed' as const;
+  if (job.emailSubmitAttempted || ['waiting_mail', 'mail_failed'].includes(job.status)) return 'unconfirmed' as const;
+  return 'not_submitted' as const;
+}
+
+export function rootEmailMailTimeoutDetail(job: Pick<RootEmailJob, 'sentAt'>): string {
+  return job.sentAt
+    ? 'AWS 已明确确认发信，但 10 分钟内未查到匹配的恢复邮件；请检查邮箱或索引状态，不会自动重发'
+    : '验证码已提交，但 AWS 未确认验证通过或邮件发送；10 分钟内也未查到恢复邮件。可能验证码未通过或页面异常，请人工检查，不会自动重发';
+}
 
 /** Retry a fresh recovery browser only before the form can have submitted an email request. */
 export function canRetryRootEmailBrowser(error: unknown, phase: RootEmailPhase,
@@ -181,6 +197,7 @@ export class RootEmailStore {
       || (j.autoSetPassword !== undefined && typeof j.autoSetPassword !== 'boolean')
       || (j.passwordSubmitAttempted !== undefined && typeof j.passwordSubmitAttempted !== 'boolean')
       || (j.emailSubmitAttempted !== undefined && typeof j.emailSubmitAttempted !== 'boolean')
+      || (j.maxCaptchaAttempts !== undefined && ![3, MAX_ROOT_EMAIL_CAPTCHA_ATTEMPTS].includes(j.maxCaptchaAttempts))
       || (j.browserAttempts !== undefined && (!Number.isInteger(j.browserAttempts) || j.browserAttempts < 0
         || j.browserAttempts > MAX_ROOT_EMAIL_BROWSER_ATTEMPTS))
       || (j.failureStage !== undefined && !ROOT_EMAIL_BROWSER_STAGES.includes(j.failureStage))
@@ -263,7 +280,7 @@ export class RootEmailStore {
   private makeJob(input: RootEmailInput): RootEmailJob {
     const now = new Date().toISOString();
     return { ...input, id: randomUUID(), status: 'queued', phase: 'queued', attempts: 0,
-      emailSubmitAttempted: false, browserAttempts: 0,
+      emailSubmitAttempted: false, browserAttempts: 0, maxCaptchaAttempts: MAX_ROOT_EMAIL_CAPTCHA_ATTEMPTS,
       createdAt: now, updatedAt: now, detail: '等待发送恢复邮件' };
   }
   create(input: RootEmailInput): RootEmailJob {
@@ -560,6 +577,7 @@ export async function sendRootEmail(input: {
   signal: AbortSignal;
   authorize: () => void;
   progress: (phase: RootEmailPhase, attempts: number, detail: string) => void;
+  manualCaptcha?: (purpose: 'identity' | 'recovery') => Promise<string>;
 }): Promise<void> {
   const { session, signal, progress } = input;
   const check = () => { signal.throwIfAborted(); input.authorize(); };
@@ -569,15 +587,24 @@ export async function sendRootEmail(input: {
   let stageAttempt = 0;
   let stageTransitions = 0;
   while (true) {
-    stageAttempt++;
     check();
     const recoveryCaptcha = session.isRecoveryCaptcha();
     const stageLabel = recoveryCaptcha ? '恢复邮件验证码' : '登录安全验证码';
-    progress('captcha', stageAttempt, `正在识别${stageLabel}第 ${stageAttempt} 张图片（本阶段最多 3 张）`);
-    const { candidate, imageId } = await session.recognize();
+    const manual = stageAttempt >= MAX_ROOT_EMAIL_CAPTCHA_ATTEMPTS;
+    let candidate: string | null;
+    let imageId = '';
+    if (manual) {
+      if (!input.manualCaptcha) throw new RootEmailError(`${stageLabel}连续 ${MAX_ROOT_EMAIL_CAPTCHA_ATTEMPTS} 张均未通过，需要手工输入验证码`, 422);
+      progress('manual_captcha', stageAttempt, `${stageLabel}自动识别 ${MAX_ROOT_EMAIL_CAPTCHA_ATTEMPTS} 张仍未通过，请点击「手工输入验证码」继续`);
+      candidate = await input.manualCaptcha(recoveryCaptcha ? 'recovery' : 'identity');
+    } else {
+      stageAttempt++;
+      progress('captcha', stageAttempt, `正在识别${stageLabel}第 ${stageAttempt} 张图片（本阶段最多 ${MAX_ROOT_EMAIL_CAPTCHA_ATTEMPTS} 张）`);
+      ({ candidate, imageId } = await session.recognize());
+    }
     check();
     if (candidate && /^[a-zA-Z0-9]{6}$/.test(candidate)) {
-      progress(recoveryCaptcha ? 'submitting' : 'captcha', stageAttempt,
+      progress(recoveryCaptcha ? 'submitting' : manual ? 'manual_captcha' : 'captcha', stageAttempt,
         recoveryCaptcha ? '正在提交恢复邮件验证码；等待 AWS 确认邮件已发送' : '正在提交登录安全验证码；尚未请求恢复邮件');
       check();
       const result = await session.submit(candidate);
@@ -587,9 +614,9 @@ export async function sendRootEmail(input: {
         stageAttempt = 0;
         continue;
       }
+      progress(manual ? 'manual_captcha' : 'captcha', stageAttempt, `AWS 明确拒绝${stageLabel}，尚未确认发信`);
     }
-    if (stageAttempt >= 3) throw new RootEmailError(`${stageLabel}连续 3 张均未通过，请稍后重试`, 422);
     check();
-    await session.refresh(imageId);
+    if (stageAttempt < MAX_ROOT_EMAIL_CAPTCHA_ATTEMPTS) await session.refresh(imageId);
   }
 }

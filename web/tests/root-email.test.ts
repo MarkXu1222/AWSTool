@@ -152,18 +152,50 @@ test('root email page helpers survive tsx serialization and prioritize blocked s
   assert.equal(disposed, 1);
 });
 
-test('bad lengths are never submitted; rejected candidates refresh within a three-image limit', async () => {
+test('bad lengths are never submitted; rejected candidates refresh before the limit', async () => {
   const { session, calls } = fixture(['1234567', 'abc123', 'def456'], ['invalid', 'sent']);
   await sendRootEmail({ email, session, signal: new AbortController().signal, authorize() {}, progress() {} });
   assert.deepEqual(calls.filter(c => c.startsWith('submit')), ['submit:abc123', 'submit:def456']);
   assert.deepEqual(calls.filter(c => c.startsWith('refresh')), ['refresh:1', 'refresh:2']);
 });
 
-test('three failed images stop without refreshing or starting another recovery', async () => {
-  const { session, calls } = fixture([null, 'abc123', 'def456'], ['invalid', 'invalid']);
-  await assert.rejects(sendRootEmail({ email, session, signal: new AbortController().signal, authorize() {}, progress() {} }), /3 张/);
-  assert.equal(calls.filter(c => c === 'recognize').length, 3);
-  assert.equal(calls.filter(c => c.startsWith('refresh')).length, 2);
+test('nine failed images require manual input without starting another recovery', async () => {
+  const { session, calls } = fixture(Array(9).fill(null), []);
+  await assert.rejects(sendRootEmail({ email, session, signal: new AbortController().signal, authorize() {}, progress() {} }), /9 张/);
+  assert.equal(calls.filter(c => c === 'recognize').length, 9);
+  assert.equal(calls.filter(c => c.startsWith('refresh')).length, 8);
+  assert.equal(calls.filter(c => c.startsWith('open')).length, 1);
+});
+
+test('the ninth automatic image can succeed without a manual handoff', async () => {
+  const { session, calls } = fixture([...Array(8).fill(null), 'abc123'], ['sent']);
+  await sendRootEmail({ email, session, signal: new AbortController().signal, authorize() {}, progress() {},
+    async manualCaptcha() { throw new Error('must not request manual input'); } });
+  assert.equal(calls.filter(c => c === 'recognize').length, 9);
+  assert.equal(calls.filter(c => c.startsWith('submit')).length, 1);
+});
+
+test('manual identity input resumes the same session then budgets nine recovery images separately', async () => {
+  const { session, calls } = fixture(Array(18).fill(null), ['next_captcha', 'sent'], false);
+  const purposes: string[] = [];
+  const phases: string[] = [];
+  await sendRootEmail({ email, session, signal: new AbortController().signal, authorize() {},
+    progress(phase) { phases.push(phase); }, async manualCaptcha(purpose) { purposes.push(purpose); return 'abc123'; } });
+  assert.deepEqual(purposes, ['identity', 'recovery']);
+  assert.equal(calls.filter(c => c === 'recognize').length, 18);
+  assert.equal(calls.filter(c => c.startsWith('open')).length, 1);
+  assert.equal(calls.filter(c => c.startsWith('refresh')).length, 16);
+  assert.equal(phases.filter(phase => phase === 'submitting').length, 1);
+});
+
+test('a manual rejection permits another answer but an uncertain submit is never replayed', async () => {
+  const { session, calls } = fixture(Array(9).fill(null), ['invalid', new Error('result timeout')]);
+  let manualCount = 0;
+  await assert.rejects(sendRootEmail({ email, session, signal: new AbortController().signal, authorize() {}, progress() {},
+    async manualCaptcha() { manualCount++; return 'abc123'; } }), /result timeout/);
+  assert.equal(manualCount, 2);
+  assert.equal(calls.filter(c => c === 'recognize').length, 9);
+  assert.equal(calls.filter(c => c.startsWith('submit')).length, 2);
 });
 
 test('a timeout after submission is propagated without replaying the request', async () => {

@@ -3,6 +3,8 @@ import { Alert, Button, List, Popconfirm, Space, Tag, Typography } from 'antd';
 import { MailOutlined, ReloadOutlined } from '@ant-design/icons';
 import { api, RootEmailJobView } from '../api';
 import { showRootResetLink } from '../utils/root-reset-link';
+import RootManualCaptchaModal from './RootManualCaptchaModal';
+import { rootEmailStatusLabel } from '../utils/root-email-status';
 
 const labels: Record<RootEmailJobView['status'], string> = {
   queued: '排队中', running: '发送恢复邮件', email_sent: 'AWS 已确认发信', failed: '发信失败', cancelled: '已取消', interrupted: '结果待检查',
@@ -22,6 +24,7 @@ const RootEmailPanel: React.FC<{ accountId: string; canOperate?: boolean }> = ({
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
   const [revision, setRevision] = useState(0);
+  const [manualJobId, setManualJobId] = useState<string | null>(null);
   useEffect(() => {
     let disposed = false;
     let timer: ReturnType<typeof setTimeout>;
@@ -72,7 +75,10 @@ const RootEmailPanel: React.FC<{ accountId: string; canOperate?: boolean }> = ({
       <Button icon={<MailOutlined />} loading={busy} disabled={!available?.ready || pending}>发送恢复邮件</Button>
     </Popconfirm>}
     <List size="small" dataSource={jobs} locale={{ emptyText: '暂无恢复邮件任务' }} renderItem={job => <List.Item
-      actions={!canOperate || !job.canManage ? [] : job.status === 'link_ready' && !job.autoSetPassword ? [<Button key="link" size="small" disabled={busy} onClick={async () => {
+      actions={!canOperate || !job.canManage ? [] : job.manualCaptchaAvailable ? [
+        <Button key="manual" type="link" size="small" onClick={() => setManualJobId(job.id)}>手工输入验证码</Button>,
+        <Button key="cancel" size="small" onClick={() => act(() => api.cancelRootEmail(job.id))}>停止</Button>,
+      ] : job.status === 'link_ready' && !job.autoSetPassword ? [<Button key="link" size="small" disabled={busy} onClick={async () => {
         setBusy(true); setError('');
         try { await showRootResetLink(job.id); } catch (e: any) { setError(e.message); } finally { setBusy(false); }
       }}>获取重置链接</Button>] : ['queued', 'running', 'waiting_mail', 'setting_password'].includes(job.status)
@@ -80,14 +86,17 @@ const RootEmailPanel: React.FC<{ accountId: string; canOperate?: boolean }> = ({
         <Button key="cancel" size="small" disabled={busy} onClick={() => act(() => api.cancelRootEmail(job.id))}>停止</Button>,
       ] : []}>
       <Space direction="vertical" size={4}>
-        <Space wrap><Tag color={colors[job.status]}>{labels[job.status]}</Tag><Typography.Text>{job.email}</Typography.Text></Space>
+        <Space wrap><Tag color={job.phase === 'manual_captcha' ? 'warning' : colors[job.status]}>
+          {rootEmailStatusLabel(job, labels[job.status])}</Tag><Typography.Text>{job.email}</Typography.Text></Space>
         <Typography.Text>{job.detail}</Typography.Text>
         <Typography.Text type="secondary">
-          {new Date(job.createdAt).toLocaleString()} · {job.createdBy} · 验证码 {job.attempts}/3
+          {new Date(job.createdAt).toLocaleString()} · {job.createdBy} · 验证码 {job.attempts}/{job.maxCaptchaAttempts || 3}
         </Typography.Text>
         {job.sentAt && <Typography.Text type="secondary">AWS 确认时间：{new Date(job.sentAt).toLocaleString()}</Typography.Text>}
       </Space>
     </List.Item>} />
+    <RootManualCaptchaModal key={manualJobId || 'closed'} job={jobs.find(job => job.id === manualJobId) || null}
+      onClose={() => setManualJobId(null)} onProgress={() => setRevision(value => value + 1)} />
   </Space>;
 };
 

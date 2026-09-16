@@ -14,8 +14,12 @@ export interface RootEmailJobView {
   email: string;
   status: 'queued' | 'running' | 'email_sent' | 'waiting_mail' | 'link_ready' | 'setting_password' | 'password_set'
     | 'password_failed' | 'password_unknown' | 'mail_failed' | 'failed' | 'cancelled' | 'interrupted';
-  phase: 'queued' | 'opening' | 'captcha' | 'submitting' | 'waiting_mail' | 'setting_password' | 'done';
+  phase: 'queued' | 'opening' | 'captcha' | 'manual_captcha' | 'submitting' | 'waiting_mail' | 'setting_password' | 'done';
   attempts: number;
+  maxCaptchaAttempts: number;
+  emailDeliveryState: 'not_submitted' | 'unconfirmed' | 'aws_confirmed' | 'received';
+  manualCaptchaAvailable: boolean;
+  manualCaptchaExpiresAt?: string;
   createdBy: string;
   createdAt: string;
   sentAt?: string;
@@ -32,6 +36,12 @@ export interface RootEmailJobView {
   retryAvailableAt?: string;
   manualResetAvailable: boolean;
   manualResetExpiresAt?: string;
+}
+export interface RootManualCaptchaView {
+  challengeId: string;
+  image: string;
+  purpose: 'identity' | 'recovery';
+  expiresAt: string;
 }
 export interface RootEmailAccount {
   accountId: string;
@@ -703,6 +713,13 @@ export const api = {
   retryRootEmailJob: (id: string, totpCode: string) => request(`/aws/root-email/jobs/${encodeURIComponent(id)}/retry`, {
     method: 'POST', cache: 'no-store', body: JSON.stringify({ totpCode, confirmRetry: true }),
   }),
+  rootEmailManualCaptcha: (id: string) => request(`/aws/root-email/jobs/${encodeURIComponent(id)}/manual-captcha`, {
+    method: 'POST', cache: 'no-store',
+  }),
+  answerRootEmailManualCaptcha: (id: string, body: { challengeId: string; action: 'submit' | 'refresh'; captchaAnswer?: string }) =>
+    request(`/aws/root-email/jobs/${encodeURIComponent(id)}/manual-captcha/answer`, {
+      method: 'POST', cache: 'no-store', body: JSON.stringify(body),
+    }),
   rootEmailCatalog: () => request('/aws/root-email/catalog'),
   rootEmailBatches: () => request('/aws/root-email/batches'),
   rootEmailBatch: (id: string) => request(`/aws/root-email/batches/${encodeURIComponent(id)}`),
