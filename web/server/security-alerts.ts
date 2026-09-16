@@ -1,13 +1,17 @@
 /**
  * 安全告警 — 被攻击/滥用时第一时间飞书通知
  *
- * 三类信号：
- * 1. 登录安全：失败爆破（同 IP 或同用户名阈值）、登录成功但来自本进程未见过的新 IP
- * 2. 敏感操作：root 凭证类 / 用户管理类 / ExternalId 查看等，实时推送（由 db.addAuditLog 钩子触发）
- * 3. HTTP 异常：429（限速被打满=疑似滥用）与 5xx 突增，滑动窗口阈值告警
+ * 两类信号：
+ * 1. 登录安全：失败爆破（同 IP 或同用户名阈值）
+ * 2. HTTP 异常：429（限速被打满=疑似滥用）与 5xx 突增，滑动窗口阈值告警
  *
  * 设计约束：所有计数器在进程内存（与 ops-monitor 同理，重启清零）；
  * 每类告警有独立冷却时间，防止告警本身被刷屏；通知失败绝不影响业务请求。
+ *
+ * 2026-09-15 按运营要求移除：
+ * - 「新 IP 登录」提醒：登录已强制密码 + MFA，该提醒噪音大于价值。
+ * - 敏感操作实时推送（原 18 个动作）：这些动作**仍然完整写入审计日志**，
+ *   只是不再推飞书。需要追溯时查审计页，不要以为没通知就等于没记录。
  */
 import { sendNotification } from './notify';
 
@@ -66,66 +70,16 @@ export function recordLoginFailure(username: string, ip: string | undefined, rea
   }
 }
 
-// 每用户已见 IP（进程内存，重启后首个登录会再提醒一次，可接受）
-const seenIps = new Map<string, Set<string>>();
-
-export function recordLoginSuccess(username: string, ip: string | undefined) {
-  const cleanIp = (ip || 'unknown').replace('::ffff:', '');
-  let set = seenIps.get(username);
-  if (!set) { set = new Set(); seenIps.set(username, set); }
-  const isNew = !set.has(cleanIp);
-  set.add(cleanIp);
-  // 进程启动后该用户的第一次登录不告警（否则每次重启都会提醒一轮）
-  if (isNew && set.size > 1 && cooldownOk(`alert:newip:${username}:${cleanIp}`, 24 * 3600 * 1000)) {
-    fireAndForget('⚠️ 新 IP 登录',
-      `用户 **${username}** 从本进程未见过的 IP **${cleanIp}** 登录成功（已通过密码 + MFA）。\n`
-      + `若非本人操作，请立即重置密码并检查审计日志。\n${ts()}`);
-  }
+/**
+ * 登录成功回调。
+ * 曾用于「新 IP 登录」提醒，现按运营要求移除；保留空实现是为了不改动
+ * auth.ts 的调用点，将来若要恢复某种登录成功侧信号，在这里加即可。
+ */
+export function recordLoginSuccess(_username: string, _ip: string | undefined) {
+  // 有意留空：不再推送新 IP 登录提醒。登录仍写审计日志（auth.ts 的 LOGIN 条目）。
 }
 
-// ===== 2. 敏感操作实时通知（db.addAuditLog 钩子） =====
-
-const SENSITIVE_ACTIONS: Record<string, string> = {
-  TEMP_CREDENTIALS: '生成 Admin 临时凭证',
-  ROOT_MFA_DELETE: '删除 Root MFA',
-  ROOT_PASSWORD_RECOVER: '恢复根用户密码',
-  ROOT_ACCESSKEY_DELETE: '删除 Root Access Key',
-  ROOT_PASSWORD_BATCH_CREATE: '创建批量 Root 自动改密任务',
-  ROOT_PASSWORD_SET: '自动设置 Root 新密码成功',
-  ROOT_PASSWORD_SET_FAILED: '自动设置 Root 新密码失败',
-  ROOT_PASSWORD_SET_UNKNOWN: 'Root 新密码提交结果未知',
-  ROOT_PASSWORD_CSV_DOWNLOAD: '下载一次性 Root 密码 CSV',
-  ROOT_PASSWORD_CREDENTIAL_DESTROY: '销毁临时 Root 密码密文',
-  ROOT_PASSWORD_STEPUP_FAILED: 'Root 密码高风险操作 MFA 验证失败',
-  CONSOLE_ADMIN_LOGIN: 'Admin 控制台登录',
-  USER_CREATE: '创建平台用户',
-  USER_DELETE: '删除平台用户',
-  USER_UPDATE: '修改用户权限',
-  PASSWORD_RESET: '重置用户密码',
-  ACCOUNT_EXTERNALID_VIEW: '查看客户 ExternalId',
-  ACCOUNT_RESTRICT: '标记敏感权限客户',
-  ACCOUNT_UNRESTRICT: '取消敏感权限标记',
-};
-
-// 单类敏感操作 5 分钟内只推一次汇总冷却，避免批量操作刷屏；
-// root 凭证四类风险最高，不设冷却、每次必达。
-const ALWAYS_NOTIFY = new Set(['ROOT_MFA_DELETE', 'ROOT_PASSWORD_RECOVER', 'ROOT_ACCESSKEY_DELETE',
-  'ROOT_PASSWORD_BATCH_CREATE', 'ROOT_PASSWORD_SET', 'ROOT_PASSWORD_SET_FAILED', 'ROOT_PASSWORD_SET_UNKNOWN',
-  'ROOT_PASSWORD_CSV_DOWNLOAD', 'ROOT_PASSWORD_CREDENTIAL_DESTROY']);
-const SENSITIVE_COOLDOWN_MS = 5 * 60 * 1000;
-
-export function onAuditAction(action: string, username: string | null | undefined, ip: string | null | undefined, detail: string) {
-  const label = SENSITIVE_ACTIONS[action];
-  if (!label) return;
-  const key = `alert:sens:${action}:${username || ''}`;
-  if (!ALWAYS_NOTIFY.has(action) && !cooldownOk(key, SENSITIVE_COOLDOWN_MS)) return;
-  const cleanIp = (ip || '未知').replace('::ffff:', '');
-  fireAndForget(`🔔 敏感操作 · ${label}`,
-    `操作人：**${username || '未知'}**（IP ${cleanIp}）\n动作：${action}\n详情：${detail.slice(0, 300)}\n${ts()}`
-    + (ALWAYS_NOTIFY.has(action) ? '' : '\n_同类操作 5 分钟内合并通知_'));
-}
-
-// ===== 3. HTTP 异常（429 滥用 / 5xx 突增） =====
+// ===== 2. HTTP 异常（429 滥用 / 5xx 突增） =====
 
 const HTTP_WINDOW_MS = 5 * 60 * 1000;
 const HTTP_ALERT_COOLDOWN_MS = 30 * 60 * 1000;

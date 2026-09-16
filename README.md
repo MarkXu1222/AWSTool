@@ -113,7 +113,7 @@ AWS/
     │   ├── scheduler.ts            # 后台定时同步（账户/配额/区域/仪表盘）
     │   ├── doc-generator.ts        # 生成提额申请 PDF（puppeteer）
     │   ├── doc-templates.ts        # ★公司模板 + 账户→公司 / payer→公司 映射 + 区域显示名
-    │   ├── notify.ts               # 飞书通知（配额变动/达成）
+    │   ├── notify.ts               # 飞书通知（账户角色缺失告警）
     │   ├── tag-compliance.ts       # MAP 标签合规（编排中央工具账户的 Step Functions + S3 报告）
     │   ├── tag-onboarding.ts       # MAP 全自动接入持久化 runner（资源、索引、StackSet、S3 配置与校验）
     │   ├── account-roles.ts        # ★账户角色自愈：探测 → 缺失则触发 StackSet 补齐 → 超限告警
@@ -124,7 +124,7 @@ AWS/
     │   ├── bedrock-tools.ts        # Bedrock 工具：Profile 管理/批量创建/FTU/数据共享/IAM（全部走 Admin 凭证，50min 缓存）
     │   ├── bedrock-delivery.ts     # Bedrock 客户交付 xlsx 生成（exceljs；校验 map-migrated tag 唯一）
     │   ├── case-doc-submitter.ts   # ★一键提交提额文档到 Support Case（生成 PDF → 联邦登录 → Reply → 传附件 → Submit）
-    │   ├── security-alerts.ts      # 安全告警：登录爆破/新 IP 登录/敏感操作/429、5xx 突增 → 飞书
+    │   ├── security-alerts.ts      # 安全告警：登录爆破/429、5xx 突增 → 飞书
     │   └── routes/
     │       ├── aws.ts              # ★awsRouter：主业务端点（50+），含权限守卫
     │       ├── regions.ts          # regionsRouter：区域 opt-in 状态/扫描/开通
@@ -540,7 +540,21 @@ HTML 模板 + Puppeteer 渲染。公司背景库在 `doc-templates.ts`（12 家�
 
 ### 飞书通知
 
-飞书自定义机器人 Webhook 发交互式卡片。后台同步（每 4 小时）检测到配额**当前值实际变化**时才推送 —— 提交、状态变化都不通知，避免刷屏。内容按账户分组，显示所属组织、配额、区域、旧值→新值、达标标记。首次同步（空快照）不通知，用同步前快照对比避免误判。
+飞书自定义机器人 Webhook 发交互式卡片。配置在 `config.json` 的 `web.feishuWebhook`，未配置时静默跳过。
+
+当前只保留**异常告警**，不做常规业务播报：
+
+| 通知 | 来源 | 触发条件 | 冷却 |
+| --- | --- | --- | --- |
+| 🚨 登录爆破 | `security-alerts.ts` | 同 IP 10 分钟内登录失败 ≥5 次 | 30 分钟/IP |
+| 🚨 账号被集中尝试 | `security-alerts.ts` | 同用户名 10 分钟内失败 ≥5 次 | 30 分钟/用户 |
+| 🚨 限速被持续触发 | `security-alerts.ts` | 5 分钟内 ≥20 次 429 | 30 分钟 |
+| 🚨 服务端错误突增 | `security-alerts.ts` | 5 分钟内 ≥5 次 5xx | 30 分钟 |
+| 账户角色缺失 | `account-roles.ts` | 每日全量检测后新变成 `unreachable` 的账户 | 只推本轮新增 |
+
+> **2026-09-15 按运营要求移除**：配额变动通知、新 IP 登录提醒、敏感操作实时推送（原 18 个动作）。
+> 这些行为**仍然完整写入审计日志与数据库**，只是不再推飞书 —— 追溯请查审计页/配额页，
+> 不要因为没收到通知就认为没有记录。
 
 ---
 
@@ -671,7 +685,7 @@ Nginx 反代 + Let's Encrypt（`markxu.co`，自动续期），80 强制跳 443�
 - 登录限流 5 次/15 分钟；API 限流读写分离：GET 300 次/分钟（监控轮询 + 多标签页），写操作 100 次/分钟
 - 未匹配的 `/api/*` 一律返回 404 JSON（不掉进 SPA fallback 返回 200 + index.html，避免鼓励扫描器探测）
 - Helmet 安全头 + CORS 白名单（未列入的来源用 `callback(null, false)` 优雅拒绝，**绝不 throw** —— 抛错会被 Express 当 500，导致带 `crossorigin` 的静态资源请求失败、整站白屏）
-- 安全告警（`security-alerts.ts`）：登录爆破、新 IP 登录、敏感操作（审计钩子）、429/5xx 突增均实时推飞书；已在生产验证触发
+- 安全告警（`security-alerts.ts`）：登录爆破、429/5xx 突增实时推飞书；已在生产验证触发。新 IP 登录与敏感操作推送已于 2026-09-15 移除（审计日志仍完整记录）
 
 ---
 

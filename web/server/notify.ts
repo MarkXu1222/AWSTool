@@ -78,112 +78,11 @@ async function sendCard(title: string, template: string, elements: any[]) {
   }
 }
 
-/**
- * Send quota achievement notification
+/*
+ * 2026-09-15：移除配额相关飞书通知。
+ * - notifyQuotaChanged：按运营要求停推（变动仍照常落库，查配额页即可）。
+ * - notifyQuotaAchieved：历史死代码，全项目无调用点，一并删除。
  */
-export async function notifyQuotaAchieved(records: { accountId: string; accountName: string; quotaName: string; region: string; currentValue: number; desiredValue: number }[]) {
-  if (records.length === 0) return;
-
-  const rows = records.map(r =>
-    `| ${r.accountName} | ${r.accountId} | ${r.quotaName} | ${r.region} | **${r.currentValue}** / ${r.desiredValue} |`
-  ).join('\n');
-
-  const content = `✅ **${records.length} 个配额已达标**\n\n| 账户 | ID | 配额 | 区域 | 当前/期望 |\n| --- | --- | --- | --- | --- |\n${rows}\n\n---\n_AWS Toolbox 自动检测 · ${new Date().toLocaleString('zh-CN')}_`;
-
-  await sendNotification(`配额达标通知 (${records.length}条)`, content);
-}
-
-/**
- * Send quota change notification — clean Feishu card grouped by account.
- * Uses column_set for table-like alignment + colored values.
- */
-export async function notifyQuotaChanged(records: { accountId: string; accountName: string; payer?: string; quotaName: string; region: string; oldValue: number; newValue: number; desiredValue: number }[]) {
-  if (records.length === 0) return;
-
-  // Shorten common verbose quota names
-  const shortName = (name: string) => name
-    .replace('Running On-Demand Standard (A, C, D, H, I, M, R, T, Z) instances', 'On-Demand Standard 实例')
-    .replace(/Running On-Demand (.+?) instances/, 'On-Demand $1')
-    .replace('Running Dedicated ', 'Dedicated ')
-    .replace('EC2-VPC Elastic IPs', 'Elastic IPs');
-
-  // Group by account (include payer in key)
-  const byAccount: Record<string, typeof records> = {};
-  const accountPayer: Record<string, string> = {};
-  for (const r of records) {
-    const key = `${r.accountName}|${r.accountId}`;
-    if (!byAccount[key]) byAccount[key] = [];
-    byAccount[key].push(r);
-    if (r.payer) accountPayer[key] = r.payer;
-  }
-
-  const elements: any[] = [];
-  const MAX_ACCOUNTS = 12;
-  const accountKeys = Object.keys(byAccount).slice(0, MAX_ACCOUNTS);
-
-  // Summary line
-  // 只有"实际当前值变化"且达标才算达标；"提交"/"新增"算提升中
-  const isNumeric = (v: any) => typeof v === 'number' || (typeof v === 'string' && /^\d+$/.test(v));
-  const reachedCount = records.filter(r => isNumeric(r.oldValue) && r.desiredValue != null && r.newValue >= r.desiredValue).length;
-  const submittedCount = records.filter(r => !isNumeric(r.oldValue)).length;
-  const inProgressCount = records.length - reachedCount - submittedCount;
-  const summaryParts: string[] = [];
-  if (reachedCount > 0) summaryParts.push(`<font color='green'>✅ ${reachedCount} 项达标</font>`);
-  if (submittedCount > 0) summaryParts.push(`<font color='blue'>📤 ${submittedCount} 项已提交</font>`);
-  if (inProgressCount > 0) summaryParts.push(`<font color='orange'>⏳ ${inProgressCount} 项进行中</font>`);
-  elements.push({
-    tag: 'div',
-    text: { tag: 'lark_md', content: `共 **${records.length}** 项配额变动　｜　${summaryParts.join('　')}` },
-  });
-  elements.push({ tag: 'hr' });
-
-  for (let idx = 0; idx < accountKeys.length; idx++) {
-    const [name, id] = accountKeys[idx].split('|');
-    const items = byAccount[accountKeys[idx]];
-    const payer = accountPayer[accountKeys[idx]];
-
-    // Account header — 显示组织(yanhuang几) + 账户名 + ID
-    const orgLabel = payer ? `<font color='blue'>[${payer}]</font> ` : '';
-    elements.push({
-      tag: 'div',
-      text: { tag: 'lark_md', content: `🏢 ${orgLabel}**${name}**　<font color='grey'>${id}</font>` },
-    });
-
-    // Each quota as an aligned 2-column row
-    for (const r of items) {
-      const submitted = !isNumeric(r.oldValue);
-      const reached = isNumeric(r.oldValue) && r.desiredValue != null && r.newValue >= r.desiredValue;
-      const changeColor = submitted ? 'blue' : reached ? 'green' : 'orange';
-      const badge = submitted ? ' 📤' : reached ? ' ✅' : '';
-      elements.push({
-        tag: 'column_set',
-        flex_mode: 'none',
-        columns: [
-          {
-            tag: 'column', width: 'weighted', weight: 5, vertical_align: 'center',
-            elements: [{ tag: 'div', text: { tag: 'lark_md', content: `${shortName(r.quotaName)}\n<font color='grey'>📍 ${r.region}</font>` } }],
-          },
-          {
-            tag: 'column', width: 'weighted', weight: 3, vertical_align: 'center',
-            elements: [{ tag: 'div', text: { tag: 'lark_md', content: `<font color='grey'>${r.oldValue}</font> → <font color='${changeColor}'>**${r.newValue}**</font>${badge}\n<font color='grey'>目标 ${r.desiredValue ?? '-'}</font>` } }],
-          },
-        ],
-      });
-    }
-
-    if (idx < accountKeys.length - 1) elements.push({ tag: 'hr' });
-  }
-
-  if (Object.keys(byAccount).length > MAX_ACCOUNTS) {
-    elements.push({ tag: 'note', elements: [{ tag: 'plain_text', content: `还有 ${Object.keys(byAccount).length - MAX_ACCOUNTS} 个账户的变动未显示，请登录系统查看` }] });
-  }
-
-  elements.push({ tag: 'note', elements: [{ tag: 'plain_text', content: `AWS Toolbox · ${new Date().toLocaleString('zh-CN')}` }] });
-
-  // Header color: green if all actually reached, else blue
-  const headerColor = (reachedCount === records.length && reachedCount > 0) ? 'green' : 'blue';
-  await sendCard(`配额变动 · ${records.length} 项`, headerColor, elements);
-}
 
 /**
  * 账户角色不可达告警 —— 自动补齐重试到上限仍失败的账户。

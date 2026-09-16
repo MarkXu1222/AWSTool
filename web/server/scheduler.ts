@@ -8,7 +8,7 @@
  */
 import * as aws from './aws-service';
 import { db } from './db';
-import { notifyQuotaChanged } from './notify';
+// notify 已不再被调度器使用（配额变动通知于 2026-09-15 移除）
 import { syncAccountRoles } from './account-roles';
 import { recordDepartures, backfillDepartures } from './account-lifecycle';
 
@@ -174,30 +174,10 @@ async function syncQuotaRequests() {
     lastQuotaSync = new Date().toISOString();
     console.log(`[Scheduler] Quota sync complete: ${total} accounts, ${totalRecords} records`);
 
-    // Notify for any quota change — but skip if this was the first-ever sync (empty snapshot = avoid flooding)
-    try {
-      if (changedRecords.length > 0 && snapshot.size > 0) {
-        const { accounts: accts2 } = db.getAccountsCache();
-        const toNotify = changedRecords.map(r => {
-          const acct = accts2.find((a: any) => a.Id === r.accountId);
-          return {
-            accountId: r.accountId,
-            accountName: acct?.Name || r.accountId,
-            payer: acct?._payer || '',
-            quotaName: r.quotaName,
-            region: r.region,
-            oldValue: r.oldValue,
-            newValue: r.newValue,
-            desiredValue: r.desiredValue,
-          };
-        });
-        await notifyQuotaChanged(toNotify);
-        console.log(`[Scheduler] Notified ${toNotify.length} quota changes to Feishu`);
-      } else if (changedRecords.length > 0) {
-        console.log(`[Scheduler] Skipped notification (first sync, ${changedRecords.length} records)`);
-      }
-    } catch (e: any) {
-      console.error('[Scheduler] Notification check failed:', e.message);
+    // 2026-09-15：按运营要求移除配额变动飞书通知。
+    // 变动数据本身照常落库，配额页与达标统计不受影响，只是不再推送。
+    if (changedRecords.length > 0) {
+      console.log(`[Scheduler] ${changedRecords.length} quota changes recorded (Feishu notification disabled)`);
     }
   } catch (e: any) {
     console.error('[Scheduler] Quota sync failed:', e.message);

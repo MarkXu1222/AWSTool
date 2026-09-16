@@ -11,7 +11,7 @@ AWS 多账户管理平台。用于跨组织管理成员账户：配额提升、�
 
 | 应用 | 位置 | 包名 / 版本 | 状态 | 说明 |
 |------|------|-------------|------|------|
-| **Web 版（生产）** | `web/` | `aws-toolbox-web` / `APP_VERSION 0.32.1` | ✅ **在维护** | 部署在 EC2（https://markxu.co）。日常改动几乎都在这里。 |
+| **Web 版（生产）** | `web/` | `aws-toolbox-web` / `APP_VERSION 0.32.2` | ✅ **在维护** | 部署在 EC2（https://markxu.co）。日常改动几乎都在这里。 |
 | 桌面版（旧） | 根 `src/` + `electron/` | `aws-toolbox` / `0.1.0` | ⚠️ 旧版/基本冻结 | 早期 Electron macOS 版，`main: dist/main/index.js`。除非专门维护桌面版，否则**不要动**。 |
 
 **结论：接到"平台/网站"相关的需求，一律在 `web/` 下操作。**
@@ -46,7 +46,7 @@ web/
 │   ├── scheduler.ts            # 后台定时同步（账户/配额/区域/角色自愈）
 │   ├── doc-generator.ts        # 生成配额提升申请 PDF（puppeteer）
 │   ├── doc-templates.ts        # ★公司模板 + 账户→公司 / payer→公司 映射 + 区域显示名
-│   ├── notify.ts               # 飞书通知（配额变动/达成）
+│   ├── notify.ts               # 飞书通知（账户角色缺失告警）
 │   ├── tag-compliance.ts       # MAP 标签合规（Step Functions 扫描 + S3 报告）
 │   ├── tag-onboarding.ts       # MAP 全自动接入持久化 runner
 │   ├── account-roles.ts        # ★账户角色自愈：探测成员账户角色 → 缺失则触发 StackSet 补齐 → 超限告警
@@ -62,7 +62,7 @@ web/
 │   ├── root-mail-poll.ts       # 按任务游标查询、精确匹配恢复邮件
 │   ├── root-mail-links.ts      # AWS RootUser 链接解析；任务不存正文或重置 URL
 │   ├── case-doc-submitter.ts   # 一键提交提额文档到 Support Case（浏览器自动化）
-│   ├── security-alerts.ts      # 安全告警：登录爆破/新IP/敏感操作/429、5xx 突增 → 飞书
+│   ├── security-alerts.ts      # 安全告警：登录爆破/429、5xx 突增 → 飞书
 │   ├── ops-monitor.ts          # 运维监控指标采集（24h 环形缓冲）+ /api/ops 守卫
 │   ├── bedrock-tools.ts        # Bedrock：Profile 管理/创建/FTU/数据共享/IAM（走 Admin 凭证）
 │   ├── bedrock-delivery.ts     # Bedrock 客户交付 xlsx（v1 三列 / v2 李浩版五列含 TPM/TPD）
