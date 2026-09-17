@@ -169,8 +169,8 @@ export function selectRootEmailTargets(accounts: any[], payer: { name: string; a
   }
   return [...new Set<string>(values)].map(accountId => {
     const account = accounts.find(a => a.Id === accountId);
-    if (!account || account._payer !== payer.name || account._isPayer || accountId === payer.accountId) {
-      throw new RootEmailError(`账户 ${accountId} 不属于所选 payer 的成员账户`, 409);
+    if (!account || account._payer !== payer.name || (account._isPayer && accountId !== payer.accountId)) {
+      throw new RootEmailError(`账户 ${accountId} 不属于所选 payer 或管理账户标记不一致`, 409);
     }
     if ((account.State || account.Status) !== 'ACTIVE') throw new RootEmailError(`账户 ${accountId} 不是 ACTIVE 状态`, 409);
     const email = String(account.Email || '').trim();
@@ -197,9 +197,23 @@ export function selectRootEmailBatchTargets(accounts: any[], payers: Array<{ nam
       throw new RootEmailError(`账户 ${accountId} 无法匹配所选或已配置的 payer`, 409);
     }
     const payer = owners[0];
-    if (payers.some(p => p.accountId === accountId)) throw new RootEmailError(`账户 ${accountId} 是管理账户，不能批量重置`, 409);
+    if (payers.some(p => p.accountId === accountId && p.accountId !== payer.accountId)) {
+      throw new RootEmailError(`账户 ${accountId} 的管理账户归属与 payer 配置不一致`, 409);
+    }
     const [target] = selectRootEmailTargets(accounts, payer, [accountId]);
     return { ...target, payerAccountId: payer.accountId, payerName: payer.name };
+  });
+}
+
+/** List configured organizations' management and member accounts for the email recovery flow. */
+export function rootEmailCatalogAccounts(accounts: any[], payers: Array<{ name: string; accountId: string }>) {
+  const byName = new Map(payers.map(p => [p.name, p.accountId]));
+  return accounts.filter(a => byName.has(a._payer)).map(a => {
+    let eligible = false;
+    try { selectRootEmailBatchTargets(accounts, payers, [a.Id]); eligible = true; }
+    catch (error) { if (!(error instanceof RootEmailError)) throw error; }
+    return { accountId: String(a.Id), name: String(a.Name || ''), email: String(a.Email || '').trim(),
+      payerAccountId: byName.get(a._payer)!, state: a.State || a.Status || 'UNKNOWN', eligible };
   });
 }
 

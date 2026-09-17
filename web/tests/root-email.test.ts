@@ -363,14 +363,15 @@ test('mail waiting survives restart with its cursor, blocks duplicate sends, and
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
-test('batch selection deduplicates members and rejects foreign payers, management and inactive accounts', () => {
+test('batch selection accepts management and members but rejects foreign payers and inactive accounts', () => {
   const payer = { name: 'payer-a', accountId: '999999999999' };
   const member = { Id: input.accountId, Email: email, _payer: payer.name, Status: 'ACTIVE' };
   const accounts = [member, { ...member, Id: '222222222222', _payer: 'payer-b' },
     { ...member, Id: '333333333333', Status: 'SUSPENDED' },
     { ...member, Id: payer.accountId, _isPayer: true }];
   assert.equal(selectRootEmailTargets(accounts, payer, [input.accountId, input.accountId]).length, 1);
-  for (const id of ['222222222222', '333333333333', payer.accountId, '000000000000']) {
+  assert.deepEqual(selectRootEmailTargets(accounts, payer, [payer.accountId]), [{ accountId: payer.accountId, email }]);
+  for (const id of ['222222222222', '333333333333', '000000000000']) {
     assert.throws(() => selectRootEmailTargets(accounts, payer, [input.accountId, id]));
   }
   assert.throws(() => selectRootEmailTargets(accounts, payer, []));

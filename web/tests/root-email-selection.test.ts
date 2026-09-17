@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { RootEmailStore, selectRootEmailBatchTargets } from '../server/root-email-core';
+import { RootEmailStore, rootEmailCatalogAccounts, selectRootEmailBatchTargets } from '../server/root-email-core';
 import { filterRootAccounts, matchRootAccountImport, rootAccountBatchPlan } from '../client/src/utils/root-account-selection';
 
 const payers = [{ name: 'payer-a', accountId: '999999999999' }, { name: 'payer-b', accountId: '888888888888' }];
@@ -29,7 +29,7 @@ test('global selection derives each real payer and accepts a single account with
 });
 
 test('global and payer-filtered selections fail closed for unknown, ambiguous or ineligible accounts', () => {
-  for (const id of ['234567890123', '345678901234', '999999999999', '456789012345']) {
+  for (const id of ['234567890123', '345678901234', '456789012345']) {
     assert.throws(() => selectRootEmailBatchTargets(accounts, payers, ['012345678901', id]));
   }
   assert.throws(() => selectRootEmailBatchTargets(accounts, payers, ['123456789012'], payers[0].accountId));
@@ -173,4 +173,52 @@ test('bulk target resolution allows 102 validated accounts while retaining the d
   const ids = source.map(a => a.Id);
   assert.throws(() => selectRootEmailBatchTargets(source, payers, ids));
   assert.equal(selectRootEmailBatchTargets(source, payers, ids, '', 500).length, 102);
+});
+
+
+test('management accounts are searchable, Excel-importable and accepted in mixed durable batches', () => {
+  const source = [...accounts, { Id: payers[1].accountId, _payer: payers[1].name,
+    _isPayer: true, Status: 'ACTIVE', Email: 'payer-b@example.test' }];
+  const list = rootEmailCatalogAccounts(source, payers);
+  for (const payer of payers) {
+    const [account] = filterRootAccounts(list, '', payer.accountId, false, []);
+    assert.equal(account.eligible, true);
+    assert.equal(account.accountId, account.payerAccountId);
+    assert.deepEqual(matchRootAccountImport([payer.accountId], list).matched, [account]);
+    const [target] = selectRootEmailBatchTargets(source, payers, [payer.accountId], payer.accountId);
+    assert.equal(target.payerName, payer.name);
+    assert.equal(target.accountId, target.payerAccountId);
+  }
+  const ids = [payers[0].accountId, '012345678901', payers[1].accountId, '123456789012'];
+  const inputs = selectRootEmailBatchTargets(source, payers, ids)
+    .map(target => ({ ...target, createdBy: 'operator', createdByUserId: '2' }));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'root-payer-'));
+  try {
+    const file = path.join(dir, 'jobs.json');
+    new RootEmailStore(file).createBatchGroup(inputs, { batchId: randomUUID(), autoSetPassword: true });
+    const jobs = new RootEmailStore(file).list();
+    assert.equal(jobs.length, 4);
+    for (const job of jobs) {
+      // The executor revalidates every stored job through this same selector.
+      const [current] = selectRootEmailBatchTargets(source, payers, [job.accountId], job.payerAccountId);
+      assert.equal(current.email, job.email);
+      assert.equal(current.payerName, job.payerName);
+    }
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('management recovery retains ownership, status, mailbox and duplicate-account validation', () => {
+  const management = { ...accounts[4], _isPayer: true };
+  for (const bad of [
+    { ...management, State: 'SUSPENDED' }, { ...management, Email: '' },
+    { ...management, _payer: 'payer-b' },
+    { ...management, Id: '456789012345' },
+  ]) {
+    assert.throws(() => selectRootEmailBatchTargets([bad], payers, [bad.Id]));
+    assert.equal(rootEmailCatalogAccounts([bad], payers)[0].eligible, false);
+  }
+  assert.throws(() => selectRootEmailBatchTargets([management], payers, [management.Id], payers[1].accountId));
+  assert.throws(() => selectRootEmailBatchTargets([management, management], payers, [management.Id]));
+  assert.ok(rootEmailCatalogAccounts([management, management], payers).every(a => !a.eligible));
+  assert.equal(rootEmailCatalogAccounts([{ ...management, _payer: 'unknown' }], payers).length, 0);
 });

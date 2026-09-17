@@ -13,7 +13,7 @@ export function matchRootAccountImport(ids: string[], accounts: RootEmailAccount
   for (const accountId of new Set(ids)) {
     const candidates = accounts.filter(account => account.accountId === accountId);
     if (candidates.length !== 1) {
-      rejected.push({ accountId, reason: candidates.length ? '账户缓存存在重复记录' : '未找到可管理的成员账户' });
+      rejected.push({ accountId, reason: candidates.length ? '账户缓存存在重复记录' : '未找到可管理的账户' });
     } else if (!candidates[0].eligible) {
       rejected.push({ accountId, reason: candidates[0].state !== 'ACTIVE' ? `账户状态为 ${candidates[0].state}` : '缺少有效 Root 邮箱' });
     } else matched.push(candidates[0]);

@@ -5,7 +5,7 @@ import { AwsRootEmailSession, AwsRootPasswordSession, MAX_ROOT_PASSWORD_BROWSER_
   RootEmailBrowserAutomationError, RootPasswordAutomationError, runRootEmailOcr } from './root-email-browser';
 import { canRetryFailedRootEmailJob, canRetryRootEmailBrowser, type CredentialDownloadSlot, hasNewerRootEmailJob,
   LEGACY_ROOT_EMAIL_BROWSER_FAILURE, RootEmailError, RootEmailJob, RootEmailStore, isPendingEmailJob,
-  manualRootResetFallbackExpiresAt, sendRootEmail, selectRootEmailBatchTargets, MAX_ROOT_EMAIL_BROWSER_ATTEMPTS,
+  manualRootResetFallbackExpiresAt, sendRootEmail, selectRootEmailBatchTargets, rootEmailCatalogAccounts, MAX_ROOT_EMAIL_BROWSER_ATTEMPTS,
   MAX_ROOT_PASSWORD_BATCH, MAX_ROOT_EMAIL_TASKS, ROOT_MANUAL_FALLBACK_TTL_MS } from './root-email-core';
 import { rootEmailDeliveryState, rootEmailMailTimeoutDetail } from './root-email-core';
 import { RootEmailManualInput, ROOT_MANUAL_CAPTCHA_TTL_MS } from './root-email-manual';
@@ -135,12 +135,8 @@ export function listRootEmails(accountId: string, user: RootEmailUser) {
 export function rootEmailCatalog() {
   const { accounts, cachedAt } = db.getAccountsCache();
   const payers = listConfiguredPayers().map(p => ({ accountId: p.accountId, name: p.name }));
-  const byName = new Map(payers.map(p => [p.name, p.accountId]));
-  return { payers, cachedAt, maxBatchSize: MAX_ROOT_PASSWORD_BATCH, maxSubmissionSize: MAX_ROOT_EMAIL_TASKS, accounts: accounts
-    .filter((a: any) => byName.has(a._payer) && !a._isPayer && a.Id !== byName.get(a._payer))
-    .map((a: any) => ({ accountId: String(a.Id), name: String(a.Name || ''), email: String(a.Email || ''),
-      payerAccountId: byName.get(a._payer), state: a.State || a.Status || 'UNKNOWN',
-      eligible: (a.State || a.Status) === 'ACTIVE' && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(a.Email || '') })) };
+  return { payers, cachedAt, maxBatchSize: MAX_ROOT_PASSWORD_BATCH, maxSubmissionSize: MAX_ROOT_EMAIL_TASKS,
+    accounts: rootEmailCatalogAccounts(accounts, payers) };
 }
 
 function credentialAvailable(job: RootEmailJob): boolean {

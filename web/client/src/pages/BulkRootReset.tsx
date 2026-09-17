@@ -211,7 +211,7 @@ const BulkRootResetPage: React.FC<{ canOperate?: boolean }> = ({ canOperate = fa
     {!canOperate && <Alert type="info" showIcon message="当前为仅查看权限"
       description="只能查看自己创建的批次进度，不能创建、停止任务或下载 Root 凭证。" />}
     <Alert type="warning" showIcon message="高风险操作：将真实修改 AWS Root 密码"
-      description="一次最多选择 500 个成员账户，系统按每批 20 个自动拆分。普通用户只看到本人批次，Admin 可查看全部。下载 CSV 不再二次验证 MFA；新密码以 AES-256-GCM 密文永久保存在本地，可由创建者和 Admin 按权限重复下载。服务器与备份必须按永久 Root 凭证库保护。" />
+      description="支持 Payer 管理账户和成员账户，一次最多选择 500 个账户，系统按每批 20 个自动拆分。普通用户只看到本人批次，Admin 可查看全部。下载 CSV 不再二次验证 MFA；新密码以 AES-256-GCM 密文永久保存在本地，可由创建者和 Admin 按权限重复下载。服务器与备份必须按永久 Root 凭证库保护。" />
     {error && <Alert type="error" showIcon message={error} closable onClose={() => setError('')} />}
     {available && !available.ready && <Alert type="warning" showIcon message="发送环境尚未就绪" description={available.detail} />}
     {available && available.ready && !available.mailboxConfigured && <Alert type="error" showIcon message="邮箱 API 未配置"
@@ -237,7 +237,7 @@ const BulkRootResetPage: React.FC<{ canOperate?: boolean }> = ({ canOperate = fa
           <Button icon={<ReloadOutlined />} loading={loading} disabled={busy || importing}
             onClick={() => { setError(''); setRefresh(value => value + 1); }}>刷新列表</Button>
         </Space>
-        <Typography.Text type="secondary">直接搜索账户即可单独重置；也可导入 .xlsx 批量选择，支持跨 payer。Excel 中每行填写一个 12 位账户 ID，含前导零的 ID 请设为文本。</Typography.Text>
+        <Typography.Text type="secondary">Payer 管理账户和成员账户均可直接搜索并单独重置；也可导入 .xlsx 批量选择，支持跨 payer。Excel 中每行填写一个 12 位账户 ID，含前导零的 ID 请设为文本。</Typography.Text>
         <Space wrap>
           {canOperate && <><Button disabled={busy || loading || importing || !filtered.some(account => account.eligible)}
             onClick={() => setSelected(filtered.filter(account => account.eligible).slice(0, maxSubmissionSize).map(account => account.accountId))}>
@@ -250,12 +250,14 @@ const BulkRootResetPage: React.FC<{ canOperate?: boolean }> = ({ canOperate = fa
         </Space>
         <Table<RootEmailAccount> size="small" rowKey="accountId" loading={loading} dataSource={filtered}
           pagination={{ pageSize: 20, showSizeChanger: true, showTotal: total => `共 ${total} 个账户` }} scroll={{ x: 760 }}
-          locale={{ emptyText: selectedOnly ? '当前筛选下没有已选账户，可取消“只看已选”或清除筛选' : '没有匹配的成员账户，请检查账户 ID 或刷新列表' }}
+          locale={{ emptyText: selectedOnly ? '当前筛选下没有已选账户，可取消“只看已选”或清除筛选' : '没有匹配的账户，请检查账户 ID 或刷新列表' }}
           rowSelection={canOperate ? { selectedRowKeys: selected, preserveSelectedRowKeys: true,
             onChange: keys => setSelected(keys.map(String)), getCheckboxProps: account => ({ disabled: !account.eligible || busy || importing }) } : undefined}
           columns={[
             { title: '账户 ID', dataIndex: 'accountId', width: 150 },
             { title: '名称', dataIndex: 'name', ellipsis: true },
+            { title: '类型', key: 'accountType', width: 130, render: (_, account) =>
+              account.accountId === account.payerAccountId ? <Tag color="blue">Payer 管理账户</Tag> : '成员账户' },
             { title: '所属 Payer', dataIndex: 'payerAccountId', width: 150, render: payerLabel },
             { title: 'Root 邮箱', dataIndex: 'email', width: 260, ellipsis: true },
             { title: '状态', dataIndex: 'state', width: 120,
@@ -420,7 +422,9 @@ const BulkRootResetPage: React.FC<{ canOperate?: boolean }> = ({ canOperate = fa
           description="操作开始后，已发送的恢复邮件无法撤回。系统不会重试结果未知的一次性链接。" />
         <Typography.Text>自动分为 {rootAccountBatchPlan(selectedAccounts.length, maxBatchSize)}，全部批次一次确认，后台依次处理。</Typography.Text>
         <Table<RootEmailAccount> size="small" rowKey="accountId" dataSource={selectedAccounts} pagination={false} scroll={{ y: 240 }}
-          columns={[{ title: '账户 ID', dataIndex: 'accountId' }, { title: '所属 Payer', dataIndex: 'payerAccountId', render: payerLabel }]} />
+          columns={[{ title: '账户 ID', dataIndex: 'accountId' },
+            { title: '类型', key: 'accountType', render: (_, account) => account.accountId === account.payerAccountId ? 'Payer 管理账户' : '成员账户' },
+            { title: '所属 Payer', dataIndex: 'payerAccountId', render: payerLabel }]} />
         <Typography.Text>请输入账户数量：<Typography.Text code>{selectedAccounts.length}</Typography.Text></Typography.Text>
         <Input aria-label="确认账户数量" value={confirmAccountCount} onChange={event => setConfirmAccountCount(event.target.value.replace(/\D/g, ''))}
           placeholder="输入账户数量" disabled={busy} inputMode="numeric" autoComplete="off" />
