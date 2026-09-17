@@ -4,11 +4,17 @@
 
 独立导航「批量设置 Root 密码」（`/rootreset`）创建自动改密批次。系统支持全局搜索账户 ID、名称或邮箱并单独重置，也可勾选或 Excel 导入最多 500 个 ACTIVE 成员账户（自动按每批 20 个拆分），支持同批跨 payer。发送恢复邮件、精确匹配收件人和请求时间、重新校验 AWS 一次性链接后，生成并提交 24 位强随机密码。创建批次核对账户清单，输入账户数量和当前 TOTP，无需输入 payer 名称。
 
+### 人工验证码不阻塞后续任务（0.32.3）
+
+`manual_captcha` 会保留原会话、挑战图片和原有 10 分钟有效期，同时释放活动执行槽。执行器用任务 Map 跟踪所有存活会话，只允许一个会话执行浏览器操作。收到手工输入/刷新请求后进入 `resuming`，按先后顺序优先于新账户恢复；等待重新取得执行槽同样受人工期限约束。过期或取消的旧任务只能释放自己持有的槽，不能清空另一个账户的执行状态。
+
+取消任务/批次和停止服务会覆盖活动、人工等待及待恢复的全部对应会话；服务重启仍将无法恢复的浏览器会话标为 interrupted，不保存图片、验证码答案或重置 URL。队列不再被一个等待人工验证码的账户占住，列表分别显示发信、待手工验证码和待继续验证数量。
+
 ### 自动分批（0.32.1）
 
 同一次确认可提交 1–500 个账户，后端按每批 20 个自动分组。例如 102 个生成 6 批（20×5＋2），一次核对总数量并通过一次 TOTP。所有目标先完整验证并检查全局队列余量，然后一次原子写入；任一目标冲突或队列容量不足时整组不创建。请求 ID 覆盖整次提交，重试不会重复创建部分子批次。
 
-任务逐条保存 `submissionId`、`batchIndex`、`batchCount`，每个子批次保留独立 `batchId`；单账户旧任务与单批请求兼容。`GET /api/aws/root-email/batches/:id` 的 `relatedBatches` 返回同次提交的可见批次摘要，页面展示各批进度并可切换查看、停止当前批次和下载当前批次 CSV。当前批次结束后，仍持续刷新其余未结束的分批进度。执行器继续单浏览器串行，已验证的恢复链接优先处理。
+任务逐条保存 `submissionId`、`batchIndex`、`batchCount`，每个子批次保留独立 `batchId`；单账户旧任务与单批请求兼容。`GET /api/aws/root-email/batches/:id` 的 `relatedBatches` 返回同次提交的可见批次摘要，页面展示各批进度并可切换查看、停止当前批次和下载当前批次 CSV。当前批次结束后，仍持续刷新其余未结束的分批进度。执行器继续保持单个活动浏览器操作，待手工会话让出执行槽，已验证的恢复链接优先处理。
 
 ### 全局账户选择与 Excel 导入（0.32.0）
 
@@ -46,7 +52,7 @@ iframe 导航、域名变化、重复控件或不支持的挑战会停止；提�
 
 新任务每个验证码阶段最多自动识别 9 张，浏览器重建仍最多 3 次。9 张用尽后保留当前 AWS 会话，任务进入 `running/manual_captcha`，列表显示「手工输入验证码」链接。操作者在站内弹窗查看裁剪后的验证码、手动刷新或输入 6 位字符；每次图片使用一次性 challenge ID，重复点击、旧图片和其他任务的输入不能复用。提交前重新截图核对图片哈希，AWS 已换图时要求重新输入。只有明确拒绝才允许继续填写；提交结果不明仍转为只读查邮箱，不自动重发。
 
-每个手工阶段从首次进入起保留 10 分钟，刷新或输错不会延长；发信浏览器总执行期限为 40 分钟。等待期间后续浏览器任务暂缓，用户可取消该账户或批次。图片和输入只在进程/弹窗内存中存在，普通列表不返回图片、答案或 URL；持久化只保存阶段及次数。接口沿用登录 MFA 会话并逐次复验 owner/admin 操作权限，无权查看的用户也不能读取图片；验证码字段在通用审计中脱敏。取消、权限撤销和服务停止会解除等待；重启把旧运行会话标记 interrupted，不恢复图片或重放输入。
+每个手工阶段从首次进入起保留 10 分钟，刷新或输错不会延长；发信浏览器总执行期限为 40 分钟。等待期间保留原独立浏览器会话并让出执行槽，后续账户继续执行；人工回复后进入优先恢复队列，获得执行槽后重新检查权限、原图片 ID 和有效期再继续。不会抢占正在提交的账户。用户可取消该账户或批次。图片和输入只在进程/弹窗内存中存在，普通列表不返回图片、答案或 URL；持久化只保存阶段及次数。接口沿用登录 MFA 会话并逐次复验 owner/admin 操作权限，无权查看的用户也不能读取图片；验证码字段在通用审计中脱敏。取消、权限撤销和服务停止会解除等待；重启把旧运行会话标记 interrupted，不恢复图片或重放输入。
 
 `emailDeliveryState` 区分 `not_submitted`、`unconfirmed`、`aws_confirmed`、`received`。等待邮箱不代表验证码已通过：未见 AWS 发信确认时显示「发信未确认·核查邮箱」，超时说明也明确可能验证未通过或页面异常。只有 AWS 明确确认才显示「已发信·等待收件」。旧版同类超时记录仅在展示时修正文案，不改写历史任务。成功收到并核对邮件后才继续原来的密码设置流程。
 
@@ -155,7 +161,7 @@ PY
 ## 验证
 
 ```sh
-node --import tsx --test tests/root-email-selection.test.ts tests/root-email.test.ts tests/root-email-manual.test.ts tests/root-email-reconcile.test.ts tests/root-email-network.test.ts tests/root-email-security-frame.test.ts tests/root-mail-links.test.ts tests/mail-api.test.ts tests/root-reset-permissions.test.ts
+node --import tsx --test tests/root-email-execution-slot.test.ts tests/root-email-selection.test.ts tests/root-email.test.ts tests/root-email-manual.test.ts tests/root-email-reconcile.test.ts tests/root-email-network.test.ts tests/root-email-security-frame.test.ts tests/root-mail-links.test.ts tests/mail-api.test.ts tests/root-reset-permissions.test.ts
 npx tsc --noEmit -p server/tsconfig.json
 npx tsc -p client/tsconfig.json
 npx vite build --config client/vite.config.ts

@@ -9,6 +9,7 @@ import { canRetryFailedRootEmailJob, canRetryRootEmailBrowser, type CredentialDo
   MAX_ROOT_PASSWORD_BATCH, MAX_ROOT_EMAIL_TASKS, ROOT_MANUAL_FALLBACK_TTL_MS } from './root-email-core';
 import { rootEmailDeliveryState, rootEmailMailTimeoutDetail } from './root-email-core';
 import { RootEmailManualInput, ROOT_MANUAL_CAPTCHA_TTL_MS } from './root-email-manual';
+import { RootEmailExecutionSlot } from './root-email-execution-slot';
 import { reconcileRootEmailSubmission } from './root-email-reconcile';
 import { listConfiguredPayers } from './aws-service';
 import { mailbox, mailApiConfigured, MailApiError } from './mail-api';
@@ -22,7 +23,8 @@ import { assertRootPasswordEncryptionReady, buildRootCredentialCsv, decryptRootP
 let store: RootEmailStore | undefined;
 let timer: NodeJS.Timeout | undefined;
 let stopping = false;
-let active: { id: string; controller: AbortController; promise: Promise<void> } | undefined;
+const executions = new Map<string, { controller: AbortController; promise: Promise<void> }>();
+const executionSlot = new RootEmailExecutionSlot();
 let runtimeCheck: { checkedAt: number; ready: boolean; detail: string } | undefined;
 let checkingRuntime: Promise<void> | undefined;
 let mailTimer: NodeJS.Timeout | undefined;
@@ -226,7 +228,10 @@ function batchSummary(jobs: RootEmailJob[], user: RootEmailUser) {
     payerName: payerCount === 1 ? first.payerName! : `跨 ${payerCount} 个 payer`,
     submissionId: first.submissionId, batchIndex: first.batchIndex, batchCount: first.batchCount,
     createdBy: first.createdBy, createdAt: first.createdAt, total: jobs.length,
-    queued: count('queued'), running: count('running'), sent: jobs.filter(job => !!job.sentAt).length, failed: count('failed'),
+    queued: count('queued'), running: jobs.filter(job => job.status === 'running' && !['manual_captcha', 'resuming'].includes(job.phase)).length,
+    manualWaiting: jobs.filter(job => job.status === 'running' && job.phase === 'manual_captcha').length,
+    resuming: jobs.filter(job => job.status === 'running' && job.phase === 'resuming').length,
+    sent: jobs.filter(job => !!job.sentAt).length, failed: count('failed'),
     waitingMail: count('waiting_mail'), linkReady: count('link_ready'), mailFailed: count('mail_failed'),
     settingPassword: count('setting_password'), passwordSet: count('password_set'),
     passwordFailed: count('password_failed'), passwordUnknown: count('password_unknown'),
@@ -331,7 +336,7 @@ export function cancelRootEmailBatch(id: string, user: RootEmailUser) {
   const jobs = batchJobs(id);
   if (!jobs.every(j => canManageRootEmailJob(user, j))) throw new RootEmailError('无权停止此批次', 403);
   const ids = new Set(jobs.map(job => job.id));
-  if (active && ids.has(active.id)) active.controller.abort();
+  for (const [jobId, execution] of executions) if (ids.has(jobId)) execution.controller.abort();
   if (mailActive && ids.has(mailActive.id)) mailActive.controller.abort();
   getStore().cancelQueuedBatch(id);
   audit({ ...jobs[0], detail: `停止批次 ${id}；已发送的恢复邮件无法撤回，提交中的密码结果可能未知` }, 'ROOT_EMAIL_BATCH_CANCEL');
@@ -342,7 +347,7 @@ export function cancelRootEmail(id: string, user: RootEmailUser) {
   const currentStore = getStore();
   const initial = currentStore.get(id);
   if (!initial || !canManageRootEmailJob(user, initial)) throw new RootEmailError('无权停止此任务', 403);
-  if (active?.id === id) active.controller.abort();
+  executions.get(id)?.controller.abort();
   if (mailActive?.id === id) mailActive.controller.abort();
   const latest = currentStore.get(id);
   if (!latest || !isPendingEmailJob(latest)) return jobView(latest || initial, user);
@@ -390,8 +395,24 @@ async function execute(job: RootEmailJob, controller: AbortController) {
     while (true) {
       ensureRunning();
       const { image, imageId } = await session!.captureCaptcha();
-      const response = await manualInput.wait(image, purpose, manualDeadline.expires);
+      progress('manual_captcha', currentStore.get(job.id)!.attempts,
+        '待手工验证码；原会话已保留，后续账户继续处理。请在有效期内点击「手工输入验证码」');
+      const waiting = manualInput.wait(image, purpose, manualDeadline.expires);
+      executionSlot.release(job.id);
+      const response = await waiting;
       ensureRunning();
+      progress('resuming', currentStore.get(job.id)!.attempts, '已收到手工操作，等待当前账户处理结束后优先继续验证');
+      const remaining = manualDeadline.expires - Date.now();
+      if (remaining <= 0) throw new RootEmailError('人工验证码会话已过期，请检查任务后重新操作', 408);
+      const resumeSignal = AbortSignal.any([controller.signal, AbortSignal.timeout(remaining)]);
+      try { await executionSlot.acquire(job.id, resumeSignal); }
+      catch (error) {
+        controller.signal.throwIfAborted();
+        if (resumeSignal.aborted) throw new RootEmailError('等待恢复人工验证码会话超时，请检查任务后重新操作', 408);
+        throw error;
+      }
+      ensureRunning();
+      if (Date.now() >= manualDeadline.expires) throw new RootEmailError('人工验证码会话已过期，请检查任务后重新操作', 408);
       if (response.action === 'submit') {
         if ((await session!.captureCaptcha()).imageId !== imageId) {
           progress('manual_captcha', currentStore.get(job.id)!.attempts, 'AWS 验证码图片已变化，请重新打开手工输入');
@@ -774,18 +795,18 @@ export function prepareRootCredentialCsv(id: string, user: RootEmailUser,
 
 function tick() {
   if (!store || stopping) return;
-  if (active) return;
+  if (executionSlot.busy) return;
   // Reset links are time-sensitive, so confirmed links take priority over new recovery-email requests.
   const job = store.list().find(j => j.status === 'link_ready' && j.autoSetPassword === true)
     || store.list().find(j => j.status === 'queued');
-  if (!job) return;
+  if (!job || executions.has(job.id) || !executionSlot.tryAcquire(job.id)) return;
   const controller = new AbortController();
   const promise = (job.status === 'link_ready' ? executePassword(job, controller) : execute(job, controller)).catch(() => {
     // A persistence/cleanup failure must not start further jobs with uncertain state.
     stopping = true;
     console.error('[RootEmail] 任务保存或浏览器清理失败，执行器已停止');
-  }).finally(() => { active = undefined; });
-  active = { id: job.id, controller, promise };
+  }).finally(() => { executionSlot.release(job.id); executions.delete(job.id); });
+  executions.set(job.id, { controller, promise });
 }
 
 /** Start only after the existing billing runner has acquired the process-wide OS lock. */
@@ -831,8 +852,8 @@ export async function stopRootEmailRunner() {
   timer = undefined;
   if (mailTimer) clearInterval(mailTimer);
   mailTimer = undefined;
-  active?.controller.abort();
+  for (const execution of executions.values()) execution.controller.abort();
   mailActive?.controller.abort();
-  await Promise.all([active?.promise, mailActive?.promise]);
+  await Promise.all([...executions.values()].map(execution => execution.promise).concat(mailActive ? [mailActive.promise] : []));
   credentialDownloads.clear();
 }

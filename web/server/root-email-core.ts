@@ -4,7 +4,7 @@ import { randomUUID } from 'crypto';
 
 export type RootEmailStatus = 'queued' | 'running' | 'email_sent' | 'waiting_mail' | 'link_ready' | 'setting_password'
   | 'password_set' | 'password_failed' | 'password_unknown' | 'mail_failed' | 'failed' | 'cancelled' | 'interrupted';
-export type RootEmailPhase = 'queued' | 'opening' | 'captcha' | 'manual_captcha' | 'submitting' | 'waiting_mail' | 'setting_password' | 'done';
+export type RootEmailPhase = 'queued' | 'opening' | 'captcha' | 'manual_captcha' | 'resuming' | 'submitting' | 'waiting_mail' | 'setting_password' | 'done';
 export type RootManualFallbackReason = 'password_not_submitted';
 export type RootEmailBrowserStage = 'runtime' | 'load_driver' | 'create_profile' | 'launch_browser' | 'create_page'
   | 'configure_page' | 'navigate' | 'wait_entry' | 'enter_recovery' | 'capture_captcha' | 'recognize_captcha'

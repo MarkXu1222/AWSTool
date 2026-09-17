@@ -308,6 +308,8 @@ const BulkRootResetPage: React.FC<{ canOperate?: boolean }> = ({ canOperate = fa
               ? 'exception' : batch.done === batch.total ? 'normal' : 'active'} />
           <Space wrap>
             <Tag>排队 {batch.queued}</Tag><Tag color="processing">发信 {batch.running}</Tag>
+            {!!batch.manualWaiting && <Tag color="warning">待手工验证码 {batch.manualWaiting}</Tag>}
+            {!!batch.resuming && <Tag color="processing">待继续验证 {batch.resuming}</Tag>}
             <Tag color="success">已发信 {batch.sent}</Tag><Tag color="processing">等待邮件 {batch.waitingMail || 0}</Tag>
             <Tag color="processing">链接就绪 {batch.linkReady || 0}</Tag><Tag color="processing">设置密码 {batch.settingPassword || 0}</Tag>
             <Tag color="success">密码成功 {batch.passwordSet || 0}</Tag><Tag color="error">密码失败 {batch.passwordFailed || 0}</Tag>

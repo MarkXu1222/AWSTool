@@ -83,4 +83,5 @@ test('mail timeout distinguishes unconfirmed CAPTCHA submissions from AWS confir
   assert.equal(rootEmailStatusLabel({ status: 'waiting_mail', emailDeliveryState: 'unconfirmed' } as RootEmailJobView, ''), '发信未确认·核查邮箱');
   assert.equal(rootEmailStatusLabel({ status: 'waiting_mail', emailDeliveryState: 'aws_confirmed' } as RootEmailJobView, ''), '已发信·等待收件');
   assert.equal(rootEmailStatusLabel({ status: 'running', phase: 'manual_captcha' } as RootEmailJobView, ''), '待手工验证码');
+  assert.equal(rootEmailStatusLabel({ status: 'running', phase: 'resuming' } as RootEmailJobView, ''), '等待继续验证');
 });

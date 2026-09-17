@@ -68,7 +68,7 @@ export default function RootManualCaptchaModal({ job, onClose, onProgress }: {
       {error && <Alert type="error" showIcon message={error} />}
       {challenge ? <>
         <Alert type="info" showIcon message={challenge.purpose === 'identity' ? '登录安全验证码' : '恢复邮件验证码'}
-          description={`请在 ${new Date(challenge.expiresAt).toLocaleTimeString()} 前完成。等待期间后续账户暂缓处理；验证通过后任务会自动继续。`} />
+          description={`请在 ${new Date(challenge.expiresAt).toLocaleTimeString()} 前完成。等待期间后续账户继续处理；提交后将排队优先恢复本账户验证。`} />
         <img src={challenge.image} alt="当前 AWS 验证码" style={{ maxWidth: '100%', width: 300, objectFit: 'contain' }} />
         <Input aria-label="手工验证码" value={answer} maxLength={6} autoComplete="off" spellCheck={false}
           placeholder="输入图片中的 6 位字母或数字" onChange={event => setAnswer(event.target.value)}

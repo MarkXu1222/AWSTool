@@ -14,7 +14,7 @@ export interface RootEmailJobView {
   email: string;
   status: 'queued' | 'running' | 'email_sent' | 'waiting_mail' | 'link_ready' | 'setting_password' | 'password_set'
     | 'password_failed' | 'password_unknown' | 'mail_failed' | 'failed' | 'cancelled' | 'interrupted';
-  phase: 'queued' | 'opening' | 'captcha' | 'manual_captcha' | 'submitting' | 'waiting_mail' | 'setting_password' | 'done';
+  phase: 'queued' | 'opening' | 'captcha' | 'manual_captcha' | 'resuming' | 'submitting' | 'waiting_mail' | 'setting_password' | 'done';
   attempts: number;
   maxCaptchaAttempts: number;
   emailDeliveryState: 'not_submitted' | 'unconfirmed' | 'aws_confirmed' | 'received';
@@ -70,6 +70,8 @@ export interface RootEmailBatchView {
   done: number;
   queued: number;
   running: number;
+  manualWaiting?: number;
+  resuming?: number;
   sent: number;
   failed: number;
   cancelled: number;
