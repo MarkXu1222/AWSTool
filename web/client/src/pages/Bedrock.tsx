@@ -11,12 +11,45 @@ import {
 import { ReloadOutlined, PlusOutlined, DeleteOutlined, TagsOutlined, ThunderboltOutlined, DownloadOutlined, UserAddOutlined } from '@ant-design/icons';
 import { api } from '../api';
 
+/**
+ * Bedrock 可用区域全集，与 Quotas.tsx 的 BEDROCK_REGIONS 保持一致。
+ * 之前这里只写了 10 个区域，ap-southeast-5（马来西亚）、ap-southeast-7（泰国）、
+ * ap-east-2（台北）、eu-south-*、mx-central-1 等全都选不到，
+ * 导致这些区域的 Profile / 配额 / 数据共享在页面上完全不可达。
+ * 未开通或暂不支持 Bedrock 的区域会由后端作为部分失败返回，不影响其它区域。
+ */
 const BEDROCK_REGIONS = [
-  'us-east-1', 'us-west-2', 'us-east-2', 'us-west-1',
-  'eu-west-1', 'eu-west-2', 'eu-central-1',
-  'ap-northeast-1', 'ap-southeast-1', 'ap-southeast-2',
+  'us-east-1', 'us-east-2', 'us-west-1', 'us-west-2',
+  'ca-central-1', 'ca-west-1',
+  'eu-central-1', 'eu-central-2', 'eu-north-1', 'eu-south-1', 'eu-south-2',
+  'eu-west-1', 'eu-west-2', 'eu-west-3',
+  'ap-east-2', 'ap-northeast-1', 'ap-northeast-2', 'ap-northeast-3',
+  'ap-south-1', 'ap-south-2',
+  'ap-southeast-1', 'ap-southeast-2', 'ap-southeast-3', 'ap-southeast-4',
+  'ap-southeast-5', 'ap-southeast-6', 'ap-southeast-7',
+  'af-south-1', 'sa-east-1', 'mx-central-1',
 ];
-const REGION_OPTS = BEDROCK_REGIONS.map(r => ({ label: r, value: r }));
+// 中文别名，下拉里直接看得懂是哪个地区（搜索时中英文都能命中）
+const REGION_LABEL: Record<string, string> = {
+  'us-east-1': '弗吉尼亚', 'us-east-2': '俄亥俄', 'us-west-1': '加州', 'us-west-2': '俄勒冈',
+  'ca-central-1': '加拿大', 'ca-west-1': '卡尔加里',
+  'eu-central-1': '法兰克福', 'eu-central-2': '苏黎世', 'eu-north-1': '斯德哥尔摩',
+  'eu-south-1': '米兰', 'eu-south-2': '西班牙',
+  'eu-west-1': '爱尔兰', 'eu-west-2': '伦敦', 'eu-west-3': '巴黎',
+  'ap-east-2': '台北', 'ap-northeast-1': '东京', 'ap-northeast-2': '首尔', 'ap-northeast-3': '大阪',
+  'ap-south-1': '孟买', 'ap-south-2': '海得拉巴',
+  'ap-southeast-1': '新加坡', 'ap-southeast-2': '悉尼', 'ap-southeast-3': '雅加达',
+  'ap-southeast-4': '墨尔本', 'ap-southeast-5': '马来西亚', 'ap-southeast-6': '新西兰',
+  'ap-southeast-7': '泰国',
+  'af-south-1': '开普敦', 'sa-east-1': '圣保罗', 'mx-central-1': '墨西哥',
+};
+const REGION_OPTS = BEDROCK_REGIONS.map(r => ({
+  label: REGION_LABEL[r] ? `${r} (${REGION_LABEL[r]})` : r,
+  value: r,
+}));
+// 后端 /profiles 单次最多 12 个区域，「全选」按钮据此取前 12 个高频区域，
+// 避免点了就 400。需要更多区域时手动多选或分批查询。
+const PROFILE_REGION_LIMIT = 12;
 
 // 常见 Provider（未加载模型前也可选；加载后与实际数据合并去重）
 const KNOWN_PROVIDERS = ['Anthropic', 'Amazon', 'Meta', 'Mistral', 'Cohere', 'AI21', 'Stability', 'DeepSeek', 'Qwen'];
@@ -136,8 +169,10 @@ const ProfilesTabView: React.FC<any> = ({
 }) => (
   <div style={{ paddingTop: 12 }}>
     <Space wrap style={{ marginBottom: 12 }}>
+      {/* maxCount=12：后端 /profiles 单次上限，超了会直接 400 */}
       <Select mode="multiple" size="small" style={{ minWidth: 320 }} value={regions} onChange={setRegions}
-        options={REGION_OPTS} placeholder="选择区域" maxTagCount={4} />
+        showSearch optionFilterProp="label" maxCount={PROFILE_REGION_LIMIT}
+        options={REGION_OPTS} placeholder={`选择区域（最多 ${PROFILE_REGION_LIMIT} 个）`} maxTagCount={4} />
       <Button size="small" type="primary" icon={<ReloadOutlined />} loading={loading} onClick={load}>加载 Profiles</Button>
       <Input.Search size="small" placeholder="筛选：名称 / ARN / Tag / 模型" allowClear style={{ width: 260 }}
         onChange={e => setSearch(e.target.value)} />
@@ -265,6 +300,7 @@ const CreateTab: React.FC<{ accountId: string }> = ({ accountId }) => {
     <div style={{ paddingTop: 12 }}>
       <Space wrap style={{ marginBottom: 8 }}>
         <Select mode="multiple" size="small" style={{ minWidth: 260 }} value={regions} onChange={setRegions}
+          showSearch optionFilterProp="label"
           options={REGION_OPTS} placeholder="创建到哪些区域（可多选）" maxTagCount={3} />
         <Button size="small" icon={<ReloadOutlined />} loading={loading} onClick={loadModels}>刷新模型</Button>
         <Select size="small" style={{ width: 130 }} value={provider} onChange={setProvider}
@@ -344,7 +380,8 @@ const InvokeTab: React.FC<{ accountId: string }> = ({ accountId }) => {
   return (
     <div style={{ paddingTop: 12, maxWidth: 900 }}>
       <Space wrap style={{ marginBottom: 8 }}>
-        <Select size="small" style={{ width: 150 }} value={region} onChange={setRegion} options={REGION_OPTS} />
+        <Select size="small" style={{ width: 190 }} value={region} onChange={setRegion}
+          showSearch optionFilterProp="label" options={REGION_OPTS} />
         <Input size="small" placeholder="Model ID 或 Inference Profile ARN" style={{ width: 460 }}
           value={modelId} onChange={e => setModelId(e.target.value)} />
         <InputNumber size="small" min={1} max={4096} value={maxTokens} onChange={v => setMaxTokens(v || 1024)} addonBefore="maxTokens" style={{ width: 180 }} />
@@ -382,7 +419,8 @@ const ModelsTab: React.FC<{ accountId: string }> = ({ accountId }) => {
   return (
     <div style={{ paddingTop: 12 }}>
       <Space wrap style={{ marginBottom: 12 }}>
-        <Select size="small" style={{ width: 150 }} value={region} onChange={setRegion} options={REGION_OPTS} />
+        <Select size="small" style={{ width: 190 }} value={region} onChange={setRegion}
+          showSearch optionFilterProp="label" options={REGION_OPTS} />
         <Button size="small" type="primary" icon={<ReloadOutlined />} loading={loading} onClick={load}>加载模型</Button>
         <Input.Search size="small" placeholder="筛选" allowClear style={{ width: 220 }} onChange={e => setKw(e.target.value)} />
         <span style={{ fontSize: 12, color: '#8a94a6' }}>{filtered.length} 个模型</span>
@@ -432,7 +470,8 @@ const FtuTab: React.FC<{ accountId: string }> = ({ accountId }) => {
         <Form.Item name="useCases" label="使用场景 (useCases)" rules={[{ required: true, message: '必填' }]}><Input.TextArea rows={3} /></Form.Item>
       </Form>
       <Space>
-        <Select size="small" style={{ width: 150 }} value={region} onChange={setRegion} options={REGION_OPTS} />
+        <Select size="small" style={{ width: 190 }} value={region} onChange={setRegion}
+          showSearch optionFilterProp="label" options={REGION_OPTS} />
         <Button type="primary" size="small" loading={submitting} onClick={submit}>提交申请</Button>
       </Space>
       {result && <pre style={{ marginTop: 12, padding: 12, background: '#fafafa', borderRadius: 6, fontSize: 12 }}>{result}</pre>}
@@ -475,7 +514,9 @@ const DataShareTab: React.FC<{ accountId: string }> = ({ accountId }) => {
       <Alert type="info" showIcon style={{ marginBottom: 12 }}
         message="Fable 5 需要将 Bedrock data retention 设为 provider_data_share。开启为写操作，仅 admin（实时校验）可执行并写审计。" />
       <Space wrap style={{ marginBottom: 12 }}>
+        {/* maxCount=20：后端 /data-retention 单次上限 */}
         <Select mode="multiple" size="small" style={{ minWidth: 320 }} value={regions} onChange={setRegions}
+          showSearch optionFilterProp="label" maxCount={20}
           options={REGION_OPTS} maxTagCount={4} />
         <Button size="small" icon={<ReloadOutlined />} loading={loading} onClick={load}>查看状态</Button>
         <Popconfirm title={`确认为 ${regions.length} 个区域开启 provider_data_share？`} okText="开启" onConfirm={enable}>
@@ -539,11 +580,13 @@ const QuotaQueryTab: React.FC<{ accountId: string }> = ({ accountId }) => {
   return (
     <div style={{ paddingTop: 12 }}>
       <Space wrap style={{ marginBottom: 8 }}>
+        {/* 配额查询后端上限 30，正好等于区域全集，故「全选区域」可以全给 */}
         <Select mode="multiple" allowClear size="small" style={{ minWidth: 340 }} placeholder="选择区域（可多选）"
+          showSearch optionFilterProp="label" maxCount={30}
           value={regions} onChange={setRegions} maxTagCount="responsive" options={REGION_OPTS} />
         <Button type="primary" size="small" icon={<ReloadOutlined />} loading={loading} onClick={load}>一键查询</Button>
         <Button size="small" onClick={() => setRegions(['us-east-1'])}>仅 us-east-1</Button>
-        <Button size="small" onClick={() => setRegions(BEDROCK_REGIONS)}>全选区域</Button>
+        <Button size="small" onClick={() => setRegions(BEDROCK_REGIONS)}>全选区域（{BEDROCK_REGIONS.length}）</Button>
       </Space>
       <Space wrap style={{ marginBottom: 12 }}>
         <Select size="small" style={{ width: 150 }} value={provider} onChange={setProvider} showSearch optionFilterProp="label"
@@ -750,7 +793,9 @@ const DeliveryTab: React.FC<{ accountId: string }> = ({ accountId }) => {
       <Alert type="info" showIcon style={{ marginBottom: 12 }}
         message="生成客户交付 Excel：账户信息 + ARN List（按区域分组）+ 使用须知。服务端强校验：所有 Profile 必须同属一个账户、且都带同一个 map-migrated Tag（无 Tag 或 Tag 不一致会拒绝生成）。" />
       <Space wrap style={{ marginBottom: 12 }}>
+        {/* 交付表格走 /profiles，同样受 12 区域上限约束 */}
         <Select mode="multiple" size="small" style={{ minWidth: 280 }} value={regions} onChange={setRegions}
+          showSearch optionFilterProp="label" maxCount={PROFILE_REGION_LIMIT}
           options={REGION_OPTS} maxTagCount={4} />
         <Button size="small" icon={<ReloadOutlined />} loading={loading} onClick={load}>加载 Profiles（{rows.length}）</Button>
         <Input size="small" placeholder="交付 IAM 用户名（默认 admin）" style={{ width: 210 }} value={iamUser} onChange={e => setIamUser(e.target.value)} />
