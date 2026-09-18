@@ -8,8 +8,25 @@ import {
   Card, Tabs, Select, Button, Table, Tag, Input, Space, message, Modal, Form,
   Checkbox, Alert, Tooltip, Popconfirm, InputNumber, Typography,
 } from 'antd';
-import { ReloadOutlined, PlusOutlined, DeleteOutlined, TagsOutlined, ThunderboltOutlined, DownloadOutlined, UserAddOutlined } from '@ant-design/icons';
+import { ReloadOutlined, PlusOutlined, DeleteOutlined, TagsOutlined, ThunderboltOutlined, DownloadOutlined, UserAddOutlined, CopyOutlined } from '@ant-design/icons';
 import { api } from '../api';
+
+/**
+ * 复制到剪贴板。navigator.clipboard 在非 HTTPS / 旧 WebView 下可能不存在，
+ * 这里显式兜底提示，避免点了没反应又不报错。
+ */
+async function copyText(text: string, label = '内容') {
+  if (!navigator.clipboard?.writeText) {
+    message.error('当前浏览器不允许写剪贴板，请手动选中复制');
+    return;
+  }
+  try {
+    await navigator.clipboard.writeText(text);
+    message.success(`已复制${label}`);
+  } catch {
+    message.error('复制失败，请手动选中复制');
+  }
+}
 
 /**
  * Bedrock 可用区域全集，与 Quotas.tsx 的 BEDROCK_REGIONS 保持一致。
@@ -159,13 +176,22 @@ const ProfilesTab: React.FC<{ accountId: string }> = ({ accountId }) => {
   };
 
   return (
-    <ProfilesTabView {...{ regions, setRegions, load, loading, search, setSearch, filtered, selectedKeys, setSelectedKeys, errors, doDelete, doTag, acting, tagModalOpen, setTagModalOpen, tagInputs, setTagInputs, visibleSelectedCount: selectedRows.length }} />
+    <ProfilesTabView {...{
+      regions, setRegions, load, loading, search, setSearch, filtered,
+      selectedKeys, setSelectedKeys, errors, doDelete, doTag, acting,
+      tagModalOpen, setTagModalOpen, tagInputs, setTagInputs,
+      visibleSelectedCount: selectedRows.length,
+      // 复制用「当前可见且被选中」的 ARN：与删除/打 Tag 的口径一致，
+      // 避免复制到被搜索框过滤掉、用户其实看不见的行。
+      selectedArns: selectedRows.map(r => r.arn),
+    }} />
   );
 };
 
 const ProfilesTabView: React.FC<any> = ({
   regions, setRegions, load, loading, search: _s, setSearch, filtered, selectedKeys, setSelectedKeys,
   errors, doDelete, doTag, acting, tagModalOpen, setTagModalOpen, tagInputs, setTagInputs, visibleSelectedCount,
+  selectedArns,
 }) => (
   <div style={{ paddingTop: 12 }}>
     <Space wrap style={{ marginBottom: 12 }}>
@@ -177,6 +203,18 @@ const ProfilesTabView: React.FC<any> = ({
       <Input.Search size="small" placeholder="筛选：名称 / ARN / Tag / 模型" allowClear style={{ width: 260 }}
         onChange={e => setSearch(e.target.value)} />
       <span style={{ fontSize: 12, color: '#8a94a6' }}>已选 {visibleSelectedCount} / {filtered.length}</span>
+      <Tooltip title="把选中行的 ARN 按每行一条复制到剪贴板">
+        <Button size="small" icon={<CopyOutlined />} disabled={!visibleSelectedCount}
+          onClick={() => copyText(selectedArns.join('\n'), `${selectedArns.length} 条 ARN`)}>
+          复制选中 ARN
+        </Button>
+      </Tooltip>
+      <Tooltip title="把当前筛选结果的全部 ARN 复制到剪贴板">
+        <Button size="small" icon={<CopyOutlined />} disabled={!filtered.length}
+          onClick={() => copyText(filtered.map((r: any) => r.arn).join('\n'), `${filtered.length} 条 ARN`)}>
+          复制全部 ARN
+        </Button>
+      </Tooltip>
       <Button size="small" icon={<TagsOutlined />} disabled={!visibleSelectedCount} onClick={() => setTagModalOpen(true)}>批量打 Tag</Button>
       <Popconfirm title={`确认删除选中的 ${visibleSelectedCount} 个 Profile？`} okText="删除" okButtonProps={{ danger: true }} onConfirm={doDelete}>
         <Button size="small" danger icon={<DeleteOutlined />} disabled={!visibleSelectedCount} loading={acting}>批量删除</Button>
@@ -192,18 +230,35 @@ const ProfilesTabView: React.FC<any> = ({
         // 下拉里提供跨页全选/清空/反选（表头 checkbox 只管当前页）
         selections: [Table.SELECTION_ALL, Table.SELECTION_NONE, Table.SELECTION_INVERT],
       }}
+      // ARN 列完整展示后总宽超屏，交给表格自身横向滚动，避免挤压其它列
+      scroll={{ x: 1400 }}
       pagination={{ pageSize: 20, showSizeChanger: true, showTotal: (t: number) => `共 ${t} 条` }}
       columns={[
         { title: 'Region', dataIndex: 'region', width: 110, sorter: (a: any, b: any) => a.region.localeCompare(b.region) },
         { title: 'Name', dataIndex: 'name', width: 240, sorter: (a: any, b: any) => (a.name || '').localeCompare(b.name || '') },
         { title: 'Scope', dataIndex: 'scope', width: 80, render: (s: string) => <Tag color={s === 'Global' ? 'blue' : 'green'}>{s}</Tag> },
         { title: 'Status', dataIndex: 'status', width: 90 },
-        { title: '后端模型', dataIndex: 'backendModels', ellipsis: true },
+        { title: '后端模型', dataIndex: 'backendModels', ellipsis: true, width: 200 },
         {
-          title: 'Tags', dataIndex: 'tags', width: 240,
+          title: 'Tags', dataIndex: 'tags', width: 200,
           render: (tags: any[]) => (tags || []).map(t => <Tag key={t.key} style={{ marginBottom: 2 }}>{t.key}={t.value}</Tag>),
         },
-        { title: 'ARN', dataIndex: 'arn', ellipsis: true, render: (a: string) => <Typography.Text copyable={{ text: a }} style={{ fontSize: 12 }}>{a}</Typography.Text> },
+        {
+          // ARN 是拿去测试/交付要逐字用的，之前 ellipsis 截断后根本看不全。
+          // 这里不截断、允许换行完整显示，并带独立复制按钮。
+          title: 'ARN', dataIndex: 'arn', width: 460,
+          render: (a: string) => (
+            <Space size={4} align="start">
+              <Typography.Text
+                style={{ fontSize: 12, fontFamily: 'SFMono-Regular, Consolas, Menlo, monospace', wordBreak: 'break-all' }}
+              >{a}</Typography.Text>
+              <Tooltip title="复制 ARN">
+                <Button type="text" size="small" icon={<CopyOutlined />}
+                  onClick={() => copyText(a, 'ARN')} />
+              </Tooltip>
+            </Space>
+          ),
+        },
       ]} />
     <Modal title={`批量打 Tag（${visibleSelectedCount} 个 Profile）`} open={tagModalOpen}
       onCancel={() => setTagModalOpen(false)} onOk={doTag} okText="打 Tag" confirmLoading={acting}
