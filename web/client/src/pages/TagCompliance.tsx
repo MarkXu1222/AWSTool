@@ -487,7 +487,7 @@ const AddOrgModal: React.FC<{
         </Row>
         <Form.Item label="search_role_arn" required><Input value={searchRoleArn} onChange={e => setSearchRoleArn(e.target.value)} placeholder={`arn:aws:iam::${payer || '<payer>'}:role/resource-explorer-search-role`} /></Form.Item>
         <Form.Item label="view_arn" required><Input value={viewArn} onChange={e => setViewArn(e.target.value)} placeholder="arn:aws:resource-explorer-2:us-east-1:<payer>:view/OrgView/..." /></Form.Item>
-        <Form.Item label="exclude_accounts（逗号分隔，可选）"><Input value={excludeAccounts} onChange={e => setExcludeAccounts(e.target.value)} placeholder="默认排除 payer 自身" /></Form.Item>
+        <Form.Item label="exclude_accounts（逗号分隔，可选）"><Input value={excludeAccounts} onChange={e => setExcludeAccounts(e.target.value)} placeholder="留空 = 全部账户都打标（含 payer 自身）" /></Form.Item>
       </Form>
     </Modal>
   );

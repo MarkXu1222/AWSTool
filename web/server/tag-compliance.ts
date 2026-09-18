@@ -15,7 +15,7 @@ import { EC2Client, DescribeRegionsCommand } from '@aws-sdk/client-ec2';
 import { SFNClient, StartExecutionCommand, ListExecutionsCommand } from '@aws-sdk/client-sfn';
 import { S3Client, GetObjectCommand, PutObjectCommand, ListObjectsV2Command } from '@aws-sdk/client-s3';
 import { SNSClient, ListSubscriptionsByTopicCommand, SubscribeCommand, UnsubscribeCommand } from '@aws-sdk/client-sns';
-import { IAMClient, GetRoleCommand, CreateRoleCommand, AttachRolePolicyCommand, ListAttachedRolePoliciesCommand } from '@aws-sdk/client-iam';
+import { IAMClient, GetRoleCommand, CreateRoleCommand, AttachRolePolicyCommand, ListAttachedRolePoliciesCommand, PutRolePolicyCommand } from '@aws-sdk/client-iam';
 import {
   ResourceExplorer2Client, ListViewsCommand, CreateViewCommand,
   GetIndexCommand, CreateIndexCommand, UpdateIndexTypeCommand,
@@ -243,7 +243,10 @@ export async function upsertOrgConfig(input: OrgConfigUpsertInput): Promise<{ co
         view_arn: input.viewArn,
         tag_value: tagValue,
       };
-      if (created && !candidate.exclude_accounts) candidate.exclude_accounts = input.payerAccountId;
+      // 2026-09-18 起不再默认排除 payer 自身：业务要求 payer 管理账户的资源
+      // 同样要打 MAP 标签。配套改动是 provisionOrg 会在 payer 账户内单独创建
+      // auto-tagger-role（SERVICE_MANAGED StackSet 覆盖不到管理账户）。
+      // 仍允许调用方显式传 exclude_accounts 排除特定账户。
 
       const next = [...current];
       if (created) next.push(candidate);
@@ -903,7 +906,102 @@ export async function provisionOrg(payerAccountId: string): Promise<ProvisionRes
     out.needsRetry = true;
   }
 
+  // ---- 6. payer 管理账户自身的 auto-tagger-role ----
+  // SERVICE_MANAGED StackSet 不会部署到管理账户，所以 payer 自己永远没有这个角色。
+  // 过去靠 exclude_accounts 把 payer 整个排除掉来回避；现在业务要求 payer 的资源
+  // 也要打 MAP 标签，就必须在 payer 账户里单独建一份同样的角色，否则扫描器能发现
+  // 资源却 AssumeRole 失败，报告里每天多一批 failed。
+  try {
+    const created = await ensurePayerTaggerRole(creds, central);
+    steps.push({
+      key: 'payerTaggerRole', label: 'payer 自身打标角色 (auto-tagger-role)',
+      status: created ? 'created' : 'skipped',
+      detail: created ? '已在 payer 管理账户创建（StackSet 覆盖不到管理账户）' : '已存在',
+    });
+  } catch (e: any) {
+    steps.push({
+      key: 'payerTaggerRole', label: 'payer 自身打标角色 (auto-tagger-role)',
+      status: 'failed', detail: awsErrorDetail(e),
+    });
+    out.needsRetry = true;
+  }
+
   return out;
+}
+
+/**
+ * 从 AUTO_TAGGER_ROLE_TEMPLATE 里解析出打标 Action 列表，生成等价的内联策略。
+ *
+ * ⚠️ 必须与 CFN 模板同源，不能另写一份 Action 清单 —— 两处维护一定会漂移。
+ *
+ * ⚠️ 也**不能**用托管策略 ResourceGroupsandTagEditorFullAccess 替代：
+ * 它只给 tag:TagResources / resource-groups:*，不含各服务自身的打标 API。
+ * 而 TagResources 底层是代调 athena:TagResource、logs:TagResource、
+ * s3:PutBucketTagging 这些，缺了就全线 AccessDenied（已实测踩过）。
+ */
+export function AUTO_TAGGER_INLINE_POLICY(): any {
+  // 模板里形如 "                  - ec2:CreateTags" 的行即 Action
+  const actions = [...AUTO_TAGGER_ROLE_TEMPLATE.matchAll(/^\s+- ([a-z0-9-]+:[A-Za-z*]+)$/gm)]
+    .map(m => m[1])
+    .filter(a => !a.startsWith('apigateway:'));  // apigateway 走独立资源级语句
+  return {
+    Version: '2012-10-17',
+    Statement: [
+      { Effect: 'Allow', Action: [...new Set(actions)], Resource: '*' },
+      {
+        Effect: 'Allow',
+        Action: ['apigateway:PUT', 'apigateway:POST', 'apigateway:DELETE', 'apigateway:GET', 'apigateway:PATCH'],
+        Resource: ['arn:aws:apigateway:*::/tags/*', 'arn:aws:apigateway:*::*'],
+      },
+    ],
+  };
+}
+
+/**
+ * 在 payer 管理账户内直接创建 auto-tagger-role（幂等）。
+ * SERVICE_MANAGED StackSet 不部署到管理账户，所以只能这样单独建。
+ *
+ * 权限用 AUTO_TAGGER_INLINE_POLICY()（与 CFN 模板同源），
+ * 外加 ReadOnlyAccess 供扫描器读取资源现有 tag。
+ * 信任策略与模板一致：只信任中央工具账户下 tag-compliance* 前缀的角色。
+ */
+async function ensurePayerTaggerRole(creds: any, centralAccount: string): Promise<boolean> {
+  const iam = new IAMClient({ region: REGION, credentials: creds });
+  let exists = true;
+  try {
+    await iam.send(new GetRoleCommand({ RoleName: 'auto-tagger-role' }));
+  } catch (e: any) {
+    if (e.name !== 'NoSuchEntityException') throw e;
+    exists = false;
+  }
+
+  if (!exists) {
+    await iam.send(new CreateRoleCommand({
+      RoleName: 'auto-tagger-role',
+      Description: 'Central tag-compliance auto-tagger (payer account, managed by AWSTool)',
+      AssumeRolePolicyDocument: JSON.stringify({
+        Version: '2012-10-17',
+        Statement: [{
+          Effect: 'Allow',
+          Principal: { AWS: `arn:aws:iam::${centralAccount}:root` },
+          Action: 'sts:AssumeRole',
+          Condition: { StringLike: { 'aws:PrincipalArn': `arn:aws:iam::${centralAccount}:role/tag-compliance*` } },
+        }],
+      }),
+      Tags: [{ Key: 'ManagedBy', Value: 'AWSTool' }, { Key: 'Purpose', Value: 'AutoTagger' }],
+    }));
+    await iam.send(new AttachRolePolicyCommand({
+      RoleName: 'auto-tagger-role', PolicyArn: 'arn:aws:iam::aws:policy/ReadOnlyAccess',
+    }));
+  }
+
+  // 内联策略每次都覆盖写：模板增补了新服务时，重跑一键接入即可同步权限
+  await iam.send(new PutRolePolicyCommand({
+    RoleName: 'auto-tagger-role',
+    PolicyName: 'AutoTagPolicy',
+    PolicyDocument: JSON.stringify(AUTO_TAGGER_INLINE_POLICY()),
+  }));
+  return !exists;
 }
 
 // ============================================================
