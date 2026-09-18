@@ -3,7 +3,7 @@
 企业级 AWS 多账户（多 Organizations）管理平台。带强制 MFA 登录、页面级权限与全量操作审计。
 
 **线上**：https://markxu.co（EC2 Singapore，PM2 进程 `aws-toolbox`）
-**当前版本**：`0.30.0`（见 `web/client/src/version.ts`，左下角展示）
+**当前版本**：`0.33.0`（见 `web/client/src/version.ts`，左下角展示）
 
 **生产接入规模**（快照 2026-09-06，取自线上 db.json）
 
@@ -114,7 +114,7 @@ AWS/
     │   ├── doc-generator.ts        # 生成提额申请 PDF（puppeteer）
     │   ├── doc-templates.ts        # ★公司模板 + 账户→公司 / payer→公司 映射 + 区域显示名
     │   ├── notify.ts               # 飞书通知（账户角色缺失告警）
-    │   ├── tag-compliance.ts       # MAP 标签合规（编排中央工具账户的 Step Functions + S3 报告）
+    │   ├── tag-compliance.ts       # MAP 标签合规（编排中央工具账户的 Step Functions + S3 报告；payer 自身 auto-tagger-role 单独创建）
     │   ├── tag-onboarding.ts       # MAP 全自动接入持久化 runner（资源、索引、StackSet、S3 配置与校验）
     │   ├── account-roles.ts        # ★账户角色自愈：探测 → 缺失则触发 StackSet 补齐 → 超限告警
     │   ├── account-lifecycle.ts    # 离场账户追踪：快照 diff（防 payer 同步失败误判）+ 重新加入 + 历史补录
@@ -122,7 +122,7 @@ AWS/
     │   ├── billing-export-jobs.ts  # 账单导出持久化 job、全局队列、永久历史、重复下载与重启恢复
     │   ├── billing-exporter.ts     # 严格只读抓取 AWS 官方账单 PDF + 可取消 zip 打包
     │   ├── bedrock-tools.ts        # Bedrock 工具：Profile 管理/批量创建/FTU/数据共享/IAM（全部走 Admin 凭证，50min 缓存）
-    │   ├── bedrock-delivery.ts     # Bedrock 客户交付 xlsx 生成（exceljs；校验 map-migrated tag 唯一）
+    │   ├── bedrock-delivery.ts     # Bedrock 客户交付 xlsx（v1 三列 / v2 李浩版五列含 TPM/TPD；按变体白名单筛选模型 + 固定排序；校验 map-migrated tag 唯一）
     │   ├── case-doc-submitter.ts   # ★一键提交提额文档到 Support Case（生成 PDF → 联邦登录 → Reply → 传附件 → Submit）
     │   ├── security-alerts.ts      # 安全告警：登录爆破/429、5xx 突增 → 飞书
     │   └── routes/
@@ -224,7 +224,7 @@ Admin 临时凭证时长默认 1 小时。数据库当前角色为 `admin` 的�
 | 账单 | PDF job：`POST/GET /billing/export-jobs`、`GET /billing/export-jobs/:jobId`、`POST .../:jobId/cancel`、`GET .../:jobId/download`（均 `requireBillingAccess`，单任务再校验 owner/admin） |
 | 配额 | `GET /quotas/:accountId/:serviceCode`、`POST /quotas/increase`(admin)、`GET /quotas/requests`、`GET /quotas/stats`、`GET /quotas/companies`、`GET /quotas/company/:accountId`、`POST /quotas/generate-doc`、`POST /quotas/case-doc-submit`(admin)、`GET /quotas/case-doc-submit/:jobId`（轮询不写审计；**必须注册在 `/quotas/:accountId/:serviceCode` 通配之前**）、`POST /quotas/sync`、`POST /quotas/sync-account/:accountId`、`GET /quotas/sync-status`、`GET /quotas/sync-stream`(SSE) |
 | Bedrock 配额 | `GET /bedrock/quotas/:accountId?regions=a,b` |
-| Bedrock 工具（独立前缀 `/api/bedrock`） | `GET /profiles/:accountId?regions=`、`GET /models/:accountId?region=`、`GET /foundation-models/:accountId?region=`、`POST /profiles/create`(admin,**tags 必填强校验**)、`POST /profiles/delete`(admin)、`POST /profiles/tag`(admin,tags 必填)、`POST /profiles/untag`(admin)、`POST /invoke`(admin)、`POST /ftu`(admin)、`GET /data-retention/:accountId?regions=`、`POST /data-retention/enable`(strict admin)、`GET /iam-users/:accountId`(admin)、`POST /iam-users/create`(strict admin)、`POST /delivery`(admin，服务端校验 map-migrated tag 唯一且必存在) |
+| Bedrock 工具（独立前缀 `/api/bedrock`） | `GET /profiles/:accountId?regions=`（**最多 12 个区域**）、`GET /models/:accountId?region=`、`GET /foundation-models/:accountId?region=`、`POST /profiles/create`(admin,**tags 必填强校验**)、`POST /profiles/delete`(admin)、`POST /profiles/tag`(admin,tags 必填)、`POST /profiles/untag`(admin)、`POST /invoke`(admin)、`POST /ftu`(admin)、`GET /data-retention/:accountId?regions=`（**最多 20 个区域**）、`POST /data-retention/enable`(strict admin)、`GET /iam-users/:accountId`(admin)、`POST /iam-users/create`(strict admin)、`POST /delivery`(admin，服务端校验 map-migrated tag 唯一且必存在)、`POST /delivery-v2`(admin，李浩版五列含 TPM/TPD) |
 | 批量提额 | `GET /bulk-quota/payers`、`GET /bulk-quota/accounts/:payerAccountId`、`POST /bulk-quota/submit`、`GET /bulk-quota/job/:jobId`（全部 `requireBulkQuotaAccess`） |
 | 根凭证 | `GET /root-credentials/:accountId`、`GET /temp-credentials/:accountId?durationHours=1`（rootAccess；仅 admin 可请求 2–12 小时）、`POST /root-credentials/:accountId/delete-mfa`(rootAccess)、`.../recover-password`(rootAccess)、`.../delete-access-key`(rootAccess)、`.../delete-key`(admin) |
 | 资源清理 | `GET /resources/:accountId/:region`（最近 7 天；Lambda 按最近修改；IAM/S3 为全局；失败服务通过 warnings 返回）、`POST /resources/:accountId/delete`（服务端重新读取时间并复验；EC2/EBS/Lambda 兼容 admin/partadmin，IAM 用户仅实时 strict admin 且级联清理依赖；S3 不可删除） |
@@ -402,6 +402,31 @@ HTML 模板 + Puppeteer 渲染。公司背景库在 `doc-templates.ts`（12 家�
 - **Bedrock 配额**：按区域查 TPM/RPM/TPD，多区域并发；按 Provider、推理范围（Global Cross-Region / Cross-Region / On-Demand / Latency-Optimized）筛选
 - **批量提额**：按 payer 组织 × 多区域批量提交，只传配额名 + 目标值，QuotaCode 后端解析，已达标账户自动跳过；job 模式（submit → jobId → 轮询）
 
+### Bedrock 工具
+
+区域下拉为 30 个 Bedrock 可用区域（带中文别名，支持搜索），与 `Quotas.tsx` 的列表保持一致。**各下拉按后端实际上限设了 `maxCount`**：`/profiles` 与交付表格 12 个、`/data-retention` 20 个、配额查询 30 个 —— 早期区域表只有 10 个时永远碰不到上限，补全后不加限制会直接吃 400。
+
+Profiles 列表的 ARN 列完整展示（不截断、等宽字体），每行带复制按钮，工具栏另有「复制选中 / 全部 ARN」（每行一条，可直接粘进脚本）。批量复制用的是**当前可见且选中**的行，与批量删除/打 Tag 口径一致 —— `selectedKeys` 会包含被搜索框过滤掉的行，直接用会多复制。
+
+**客户交付表格**有两种格式：
+
+| 端点 | 格式 | 说明 |
+|---|---|---|
+| `POST /delivery` | v1 三列 | Profile Name / ARN / Region |
+| `POST /delivery-v2` | v2 五列（李浩版） | 追加 TPM / TPD，服务端实时查 Service Quotas 匹配 |
+
+v2 按 `variant` 筛选核心 6 模型并固定排序：`global`（每区 6 条，默认）或 `full`（每区 12 条，us+global）。老模型（haiku / fable / opus-4-1 / 4-5 / sonnet-4 / 4-5）一律剔除。用**白名单**而非黑名单 —— AWS 随时上新模型，黑名单会漏。
+
+筛选必须在 `prepareDelivery()` **之前**执行：后者对每一行强校验 `map-migrated` tag，老模型往往没打 tag 会直接让整个导出失败，而它们本就不该进交付表。
+
+TPM/TPD 匹配不到时如实写 0（规范红线：不盲套公式）。配额为 0 或清单型号缺失会通过 `X-Delivery-*` 响应头回传并在页面告警 —— 二进制 body 塞不进 JSON，且跨域下自定义头需在 `cors()` 的 `exposedHeaders` 显式暴露。
+
+> 匹配逻辑有两个已修复的坑（见 `bedrock-tools.ts` 注释）：
+> 次版本号正则曾贪婪吞掉 8 位日期（`claude-opus-5-20260301-v1:0` → `5.20260301`），
+> 导致 sonnet-5 / opus-5 静默写 0；版本号曾用 `includes` 子串比较，
+> `'opus 4.5'.includes('5')` 为真会让 Opus 5 串到 Opus 4.5 的配额，
+> 把错误数字当真实配额写进交付表（比写 0 更危险）。现用数字边界锚定整段匹配。
+
 ### 批量导出官方账单 PDF
 
 产出的是 AWS 自家生成的打印文档，与手动「打印 → 另存为 PDF」一致。底层流程：严格只读 Federation 会话 → Billing Bills 页面 → 等数据加载 → 点两级「打印」→ AWS 调 `window.print()` → Chrome 静默另存为 PDF → zip。
@@ -444,6 +469,32 @@ HTML 模板 + Puppeteer 渲染。公司背景库在 `doc-templates.ts`（12 家�
 ### MAP 标签合规
 
 平台不重写扫描/打标逻辑，而是 assume 中央工具账户的 `tag-compliance-console-role`（最小权限：只能操作指定状态机与报告桶），去读写 `orgs.json`、触发 Step Functions 扫描、查执行状态、读最新报告。打标本身仍由中央系统用最小权限的 `auto-tagger-role` 执行，安全模型不变。
+
+**payer 管理账户同样纳入打标范围（v0.33.0 起）**。`auto-tagger-role` 通过 SERVICE_MANAGED StackSet 下发，而该模式**不会部署到组织管理账户**，所以 payer 自身长期没有打标角色 —— 过去靠 `exclude_accounts` 默认排除 payer 来回避。现在：
+
+- `provisionOrg()` 增加一步，在 payer 账户内**单独创建** `auto-tagger-role`（StackSet 覆盖不到，只能直接建）
+- 新建组织不再自动把 payer 写进 `exclude_accounts`，默认全账户打标；仍可显式传值排除特定账户
+- payer 角色的权限由 `AUTO_TAGGER_INLINE_POLICY()` 从 `AUTO_TAGGER_ROLE_TEMPLATE` 正则解析生成（约 136 个 Action），与 StackSet 模板**同源**，避免两处维护漂移
+
+> ⚠️ **不要用托管策略 `ResourceGroupsandTagEditorFullAccess` 替代这份内联策略。**
+> 它只授予 `tag:TagResources` / `resource-groups:*`，不含各服务自身的打标 API；
+> 而 `TagResources` 底层是代调 `athena:TagResource`、`logs:TagResource`、
+> `s3:PutBucketTagging` 等，缺了会全线 `AccessDenied`。
+> 实测曾因此产生 59 个打标失败（其中 47 个是 `athena:TagResource`）。
+> `tests/tag-compliance-policy.test.ts` 会断言 Action 数量与关键 Action 存在，
+> 防止模板被重排后正则失配、静默生成空策略。
+
+变更前后实测（webby02 / FFCloud / nexstack 三个组织）：`found=142 tagged=81 failed=59` → `found=73 tagged=71 failed=1`。
+
+> **MAP 计费口径提醒**：payer 管理账户内多为账单桶、CUR 桶等运维基础设施，
+> 并非客户迁移的工作负载。是否计入 MAP 报销基数需与 AWS 侧确认；
+> 如需回退，把各 org 的 `exclude_accounts` 改回 payer 账户 ID 即可。
+
+排查这类问题时注意区分两种「未打标」：Resource Explorer 会把 `default` 事件总线、
+`default.*` 参数组这类**免费内置资源**也算进未打标（数字虚高且无业务意义），
+而 MAP 只认有费用的资源 —— 用 Cost Explorer 的 cost allocation tag 维度按
+服务/用量类型下钻，才能看出哪些是真正漏打标、哪些是结构上就没有 tag 维度
+（Savings Plans 分摊、公网 IPv4、域名注册费、纯 API 调用费等）。
 
 「全自动接入」由 `tag-onboarding.ts` 的持久化 runner 实现，任务保存在 `data/db.json` 的 `tag_onboarding_jobs`，状态为 `queued` / `running` / `waiting_retry` / `completed` / `failed`。同一 payer + 相同 payload 会复用已有任务，不同标签参数会报告冲突；服务重启后 runner 会恢复未完成任务，并对 AWS 最终一致性场景自动等待/重试。
 
@@ -700,6 +751,10 @@ Nginx 反代 + Let's Encrypt（`markxu.co`，自动续期），80 强制跳 443�
 - `config.consoleAdminPayers` 是静态白名单（生产核验快照 2026-08-27：44 个 payer 中已开放 43 个组织）。更合理的做法是直接用 `account_roles` 的真实探测结果决定 `_consoleDual`，等检测覆盖率上来后可以替换
 - 早先建的 `support-quota` / `admin-console` 角色信任主体里仍有历史身份 `134103550877`，新建的已去掉；是否统一清理待定
 - `account_roles` 覆盖率需要时间铺开（增量每轮 60 个）。想立刻建立基线可在账户页点一次「全量复检」
+- MAP 打标状态机对 EventBridge Connection 的 ARN 格式不兼容（`Provided Arn is not in correct format`），每轮扫描固定失败 1 个。代码在中央工具账户 `382309211956` 的 Lambda 里，不在本仓库
+- MAP 打标是每日定时扫描（01:20 UTC），新建资源最长要等 24 小时才被打标。真正的根治是 EventBridge 事件驱动实时打标 + 定时扫描兜底，改动较大待评估
+- payer 账户资源是否计入 MAP 报销基数尚未与 AWS 侧确认（账单桶 / CUR 桶属运维基础设施而非迁移工作负载）
+- `Bedrock.tsx`、`Quotas.tsx`、`Cleanup.tsx` 各自维护一份区域表。前两者已对齐为 30 个，但仍是三份拷贝，AWS 开新区时要改多处；建议抽到 `client/src/constants/regions.ts` 做单一数据源
 
 ---
 
