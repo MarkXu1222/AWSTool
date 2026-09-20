@@ -419,9 +419,20 @@ v2 按 `variant` 筛选核心 6 模型并固定排序：`global`（每区 6 条�
 
 筛选必须在 `prepareDelivery()` **之前**执行：后者对每一行强校验 `map-migrated` tag，老模型往往没打 tag 会直接让整个导出失败，而它们本就不该进交付表。
 
-**TPD 口径（2026-09 变更）**：AWS 取消了 Anthropic 系列的逐模型 TPD 配额（实测 Opus 4.7 只剩 TPM），改为账户级总配额 `Cross-Model Account-Level Tokens Per Day`（`L-E3F10727`，scope 标记为 `Account-Level`）。所以 TPD 取值优先用模型自己的配额（Nova / Jamba 等老模型仍有），查不到时回退到账户级值，并置 `tpdShared=true` —— 交付表会自动追加第 9 条须知，说明该额度**由账户下所有模型共享、非每个模型独享**（6 个模型不是 6×540M，仍是 540M）。两者都没有才写 0（规范红线：不盲套公式）。
+**TPD 口径（2026-09 变更）**：AWS 新增账户级总配额 `Cross-Model Account-Level Tokens Per Day`（`L-E3F10727`，scope 标记为 `Account-Level`），同时**较新的 Claude 型号不再有独立 TPD**（实测 Opus 4.7 只剩 TPM）。取值优先级：
 
-> 李浩版规范里「US TPD = TPM×720 / Global TPD = TPM×1440」的档位表对 Anthropic 已失效，逐模型 TPD 不再存在。
+1. 模型自己的 TPD —— 仍大量存在且各不相同（Nova 2 Lite 11.52B、Claude 3.5 Sonnet 2.88B、Claude Opus 4.1 360M……）
+2. 回退到**同区域**的账户级 TPD，并置 `tpdShared=true`
+3. 两者都没有才写 0（规范红线：不盲套公式）
+
+⚠️ 两个容易搞错的点：
+
+- **账户级 TPD 按区域不同**，实测同一账户 `us-east-1`/`us-west-2` 为 540M，而 `ap-southeast-1` 只有 150M。`accountLevelTpd()` 按 region 取值，不可跨区复用。
+- **不是所有 Anthropic 都没有独立 TPD**。Claude 3 Haiku / 3.5 Sonnet / 3.7 Sonnet / Sonnet 4 / Opus 4.1 仍有自己的值；只是交付清单里那 6 个核心新型号都落在回退分支，所以同区域内它们的 TPD 会显示为同一个数。
+
+`tpdShared=true` 时交付表自动追加第 9 条须知，说明该额度**由账户下所有模型共享、非每个模型独享**（6 个模型不是 6×540M，仍是 540M）。
+
+> 李浩版规范里「US TPD = TPM×720 / Global TPD = TPM×1440」的档位表，对交付清单中的新 Claude 型号已失效。
 
 配额为 0 或清单型号缺失会通过 `X-Delivery-*` 响应头回传并在页面告警 —— 二进制 body 塞不进 JSON，且跨域下自定义头需在 `cors()` 的 `exposedHeaders` 显式暴露。
 
