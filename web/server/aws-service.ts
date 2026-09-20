@@ -889,6 +889,37 @@ export async function listBedrockQuotas(accountId: string, regions?: string[]) {
     }
   });
 
+  // 账户级跨模型 TPD 回退。
+  // AWS 给较新的 Claude 型号不再单独发 TPD 配额，真正生效的日限额是
+  // "Cross-Model Account-Level Tokens Per Day"（L-E3F10727）。若只把它当成独立一行，
+  // 逐模型行的 TPD 会显示为"-"，看起来像"没有日限额"，与实际完全相反。
+  // 所以这里给缺 TPD 的行补上所在区域的账户级值，并打 inherited 标记：
+  //  - 该额度由账户内所有模型共享，不是每个模型各自独享，前端必须区分显示；
+  //  - adjustable 置 false，避免从某个模型行误提"这个模型的 TPD"——
+  //    真要提额得走 Account-Level 那一行，改的是全账户的总盘子。
+  const accountTpdByRegion = new Map<string, any>();
+  for (const row of rowMap.values()) {
+    if (row.scope !== 'Account-Level') continue;
+    const m = row.metrics?.TPD;
+    if (m?.value == null) continue;
+    const prev = accountTpdByRegion.get(row.region);
+    if (!prev || m.value > prev.value) accountTpdByRegion.set(row.region, m);
+  }
+  for (const row of rowMap.values()) {
+    if (row.scope === 'Account-Level') continue;
+    if (row.metrics.TPD) continue;
+    const shared = accountTpdByRegion.get(row.region);
+    if (!shared) continue;
+    row.metrics.TPD = {
+      value: shared.value,
+      quotaCode: shared.quotaCode,
+      quotaName: shared.quotaName,
+      adjustable: false,
+      unit: shared.unit,
+      inherited: true,
+    };
+  }
+
   const scopeOrder = new Map(BEDROCK_QUOTA_SCOPES.map((s, i) => [s, i] as [string, number]));
   const rows = [...rowMap.values()].sort((a, b) =>
     a.region.localeCompare(b.region) ||

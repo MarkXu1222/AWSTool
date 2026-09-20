@@ -337,9 +337,13 @@ export function matchProfileTpmTpd(
   const key = extractClaudeKey(profile.backendModels || profile.name || '');
   const shared = accountLevelTpd(quotaRows, profile.region);
   const pick = (q: any) => {
-    const own = q.metrics?.TPD?.value;
-    if (own != null) return { tpd: Math.round(own), tpdShared: false };
-    return { tpd: shared, tpdShared: shared > 0 };
+    const m = q.metrics?.TPD;
+    // listBedrockQuotas 已把账户级 TPD 回填到缺值的行上（inherited=true）。
+    // 必须按该标记判断，不能只看"有没有值"，否则回填值会被当成模型自有配额，
+    // tpdShared 恒为 false，交付表就丢掉"该额度全账户共享"的备注 9。
+    if (m?.value != null && !m.inherited) return { tpd: Math.round(m.value), tpdShared: false };
+    const v = m?.inherited ? Math.round(m.value) : shared;
+    return { tpd: v, tpdShared: v > 0 };
   };
   if (!key) return { tpm: 0, tpd: 0, tpdShared: false };
   const wantScope = profile.scope === 'Global' ? 'Global Cross-Region' : 'Cross-Region';

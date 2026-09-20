@@ -677,7 +677,18 @@ const QuotaQueryTab: React.FC<{ accountId: string }> = ({ accountId }) => {
             sorter: (a: any, b: any) => (a.metrics?.[metric]?.value ?? -1) - (b.metrics?.[metric]?.value ?? -1),
             render: (_: any, r: any) => {
               const m = r.metrics?.[metric];
-              return m ? <span style={{ fontWeight: 500 }}>{fmtNum(m.value)}</span> : <span style={{ color: 'rgba(0,0,0,0.25)' }}>-</span>;
+              if (!m) return <span style={{ color: 'rgba(0,0,0,0.25)' }}>-</span>;
+              // inherited：该模型没有自己的 TPD，值取自账户级跨模型总配额。
+              // 必须显式区分，否则会被读成"这个模型每天独享这么多 token"。
+              if (m.inherited) {
+                return (
+                  <Tooltip title={`该模型无独立 TPD，此值取自账户级跨模型总配额（${m.quotaName}），由本账户所有模型共享`}>
+                    <span style={{ fontWeight: 500, color: '#8a94a6' }}>{fmtNum(m.value)}</span>
+                    <Tag color="magenta" style={{ marginLeft: 4, fontSize: 10, lineHeight: '16px', padding: '0 4px' }}>共享</Tag>
+                  </Tooltip>
+                );
+              }
+              return <span style={{ fontWeight: 500 }}>{fmtNum(m.value)}</span>;
             },
           })),
         ]} />

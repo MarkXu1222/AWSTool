@@ -3,7 +3,7 @@
 企业级 AWS 多账户（多 Organizations）管理平台。带强制 MFA 登录、页面级权限与全量操作审计。
 
 **线上**：https://markxu.co（EC2 Singapore，PM2 进程 `aws-toolbox`）
-**当前版本**：`0.34.0`（见 `web/client/src/version.ts`，左下角展示）
+**当前版本**：`0.34.1`（见 `web/client/src/version.ts`，左下角展示）
 
 **生产接入规模**（快照 2026-09-06，取自线上 db.json）
 
@@ -425,9 +425,16 @@ v2 按 `variant` 筛选核心 6 模型并固定排序：`global`（每区 6 条�
 2. 回退到**同区域**的账户级 TPD，并置 `tpdShared=true`
 3. 两者都没有才写 0（规范红线：不盲套公式）
 
-⚠️ 两个容易搞错的点：
+回退**下沉在 `listBedrockQuotas()` 数据源层**（0.34.1）：返回前给缺 TPD 的逐模型行回填同区域账户级值，打 `inherited: true` 并强制 `adjustable: false`。此前回退只写在交付链路的 `matchProfileTpmTpd()` 里，配额查询页的 TPD 列因此显示 `-`，会被读成「没有日限额」，与事实恰好相反。
+
+`inherited` 标记是硬契约，三处依赖它：前端灰显 +「共享」标签、CSV 的 `TPD来源` 列、交付表的第 9 条须知。`matchProfileTpmTpd()` 必须按该标记而非「有没有值」判断，否则回填值会被当成模型自有配额，`tpdShared` 恒为 false 而丢掉须知。回归测试见 `tests/bedrock-account-tpd.test.ts`。
+
+配额页对继承行**不渲染「提升」按钮** —— 提的是全账户总盘子而非单个模型，须到 `Account-Level` 行操作。
+
+⚠️ 三个容易搞错的点：
 
 - **账户级 TPD 按区域不同**，实测同一账户 `us-east-1`/`us-west-2` 为 540M，而 `ap-southeast-1` 只有 150M。`accountLevelTpd()` 按 region 取值，不可跨区复用。
+- **账户级 TPD 的量级差异极大，且未必可自助提额**。实测 `668602396329` 的 `us-east-1` 为 **3 万亿/天**（约为常规 540M 的 5500 倍）且 `Adjustable=false`，只能走 TAM。别拿常规账户的经验套大客户账户。
 - **不是所有 Anthropic 都没有独立 TPD**。Claude 3 Haiku / 3.5 Sonnet / 3.7 Sonnet / Sonnet 4 / Opus 4.1 仍有自己的值；只是交付清单里那 6 个核心新型号都落在回退分支，所以同区域内它们的 TPD 会显示为同一个数。
 
 `tpdShared=true` 时交付表自动追加第 9 条须知，说明该额度**由账户下所有模型共享、非每个模型独享**（6 个模型不是 6×540M，仍是 540M）。
@@ -769,6 +776,7 @@ Nginx 反代 + Let's Encrypt（`markxu.co`，自动续期），80 强制跳 443�
 - MAP 打标状态机对 EventBridge Connection 的 ARN 格式不兼容（`Provided Arn is not in correct format`），每轮扫描固定失败 1 个。代码在中央工具账户 `382309211956` 的 Lambda 里，不在本仓库
 - MAP 打标是每日定时扫描（01:20 UTC），新建资源最长要等 24 小时才被打标。真正的根治是 EventBridge 事件驱动实时打标 + 定时扫描兜底，改动较大待评估
 - payer 账户资源是否计入 MAP 报销基数尚未与 AWS 侧确认（账单桶 / CUR 桶属运维基础设施而非迁移工作负载）
+- **`listBedrockQuotas()` 对配额数量大的账户会静默丢数据**。单区域硬超时 15 秒（`BEDROCK_REGION_TIMEOUT_MS`），而大客户账户 Bedrock 配额可达 1000+ 条需翻 27 页，必然超时。超时区域虽会进 `errors` 并在页面顶部告警，但**已拉到的残缺数据仍照常渲染**，表现为部分模型 TPM/TPD 显示 `-`，极易被当成「没有该配额」。实测 `668602396329` us-east-1 即触发。交付表导出风险更大（截断会被写成 TPM=0）。待办：超时改为可配置/自适应，且超时区域的残缺行不应参与渲染与导出
 - `Bedrock.tsx`、`Quotas.tsx`、`Cleanup.tsx` 各自维护一份区域表。前两者已对齐为 30 个，但仍是三份拷贝，AWS 开新区时要改多处；建议抽到 `client/src/constants/regions.ts` 做单一数据源
 
 ---

@@ -691,6 +691,8 @@ const QuotasPage: React.FC = () => {
       exportToCSV(bedrockFiltered.map(r => ({
         区域: r.region, Provider: r.provider, 模型: r.model, 推理范围: r.scope,
         TPM: r.metrics?.TPM?.value ?? '', RPM: r.metrics?.RPM?.value ?? '', TPD: r.metrics?.TPD?.value ?? '',
+        // 导出件常被直接转发给客户，必须带上口径，否则共享额度会被当成单模型独享
+        TPD来源: r.metrics?.TPD ? (r.metrics.TPD.inherited ? '账户级共享' : '模型独立') : '',
       })), 'bedrock_quotas');
     } else if (activeTab === 'requests') {
       exportQuotaRecords(requests, accounts, `quota_${selectedAccount}`);
@@ -1011,6 +1013,17 @@ const QuotasPage: React.FC = () => {
                     render: (_: any, r: any) => {
                       const m = r.metrics?.[metric];
                       if (!m) return <span style={{ color: 'rgba(0,0,0,0.25)' }}>-</span>;
+                      // inherited：值来自账户级跨模型总配额，不是该模型自己的。
+                      // 这里刻意不给「提升」入口：提的是全账户总盘子而非单模型，
+                      // 要提额须到 Account-Level 那一行操作，避免误以为只影响这一个模型。
+                      if (m.inherited) {
+                        return (
+                          <Tooltip title={`该模型无独立 TPD，此值取自账户级跨模型总配额（${m.quotaName}），由本账户所有模型共享。如需提额请在「Account-Level」行操作`}>
+                            <span style={{ fontWeight: 500, color: '#8a94a6' }}>{fmtQuotaNum(m.value)}</span>
+                            <Tag color="magenta" style={{ marginLeft: 4, fontSize: 10, lineHeight: '16px', padding: '0 4px' }}>共享</Tag>
+                          </Tooltip>
+                        );
+                      }
                       return (
                         <span>
                           <span style={{ fontWeight: 500 }}>{fmtQuotaNum(m.value)}</span>
