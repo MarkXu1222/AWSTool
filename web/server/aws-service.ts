@@ -723,10 +723,13 @@ export async function listServiceQuotas(accountId: string, serviceCode: string, 
 //   "On-demand model inference tokens per minute for Anthropic Claude 3.5 Sonnet (doubled for cross-region calls)"
 // 需要从中解析出「指标类型 / 推理范围(scope) / 模型名 / provider」，再透视成一行三列(TPM/RPM/TPD)。
 // ============================================================
-const BEDROCK_QUOTA_SCOPES = ['Global Cross-Region', 'Cross-Region', 'On-Demand', 'Latency-Optimized', 'Other'];
+// Account-Level = 账户级跨模型总配额（不限定推理范围），与其余按范围划分的 scope 并列
+const BEDROCK_QUOTA_SCOPES = ['Global Cross-Region', 'Cross-Region', 'On-Demand', 'Latency-Optimized', 'Account-Level', 'Other'];
 // 模型名 → 规范 provider。按关键词匹配（含模型家族别名），避免出现 "GPT-5.4"/"Stable" 这类
 // 由“取首个单词”产生的伪 provider，也避免 MiniMax/Minimax 大小写重复项。
 const BEDROCK_PROVIDER_HINTS: Array<[string, string]> = [
+  // 账户级总配额跨所有厂商，归到服务级而不是某个 provider
+  ['cross-model account-level', 'Bedrock (服务级)'],
   ['guardrail', 'Bedrock (服务级)'],
   ['anthropic', 'Anthropic'], ['claude', 'Anthropic'],
   ['nova', 'Amazon'], ['titan', 'Amazon'], ['amazon', 'Amazon'],
@@ -761,8 +764,19 @@ function inferBedrockProvider(...values: string[]): string {
 
 const BEDROCK_METRIC_PHRASE = /\s*(?:tokens per minute|requests per minute|tokens per day)\s*/i;
 
+/**
+ * 账户级跨模型总配额（AWS 2026 新增），配额名不带 "for <模型>"：
+ *   "Cross-Model Account-Level Tokens Per Day"   L-E3F10727
+ * 它约束的是整个账户所有模型的合计用量，与逐模型配额是两个维度，
+ * 交付/提额时都要单独看，所以这里保留完整名称、不按普通模型行解析。
+ */
+const BEDROCK_ACCOUNT_LEVEL_RE = /cross-model\s+account-level/i;
+
 /** 从配额名里提取模型名："... tokens per minute for <模型名>" */
 function extractBedrockModelName(quotaName: string): string {
+  // 账户级总配额没有模型维度，保留原名（去掉指标短语会丢语义）
+  if (BEDROCK_ACCOUNT_LEVEL_RE.test(quotaName)) return quotaName.trim();
+
   const m = /(?:tokens per minute|requests per minute|tokens per day)\s+for\s+(.+)/i.exec(quotaName);
   let model: string;
   if (m) {
@@ -794,6 +808,10 @@ function classifyBedrockQuota(quotaName: string): { metric: 'TPM' | 'RPM' | 'TPD
   if (nl.includes('tokens per minute')) metric = 'TPM';
   else if (nl.includes('requests per minute')) metric = 'RPM';
   else if (nl.includes('tokens per day')) metric = 'TPD';
+
+  // 账户级总配额优先判定：它名字里带 "cross-model"，若落到下面的
+  // cross-region 分支会被误归类，而它其实不限定任何推理范围。
+  if (BEDROCK_ACCOUNT_LEVEL_RE.test(quotaName)) return { metric, scope: 'Account-Level' };
 
   let scope = 'Other';
   if (nl.includes('global cross-region')) scope = 'Global Cross-Region';

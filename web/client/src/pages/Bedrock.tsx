@@ -589,7 +589,9 @@ const DataShareTab: React.FC<{ accountId: string }> = ({ accountId }) => {
 };
 
 // ===== Tab: Bedrock 配额查询（TPM/RPM/TPD，与配额管理页 Bedrock Tab 同一后端接口） =====
-const BEDROCK_QUOTA_SCOPES = ['Global Cross-Region', 'Cross-Region', 'On-Demand', 'Latency-Optimized', 'Other'];
+// Account-Level = 账户级跨模型总配额（Cross-Model Account-Level Tokens Per Day），
+// 约束整个账户所有模型的合计用量，与按推理范围划分的其余 scope 是不同维度
+const BEDROCK_QUOTA_SCOPES = ['Global Cross-Region', 'Cross-Region', 'On-Demand', 'Latency-Optimized', 'Account-Level', 'Other'];
 // Provider 固定候选（与后端 inferBedrockProvider 的规范名一致，同 Quotas 页），查询前也能直接选
 const BEDROCK_QUOTA_PROVIDERS = [
   'Anthropic', 'Amazon', 'Meta', 'Mistral', 'Cohere', 'AI21', 'DeepSeek', 'Qwen',
@@ -598,6 +600,7 @@ const BEDROCK_QUOTA_PROVIDERS = [
 ];
 const SCOPE_COLOR: Record<string, string> = {
   'Global Cross-Region': 'blue', 'Cross-Region': 'green', 'On-Demand': 'orange', 'Latency-Optimized': 'purple',
+  'Account-Level': 'magenta',
 };
 const fmtNum = (v: number) => v >= 1_000_000 ? `${(v / 1_000_000).toLocaleString(undefined, { maximumFractionDigits: 1 })}M` : v.toLocaleString();
 

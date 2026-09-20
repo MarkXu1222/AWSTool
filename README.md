@@ -3,7 +3,7 @@
 企业级 AWS 多账户（多 Organizations）管理平台。带强制 MFA 登录、页面级权限与全量操作审计。
 
 **线上**：https://markxu.co（EC2 Singapore，PM2 进程 `aws-toolbox`）
-**当前版本**：`0.33.0`（见 `web/client/src/version.ts`，左下角展示）
+**当前版本**：`0.34.0`（见 `web/client/src/version.ts`，左下角展示）
 
 **生产接入规模**（快照 2026-09-06，取自线上 db.json）
 
@@ -419,7 +419,11 @@ v2 按 `variant` 筛选核心 6 模型并固定排序：`global`（每区 6 条�
 
 筛选必须在 `prepareDelivery()` **之前**执行：后者对每一行强校验 `map-migrated` tag，老模型往往没打 tag 会直接让整个导出失败，而它们本就不该进交付表。
 
-TPM/TPD 匹配不到时如实写 0（规范红线：不盲套公式）。配额为 0 或清单型号缺失会通过 `X-Delivery-*` 响应头回传并在页面告警 —— 二进制 body 塞不进 JSON，且跨域下自定义头需在 `cors()` 的 `exposedHeaders` 显式暴露。
+**TPD 口径（2026-09 变更）**：AWS 取消了 Anthropic 系列的逐模型 TPD 配额（实测 Opus 4.7 只剩 TPM），改为账户级总配额 `Cross-Model Account-Level Tokens Per Day`（`L-E3F10727`，scope 标记为 `Account-Level`）。所以 TPD 取值优先用模型自己的配额（Nova / Jamba 等老模型仍有），查不到时回退到账户级值，并置 `tpdShared=true` —— 交付表会自动追加第 9 条须知，说明该额度**由账户下所有模型共享、非每个模型独享**（6 个模型不是 6×540M，仍是 540M）。两者都没有才写 0（规范红线：不盲套公式）。
+
+> 李浩版规范里「US TPD = TPM×720 / Global TPD = TPM×1440」的档位表对 Anthropic 已失效，逐模型 TPD 不再存在。
+
+配额为 0 或清单型号缺失会通过 `X-Delivery-*` 响应头回传并在页面告警 —— 二进制 body 塞不进 JSON，且跨域下自定义头需在 `cors()` 的 `exposedHeaders` 显式暴露。
 
 > 匹配逻辑有两个已修复的坑（见 `bedrock-tools.ts` 注释）：
 > 次版本号正则曾贪婪吞掉 8 位日期（`claude-opus-5-20260301-v1:0` → `5.20260301`），

@@ -302,16 +302,46 @@ function versionMatches(model: string, version: string): boolean {
 }
 
 /**
+ * 取该区域的账户级跨模型日配额（Cross-Model Account-Level Tokens Per Day，L-E3F10727）。
+ *
+ * 2026 年起 AWS 取消了 Anthropic 系列的逐模型 TPD 配额（实测 Opus 4.7 只剩 TPM），
+ * 改为一个账户级总配额约束所有模型的合计日用量。
+ * 所以逐模型 TPD 查不到时，真正生效的日限额就是这个值。
+ */
+function accountLevelTpd(quotaRows: any[], region: string): number {
+  for (const q of quotaRows) {
+    if (q.region !== region) continue;
+    if (q.scope !== 'Account-Level') continue;
+    const v = q.metrics?.TPD?.value;
+    if (v != null) return Math.round(v);
+  }
+  return 0;
+}
+
+/**
  * 在 listBedrockQuotas 的结果行里找该 Profile 的 TPM/TPD。
  * scope：Global → 'Global Cross-Region'；US → 'Cross-Region'（李浩版规范的两档）。
- * 匹配不到如实返回 0（规范：提额未生效写 0，不盲套公式）。
+ *
+ * TPD 取值优先级：
+ *   1. 该模型自己的 TPD（老模型仍有，如 Nova / Jamba）
+ *   2. 回退到账户级跨模型 TPD —— Anthropic 现在都走这条
+ * 两者都没有才写 0（规范：提额未生效如实写 0，不盲套公式）。
+ *
+ * `tpdShared` 标记这一行的 TPD 是否来自账户级共享配额，交付表据此加备注，
+ * 避免客户误以为每个模型各自独享该额度。
  */
 export function matchProfileTpmTpd(
   profile: { backendModels?: string; name?: string; scope: string; region: string },
   quotaRows: any[],
-): { tpm: number; tpd: number } {
+): { tpm: number; tpd: number; tpdShared: boolean } {
   const key = extractClaudeKey(profile.backendModels || profile.name || '');
-  if (!key) return { tpm: 0, tpd: 0 };
+  const shared = accountLevelTpd(quotaRows, profile.region);
+  const pick = (q: any) => {
+    const own = q.metrics?.TPD?.value;
+    if (own != null) return { tpd: Math.round(own), tpdShared: false };
+    return { tpd: shared, tpdShared: shared > 0 };
+  };
+  if (!key) return { tpm: 0, tpd: 0, tpdShared: false };
   const wantScope = profile.scope === 'Global' ? 'Global Cross-Region' : 'Cross-Region';
   for (const q of quotaRows) {
     if (q.region !== profile.region || q.scope !== wantScope) continue;
@@ -320,10 +350,7 @@ export function matchProfileTpmTpd(
     if (key.v && !model.includes(key.v)) continue;
     // 无 v 后缀时避免匹配到 "4.6 V1" 这类带版本的行（除非只有它）
     if (!key.v && /v\d/.test(model)) continue;
-    return {
-      tpm: Math.round(q.metrics?.TPM?.value || 0),
-      tpd: Math.round(q.metrics?.TPD?.value || 0),
-    };
+    return { tpm: Math.round(q.metrics?.TPM?.value || 0), ...pick(q) };
   }
   // 放宽一轮：允许 v 后缀不严格（应对配额命名差异）。
   // 注意版本号仍须整段匹配，绝不放宽到子串，否则又会串到隔壁版本上。
@@ -331,10 +358,10 @@ export function matchProfileTpmTpd(
     if (q.region !== profile.region || q.scope !== wantScope) continue;
     const model = String(q.model || '').toLowerCase();
     if (model.includes(key.family) && versionMatches(model, key.version)) {
-      return { tpm: Math.round(q.metrics?.TPM?.value || 0), tpd: Math.round(q.metrics?.TPD?.value || 0) };
+      return { tpm: Math.round(q.metrics?.TPM?.value || 0), ...pick(q) };
     }
   }
-  return { tpm: 0, tpd: 0 };
+  return { tpm: 0, tpd: 0, tpdShared: false };
 }
 
 // ===== FTU 模型开通（Claude 首次使用表单） =====

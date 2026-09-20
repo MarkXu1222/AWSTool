@@ -149,7 +149,9 @@ const BEDROCK_REGIONS = [
   'af-south-1', 'sa-east-1', 'mx-central-1',
 ];
 // scope = 推理范围（与后端 BEDROCK_QUOTA_SCOPES 保持一致）
-const BEDROCK_SCOPES = ['Global Cross-Region', 'Cross-Region', 'On-Demand', 'Latency-Optimized', 'Other'];
+// Account-Level = 账户级跨模型总配额（Cross-Model Account-Level Tokens Per Day），
+// 约束整个账户所有模型的合计用量，与按推理范围划分的其余 scope 是不同维度
+const BEDROCK_SCOPES = ['Global Cross-Region', 'Cross-Region', 'On-Demand', 'Latency-Optimized', 'Account-Level', 'Other'];
 // Provider 固定候选（与后端 inferBedrockProvider 的规范名一致），查询前也能直接选
 const BEDROCK_PROVIDERS = [
   'Anthropic', 'Amazon', 'Meta', 'Mistral', 'Cohere', 'AI21', 'DeepSeek', 'Qwen',
@@ -161,6 +163,7 @@ const BEDROCK_SCOPE_COLOR: Record<string, string> = {
   'Cross-Region': 'blue',
   'On-Demand': 'green',
   'Latency-Optimized': 'orange',
+  'Account-Level': 'magenta',
   'Other': 'default',
 };
 const fmtQuotaNum = (v: any) => {

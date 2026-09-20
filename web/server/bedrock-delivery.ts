@@ -147,6 +147,8 @@ export async function buildDeliveryXlsx(
 export interface DeliveryProfileRowV2 extends DeliveryProfileRow {
   tpm: number;   // 实测 TPM（Service Quotas），未匹配到写 0
   tpd: number;   // 实测 TPD
+  /** TPD 取自账户级跨模型共享配额（非该模型独享）时为 true，须知里会加说明 */
+  tpdShared?: boolean;
 }
 
 /**
@@ -233,7 +235,16 @@ export async function buildDeliveryXlsxV2(
   rows: DeliveryProfileRowV2[], iamUser: string, iamPassword: string,
 ): Promise<{ buffer: Buffer; accountId: string; tagValue: string }> {
   const { grouped, tagValue, accountId } = prepareDelivery(rows);
-  const notice = DELIVERY_NOTICE(tagValue);
+  // AWS 2026 起取消了 Anthropic 逐模型 TPD，改为账户级跨模型总配额。
+  // 此时表里各行 TPD 是同一个共享额度，必须说明，否则客户会按「每模型独享」理解，
+  // 误判整体吞吐上限（比如 6 个模型不是 6×540M，仍是 540M）。
+  const hasShared = rows.some(r => r.tpdShared);
+  const notice = DELIVERY_NOTICE(tagValue) + (hasShared
+    ? '\n 9. 关于 TPD（每日 Token 上限）\n'
+      + '上表 TPD 取自账户级跨模型配额（Cross-Model Account-Level Tokens Per Day），'
+      + '该额度由本账户下所有模型共享，并非每个模型各自独享；'
+      + '各模型的 TPM（每分钟 Token）仍是独立配额。'
+    : '');
 
   const wb = new ExcelJS.Workbook();
   // 工作表名固定（李浩版规范：不随日期变）
