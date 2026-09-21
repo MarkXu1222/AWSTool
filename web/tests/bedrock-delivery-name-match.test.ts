@@ -138,6 +138,64 @@ test('多区域各自独立匹配', () => {
   assert.equal(missingByRegion.size, 0);
 });
 
+/** 账户 106360388618（Elodie）的真实 Profile 名：Self- 前缀 + 日期戳 + :0 后缀 */
+const SELF_STYLE = [
+  'Self-global-claude-opus-4-6-v1:0',
+  'Self-global-claude-sonnet-4-6',
+  'Self-global-claude-opus-4-7',
+  'Self-global-claude-opus-4-8',
+  'Self-global-claude-sonnet-5',
+  'Self-global-claude-opus-5',
+  // 以下为非清单模型，不得误纳入
+  'Self-global-claude-sonnet-4-20250514-v1:0',
+  'Self-global-claude-sonnet-4-5-20250929-v1:0',
+  'Self-global-claude-opus-4-5-20251101-v1:0',
+  'Self-global-claude-haiku-4-5-20251001-v1:0',
+  'Self-global-claude-fable-5',
+  'Self-us-claude-opus-4-7',
+];
+
+test('Self- 前缀命名经回退全部命中（复现 106360388618）', () => {
+  // 实测该账户 52 个 Profile 全部匹配失败：归一化只剥了 sef-，
+  // Self- 剥不掉导致残留 "self-global-opus-4-7" vs 清单 "global-opus-4-7"
+  const { kept } = filterAndSortForDelivery(asRows(SELF_STYLE), 'global');
+  assert.equal(kept.length, 6);
+  assert.deepEqual(kept.map(r => r.name), [
+    'Self-global-claude-opus-4-6-v1:0',
+    'Self-global-claude-sonnet-4-6',
+    'Self-global-claude-opus-4-7',
+    'Self-global-claude-opus-4-8',
+    'Self-global-claude-sonnet-5',
+    'Self-global-claude-opus-5',
+  ]);
+});
+
+test('带日期戳与 :0 后缀的老模型不会被误纳入', () => {
+  const { kept, dropped } = filterAndSortForDelivery(asRows(SELF_STYLE), 'global');
+  const keptNames = new Set(kept.map(r => r.name));
+  for (const n of ['Self-global-claude-sonnet-4-20250514-v1:0',
+    'Self-global-claude-sonnet-4-5-20250929-v1:0',
+    'Self-global-claude-opus-4-5-20251101-v1:0',
+    'Self-global-claude-haiku-4-5-20251001-v1:0',
+    'Self-global-claude-fable-5']) {
+    assert.equal(keptNames.has(n), false, `${n} 不应进入交付表`);
+    assert.equal(dropped.includes(n), true, `${n} 应计入 dropped`);
+  }
+  // us 版在 global 变体里也不该出现
+  assert.equal(keptNames.has('Self-us-claude-opus-4-7'), false);
+});
+
+test('剥日期戳不会让不同型号撞车', () => {
+  // sonnet-4（20250514）与 sonnet-4-5（20250929）剥掉日期后仍须可区分
+  assert.notEqual(
+    normalizeProfileName('Self-global-claude-sonnet-4-20250514-v1:0'),
+    normalizeProfileName('Self-global-claude-sonnet-4-5-20250929-v1:0'));
+  // 剥完日期后 sonnet-4 不能等于清单里的 sonnet-4-6
+  assert.notEqual(
+    normalizeProfileName('Self-global-claude-sonnet-4-20250514-v1:0'),
+    normalizeProfileName('sef-global-claude-sonnet-4-6'));
+});
+
 test('归一化规则本身', () => {
   // 清单名与控制台名折叠到同一形态
   assert.equal(

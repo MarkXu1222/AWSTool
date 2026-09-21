@@ -202,11 +202,17 @@ export function deliveryOrderFor(variant: DeliveryVariant): string[] {
  *
  * 归一化规则（只做无歧义的形态折叠，不做语义猜测）：
  *   1. 转小写、去首尾空格
- *   2. 丢弃 `sef-` 前缀（内部命名约定，非模型信息）
+ *   2. 丢弃 `sef-` / `self-` 前缀（内部命名约定，非模型信息）
  *   3. 丢弃 `anthropic` / `claude` 词（各账户写法不一，不携带区分度）
  *   4. 版本号里的 `.` 视同 `-`（4.6 ≡ 4-6）
- *   5. 丢弃结尾的 `-v1` 版本后缀（清单有、控制台没有）
+ *   5. 丢弃结尾的 `-v1` / `-v1:0` 与 8 位日期戳
  *   6. 所有非字母数字压成单个 `-`
+ *
+ * 实测遇到的三种命名，必须都能折叠到同一形态：
+ *   sef-global-claude-opus-4-7                      （交付清单）
+ *   Self-global-claude-opus-4-7                     （账户 106360388618）
+ *   Global Anthropic Claude Opus 4.7                （账户 703844615335）
+ *   Self-global-claude-sonnet-4-5-20250929-v1:0     （带日期戳与版本后缀）
  *
  * ⚠️ scope 词（us / global）**必须保留**：它是变体 A 里区分
  * `sef-us-claude-opus-4-8` 与 `sef-global-claude-opus-4-8` 的唯一依据，
@@ -216,12 +222,16 @@ export function normalizeProfileName(s: string): string {
   return String(s || '')
     .toLowerCase()
     .trim()
-    .replace(/^sef-/, '')
+    // sef- 与 self- 都是内部前缀；不同账户用法不一，实测两种都存在
+    .replace(/^(sef|self)-/, '')
     .replace(/\banthropic\b/g, ' ')
     .replace(/\bclaude\b/g, ' ')
     .replace(/(\d)\.(\d)/g, '$1-$2')
     .replace(/[^a-z0-9]+/g, '-')
-    .replace(/-v\d+$/, '')
+    // 先剥版本后缀（-v1 / -v1-0，源自 :0），再剥 8 位日期戳。
+    // 顺序不能反：日期戳在版本号前面（...-20250929-v1-0）。
+    .replace(/-v\d+(-\d+)?$/, '')
+    .replace(/-\d{8}$/, '')
     .replace(/^-+|-+$/g, '');
 }
 
