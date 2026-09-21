@@ -13,8 +13,21 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   deriveAmounts, buildTitle, getPartner, PARTNERS, USE_CASES, INDUSTRIES,
-  __test__toIsoDate,
+  __test__toIsoDate, __test__evaluateStage,
 } from '../server/poc-cash';
+
+/** 构造 GetOpportunity 的返回形状 */
+const opp = (stage: string | undefined, review: string | undefined, mrr = 2400) => ({
+  Id: 'O12345678',
+  Project: {
+    Title: 'Webby - Test #ADPL',
+    ExpectedCustomerSpend: [{ Amount: String(mrr) }],
+  },
+  Customer: { Account: { CompanyName: 'Test Sdn Bhd' } },
+  LifeCycle: { Stage: stage, ReviewStatus: review, TargetCloseDate: '2027-03-31' },
+  RelatedEntityIdentifiers: { Solutions: ['S-0070517'] },
+  LastModifiedDate: new Date('2026-09-21T08:28:41Z'),
+});
 
 const webby = getPartner('webby');
 
@@ -69,6 +82,62 @@ test('创建日期统一成 ISO，不能用 String(Date)', () => {
   const dates = ['2025-10-24', '2026-09-21', '2026-01-02']
     .sort((a, b) => b.localeCompare(a));
   assert.deepEqual(dates, ['2026-09-21', '2026-01-02', '2025-10-24']);
+});
+
+test('阶段可编辑性严格跟随 ReviewStatus', () => {
+  // 未提交：AWS 明确拒绝改 Stage
+  // "You can not update the stage when Opportunity status is Pending Submission."
+  const pending = __test__evaluateStage(opp('Prospect', 'Pending Submission'));
+  assert.equal(pending.editable, false);
+  assert.equal(pending.nextStage, null, '不可编辑时不应给出下一阶段');
+
+  // 审核中：商机被锁
+  const submitted = __test__evaluateStage(opp('Prospect', 'Submitted'));
+  assert.equal(submitted.editable, false);
+  assert.match(submitted.reason, /审核中|锁定/);
+  assert.equal(submitted.nextStage, null);
+
+  const inReview = __test__evaluateStage(opp('Prospect', 'In review'));
+  assert.equal(inReview.editable, false);
+
+  // 只有这两个状态可以继续操作
+  for (const r of ['Approved', 'Action Required']) {
+    const ok = __test__evaluateStage(opp('Prospect', r));
+    assert.equal(ok.editable, true, `${r} 应可编辑`);
+    assert.equal(ok.nextStage, 'Qualified');
+  }
+
+  // Rejected 不在白名单里
+  assert.equal(__test__evaluateStage(opp('Prospect', 'Rejected')).editable, false);
+});
+
+test('下一阶段按顺序推导，末尾为 null', () => {
+  assert.equal(__test__evaluateStage(opp('Qualified', 'Approved')).nextStage,
+    'Technical Validation');
+  assert.equal(__test__evaluateStage(opp('Committed', 'Approved')).nextStage, 'Launched');
+  // Launched 是最后一个
+  assert.equal(__test__evaluateStage(opp('Launched', 'Approved')).nextStage, null);
+  // Closed Lost 不在推进链里
+  assert.equal(__test__evaluateStage(opp('Closed Lost', 'Approved')).nextStage, null);
+});
+
+test('POC 就绪只认 Technical Validation 且可编辑', () => {
+  assert.equal(
+    __test__evaluateStage(opp('Technical Validation', 'Approved')).readyForPoc, true);
+  // 阶段到了但还在审核中 —— 不算就绪
+  assert.equal(
+    __test__evaluateStage(opp('Technical Validation', 'Submitted')).readyForPoc, false);
+  // 阶段没到
+  assert.equal(__test__evaluateStage(opp('Qualified', 'Approved')).readyForPoc, false);
+});
+
+test('阶段状态里带出 POC 金额联动', () => {
+  const s = __test__evaluateStage(opp('Technical Validation', 'Approved', 5000));
+  assert.deepEqual(s.amounts, { mrrUsd: 5000, arrUsd: 60000, pocUsd: 6000 });
+  // 无金额时不应编造
+  const noSpend: any = opp('Prospect', 'Approved');
+  noSpend.Project.ExpectedCustomerSpend = [];
+  assert.equal(__test__evaluateStage(noSpend).amounts, undefined);
 });
 
 test('Use Case 用 AWS 的完整字面量', () => {

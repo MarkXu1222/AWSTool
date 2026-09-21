@@ -456,6 +456,11 @@ export const api = {
   pocCashOpportunities: (search?: string) =>
     request(`/poc-cash/opportunities${search ? `?search=${encodeURIComponent(search)}` : ''}`),
   pocCashTemplate: (id: string) => request(`/poc-cash/opportunities/${encodeURIComponent(id)}`),
+  // 阶段检查与推进（提交后确认 AWS 审到哪一步）
+  pocCashStage: (id: string) => request(`/poc-cash/opportunities/${encodeURIComponent(id)}/stage`),
+  pocCashAdvanceStage: (id: string, stage: string) =>
+    request(`/poc-cash/opportunities/${encodeURIComponent(id)}/stage`,
+      { method: 'POST', body: JSON.stringify({ stage }) }),
   pocCashPreviewTitle: (body: { partnerKey: string; companyName: string; projectName: string }) =>
     request('/poc-cash/preview-title', { method: 'POST', body: JSON.stringify(body) }),
   pocCashCreate: (body: any) =>

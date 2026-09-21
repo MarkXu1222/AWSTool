@@ -21,6 +21,7 @@ import {
   AssociateOpportunityCommand,
   StartEngagementFromOpportunityTaskCommand,
   GetOpportunityCommand,
+  UpdateOpportunityCommand,
   ListOpportunitiesCommand,
   ListSolutionsCommand,
 } from '@aws-sdk/client-partnercentral-selling';
@@ -354,6 +355,134 @@ export async function getOpportunityTemplate(id: string): Promise<OpportunityTem
     stage: o.LifeCycle?.Stage,
     reviewStatus: o.LifeCycle?.ReviewStatus,
   };
+}
+
+/** 商机阶段顺序（LifeCycle.Stage 合法值）。Closed Lost 不在推进链里。 */
+export const STAGES = [
+  'Prospect',
+  'Qualified',
+  'Technical Validation',
+  'Business Validation',
+  'Committed',
+  'Launched',
+] as const;
+export const CLOSED_LOST = 'Closed Lost';
+
+/** 提交后只有这两个 ReviewStatus 允许继续编辑（实测 AWS 的约束）。 */
+const EDITABLE_REVIEW_STATUS = new Set(['Approved', 'Action Required']);
+
+export interface StageStatus {
+  id: string;
+  title?: string;
+  companyName: string;
+  stage?: string;
+  reviewStatus?: string;
+  targetCloseDate?: string;
+  lastModifiedDate?: string;
+  mrrUsd?: number;
+  solutionIds: string[];
+  /** 现在能否改 Stage */
+  editable: boolean;
+  /** 不能改时的原因；能改时说明依据 */
+  reason: string;
+  /** 按顺序的下一个阶段，已在末尾或不可推进时为 null */
+  nextStage: string | null;
+  /** POC 申请的前置：要到 Technical Validation */
+  readyForPoc: boolean;
+  amounts?: { mrrUsd: number; arrUsd: number; pocUsd: number };
+}
+
+export function __test__evaluateStage(o: any): StageStatus {
+  return evaluateStage(o);
+}
+
+function evaluateStage(o: any): StageStatus {
+  const lc = o.LifeCycle || {};
+  const acct = o.Customer?.Account || {};
+  const spend = (o.Project?.ExpectedCustomerSpend || [])[0];
+  const mrr = spend?.Amount ? Number(spend.Amount) : undefined;
+  const stage: string | undefined = lc.Stage;
+  const review: string | undefined = lc.ReviewStatus;
+
+  // 实测约束：Pending Submission 下改 Stage 会被 AWS 拒
+  //   "You can not update the stage when Opportunity status is Pending Submission."
+  // Submitted / In review 期间商机被锁，要等 AWS 审完。
+  let editable: boolean;
+  let reason: string;
+  if (!review || review === 'Pending Submission') {
+    editable = false;
+    reason = '尚未提交给 AWS —— 未提交状态下不能改阶段，需先提交';
+  } else if (EDITABLE_REVIEW_STATUS.has(review)) {
+    editable = true;
+    reason = `ReviewStatus=${review}，可以推进阶段`;
+  } else {
+    editable = false;
+    reason = `ReviewStatus=${review}，AWS 审核中，商机已锁定`;
+  }
+
+  const idx = stage ? STAGES.indexOf(stage as any) : -1;
+  const nextStage = editable && idx >= 0 && idx + 1 < STAGES.length
+    ? STAGES[idx + 1] : null;
+
+  return {
+    id: o.Id,
+    title: o.Project?.Title,
+    companyName: acct.CompanyName || '',
+    stage, reviewStatus: review,
+    targetCloseDate: lc.TargetCloseDate,
+    lastModifiedDate: o.LastModifiedDate
+      ? new Date(o.LastModifiedDate).toISOString() : undefined,
+    mrrUsd: mrr,
+    solutionIds: o.RelatedEntityIdentifiers?.Solutions || [],
+    editable, reason, nextStage,
+    readyForPoc: stage === 'Technical Validation' && editable,
+    amounts: mrr ? deriveAmounts(mrr) : undefined,
+  };
+}
+
+/** 查单个商机的阶段与可操作性。 */
+export async function getStageStatus(id: string): Promise<StageStatus> {
+  const c = await client();
+  const o: any = await c.send(new GetOpportunityCommand({
+    Catalog: CATALOG, Identifier: id,
+  }));
+  return evaluateStage(o);
+}
+
+/**
+ * 推进阶段。
+ *
+ * ⚠️ UpdateOpportunity 用 LastModifiedDate 做乐观锁，必须是服务端最新值，
+ * 否则抛 ConflictException —— 所以这里先 Get 再 Update，不接受前端传来的时间戳。
+ * ⚠️ ReviewStatus 只读，只能改 Stage。
+ */
+export async function advanceStage(id: string, targetStage: string) {
+  if (![...STAGES, CLOSED_LOST].includes(targetStage as any)) {
+    throw new Error(`非法阶段：${targetStage}`);
+  }
+  const c = await client();
+  const cur: any = await c.send(new GetOpportunityCommand({
+    Catalog: CATALOG, Identifier: id,
+  }));
+  const status = evaluateStage(cur);
+  if (!status.editable) throw new Error(`不能改阶段：${status.reason}`);
+  if (status.stage === targetStage) {
+    throw new Error(`当前已是 ${targetStage}，无需推进`);
+  }
+
+  const lc = cur.LifeCycle || {};
+  const payloadLc: any = { Stage: targetStage };
+  // 只回传可写字段，ReviewStatus 等只读字段带上会被拒
+  if (lc.TargetCloseDate) payloadLc.TargetCloseDate = lc.TargetCloseDate;
+  if (lc.NextSteps) payloadLc.NextSteps = lc.NextSteps;
+
+  await c.send(new UpdateOpportunityCommand({
+    Catalog: CATALOG,
+    Identifier: id,
+    LastModifiedDate: cur.LastModifiedDate,  // 乐观锁
+    LifeCycle: payloadLc,
+  }));
+  return getStageStatus(id);
 }
 
 /** 创建 → 关联 Solution → 提交。任一后续步骤失败都不回滚商机，

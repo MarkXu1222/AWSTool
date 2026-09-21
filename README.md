@@ -3,7 +3,7 @@
 企业级 AWS 多账户（多 Organizations）管理平台。带强制 MFA 登录、页面级权限与全量操作审计。
 
 **线上**：https://markxu.co（EC2 Singapore，PM2 进程 `aws-toolbox`）
-**当前版本**：`0.35.1`（见 `web/client/src/version.ts`，左下角展示）
+**当前版本**：`0.36.0`（见 `web/client/src/version.ts`，左下角展示）
 
 **生产接入规模**（快照 2026-09-06，取自线上 db.json）
 
@@ -524,6 +524,27 @@ Partner Contribution = Total − 申请额（USD→MYR 汇率 4.27）
 
 前端实时预览并在三种情况下告警：Partner Contribution 为负、占比 < 10%、
 POC 申请额 > 9,900 USD（实测 114 条记录的经验上限）。
+
+**阶段检查（0.36.0）**：页面分「创建商机 / 阶段检查」两个 Tab。提交后商机被
+AWS 锁定，用阶段检查确认审到哪一步了，并在允许时推进阶段。
+
+可编辑性严格跟随 `ReviewStatus`，三段互斥：
+
+| ReviewStatus | 能否改 Stage | 说明 |
+|---|---|---|
+| `Pending Submission` / 空 | ❌ | 未提交状态下 AWS 拒绝改阶段 |
+| `Submitted` / `In review` | ❌ | 审核中，商机被锁 |
+| `Approved` / `Action Required` | ✅ | 可推进 |
+| `Rejected` | ❌ | 不在白名单 |
+
+`readyForPoc` 需同时满足 **Stage = Technical Validation** 且可编辑 ——
+阶段到了但还在审核中不算就绪。就绪时页面直接给出定价计算器目标 ARR 与
+POC 可申请额。
+
+⚠️ `UpdateOpportunity` 用 `LastModifiedDate` 做乐观锁，必须是服务端最新值，
+否则抛 `ConflictException`。所以推进接口**在服务端自己先 Get 再 Update**，
+不接受前端传时间戳（前端值可能已陈旧）。`ReviewStatus` 只读，只能改 Stage；
+回传 `LifeCycle` 时只带可写字段，带上只读字段会被拒。
 
 **参考已有商机（0.35.1）**：同一客户做新项目时，从下拉选一条已有商机，
 带出客户信息、Use Case、业务描述、Solution。**项目名称与 MRR 刻意不带过来** ——

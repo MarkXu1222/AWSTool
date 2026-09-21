@@ -34,6 +34,8 @@ pocCashRouter.get('/meta', (_req: Request, res: Response) => {
     })),
     useCases: poc.USE_CASES,
     industries: poc.INDUSTRIES,
+    stages: poc.STAGES,
+    closedLost: poc.CLOSED_LOST,
   });
 });
 
@@ -66,6 +68,38 @@ pocCashRouter.get('/opportunities/:id', async (req: Request, res: Response) => {
   }
   try {
     res.json(await poc.getOpportunityTemplate(id));
+  } catch (e: any) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
+const OPP_ID_RE = /^O\d+$/;
+
+/** 查商机阶段与可操作性（提交后用它确认 AWS 审到哪一步了）。 */
+pocCashRouter.get('/opportunities/:id/stage', async (req: Request, res: Response) => {
+  const id = String(req.params.id || '');
+  if (!OPP_ID_RE.test(id)) return res.status(400).json({ error: '无效的商机 ID' });
+  try {
+    res.json(await poc.getStageStatus(id));
+  } catch (e: any) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
+/** 推进阶段。服务端自己 Get 最新 LastModifiedDate 做乐观锁，
+ *  不接受前端传时间戳（避免用陈旧值触发 ConflictException）。 */
+pocCashRouter.post('/opportunities/:id/stage', async (req: Request, res: Response) => {
+  const id = String(req.params.id || '');
+  if (!OPP_ID_RE.test(id)) return res.status(400).json({ error: '无效的商机 ID' });
+  const stage = String(req.body?.stage || '');
+  try {
+    const after = await poc.advanceStage(id, stage);
+    const user = (req as any).user;
+    db.addAuditLog(user?.userId, 'POC_OPPORTUNITY_STAGE',
+      `${id} | 阶段推进到 ${after.stage} | ReviewStatus ${after.reviewStatus}`,
+      user?.username, req.ip);
+    (res.locals as any).audited = true;
+    res.json(after);
   } catch (e: any) {
     res.status(400).json({ error: e.message });
   }

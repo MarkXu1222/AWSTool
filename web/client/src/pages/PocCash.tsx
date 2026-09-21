@@ -10,7 +10,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import {
   Card, Form, Input, InputNumber, Select, Button, Space, Radio, Alert,
-  Descriptions, Typography, Divider, message, Modal, Tag, DatePicker, Result,
+  Descriptions, Typography, Divider, message, Modal, Tag, DatePicker, Result, Tabs,
 } from 'antd';
 import { RocketOutlined, CopyOutlined } from '@ant-design/icons';
 import dayjs, { Dayjs } from 'dayjs';
@@ -24,6 +24,8 @@ interface Meta {
   partners: { key: string; label: string; defaultSolutionId: string }[];
   useCases: string[];
   industries: string[];
+  stages?: string[];
+  closedLost?: string;
 }
 interface Solution { id: string; name: string; category: string; status: string }
 interface CreateResult {
@@ -44,6 +46,23 @@ interface OppBrief {
   stage?: string; reviewStatus?: string; createdDate?: string; mrrUsd?: number;
 }
 
+interface StageStatus {
+  id: string; title?: string; companyName: string;
+  stage?: string; reviewStatus?: string;
+  targetCloseDate?: string; lastModifiedDate?: string;
+  mrrUsd?: number; solutionIds: string[];
+  editable: boolean; reason: string;
+  nextStage: string | null; readyForPoc: boolean;
+  amounts?: { mrrUsd: number; arrUsd: number; pocUsd: number };
+}
+
+/** 审核状态 → 展示颜色。Approved 才是真正可以继续操作的状态。 */
+const reviewColor = (s?: string) =>
+  s === 'Approved' ? 'success'
+    : s === 'Rejected' ? 'error'
+      : s === 'Action Required' ? 'warning'
+        : s === 'Pending Submission' ? 'default' : 'processing';
+
 const PocCashPage: React.FC = () => {
   const [form] = Form.useForm();
   const [meta, setMeta] = useState<Meta | null>(null);
@@ -59,6 +78,12 @@ const PocCashPage: React.FC = () => {
   const [days, setDays] = useState(5);
   const [submitting, setSubmitting] = useState(false);
   const [result, setResult] = useState<CreateResult | null>(null);
+  // 阶段检查
+  const [tab, setTab] = useState('create');
+  const [checkId, setCheckId] = useState('');
+  const [stageInfo, setStageInfo] = useState<StageStatus | null>(null);
+  const [checking, setChecking] = useState(false);
+  const [advancing, setAdvancing] = useState(false);
 
   useEffect(() => {
     api.pocCashMeta().then((m: Meta) => {
@@ -189,6 +214,28 @@ const PocCashPage: React.FC = () => {
     });
   };
 
+  // ⚠️ 必须定义在下面 `if (result) return` 之前：结果页的「查看阶段」按钮
+  // 闭包引用了它，若定义在 early return 之后，该语句永不执行，
+  // 点击时会因 TDZ 抛 ReferenceError（编译期发现不了）。
+  const doCheck = async (id?: string) => {
+    const target = (id || checkId).trim().toUpperCase();
+    if (!/^O\d+$/.test(target)) {
+      message.warning('请选择或填写商机 ID，格式如 O28604112');
+      return;
+    }
+    setChecking(true);
+    try {
+      const s = await api.pocCashStage(target);
+      setStageInfo(s);
+      setCheckId(target);
+    } catch (e: any) {
+      message.error(e.message || '查询失败');
+      setStageInfo(null);
+    } finally {
+      setChecking(false);
+    }
+  };
+
   const resetAll = () => {
     setResult(null); form.resetFields(); setMrr(null); setAutoTitle('');
     setTitleMode('auto'); setPeople(2); setDays(5); setRefFrom(null);
@@ -203,7 +250,11 @@ const PocCashPage: React.FC = () => {
           title={`商机 ${result.opportunityId} ${result.submitted ? '已提交' : '已创建'}`}
           subTitle={result.title}
           extra={[
-            <Button key="new" type="primary" onClick={resetAll}>再建一个</Button>,
+            <Button key="stage" type="primary" onClick={() => {
+              const id = result.opportunityId;
+              setResult(null); setTab('stage'); setCheckId(id); doCheck(id);
+            }}>查看阶段</Button>,
+            <Button key="new" onClick={resetAll}>再建一个</Button>,
             <Button key="copy" icon={<CopyOutlined />} onClick={() => {
               navigator.clipboard.writeText(result.opportunityId);
               message.success('已复制商机 ID');
@@ -256,6 +307,145 @@ const PocCashPage: React.FC = () => {
       </Card>
     );
   }
+
+  const doAdvance = (to: string) => {
+    if (!stageInfo) return;
+    Modal.confirm({
+      title: '确认推进阶段？',
+      content: (
+        <div style={{ lineHeight: 1.9 }}>
+          <Text strong>{stageInfo.title || stageInfo.id}</Text>
+          <div style={{ marginTop: 8 }}>
+            <Tag>{stageInfo.stage}</Tag> → <Tag color="blue">{to}</Tag>
+          </div>
+          <Text type="secondary">阶段会同步到 AWS，请确认项目确实推进到了该阶段。</Text>
+        </div>
+      ),
+      okText: '推进',
+      cancelText: '取消',
+      onOk: async () => {
+        setAdvancing(true);
+        try {
+          const after = await api.pocCashAdvanceStage(stageInfo.id, to);
+          setStageInfo(after);
+          message.success(`已推进到 ${after.stage}`);
+        } catch (e: any) {
+          message.error(e.message || '推进失败');
+        } finally {
+          setAdvancing(false);
+        }
+      },
+    });
+  };
+
+  const renderStageDetail = () => {
+    if (!stageInfo) return null;
+    const a = stageInfo.amounts;
+    return (
+      <>
+        <Descriptions bordered size="small" column={2} style={{ maxWidth: 900 }}>
+          <Descriptions.Item label="商机" span={2}>
+            <Text strong>{stageInfo.title || '(无标题)'}</Text>
+            <br /><Text type="secondary">{stageInfo.id} · {stageInfo.companyName}</Text>
+          </Descriptions.Item>
+          <Descriptions.Item label="当前阶段">
+            <Tag color="blue">{stageInfo.stage || '—'}</Tag>
+          </Descriptions.Item>
+          <Descriptions.Item label="审核状态">
+            <Tag color={reviewColor(stageInfo.reviewStatus)}>
+              {stageInfo.reviewStatus || '—'}
+            </Tag>
+          </Descriptions.Item>
+          <Descriptions.Item label="预计成交">
+            {stageInfo.targetCloseDate || '—'}</Descriptions.Item>
+          <Descriptions.Item label="最后修改">
+            {stageInfo.lastModifiedDate
+              ? stageInfo.lastModifiedDate.replace('T', ' ').slice(0, 19) : '—'}
+          </Descriptions.Item>
+          <Descriptions.Item label="Solution">
+            {stageInfo.solutionIds.length
+              ? stageInfo.solutionIds.map(s => <Tag key={s}>{s}</Tag>)
+              : <Tag color="error">未关联</Tag>}
+          </Descriptions.Item>
+          <Descriptions.Item label="MRR / POC 额度">
+            {a ? <>{a.mrrUsd.toLocaleString()} USD/月
+              <Text type="secondary"> → POC {a.pocUsd.toLocaleString()} USD</Text></> : '—'}
+          </Descriptions.Item>
+        </Descriptions>
+
+        <Alert style={{ maxWidth: 900, marginTop: 16 }}
+          type={stageInfo.editable ? 'success' : 'warning'} showIcon
+          message={stageInfo.editable ? '可以操作' : '当前不可改阶段'}
+          description={stageInfo.reason} />
+
+        {stageInfo.readyForPoc && a && (
+          <Alert style={{ maxWidth: 900, marginTop: 12 }} type="info" showIcon
+            message="已到 Technical Validation —— 可以提 POC 资金申请了"
+            description={`定价计算器目标 ARR ${a.arrUsd.toLocaleString()} USD，`
+              + `POC 可申请 ${a.pocUsd.toLocaleString()} USD`
+              + `（≈ ${(a.pocUsd * MYR_RATE).toLocaleString(undefined,
+                { maximumFractionDigits: 0 })} MYR）`} />
+        )}
+
+        <div style={{ marginTop: 16 }}>
+          <Space wrap>
+            {stageInfo.editable && stageInfo.nextStage && (
+              <Button type="primary" loading={advancing}
+                onClick={() => doAdvance(stageInfo.nextStage!)}>
+                推进到 {stageInfo.nextStage}
+              </Button>
+            )}
+            {stageInfo.editable && (
+              <Select style={{ width: 220 }} placeholder="跳到指定阶段"
+                value={undefined} disabled={advancing}
+                onChange={(v: string) => doAdvance(v)}
+                options={[...(meta?.stages || []),
+                  ...(meta?.closedLost ? [meta.closedLost] : [])]
+                  .filter(s => s !== stageInfo.stage)
+                  .map(s => ({ value: s, label: s }))} />
+            )}
+            <Button loading={checking} onClick={() => doCheck()}>刷新状态</Button>
+          </Space>
+        </div>
+      </>
+    );
+  };
+
+  const renderStageTab = () => (
+    <>
+      <Paragraph type="secondary" style={{ maxWidth: 900 }}>
+        提交后商机会被 AWS 锁定，直到审核完成。用这里确认审到哪一步了 ——
+        <Text code>Approved</Text> 或 <Text code>Action Required</Text> 才能继续改阶段，
+        到 <Text code>Technical Validation</Text> 才能提 POC 资金申请。
+      </Paragraph>
+      <Space.Compact style={{ width: '100%', maxWidth: 620, marginBottom: 16 }}>
+        <Select
+          style={{ width: '100%' }} showSearch allowClear
+          loading={oppsLoading}
+          value={checkId || undefined}
+          placeholder="选择或搜索商机（按客户名 / ID）"
+          optionFilterProp="label"
+          onChange={(v: string) => { setCheckId(v || ''); if (v) doCheck(v); }}
+          options={opps.map(o => ({ value: o.id, label: `${o.companyName} — ${o.id}` }))}
+          optionRender={(opt) => {
+            const o = opps.find(x => x.id === opt.value);
+            if (!o) return opt.label;
+            return (
+              <div style={{ lineHeight: 1.5 }}>
+                <div>{o.companyName}</div>
+                <Text type="secondary" style={{ fontSize: 12 }}>
+                  {o.id} · {o.createdDate || ''} · {o.stage || '?'}
+                  {o.reviewStatus ? ` / ${o.reviewStatus}` : ''}
+                </Text>
+              </div>
+            );
+          }}
+        />
+        <Button type="primary" loading={checking} onClick={() => doCheck()}>查询</Button>
+      </Space.Compact>
+      {renderStageDetail()}
+    </>
+  );
 
   const renderAmounts = () => (
     <>
@@ -343,8 +533,8 @@ const PocCashPage: React.FC = () => {
     </>
   );
 
-  return (
-    <Card title={<Space><RocketOutlined />POC Cash — 创建商机</Space>}>
+  const renderCreateTab = () => (
+    <>
       {meta && !meta.configured && (
         <Alert style={{ marginBottom: 16 }} type="error" showIcon
           message="Partner Central 未配置"
@@ -488,6 +678,15 @@ const PocCashPage: React.FC = () => {
         {renderAmounts()}
         {renderSubmitSection()}
       </Form>
+    </>
+  );
+
+  return (
+    <Card title={<Space><RocketOutlined />POC Cash</Space>}>
+      <Tabs activeKey={tab} onChange={setTab} items={[
+        { key: 'create', label: '创建商机', children: renderCreateTab() },
+        { key: 'stage', label: '阶段检查', children: renderStageTab() },
+      ]} />
     </Card>
   );
 };
