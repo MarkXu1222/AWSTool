@@ -39,10 +39,19 @@ const MYR_RATE = 4.27;   // 实测 114 条记录，USD→MYR 比值集中在 4.2
 const HOURLY_MYR = 339;  // 标准人时单价
 const POC_CAP_USD = 9900; // 实测上限，114 条无一超过
 
+interface OppBrief {
+  id: string; companyName: string; industry?: string;
+  stage?: string; reviewStatus?: string; createdDate?: string; mrrUsd?: number;
+}
+
 const PocCashPage: React.FC = () => {
   const [form] = Form.useForm();
   const [meta, setMeta] = useState<Meta | null>(null);
   const [solutions, setSolutions] = useState<Solution[]>([]);
+  // 参考已有商机
+  const [opps, setOpps] = useState<OppBrief[]>([]);
+  const [oppsLoading, setOppsLoading] = useState(false);
+  const [refFrom, setRefFrom] = useState<string | null>(null);
   const [titleMode, setTitleMode] = useState<'auto' | 'manual'>('auto');
   const [autoTitle, setAutoTitle] = useState('');
   const [mrr, setMrr] = useState<number | null>(null);
@@ -59,9 +68,46 @@ const PocCashPage: React.FC = () => {
         api.pocCashSolutions()
           .then((r: any) => setSolutions(r.solutions || []))
           .catch(() => { /* 凭证问题已由 configured 提示，不重复报错 */ });
+        setOppsLoading(true);
+        api.pocCashOpportunities()
+          .then((r: any) => setOpps(r.opportunities || []))
+          .catch(() => { /* 同上 */ })
+          .finally(() => setOppsLoading(false));
       }
     }).catch((e: any) => message.error(e.message || '加载失败'));
   }, []);
+
+  /**
+   * 套用已有商机作为模板。
+   *
+   * 刻意**不填** projectName —— 新商机是别的项目，项目描述必须重写，
+   * 自动带过来会让标题指向错误的项目内容。
+   * 业务描述会带过来但需要改：AWS 审的时候看描述是否贴合本次项目。
+   */
+  const applyTemplate = async (id: string) => {
+    try {
+      const t = await api.pocCashTemplate(id);
+      form.setFieldsValue({
+        companyName: t.companyName,
+        industry: t.industry,
+        websiteUrl: t.websiteUrl,
+        countryCode: t.countryCode,
+        postalCode: t.postalCode,
+        customerUseCase: t.customerUseCase,
+        customerBusinessProblem: t.customerBusinessProblem,
+        marketingSource: t.marketingSource === 'None' ? 'None' : 'Marketing Activity',
+        solutionId: t.solutionIds?.[0],
+        // MRR 不带过来：不同项目金额不同，沿用旧值是常见错误
+      });
+      setRefFrom(id);
+      setTitleMode('auto');
+      form.setFieldValue('projectName', undefined);
+      setAutoTitle('');
+      message.success(`已套用 ${id} 的客户信息${t.title ? `（原标题：${t.title}）` : ''}`);
+    } catch (e: any) {
+      message.error(e.message || '读取模板失败');
+    }
+  };
 
   // 标题预览：自动模式下随客户名/项目名实时更新（防抖，避免每次按键都打后端）
   const companyName = Form.useWatch('companyName', form);
@@ -145,7 +191,7 @@ const PocCashPage: React.FC = () => {
 
   const resetAll = () => {
     setResult(null); form.resetFields(); setMrr(null); setAutoTitle('');
-    setTitleMode('auto'); setPeople(2); setDays(5);
+    setTitleMode('auto'); setPeople(2); setDays(5); setRefFrom(null);
     if (meta?.partners[0]) form.setFieldValue('partnerKey', meta.partners[0].key);
   };
 
@@ -310,6 +356,46 @@ const PocCashPage: React.FC = () => {
           countryCode: 'MY', submit: true, marketingSource: 'Marketing Activity',
           customerUseCase: 'Migration / Database Migration',
         }}>
+
+        <Divider orientation="left">参考已有商机（可选）</Divider>
+        <Form.Item
+          extra="同一客户做新项目时，选一条已有商机可带出客户信息、Use Case、业务描述和 Solution。项目名称与 MRR 不会带过来 —— 新项目必须自己填。">
+          <Select
+            style={{ width: '100%', maxWidth: 720 }}
+            showSearch allowClear
+            loading={oppsLoading}
+            value={refFrom}
+            placeholder={oppsLoading ? '加载中…' : '按客户名或商机 ID 搜索'}
+            optionFilterProp="label"
+            onChange={(v: string) => { if (v) applyTemplate(v); else setRefFrom(null); }}
+            options={opps.map(o => ({
+              value: o.id,
+              label: `${o.companyName} — ${o.id}`,
+              // 下拉项里多给点上下文，便于判断该用哪条
+              title: `${o.stage || ''} ${o.reviewStatus || ''}`,
+            }))}
+            optionRender={(opt) => {
+              const o = opps.find(x => x.id === opt.value);
+              if (!o) return opt.label;
+              return (
+                <div style={{ lineHeight: 1.5 }}>
+                  <div>{o.companyName}</div>
+                  <Text type="secondary" style={{ fontSize: 12 }}>
+                    {o.id} · {o.createdDate || ''} · {o.stage || '?'}
+                    {o.reviewStatus ? ` / ${o.reviewStatus}` : ''}
+                    {o.mrrUsd ? ` · ${o.mrrUsd.toLocaleString()} USD/月` : ''}
+                  </Text>
+                </div>
+              );
+            }}
+          />
+        </Form.Item>
+        {refFrom && (
+          <Alert style={{ maxWidth: 720, marginBottom: 16 }} type="info" showIcon
+            message={`已套用 ${refFrom} 的信息`}
+            description="业务描述是上一个项目的，请按本次项目改写 —— AWS 会看描述是否贴合实际项目内容。"
+            action={<Button size="small" onClick={() => setRefFrom(null)}>知道了</Button>} />
+        )}
 
         <Divider orientation="left">Partner</Divider>
         <Form.Item name="partnerKey" label="Partner 主体" rules={[{ required: true }]}

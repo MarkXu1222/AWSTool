@@ -46,6 +46,31 @@ pocCashRouter.get('/solutions', async (_req: Request, res: Response) => {
   }
 });
 
+/** 已有商机列表（摘要），供「参考已有商机」选择。支持按客户名搜索。 */
+pocCashRouter.get('/opportunities', async (req: Request, res: Response) => {
+  try {
+    const search = typeof req.query.search === 'string' ? req.query.search : '';
+    const limit = Number(req.query.limit) || 60;
+    res.json({ opportunities: await poc.listOpportunityBriefs({ search, limit }) });
+  } catch (e: any) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
+/** 单个商机的完整内容作为模板。
+ *  ListOpportunities 不返回 Title/UseCase/业务描述，必须单独 Get。 */
+pocCashRouter.get('/opportunities/:id', async (req: Request, res: Response) => {
+  const id = String(req.params.id || '');
+  if (!/^O\d+$/.test(id)) {
+    return res.status(400).json({ error: '无效的商机 ID' });
+  }
+  try {
+    res.json(await poc.getOpportunityTemplate(id));
+  } catch (e: any) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
 /** 标题预览：前端实时显示自动生成的标题，避免提交后才发现命名不对 */
 pocCashRouter.post('/preview-title', (req: Request, res: Response) => {
   try {

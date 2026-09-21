@@ -3,7 +3,7 @@
 企业级 AWS 多账户（多 Organizations）管理平台。带强制 MFA 登录、页面级权限与全量操作审计。
 
 **线上**：https://markxu.co（EC2 Singapore，PM2 进程 `aws-toolbox`）
-**当前版本**：`0.35.0`（见 `web/client/src/version.ts`，左下角展示）
+**当前版本**：`0.35.1`（见 `web/client/src/version.ts`，左下角展示）
 
 **生产接入规模**（快照 2026-09-06，取自线上 db.json）
 
@@ -524,6 +524,19 @@ Partner Contribution = Total − 申请额（USD→MYR 汇率 4.27）
 
 前端实时预览并在三种情况下告警：Partner Contribution 为负、占比 < 10%、
 POC 申请额 > 9,900 USD（实测 114 条记录的经验上限）。
+
+**参考已有商机（0.35.1）**：同一客户做新项目时，从下拉选一条已有商机，
+带出客户信息、Use Case、业务描述、Solution。**项目名称与 MRR 刻意不带过来** ——
+新项目的描述和金额必须自己填，沿用旧值是常见错误。套用后会提示"业务描述是上一个
+项目的，请按本次项目改写"。
+
+⚠️ `ListOpportunities` **不返回 Title / CustomerUseCase / CustomerBusinessProblem**，
+只有 `GetOpportunity` 才有。所以列表只显示客户名等摘要，选中后再单独拉完整模板——
+不能对每条都 Get（账户里有 246 个商机）。
+
+⚠️ `CreatedDate` 是 timestamp，SDK 反序列化成 Date 对象。用 `String(date).slice(0,10)`
+会得到 `Mon Sep 21` —— 既显示错误又让按日期倒序的字符串排序失效。必须走
+`toISOString()`。`TargetCloseDate` 是 string 类型，不受影响。
 
 **商机名称**支持自动生成与手动输入。自动模式按账户内惯例拼成两段式
 `Webby - <客户简称> <项目描述> #ADPL`（不是 YanHuang 的三段式），并剥掉

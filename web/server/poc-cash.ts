@@ -21,6 +21,7 @@ import {
   AssociateOpportunityCommand,
   StartEngagementFromOpportunityTaskCommand,
   GetOpportunityCommand,
+  ListOpportunitiesCommand,
   ListSolutionsCommand,
 } from '@aws-sdk/client-partnercentral-selling';
 import { STSClient, AssumeRoleCommand } from '@aws-sdk/client-sts';
@@ -239,6 +240,120 @@ export async function listSolutions() {
   return out
     .filter(s => s.Status === 'Active')
     .map(s => ({ id: s.Id, name: s.Name, category: s.Category, status: s.Status }));
+}
+
+/** Date | string | undefined → YYYY-MM-DD（UTC）。用于显示与排序。 */
+export function __test__toIsoDate(v: any): string | undefined {
+  return toIsoDate(v);
+}
+
+function toIsoDate(v: any): string | undefined {
+  if (!v) return undefined;
+  const d = v instanceof Date ? v : new Date(v);
+  return Number.isNaN(d.getTime()) ? undefined : d.toISOString().slice(0, 10);
+}
+
+export interface OpportunityBrief {
+  id: string;
+  companyName: string;
+  industry?: string;
+  stage?: string;
+  reviewStatus?: string;
+  createdDate?: string;
+  mrrUsd?: number;
+}
+
+/**
+ * 列出已有商机，供「参考已有商机」用。
+ *
+ * ⚠️ ListOpportunities **不返回 Title / CustomerUseCase /
+ * CustomerBusinessProblem** —— 只有 GetOpportunity 才有。所以列表里
+ * 只能显示客户名等摘要，完整模板要等用户选中后再单独拉。
+ * 不在这里对每条都 Get：账户里有 246 个商机，会打爆 API 且很慢。
+ */
+export async function listOpportunityBriefs(
+  opts: { search?: string; limit?: number } = {},
+): Promise<OpportunityBrief[]> {
+  const c = await client();
+  const limit = Math.min(Math.max(opts.limit || 60, 1), 300);
+  const search = (opts.search || '').trim().toLowerCase();
+
+  const out: OpportunityBrief[] = [];
+  let token: string | undefined;
+  // 最多翻 5 页（500 条）防止无限翻页拖垮请求
+  for (let page = 0; page < 5; page++) {
+    const r: any = await c.send(new ListOpportunitiesCommand({
+      Catalog: CATALOG, MaxResults: 100, NextToken: token,
+    }));
+    for (const o of r.OpportunitySummaries || []) {
+      const acct = o.Customer?.Account || {};
+      const name = acct.CompanyName || '';
+      if (search && !name.toLowerCase().includes(search)) continue;
+      const spend = (o.Project?.ExpectedCustomerSpend || [])[0];
+      out.push({
+        id: o.Id,
+        companyName: name,
+        industry: acct.Industry,
+        stage: o.LifeCycle?.Stage,
+        reviewStatus: o.LifeCycle?.ReviewStatus,
+        // SDK 把 CreatedDate 反序列化成 Date 对象，String() 得到的是
+        // "Mon Sep 21 2026 ..." 这种本地格式，截前 10 位会变成 "Mon Sep 21"，
+        // 既显示错误也让下面的字符串排序完全失效。必须走 toISOString。
+        createdDate: toIsoDate(o.CreatedDate),
+        mrrUsd: spend?.Amount ? Number(spend.Amount) : undefined,
+      });
+    }
+    token = r.NextToken;
+    if (!token || out.length >= limit) break;
+  }
+  // 新建的排前面，找最近用过的模板更快
+  out.sort((a, b) => String(b.createdDate || '').localeCompare(String(a.createdDate || '')));
+  return out.slice(0, limit);
+}
+
+export interface OpportunityTemplate {
+  id: string;
+  title?: string;
+  companyName: string;
+  industry?: string;
+  websiteUrl?: string;
+  countryCode?: string;
+  postalCode?: string;
+  customerBusinessProblem?: string;
+  customerUseCase?: string;
+  marketingSource?: string;
+  mrrUsd?: number;
+  targetCloseDate?: string;
+  solutionIds: string[];
+  stage?: string;
+  reviewStatus?: string;
+}
+
+/** 取单个商机的完整内容作为新建模板（含 Title / UseCase / 业务描述）。 */
+export async function getOpportunityTemplate(id: string): Promise<OpportunityTemplate> {
+  const c = await client();
+  const o: any = await c.send(new GetOpportunityCommand({
+    Catalog: CATALOG, Identifier: id,
+  }));
+  const acct = o.Customer?.Account || {};
+  const spend = (o.Project?.ExpectedCustomerSpend || [])[0];
+  return {
+    id: o.Id,
+    title: o.Project?.Title,
+    companyName: acct.CompanyName || '',
+    industry: acct.Industry,
+    websiteUrl: acct.WebsiteUrl,
+    countryCode: acct.Address?.CountryCode,
+    postalCode: acct.Address?.PostalCode,
+    customerBusinessProblem: o.Project?.CustomerBusinessProblem,
+    customerUseCase: o.Project?.CustomerUseCase,
+    marketingSource: o.Marketing?.Source,
+    mrrUsd: spend?.Amount ? Number(spend.Amount) : undefined,
+    targetCloseDate: o.LifeCycle?.TargetCloseDate,
+    solutionIds: o.RelatedEntityIdentifiers?.Solutions || [],
+    stage: o.LifeCycle?.Stage,
+    reviewStatus: o.LifeCycle?.ReviewStatus,
+  };
 }
 
 /** 创建 → 关联 Solution → 提交。任一后续步骤失败都不回滚商机，

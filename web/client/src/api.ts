@@ -452,6 +452,10 @@ export const api = {
   // ===== POC Cash（admin-only，创建真实商机并提交 AWS 审核）=====
   pocCashMeta: () => request('/poc-cash/meta'),
   pocCashSolutions: () => request('/poc-cash/solutions'),
+  // 参考已有商机：列表只有摘要，选中后再 Get 拿完整模板
+  pocCashOpportunities: (search?: string) =>
+    request(`/poc-cash/opportunities${search ? `?search=${encodeURIComponent(search)}` : ''}`),
+  pocCashTemplate: (id: string) => request(`/poc-cash/opportunities/${encodeURIComponent(id)}`),
   pocCashPreviewTitle: (body: { partnerKey: string; companyName: string; projectName: string }) =>
     request('/poc-cash/preview-title', { method: 'POST', body: JSON.stringify(body) }),
   pocCashCreate: (body: any) =>

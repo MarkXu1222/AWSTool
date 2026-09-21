@@ -13,6 +13,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   deriveAmounts, buildTitle, getPartner, PARTNERS, USE_CASES, INDUSTRIES,
+  __test__toIsoDate,
 } from '../server/poc-cash';
 
 const webby = getPartner('webby');
@@ -51,6 +52,23 @@ test('目前只开放 Webby', () => {
   assert.equal(PARTNERS.length, 1);
   assert.equal(PARTNERS[0].key, 'webby');
   assert.equal(PARTNERS[0].defaultSolutionId, 'S-0070517');
+});
+
+test('创建日期统一成 ISO，不能用 String(Date)', () => {
+  // SDK 把 CreatedDate 反序列化成 Date 对象。String(date).slice(0,10)
+  // 会得到 "Mon Sep 21" —— 既显示错误，又让「按日期倒序」的字符串排序失效
+  // （曾导致模板选择器把 2025 年的商机排在 2026 年之前）。
+  const d = new Date('2026-09-21T07:08:22Z');
+  assert.equal(__test__toIsoDate(d), '2026-09-21');
+  assert.equal(__test__toIsoDate('2026-09-21T07:08:22Z'), '2026-09-21');
+  assert.equal(__test__toIsoDate(undefined), undefined);
+  assert.equal(__test__toIsoDate(''), undefined);
+  assert.equal(__test__toIsoDate('not-a-date'), undefined);
+
+  // 排序可用性：ISO 串按字典序即为时间序
+  const dates = ['2025-10-24', '2026-09-21', '2026-01-02']
+    .sort((a, b) => b.localeCompare(a));
+  assert.deepEqual(dates, ['2026-09-21', '2026-01-02', '2025-10-24']);
 });
 
 test('Use Case 用 AWS 的完整字面量', () => {
