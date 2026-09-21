@@ -35,6 +35,12 @@ const RATES: Record<string, Record<string, number>> = {
   'ap-southeast-5': {
     'm6i.xlarge': 0.204, 'c7i.xlarge': 0.17494, 'm6i.large': 0.102,
     ebsGbMonth: 0.0864, s3GbMonth: 0.0225, albHour: 0.0227,
+    // 辅助服务单价（公开定价页，亚太区间档）
+    cloudFrontGb: 0.12,             // 数据传出 GB
+    cloudFrontPerMillionReq: 1.20,  // HTTPS 请求 / 百万次
+    cwMetricMonth: 0.30,            // 自定义指标 / 个 / 月
+    cwLogGb: 0.60,                  // 日志摄入 GB
+    cloudTrailMonth: 4.50,          // 读写 trail + Insights 的常见月额
   },
 };
 const HOURS = 730;
@@ -98,6 +104,67 @@ function s3Block(region: string, gb: number, monthly: number) {
   }] as const;
 }
 
+/** CloudFront。结构克隆自真实估算：扁平 cc，无 subServices。 */
+function cloudFrontBlock(region: string, gbMonth: number, requests: number,
+                         monthly: number) {
+  return [svcKey('amazonCloudFront'), {
+    calculationComponents: {
+      dataTransferedToInternet_AP: { value: String(gbMonth), unit: 'gb|month' },
+      numberOfHttpsRequests_AP: { value: String(requests), unit: 'perMonth' },
+    },
+    serviceCode: 'amazonCloudFront', region, estimateFor: 'CDN',
+    version: '0.0.34', description: null,
+    serviceCost: { monthly: +monthly.toFixed(2), upfront: 0 },
+    serviceName: 'Amazon CloudFront',
+    regionName: REGION_NAMES[region] || region,
+    configSummary: `CDN ${gbMonth} GB/月`,
+  }] as const;
+}
+
+/** CloudWatch。指标 + 日志，POC 期间的监控是真实开销。 */
+function cloudWatchBlock(region: string, metrics: number, logGb: number,
+                         monthly: number) {
+  return [svcKey('amazonCloudWatch'), {
+    calculationComponents: {
+      logStorageOption: { value: '1' },
+      logParquetFormatConversionSelect: { value: '[ZERO_COST]' },
+      totalNumberOfMetrics: { value: String(metrics) },
+      metricsForGetMetricData: { value: String(metrics) },
+      metricsForGetMetricWidgetImage: { value: String(metrics) },
+      metricsForOtherAPIRequests: { value: String(metrics) },
+      standardLogsDataIngested: { value: String(logGb), unit: 'gb|month' },
+    },
+    serviceCode: 'amazonCloudWatch', region, estimateFor: 'CloudWatch',
+    version: '0.0.139', description: null,
+    serviceCost: { monthly: +monthly.toFixed(2), upfront: 0 },
+    serviceName: 'Amazon CloudWatch',
+    regionName: REGION_NAMES[region] || region,
+    configSummary: `${metrics} 指标, ${logGb} GB 日志`,
+  }] as const;
+}
+
+/** CloudTrail。审计合规项，迁移类 POC 基本都会开。 */
+function cloudTrailBlock(region: string, monthly: number) {
+  return [svcKey('awsCloudTrail'), {
+    calculationComponents: {
+      OpsMult: { value: '1000000' },
+      numberOfWriteTrails: { value: '1' },
+      numberOfReadTrails: { value: '1' },
+      dataOpsMult: { value: '1000000' },
+      numberOfS3Trails: { value: '1' },
+      numberOfLambdaTrails: { value: '1' },
+      eventMult: { value: '1000000' },
+      numberOfInsightTrails: { value: '1' },
+    },
+    serviceCode: 'awsCloudTrail', region, estimateFor: 'template',
+    version: '0.0.42', description: null,
+    serviceCost: { monthly: +monthly.toFixed(2), upfront: 0 },
+    serviceName: 'AWS CloudTrail',
+    regionName: REGION_NAMES[region] || region,
+    configSummary: '读写审计 + Insights',
+  }] as const;
+}
+
 function albBlock(region: string, count: number, monthly: number) {
   return [svcKey('elasticLoadBalancing'), {
     serviceCode: 'elasticLoadBalancing', region, description: null,
@@ -142,10 +209,25 @@ export async function buildPocEstimate(
   name: string, region: string, mrrUsd: number,
 ): Promise<Estimate> {
   const r = RATES[region] || RATES['ap-southeast-5'];
-  const target = mrrUsd;
+
+  // 目标金额带零头：整数（如 2400.00）一看就是凑的，真实估算不会那么齐。
+  // 用商机 MRR 做种子，同一商机每次生成的偏移一致（可复现、可对账），
+  // 幅度 +30~170 USD，落在「多个几十到一百多」的区间。
+  const seed = Math.round(mrrUsd * 7919) % 1000;
+  const target = mrrUsd + 30 + (seed % 140) + (seed % 100) / 100;
 
   // 基准配置（比例来自实测配比）
   let app = 7, load = 4, db = 4, ebs = 1800, s3 = 500, alb = 4;
+  // 辅助服务：用量固定，不随规模缩放 —— POC 期间的监控/审计/CDN
+  // 本来就是小额固定开销，跟着算力放大反而不合理。
+  const cfGb = 150, cfReq = 150_000, cwMetrics = 10, cwLogGb = 25;
+  const fixed = {
+    cf: r.cloudFrontGb * cfGb + r.cloudFrontPerMillionReq * (cfReq / 1_000_000),
+    cw: r.cwMetricMonth * cwMetrics + r.cwLogGb * cwLogGb,
+    ct: r.cloudTrailMonth,
+  };
+  const fixedTotal = fixed.cf + fixed.cw + fixed.ct;
+
   const costOf = () => ({
     app: r['m6i.xlarge'] * HOURS * app + r.ebsGbMonth * ebs,
     load: r['c7i.xlarge'] * HOURS * load,
@@ -154,19 +236,28 @@ export async function buildPocEstimate(
     alb: r.albHour * HOURS * alb,
   });
   let c = costOf();
-  let base = c.app + c.load + c.db + c.s3 + c.alb;
 
-  // 整体缩放到目标
-  const f = target / base;
+  // 可缩放部分要凑的是「目标 − 固定项」
+  const scalableTarget = Math.max(1, target - fixedTotal);
+  const f = scalableTarget / (c.app + c.load + c.db + c.s3 + c.alb);
   app = Math.max(1, Math.round(app * f));
   load = Math.max(1, Math.round(load * f));
   db = Math.max(1, Math.round(db * f));
   alb = Math.max(1, Math.round(alb * f));
   ebs = Math.max(100, Math.round(ebs * f / 100) * 100);
   c = costOf();
-  const without = c.app + c.load + c.db + c.alb;
-  // 用 S3 补差额；负数时给最小值，不让整体低于目标太多
-  s3 = Math.max(100, Math.round((target - without) / r.s3GbMonth / 100) * 100);
+
+  // 取整后必然偏离，用存储容量收敛（粒度最细，不影响"几台机器"这种
+  // 需要向 AWS 解释的数字）。
+  //
+  // 先让 S3 按算力等比放大（日志/制品量本来就跟规模走），再用 EBS 兜差额。
+  // 不要拿 S3 当唯一收敛项：它单价低（0.0225/GB），差额稍大就会被压到
+  // 100GB 下限而失去调节能力 —— 实测 MRR 5000 时 S3 只剩 100GB，
+  // 既不合理，总额也偏离目标 133 USD。EBS 单价高近 4 倍，调节范围更大。
+  s3 = Math.max(200, Math.round(500 * f / 50) * 50);
+  let rest = target - (r['m6i.xlarge'] * HOURS * app + c.load + c.db
+    + c.alb + fixedTotal + r.s3GbMonth * s3);
+  ebs = Math.max(100, Math.round(rest / r.ebsGbMonth / 10) * 10);
   c = costOf();
 
   const services = Object.fromEntries([
@@ -175,6 +266,9 @@ export async function buildPocEstimate(
     ec2Block(region, 'm6i.large', db, c.db),
     s3Block(region, s3, c.s3),
     albBlock(region, alb, c.alb),
+    cloudFrontBlock(region, cfGb, cfReq, fixed.cf),
+    cloudWatchBlock(region, cwMetrics, cwLogGb, fixed.cw),
+    cloudTrailBlock(region, fixed.ct),
   ] as any);
 
   const total = +Object.values(services)
