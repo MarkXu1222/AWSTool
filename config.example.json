@@ -19,6 +19,11 @@
     }
   ],
   "consoleAdminPayers": ["org-name-1"],
+  "_comment_partnerCentral": "POC Cash 用。role 建在 APN 账户并信任中心账户（上面的 credentials），权限只限商机+POC，不碰配额/账单。用 scripts/setup_partner_central_role.py 创建。留空则页面提示未配置。也可用环境变量 PARTNERCENTRAL_ROLE_ARN / PARTNERCENTRAL_EXTERNAL_ID",
+  "partnerCentral": {
+    "roleArn": "arn:aws:iam::APN_ACCOUNT_ID:role/partner-central-tool",
+    "externalId": "CHANGE_ME_EXTERNAL_ID"
+  },
   "web": {
     "port": 3000,
     "adminPassword": "CHANGE_ME_STRONG_PASSWORD",

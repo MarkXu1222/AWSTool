@@ -3,7 +3,7 @@
 企业级 AWS 多账户（多 Organizations）管理平台。带强制 MFA 登录、页面级权限与全量操作审计。
 
 **线上**：https://markxu.co（EC2 Singapore，PM2 进程 `aws-toolbox`）
-**当前版本**：`0.34.2`（见 `web/client/src/version.ts`，左下角展示）
+**当前版本**：`0.35.0`（见 `web/client/src/version.ts`，左下角展示）
 
 **生产接入规模**（快照 2026-09-06，取自线上 db.json）
 
@@ -456,6 +456,81 @@ v2 按 `variant` 筛选核心 6 模型并固定排序：`global`（每区 6 条�
 > 导致 sonnet-5 / opus-5 静默写 0；版本号曾用 `includes` 子串比较，
 > `'opus 4.5'.includes('5')` 为真会让 Opus 5 串到 Opus 4.5 的配额，
 > 把错误数字当真实配额写进交付表（比写 0 更危险）。现用数字边界锚定整段匹配。
+
+## POC Cash（0.35.0）
+
+创建 AWS Partner Central 商机并提交审核，是 POC 资金申请的前置步骤。
+页面 `poccash`，**admin 专属**。
+
+**权限模型比 ops 更严**：`POC_CASH_PAGE_KEY` 刻意不放进 `PAGE_META` /
+后端 `ALL_PAGE_KEYS`，所以连「页面权限」勾选都无法授予；后端
+`requireStrictAdmin` 实时查库，不信任 token 里的 role。理由是这里创建的是
+**真实商机并提交给 AWS**，属于对外发生实际业务动作的写操作。
+
+**凭证走跨账户 role，不存静态密钥**。APN 账户（105673812363）里建
+`partner-central-tool` role，信任中心账户的 tools 凭证（`user/mark`）+ ExternalId；
+平台 assume 后拿 1 小时临时票据（缓存 50 分钟）。配置在 `config.json` 的
+`partnerCentral { roleArn, externalId }`。
+
+> 最初方案是存 APN 的 AK/SK —— 但那个 IAM 用户挂着 **AdministratorAccess**，
+> 把长期密钥放进配置文件等于泄露整个 APN 账户的管理员权限。改成 role 后
+> 权限可精确限定，凭证也是临时的。
+
+一键创建与验证：
+
+```bash
+python3 scripts/setup_partner_central_role.py            # dry-run 看策略
+python3 scripts/setup_partner_central_role.py --execute  # 创建
+python3 scripts/setup_partner_central_role.py --verify   # 验权限边界
+```
+
+⚠️ **IAM action 前缀是 `partnercentral:`，不是 `partnercentral-selling:`**。
+这是实测确认的（建无权限 role 调 ListSolutions，AWS 拒绝信息里写的是
+`partnercentral:ListSolutions`）。按服务名写会让整个策略静默失效。
+
+权限范围：31 个 action，只含商机生命周期、Engagement、Solution 只读、
+POC 资金申请。显式 Deny `Delete*`、账户管理、Channel、Revenue Measurement；
+末尾 `NotAction: partnercentral:*` 兜底 —— **配额、账单、EC2 等一律拒绝**。
+实测验证：ListSolutions/ListOpportunities/ListBenefits 通过，
+EC2 DescribeInstances 与 ServiceQuotas ListServices 被拒。
+
+**三步流程（顺序不可调换，均为实测得出）**：
+
+```
+CreateOpportunity                      → 建成 Prospect
+  → AssociateOpportunity               → 挂 Solution（默认 S-0070517 Migration services）
+  → StartEngagementFromOpportunityTask → 建 engagement 并提交
+```
+
+⚠️ 两个 AWS 侧的硬约束：
+
+- **不能直接调 `SubmitOpportunity`** —— 返回
+  `Cannot submit opportunity without an engagement.`，必须走
+  `StartEngagementFromOpportunityTask`（它把建 engagement 和提交合并成一个异步任务）。
+- **`Pending Submission` 状态下不能改 Stage** —— 返回
+  `You can not update the stage when Opportunity status is Pending Submission.`
+  所以商机一律先建成 `Prospect`，待 AWS 审批通过后才能推到 Technical Validation。
+
+关联 Solution 或提交失败**不回滚商机**，而是写进 `warnings` 返回 ——
+商机已经建好，回滚反而更危险。
+
+**金额单向推导**（`docs/poc-cash-guide.md` 第 4 节，81 条实操记录 100% 吻合）：
+
+```
+ARR = MRR × 12          POC 可申请 = ARR / 10
+Total Cost = 339 MYR × 8h × 人数 × 天数
+Partner Contribution = Total − 申请额（USD→MYR 汇率 4.27）
+```
+
+前端实时预览并在三种情况下告警：Partner Contribution 为负、占比 < 10%、
+POC 申请额 > 9,900 USD（实测 114 条记录的经验上限）。
+
+**商机名称**支持自动生成与手动输入。自动模式按账户内惯例拼成两段式
+`Webby - <客户简称> <项目描述> #ADPL`（不是 YanHuang 的三段式），并剥掉
+`SDN. BHD.` 等公司后缀。`CustomerUseCase` 必须用 AWS 的完整字面量 ——
+写成 `Migration` 会被拒，正确值是 `Migration / Database Migration`。
+
+回归测试见 `tests/poc-cash.test.ts`。
 
 ### 批量导出官方账单 PDF
 

@@ -449,6 +449,14 @@ export const api = {
   bedrockDeliveryExportV2: async (body: { accountId: string; rows: any[]; iamUser: string; iamPassword: string; variant: 'full' | 'global' }) =>
     bedrockDeliveryFetch('/bedrock/delivery-v2', body),
 
+  // ===== POC Cash（admin-only，创建真实商机并提交 AWS 审核）=====
+  pocCashMeta: () => request('/poc-cash/meta'),
+  pocCashSolutions: () => request('/poc-cash/solutions'),
+  pocCashPreviewTitle: (body: { partnerKey: string; companyName: string; projectName: string }) =>
+    request('/poc-cash/preview-title', { method: 'POST', body: JSON.stringify(body) }),
+  pocCashCreate: (body: any) =>
+    request('/poc-cash/opportunities', { method: 'POST', body: JSON.stringify(body) }),
+
   // 一键提交提额文档到 Support Case（后台 job：生成 PDF → 联邦登录 → Reply → 传附件 → Submit）
   caseDocSubmit: (params: { accountId: string; accountName?: string; caseId: string; companyKey?: string; serviceCode: string; quotaName: string; region: string; requestedValue: number; currentValue?: number; message?: string }) =>
     request('/aws/quotas/case-doc-submit', { method: 'POST', body: JSON.stringify(params) }),

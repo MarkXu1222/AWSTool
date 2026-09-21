@@ -9,6 +9,7 @@ import { auditMiddleware } from './audit';
 import { awsRouter } from './routes/aws';
 import { regionsRouter } from './routes/regions';
 import { bedrockRouter } from './routes/bedrock';
+import { pocCashRouter } from './routes/poc-cash';
 import { migrateEncryptMFASecrets, backupDB } from './db';
 import { startScheduler, getSchedulerStatus } from './scheduler';
 import { startTagOnboardingRunner } from './tag-onboarding';
@@ -115,6 +116,9 @@ app.use('/api/regions', authMiddleware, auditMiddleware, regionsRouter);
 // Bedrock 工具（Profile 管理/批量创建/FTU/数据共享/IAM/交付表格）。
 // 用独立前缀 /api/bedrock 挂载，避免与 awsRouter 的 /aws/bedrock/quotas 路径歧义。
 app.use('/api/bedrock', authMiddleware, auditMiddleware, bedrockRouter);
+
+// POC Cash：创建真实商机并提交给 AWS 审核，admin-only（守卫在路由内实时查库）
+app.use('/api/poc-cash', authMiddleware, auditMiddleware, pocCashRouter);
 
 // Scheduler status endpoint
 app.get('/api/scheduler/status', authMiddleware, (_req, res) => {

@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useLayoutEffect, useRef } from 'react';
 import { Layout, Menu, Button, Skeleton, Drawer } from 'antd';
-import { HomeOutlined, TeamOutlined, DashboardOutlined, DollarOutlined, SettingOutlined, LogoutOutlined, DeleteOutlined, FileSearchOutlined, GlobalOutlined, TagsOutlined, ThunderboltOutlined, FundOutlined, RobotOutlined, AppstoreOutlined, UnlockOutlined } from '@ant-design/icons';
+import { HomeOutlined, TeamOutlined, DashboardOutlined, DollarOutlined, SettingOutlined, LogoutOutlined, DeleteOutlined, FileSearchOutlined, GlobalOutlined, TagsOutlined, ThunderboltOutlined, FundOutlined, RobotOutlined, AppstoreOutlined, UnlockOutlined, RocketOutlined } from '@ant-design/icons';
 import DashboardPage from '../pages/Dashboard';
 import AccountsPage from '../pages/Accounts';
 import QuotasPage from '../pages/Quotas';
@@ -13,6 +13,7 @@ import TagCompliancePage from '../pages/TagCompliance';
 import BulkQuotaPage from '../pages/BulkQuota';
 import BulkRootResetPage from '../pages/BulkRootReset';
 import BedrockPage from '../pages/Bedrock';
+import PocCashPage from '../pages/PocCash';
 // 运维监控懒加载：只有实际进入该授权页面时才下载 recharts 分包
 const OpsMonitorPage = React.lazy(() => import('../pages/OpsMonitor'));
 import { api } from '../api';
@@ -48,6 +49,11 @@ export const ROOT_RESET_PAGE_KEY = 'rootreset';
 // 运维监控属于可分配页面；admin 恒有，其他角色必须在 allowed_pages 中显式授权。
 export const OPS_PAGE_KEY = 'ops';
 
+// POC Cash：创建真实商机并提交给 AWS 审核，是对外发生实际业务动作的操作。
+// 刻意**不**放进 PAGE_META / 后端 ALL_PAGE_KEYS —— 这样连「页面权限」勾选
+// 都无法授予，只有 admin 可见可用（比 ops 的可分配模型更严）。
+export const POC_CASH_PAGE_KEY = 'poccash';
+
 const navItems = [
   { key: 'dashboard', icon: <HomeOutlined />, label: '概览' },
   { key: 'accounts', icon: <TeamOutlined />, label: '账户管理' },
@@ -55,6 +61,7 @@ const navItems = [
   { key: BULK_QUOTA_PAGE_KEY, icon: <ThunderboltOutlined />, label: '批量提额' },
   { key: ROOT_RESET_PAGE_KEY, icon: <UnlockOutlined />, label: '批量设置 Root 密码' },
   { key: 'bedrock', icon: <RobotOutlined />, label: 'Bedrock 工具' },
+  { key: POC_CASH_PAGE_KEY, icon: <RocketOutlined />, label: 'POC Cash' },
   { key: 'regions', icon: <GlobalOutlined />, label: '区域管理' },
   { key: 'billing', icon: <DollarOutlined />, label: '账单导出' },
   { key: 'cleanup', icon: <DeleteOutlined />, label: '资源清理' },
@@ -85,6 +92,7 @@ const VALID_PAGE_KEYS = new Set([
   BULK_QUOTA_PAGE_KEY,
   ROOT_RESET_PAGE_KEY,
   OPS_PAGE_KEY,
+  POC_CASH_PAGE_KEY,
 ]);
 
 function pageFromLocation(): string {
@@ -214,8 +222,10 @@ const MainLayout: React.FC<MainLayoutProps> = ({ onLogout }) => {
         setAllowedPages(r.allowedPages);
         // 如果当前页不在允许列表里，回退到第一个允许的页面
         const requested = pageFromLocation();
+        // 这些页面不走 allowedPages，直链访问时不能按「不在列表里」踢回首页
         const independentAccess = (requested === ROOT_RESET_PAGE_KEY && ['view', 'operate'].includes(r.rootResetAccess))
-          || (requested === BULK_QUOTA_PAGE_KEY && r.bulkQuotaAccess);
+          || (requested === BULK_QUOTA_PAGE_KEY && r.bulkQuotaAccess)
+          || (requested === POC_CASH_PAGE_KEY && r.role === 'admin');
         if (r.allowedPages.length > 0 && !r.allowedPages.includes(requested) && !independentAccess) {
           navigate(r.allowedPages[0]);
         }
@@ -230,6 +240,8 @@ const MainLayout: React.FC<MainLayoutProps> = ({ onLogout }) => {
     if (key === ROOT_RESET_PAGE_KEY) return rootResetAccess !== 'none';
     // 运维监控：admin 恒有；其他角色仅在页面权限中显式授予后可见
     if (key === OPS_PAGE_KEY) return isAdmin || allowedPages?.includes(OPS_PAGE_KEY) === true;
+    // POC Cash：admin 专属，不可通过页面权限授予（后端同样实时查库校验）
+    if (key === POC_CASH_PAGE_KEY) return isAdmin;
     if (allowedPages === null) return true;
     return allowedPages.includes(key);
   };
@@ -267,6 +279,7 @@ const MainLayout: React.FC<MainLayoutProps> = ({ onLogout }) => {
       case 'accounts': return <AccountsPage />;
       case 'quotas': return <QuotasPage />;
       case 'bedrock': return <BedrockPage />;
+      case POC_CASH_PAGE_KEY: return <PocCashPage />;
       case BULK_QUOTA_PAGE_KEY: return <BulkQuotaPage />;
       case ROOT_RESET_PAGE_KEY: return <BulkRootResetPage canOperate={rootResetAccess === 'operate'} />;
       case OPS_PAGE_KEY: return (
