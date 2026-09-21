@@ -3,7 +3,7 @@
 企业级 AWS 多账户（多 Organizations）管理平台。带强制 MFA 登录、页面级权限与全量操作审计。
 
 **线上**：https://markxu.co（EC2 Singapore，PM2 进程 `aws-toolbox`）
-**当前版本**：`0.36.0`（见 `web/client/src/version.ts`，左下角展示）
+**当前版本**：`0.37.0`（见 `web/client/src/version.ts`，左下角展示）
 
 **生产接入规模**（快照 2026-09-06，取自线上 db.json）
 
@@ -524,6 +524,38 @@ Partner Contribution = Total − 申请额（USD→MYR 汇率 4.27）
 
 前端实时预览并在三种情况下告警：Partner Contribution 为负、占比 < 10%、
 POC 申请额 > 9,900 USD（实测 114 条记录的经验上限）。
+
+### POC 资金申请（0.37.0）
+
+第三个 Tab「POC 申请」：一键创建 + 提交 + 进度看板 + CSV 台账。
+
+**硬前置：必须先有商机**，且已到 Technical Validation、ReviewStatus 为
+Approved / Action Required。不满足直接拒绝，不降级 —— AWS 侧会打回。
+
+**用户只需填 4 项**：商机（下拉）、AWS 账户 ID、业务描述（≥50 字）、人天。
+其余全自动：计算器链接、ARR、全部金额、Webby 发票信息、联系人。
+
+**项目桶 = 账户所属 payer**，填完账户 ID 毫秒级带出 —— 走平台
+`accounts_cache` 的 `_payer` 字段。**不要**改成遍历 45 个 payer 的
+Organizations 反查，实测要 60~90 秒，放表单里不可接受。
+
+账户不在任何 payer 下时**留空**（实扫确认 `105673812363`/`176350488746` 等
+5 个账户确实不在任何 payer，是客户自有或 APN 账户，非缓存问题）。
+不要回退成公司名 —— 会引入 payer 名与公司名两种命名混用。
+
+⚠️ **`ListBenefitApplications` 返回的 `BenefitApplicationDetails` 是精简版**，
+只有 `BudgetYear/Program/PurchaseOrderNumber/ActivityName/ProjectType/Template`，
+**没有 `CashRequest`/`AwsAccountId`/`AwsCalculatorUrls`**。直接用会让金额、
+项目桶、计算器链接全为空。必须逐条 `GetBenefitApplication` 补全（并发限 6）。
+
+⚠️ **CSV 里的数字不能加千分位**。`toLocaleString()` 产生的 `"28,800"`
+里有逗号，虽然 `csvEscape` 会加引号，但下游朴素 `split(',')` 解析仍会串位 ——
+实测整行从第 6 列起错位（20 列 vs 18 列表头）。数字一律输出裸值。
+回归测试断言"数据列数 == 表头列数"。
+
+CSV 19 列严格对齐现有台账，`PO ID` 就是商机 ID。服务器留存带时间戳快照
+（`data/poc-cash/`）+ `poc-cash-latest.csv`，同时浏览器下载一份 ——
+留存是为了回溯 PO 号、到账金额是何时被 AWS 回填的。
 
 **阶段检查（0.36.0）**：页面分「创建商机 / 阶段检查」两个 Tab。提交后商机被
 AWS 锁定，用阶段检查确认审到哪一步了，并在允许时推进阶段。

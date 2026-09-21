@@ -140,6 +140,82 @@ test('阶段状态里带出 POC 金额联动', () => {
   assert.equal(__test__evaluateStage(noSpend).amounts, undefined);
 });
 
+test('POC 金额由 MRR 单向推导', async () => {
+  const { computeAmounts } = await import('../server/poc-cash-funding');
+  // 实操样本：MRR 2400 → POC 2880 USD → 12,297.60 MYR
+  const a = computeAmounts(2400, 2, 3);
+  assert.equal(a.arrUsd, 28800);
+  assert.equal(a.pocUsd, 2880);
+  assert.equal(a.requestMyr, 12297.6);
+  assert.equal(a.totalMyr, 16272);      // 339 × 8 × 2人 × 3天
+  assert.equal(a.partnerMyr, 3974.4);
+  assert.ok(Math.abs(a.partnerPct - 24.42) < 0.1);
+});
+
+test('POC 风险项：Partner 为负 / 占比过低 / 超上限', async () => {
+  const { computeAmounts, warningsFor, MIN_LEAD_DAYS } =
+    await import('../server/poc-cash-funding');
+
+  // 人天太少 → Partner 投入为负，总成本盖不住申请额
+  const tooSmall = computeAmounts(2400, 1, 1);
+  assert.ok(tooSmall.partnerMyr < 0);
+  assert.ok(warningsFor(tooSmall, MIN_LEAD_DAYS).some(w => w.includes('为负')));
+
+  // 正常配比不应告警
+  assert.deepEqual(warningsFor(computeAmounts(2400, 2, 3), MIN_LEAD_DAYS), []);
+
+  // 提前期不足是硬要求（实测 lead=13 会被 AWS 打回）
+  assert.ok(warningsFor(computeAmounts(2400, 2, 3), 13)
+    .some(w => w.includes('14')));
+
+  // 申请额上限：114 条实操记录无一超过 9,900 USD
+  assert.ok(warningsFor(computeAmounts(9000, 2, 30), MIN_LEAD_DAYS)
+    .some(w => w.includes('上限')));
+});
+
+test('CSV 列顺序必须与现有台账一致', async () => {
+  const { buildCsv } = await import('../server/poc-cash-funding');
+  const csv = buildCsv([{
+    applicationId: 'benappl-test', awsAccountId: '782818417417',
+    bucket: 'koreawallpaper', opportunityId: 'O28604112',
+    arrUsd: '28800.00', requestMyr: 12297.6,
+    startDate: '2026-10-05', endDate: '2026-10-08',
+    status: 'IN_REVIEW', stage: 'BUSINESS_APPROVAL',
+    purchaseOrder: null, approvedAmount: null,
+  }], { owner: 'Mark' });
+
+  const [header, row] = csv.replace(/^\uFEFF/, '').split('\r\n');
+  // 列顺序错位会让粘回原表的数据全错，必须锁死
+  assert.equal(header.split(',')[0], 'Account ID');
+  assert.equal(header.split(',')[1], '项目桶');
+  assert.equal(header.split(',')[3], 'PO ID');
+  assert.equal(header.split(',')[8], 'Fund Request ID');
+  assert.equal(header.split(',').length, 18);
+
+  const cells = row.split(',');
+  // 数据列数必须等于表头列数。曾因金额用 toLocaleString 加千分位，
+  // 值里的逗号被当成分隔符，整行从第 6 列起串位（20 列 vs 18 列）。
+  assert.equal(cells.length, header.split(',').length,
+    `数据列数 ${cells.length} 与表头 ${header.split(',').length} 不符，可能有值含逗号`);
+  assert.equal(cells[0], '782818417417');
+  assert.equal(cells[1], 'koreawallpaper');
+  assert.equal(cells[3], 'O28604112', 'PO ID 就是商机 ID');
+  assert.equal(cells[8], 'benappl-test');
+  // AWS 未回填的字段留空，不编造
+  assert.equal(cells[13], '', 'PO 号未回填应为空');
+  assert.ok(csv.startsWith('\uFEFF'), '需要 BOM，否则 Excel 中文乱码');
+});
+
+test('项目桶查不到时留空，不回退到别的命名', async () => {
+  const { buildCsv } = await import('../server/poc-cash-funding');
+  // 客户自有账户 / APN 账户不在任何 payer 下，实测确认非缓存问题
+  const csv = buildCsv([{
+    applicationId: 'benappl-x', awsAccountId: '176350488746', bucket: null,
+  }], {});
+  const cells = csv.replace(/^\uFEFF/, '').split('\r\n')[1].split(',');
+  assert.equal(cells[1], '', '不在 payer 下的账户，项目桶必须留空');
+});
+
 test('Use Case 用 AWS 的完整字面量', () => {
   // 实测写成 "Migration" 会被 AWS 拒；账户内既有商机用的是带空格版本
   assert.equal(USE_CASES.includes('Migration / Database Migration'), true);

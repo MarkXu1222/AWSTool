@@ -461,6 +461,19 @@ export const api = {
   pocCashAdvanceStage: (id: string, stage: string) =>
     request(`/poc-cash/opportunities/${encodeURIComponent(id)}/stage`,
       { method: 'POST', body: JSON.stringify({ stage }) }),
+  // POC 资金申请
+  pocFundingMeta: () => request('/poc-cash/funding/meta'),
+  pocFundingAccount: (id: string) =>
+    request(`/poc-cash/funding/account/${encodeURIComponent(id)}`),
+  pocFundingPreview: (body: any) =>
+    request('/poc-cash/funding/preview', { method: 'POST', body: JSON.stringify(body) }),
+  pocFundingCreate: (body: any) =>
+    request('/poc-cash/funding', { method: 'POST', body: JSON.stringify(body) }),
+  pocFundingSubmit: (id: string) =>
+    request(`/poc-cash/funding/${encodeURIComponent(id)}/submit`, { method: 'POST' }),
+  pocFundingList: () => request('/poc-cash/funding'),
+  pocFundingExport: (owner?: string) =>
+    request('/poc-cash/funding/export', { method: 'POST', body: JSON.stringify({ owner }) }),
   pocCashPreviewTitle: (body: { partnerKey: string; companyName: string; projectName: string }) =>
     request('/poc-cash/preview-title', { method: 'POST', body: JSON.stringify(body) }),
   pocCashCreate: (body: any) =>

@@ -11,8 +11,9 @@ import React, { useEffect, useMemo, useState } from 'react';
 import {
   Card, Form, Input, InputNumber, Select, Button, Space, Radio, Alert,
   Descriptions, Typography, Divider, message, Modal, Tag, DatePicker, Result, Tabs,
+  Table,
 } from 'antd';
-import { RocketOutlined, CopyOutlined } from '@ant-design/icons';
+import { RocketOutlined, CopyOutlined, DownloadOutlined } from '@ant-design/icons';
 import dayjs, { Dayjs } from 'dayjs';
 import { api } from '../api';
 
@@ -56,6 +57,31 @@ interface StageStatus {
   amounts?: { mrrUsd: number; arrUsd: number; pocUsd: number };
 }
 
+interface PocRow {
+  applicationId: string; name?: string;
+  status?: string; stage?: string;
+  opportunityId?: string; awsAccountId?: string; bucket?: string | null;
+  activityName?: string; startDate?: string; endDate?: string;
+  arrUsd?: string; calculatorUrl?: string;
+  requestMyr?: number | null;
+  purchaseOrder?: string | null; approvedAmount?: string | null;
+  createdAt?: string;
+}
+
+/** POC 申请状态 → 颜色。只有 APPROVED 是终态成功。 */
+const pocColor = (s?: string) =>
+  s === 'APPROVED' ? 'success'
+    : s === 'REJECTED' ? 'error'
+      : s === 'ACTION_REQUIRED' ? 'warning'
+        : s === 'PENDING_SUBMISSION' ? 'default'
+          : s === 'CANCELED' ? 'default' : 'processing';
+
+const POC_LABEL: Record<string, string> = {
+  PENDING_SUBMISSION: '待提交', IN_REVIEW: '审核中',
+  ACTION_REQUIRED: '需补充', APPROVED: '已批准',
+  REJECTED: '已拒绝', CANCELED: '已取消',
+};
+
 /** 审核状态 → 展示颜色。Approved 才是真正可以继续操作的状态。 */
 const reviewColor = (s?: string) =>
   s === 'Approved' ? 'success'
@@ -84,6 +110,16 @@ const PocCashPage: React.FC = () => {
   const [stageInfo, setStageInfo] = useState<StageStatus | null>(null);
   const [checking, setChecking] = useState(false);
   const [advancing, setAdvancing] = useState(false);
+  // POC 资金申请
+  const [pocForm] = Form.useForm();
+  const [pocPreview, setPocPreview] = useState<any>(null);
+  const [pocBucket, setPocBucket] = useState<string | null>(null);
+  const [pocAcctErr, setPocAcctErr] = useState('');
+  const [pocBusy, setPocBusy] = useState(false);
+  const [pocResult, setPocResult] = useState<any>(null);
+  const [pocRows, setPocRows] = useState<PocRow[]>([]);
+  const [pocLoading, setPocLoading] = useState(false);
+  const [exporting, setExporting] = useState(false);
 
   useEffect(() => {
     api.pocCashMeta().then((m: Meta) => {
@@ -337,6 +373,315 @@ const PocCashPage: React.FC = () => {
       },
     });
   };
+
+  // ===== POC 资金申请 =====
+
+  const loadPocRows = async () => {
+    setPocLoading(true);
+    try {
+      const r = await api.pocFundingList();
+      setPocRows(r.applications || []);
+    } catch (e: any) {
+      message.error(e.message || '加载 POC 列表失败');
+    } finally {
+      setPocLoading(false);
+    }
+  };
+
+  /** 账户 ID → 项目桶。不在任何 payer 下的账户（客户自有/APN 账户）
+   *  查不到属正常，留空即可，不编造。 */
+  const lookupAccount = async (id: string) => {
+    setPocBucket(null); setPocAcctErr('');
+    if (!/^\d{12}$/.test(id)) return;
+    try {
+      const a = await api.pocFundingAccount(id);
+      setPocBucket(a.payer || null);
+      if (!a.payer) setPocAcctErr('该账户不在任何 payer 下，项目桶将留空');
+    } catch (e: any) {
+      setPocAcctErr(e.message || '账户不在平台缓存中');
+    }
+  };
+
+  const doPocPreview = async () => {
+    const v = pocForm.getFieldsValue();
+    if (!v.opportunityId) { message.warning('请先选择商机'); return; }
+    setPocBusy(true);
+    try {
+      setPocPreview(await api.pocFundingPreview({
+        opportunityId: v.opportunityId, awsAccountId: v.awsAccountId,
+        people: v.people, days: v.days, leadDays: v.leadDays,
+      }));
+    } catch (e: any) {
+      message.error(e.message || '预览失败');
+      setPocPreview(null);
+    } finally {
+      setPocBusy(false);
+    }
+  };
+
+  const doPocCreate = (values: any) => {
+    const willSubmit = values.submit !== false;
+    Modal.confirm({
+      title: willSubmit ? '确认创建并提交 POC 申请？' : '确认创建 POC 申请？',
+      width: 560,
+      content: (
+        <div style={{ lineHeight: 1.9 }}>
+          <div>商机 <Text code>{values.opportunityId}</Text></div>
+          <div>AWS 账户 {values.awsAccountId}
+            {pocBucket && <Text type="secondary">（{pocBucket}）</Text>}</div>
+          {pocPreview?.amounts && (
+            <div>申请额 <Text strong>
+              {pocPreview.amounts.pocUsd.toLocaleString()} USD
+            </Text>（{pocPreview.amounts.requestMyr.toLocaleString()} MYR）</div>
+          )}
+          <Alert style={{ marginTop: 12 }} type="warning" showIcon
+            message={willSubmit
+              ? '会生成定价计算器链接并提交给 AWS 审核，提交后不可修改。'
+              : '只创建不提交，可在列表里确认后再提交。'} />
+        </div>
+      ),
+      okText: willSubmit ? '创建并提交' : '创建',
+      cancelText: '再检查一下',
+      onOk: async () => {
+        setPocBusy(true);
+        try {
+          const r = await api.pocFundingCreate(values);
+          setPocResult(r);
+          if (r.warnings?.length) {
+            message.warning(`${r.applicationId} 已创建，${r.warnings.length} 条提醒`);
+          } else {
+            message.success(`${r.applicationId} ${r.submitted ? '已提交' : '已创建'}`);
+          }
+          loadPocRows();
+        } catch (e: any) {
+          message.error(e.message || '创建失败');
+        } finally {
+          setPocBusy(false);
+        }
+      },
+    });
+  };
+
+  const doPocSubmit = (row: PocRow) => {
+    Modal.confirm({
+      title: '提交给 AWS 审核？',
+      content: <div style={{ lineHeight: 1.8 }}>
+        <Text code>{row.applicationId}</Text>
+        <div>{row.name}</div>
+        <Text type="secondary">提交后商机锁定，需等 AWS 审批完成。</Text>
+      </div>,
+      okText: '提交',
+      onOk: async () => {
+        try {
+          const r = await api.pocFundingSubmit(row.applicationId);
+          message.success(`已提交：${r.status} / ${r.stage}`);
+          loadPocRows();
+        } catch (e: any) {
+          message.error(e.message || '提交失败');
+        }
+      },
+    });
+  };
+
+  /** 导出 CSV：服务器留存快照，同时浏览器下载一份 */
+  const doExport = async () => {
+    setExporting(true);
+    try {
+      const r = await api.pocFundingExport();
+      const blob = new Blob([r.csv], { type: 'text/csv;charset=utf-8' });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = r.file || 'poc-cash.csv';
+      a.click();
+      URL.revokeObjectURL(a.href);
+      message.success(`已导出 ${r.rows} 条，服务器留存 ${r.file}`);
+    } catch (e: any) {
+      message.error(e.message || '导出失败');
+    } finally {
+      setExporting(false);
+    }
+  };
+
+  const renderPocForm = () => (
+    <Form form={pocForm} layout="vertical" onFinish={doPocCreate}
+      initialValues={{ people: 2, days: 3, leadDays: 14, considering: 'Other', submit: true }}>
+      <Alert style={{ marginBottom: 16, maxWidth: 900 }} type="info" showIcon
+        message="POC 必须先有商机"
+        description="商机要已到 Technical Validation 且 ReviewStatus 为 Approved / Action Required。计算器链接、金额、发票信息由平台自动生成。" />
+
+      <Space align="start" wrap size="large">
+        <Form.Item name="opportunityId" label="商机" rules={[{ required: true }]}
+          extra="只有满足前置条件的商机才能提 POC">
+          <Select style={{ width: 420 }} showSearch allowClear loading={oppsLoading}
+            placeholder="按客户名 / 商机 ID 搜索" optionFilterProp="label"
+            onChange={() => setPocPreview(null)}
+            options={opps.map(o => ({ value: o.id, label: `${o.companyName} — ${o.id}` }))} />
+        </Form.Item>
+        <Form.Item name="awsAccountId" label="AWS 账户 ID"
+          rules={[{ required: true, pattern: /^\d{12}$/, message: '12 位数字' }]}
+          extra={pocBucket
+            ? <Text type="success">项目桶：{pocBucket}</Text>
+            : (pocAcctErr ? <Text type="warning">{pocAcctErr}</Text> : 'POC 在哪个账户执行')}>
+          <Input style={{ width: 200 }} maxLength={12} placeholder="782818417417"
+            onChange={e => lookupAccount(e.target.value.trim())} />
+        </Form.Item>
+      </Space>
+
+      <Form.Item name="description" label="业务描述"
+        rules={[{ required: true, min: 50, message: '至少 50 字 —— AWS 会看是否具体' }]}
+        extra="POC 要验证什么、用到哪些 AWS 服务、partner 做哪些事">
+        <TextArea rows={5} style={{ maxWidth: 900 }} showCount />
+      </Form.Item>
+
+      <Space align="start" wrap size="large">
+        <Form.Item name="people" label="人数"><InputNumber min={1} style={{ width: 90 }} /></Form.Item>
+        <Form.Item name="days" label="天数" extra="实操中位数 4 天">
+          <InputNumber min={1} style={{ width: 90 }} /></Form.Item>
+        <Form.Item name="leadDays" label="几天后开始" extra="流程要求 ≥ 14 天">
+          <InputNumber min={0} style={{ width: 110 }} /></Form.Item>
+        <Form.Item name="considering" label="竞争对手">
+          <Select style={{ width: 170 }} options={
+            ['Other', 'No Competition', 'AliCloud', 'On-Premise']
+              .map(v => ({ value: v, label: v }))} /></Form.Item>
+        <Form.Item label=" ">
+          <Button onClick={doPocPreview} loading={pocBusy}>预览金额</Button>
+        </Form.Item>
+      </Space>
+
+      {pocPreview && (
+        <>
+          {!pocPreview.precheck?.ok && (
+            <Alert style={{ maxWidth: 900, marginBottom: 12 }} type="error" showIcon
+              message="商机不满足前置条件"
+              description={<ul style={{ margin: 0, paddingLeft: 18 }}>
+                {pocPreview.precheck.problems.map((p: string, i: number) =>
+                  <li key={i}>{p}</li>)}</ul>} />
+          )}
+          <Descriptions bordered size="small" column={2}
+            style={{ maxWidth: 900, marginBottom: 12 }}>
+            <Descriptions.Item label="商机 MRR">
+              {pocPreview.amounts.mrrUsd.toLocaleString()} USD/月</Descriptions.Item>
+            <Descriptions.Item label="ARR（计算器目标）">
+              {pocPreview.amounts.arrUsd.toLocaleString()} USD</Descriptions.Item>
+            <Descriptions.Item label="POC 可申请">
+              <Text strong>{pocPreview.amounts.pocUsd.toLocaleString()} USD</Text></Descriptions.Item>
+            <Descriptions.Item label="实际申请额">
+              {pocPreview.amounts.requestMyr.toLocaleString()} MYR</Descriptions.Item>
+            <Descriptions.Item label="Total Cost">
+              {pocPreview.amounts.totalMyr.toLocaleString()} MYR</Descriptions.Item>
+            <Descriptions.Item label="Partner 投入">
+              {pocPreview.amounts.partnerMyr.toLocaleString()} MYR
+              <Text type={pocPreview.amounts.partnerPct < 10 ? 'danger' : 'secondary'}>
+                {' '}（{pocPreview.amounts.partnerPct.toFixed(1)}%）</Text>
+            </Descriptions.Item>
+          </Descriptions>
+          {pocPreview.warnings?.length > 0 && (
+            <Alert style={{ maxWidth: 900, marginBottom: 12 }} type="warning" showIcon
+              message="风险项" description={<ul style={{ margin: 0, paddingLeft: 18 }}>
+                {pocPreview.warnings.map((w: string, i: number) => <li key={i}>{w}</li>)}
+              </ul>} />
+          )}
+        </>
+      )}
+
+      <Form.Item name="submit" label="创建后是否提交">
+        <Radio.Group optionType="button" buttonStyle="solid">
+          <Radio.Button value={true}>创建并提交</Radio.Button>
+          <Radio.Button value={false}>只创建</Radio.Button>
+        </Radio.Group>
+      </Form.Item>
+      {pocPreview?.warnings?.length > 0 && (
+        <Form.Item name="force" valuePropName="checked">
+          <Radio.Group optionType="button" size="small">
+            <Radio.Button value={true}>已确认风险，继续</Radio.Button>
+          </Radio.Group>
+        </Form.Item>
+      )}
+      <Form.Item>
+        <Button type="primary" htmlType="submit" size="large" loading={pocBusy}
+          disabled={!meta?.configured}>提交 POC 申请</Button>
+      </Form.Item>
+    </Form>
+  );
+
+  const renderPocTab = () => (
+    <>
+      {pocResult && (
+        <Alert style={{ marginBottom: 16 }} closable onClose={() => setPocResult(null)}
+          type={pocResult.warnings?.length ? 'warning' : 'success'} showIcon
+          message={`${pocResult.applicationId} ${pocResult.submitted ? '已提交' : '已创建'}`}
+          description={<div style={{ lineHeight: 1.8 }}>
+            <div>{pocResult.name} · {pocResult.status}
+              {pocResult.stage ? ` / ${pocResult.stage}` : ''}</div>
+            <div>申请额 {pocResult.amounts?.pocUsd?.toLocaleString()} USD
+              （{pocResult.amounts?.requestMyr?.toLocaleString()} MYR）</div>
+            <div>计算器 <a href={pocResult.calculatorUrl} target="_blank"
+              rel="noreferrer">{pocResult.calculatorUrl}</a></div>
+            {pocResult.warnings?.map((w: string, i: number) =>
+              <div key={i}><Text type="warning">⚠️ {w}</Text></div>)}
+          </div>} />
+      )}
+
+      {renderPocForm()}
+
+      <Divider orientation="left">已提交的 POC 进展</Divider>
+      <Space style={{ marginBottom: 12 }}>
+        <Button onClick={loadPocRows} loading={pocLoading}>刷新</Button>
+        <Button icon={<DownloadOutlined />} onClick={doExport} loading={exporting}
+          disabled={!pocRows.length}>导出 CSV 台账</Button>
+        <Text type="secondary">
+          服务器留存带时间戳快照；PO 号与到账金额由 AWS 审批后回填
+        </Text>
+      </Space>
+      <Table<PocRow> rowKey="applicationId" size="small" loading={pocLoading}
+        dataSource={pocRows} scroll={{ x: 1200 }} pagination={{ pageSize: 20 }}
+        columns={[
+          {
+            title: '状态', dataIndex: 'status', width: 120, fixed: 'left',
+            render: (s: string, r) => (
+              <Tag color={pocColor(s)}>{POC_LABEL[s] || s}
+                {r.stage ? ` · ${r.stage}` : ''}</Tag>
+            ),
+          },
+          { title: 'Fund Request ID', dataIndex: 'applicationId', width: 210 },
+          {
+            title: '项目桶', dataIndex: 'bucket', width: 130,
+            // 不在任何 payer 下的账户（客户自有/APN 账户）留空，不编造
+            render: (b: string | null) => b || <Text type="secondary">—</Text>,
+          },
+          { title: '账户', dataIndex: 'awsAccountId', width: 130 },
+          { title: '商机', dataIndex: 'opportunityId', width: 110 },
+          {
+            title: '申请额 (MYR)', dataIndex: 'requestMyr', width: 120, align: 'right',
+            render: (v: number | null) => v != null ? v.toLocaleString() : '—',
+          },
+          {
+            title: 'PO 号', dataIndex: 'purchaseOrder', width: 140,
+            render: (v: string | null) => v || <Text type="secondary">待 AWS 回填</Text>,
+          },
+          {
+            title: '到账金额', dataIndex: 'approvedAmount', width: 110, align: 'right',
+            render: (v: string | null) => v || <Text type="secondary">—</Text>,
+          },
+          {
+            title: '周期', width: 180,
+            render: (_: any, r) => r.startDate ? `${r.startDate} ~ ${r.endDate}` : '—',
+          },
+          {
+            title: '计算器', dataIndex: 'calculatorUrl', width: 90,
+            render: (u: string) => u
+              ? <a href={u} target="_blank" rel="noreferrer">打开</a>
+              : <Text type="secondary">—</Text>,
+          },
+          {
+            title: '操作', width: 90, fixed: 'right',
+            render: (_: any, r) => r.status === 'PENDING_SUBMISSION'
+              ? <Button size="small" type="link" onClick={() => doPocSubmit(r)}>提交</Button>
+              : null,
+          },
+        ]} />
+    </>
+  );
 
   const renderStageDetail = () => {
     if (!stageInfo) return null;
@@ -683,9 +1028,14 @@ const PocCashPage: React.FC = () => {
 
   return (
     <Card title={<Space><RocketOutlined />POC Cash</Space>}>
-      <Tabs activeKey={tab} onChange={setTab} items={[
+      <Tabs activeKey={tab} onChange={(k) => {
+        setTab(k);
+        // 首次进入 POC Tab 才拉列表：要逐条 Get 补全，别在页面加载时就跑
+        if (k === 'poc' && !pocRows.length && !pocLoading) loadPocRows();
+      }} items={[
         { key: 'create', label: '创建商机', children: renderCreateTab() },
         { key: 'stage', label: '阶段检查', children: renderStageTab() },
+        { key: 'poc', label: 'POC 申请', children: renderPocTab() },
       ]} />
     </Card>
   );

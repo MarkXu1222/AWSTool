@@ -476,14 +476,18 @@ export function buildCsv(rows: PocRow[], ctx: CsvContext = {}): string {
       opp.title || r.activityName,
       r.opportunityId,                       // PO ID = 商机 ID
       opp.stage,
-      opp.mrrUsd != null ? opp.mrrUsd.toLocaleString('en-US') : '',
-      r.arrUsd ? Number(r.arrUsd).toLocaleString('en-US') : '',
+      // ⚠️ 不要用 toLocaleString 加千分位：值里的逗号会被 CSV 当成列分隔符。
+      // csvEscape 会加引号保护，但下游若用朴素 split(',') 解析仍会错位 ——
+      // 实测 "28,800" 让整行从第 6 列起全部串位。数字一律输出裸值，
+      // 千分位交给表格软件的单元格格式。
+      opp.mrrUsd != null ? String(opp.mrrUsd) : '',
+      r.arrUsd ? String(Number(r.arrUsd)) : '',
       r.calculatorUrl,
       r.applicationId,                       // Fund Request ID
       r.startDate,
       r.endDate,
       pocStageLabel(r.status, r.stage),
-      r.requestMyr != null ? r.requestMyr.toLocaleString('en-US') : '',
+      r.requestMyr != null ? String(r.requestMyr) : '',
       r.purchaseOrder,                       // AWS 审批后回填
       r.invoice,                             // AWS 打款环节回填
       r.approvedAmount,                      // 到账金额
