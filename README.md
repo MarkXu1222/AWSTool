@@ -3,7 +3,7 @@
 企业级 AWS 多账户（多 Organizations）管理平台。带强制 MFA 登录、页面级权限与全量操作审计。
 
 **线上**：https://markxu.co（EC2 Singapore，PM2 进程 `aws-toolbox`）
-**当前版本**：`0.34.1`（见 `web/client/src/version.ts`，左下角展示）
+**当前版本**：`0.34.2`（见 `web/client/src/version.ts`，左下角展示）
 
 **生产接入规模**（快照 2026-09-06，取自线上 db.json）
 
@@ -418,6 +418,14 @@ Profiles 列表的 ARN 列完整展示（不截断、等宽字体），每行带
 v2 按 `variant` 筛选核心 6 模型并固定排序：`global`（每区 6 条，默认）或 `full`（每区 12 条，us+global）。老模型（haiku / fable / opus-4-1 / 4-5 / sonnet-4 / 4-5）一律剔除。用**白名单**而非黑名单 —— AWS 随时上新模型，黑名单会漏。
 
 筛选必须在 `prepareDelivery()` **之前**执行：后者对每一行强校验 `map-migrated` tag，老模型往往没打 tag 会直接让整个导出失败，而它们本就不该进交付表。
+
+**Profile 名归一化回退（0.34.2）**：清单是精确字符串白名单，但不少账户的 Profile 用控制台默认命名。实测 `703844615335`（HDL Account 7）6 个核心模型全都在，名字却是 `Global Anthropic Claude Opus 4.6`，与清单的 `sef-global-claude-opus-4-6-v1` 一条都对不上，导出直接报「账户中找不到任何交付清单内的 Profile」。
+
+`normalizeProfileName()` 做形态折叠后回退匹配：去 `sef-` 前缀、去 `anthropic`/`claude` 词、版本号 `.` 视同 `-`、去结尾 `-v1`、非字母数字压成 `-`。**精确优先、回退兜底**，历史交付件按原名对齐的行为不变。
+
+⚠️ **scope 词（us/global）必须保留**：变体 A 里 `sef-us-claude-opus-4-8` 与 `sef-global-claude-opus-4-8` 只靠它区分，折叠掉会让两者互相顶替 —— 交付表出错且几乎不可能人眼发现。这是该函数最大的风险点，回归测试 `tests/bedrock-delivery-name-match.test.ts` 专门锁死。
+
+回退只认清单内的模型，`Fable 5` / `Haiku 4.5` / `Sonnet 4.5` 等非清单型号不会被误纳入。连带修了一处：经回退命中的行原本会同时计入 `dropped`，导致审计日志「剔除 N 种老模型」虚高。
 
 **TPD 口径（2026-09 变更）**：AWS 新增账户级总配额 `Cross-Model Account-Level Tokens Per Day`（`L-E3F10727`，scope 标记为 `Account-Level`），同时**较新的 Claude 型号不再有独立 TPD**（实测 Opus 4.7 只剩 TPM）。取值优先级：
 
