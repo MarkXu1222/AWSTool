@@ -452,6 +452,8 @@ const PocCashPage: React.FC = () => {
           } else {
             message.success(`${r.applicationId} ${r.submitted ? '已提交' : '已创建'}`);
           }
+          // 创建完直接跳到进展页 —— 用户下一步就是看状态，不用自己切
+          setTab('progress');
           loadPocRows();
         } catch (e: any) {
           message.error(e.message || '创建失败');
@@ -604,7 +606,9 @@ const PocCashPage: React.FC = () => {
     </Form>
   );
 
-  const renderPocTab = () => (
+  const renderPocTab = () => renderPocForm();
+
+  const renderProgressTab = () => (
     <>
       {pocResult && (
         <Alert style={{ marginBottom: 16 }} closable onClose={() => setPocResult(null)}
@@ -621,63 +625,81 @@ const PocCashPage: React.FC = () => {
               <div key={i}><Text type="warning">⚠️ {w}</Text></div>)}
           </div>} />
       )}
-
-      {renderPocForm()}
-
-      <Divider orientation="left">已提交的 POC 进展</Divider>
-      <Space style={{ marginBottom: 12 }}>
+      <Space style={{ marginBottom: 12 }} wrap>
         <Button onClick={loadPocRows} loading={pocLoading}>刷新</Button>
         <Button icon={<DownloadOutlined />} onClick={doExport} loading={exporting}
           disabled={!pocRows.length}>导出 CSV 台账</Button>
         <Text type="secondary">
-          服务器留存带时间戳快照；PO 号与到账金额由 AWS 审批后回填
+          共 {pocRows.length} 条 · 服务器留存带时间戳快照 · PO 号与到账金额由 AWS 审批后回填
         </Text>
       </Space>
       <Table<PocRow> rowKey="applicationId" size="small" loading={pocLoading}
-        dataSource={pocRows} scroll={{ x: 1200 }} pagination={{ pageSize: 20 }}
+        dataSource={pocRows} scroll={{ x: 1560 }} pagination={{ pageSize: 20 }}
         columns={[
+          // 状态不设 fixed：列本身较宽，固定后会盖住相邻的 ID 列（实测截图里
+          // Fund Request ID 被压掉了一半）。首列放 ID 更利于对账。
           {
-            title: '状态', dataIndex: 'status', width: 120, fixed: 'left',
+            title: 'Fund Request ID', dataIndex: 'applicationId', width: 215,
+            render: (v: string) => <Text style={{ fontSize: 12 }} copyable={{ text: v }}>{v}</Text>,
+          },
+          {
+            title: '状态', dataIndex: 'status', width: 190,
             render: (s: string, r) => (
-              <Tag color={pocColor(s)}>{POC_LABEL[s] || s}
-                {r.stage ? ` · ${r.stage}` : ''}</Tag>
+              <Tag color={pocColor(s)} style={{ whiteSpace: 'normal' }}>
+                {POC_LABEL[s] || s}{r.stage ? ` · ${r.stage}` : ''}
+              </Tag>
             ),
           },
-          { title: 'Fund Request ID', dataIndex: 'applicationId', width: 210 },
           {
             title: '项目桶', dataIndex: 'bucket', width: 130,
             // 不在任何 payer 下的账户（客户自有/APN 账户）留空，不编造
             render: (b: string | null) => b || <Text type="secondary">—</Text>,
           },
-          { title: '账户', dataIndex: 'awsAccountId', width: 130 },
-          { title: '商机', dataIndex: 'opportunityId', width: 110 },
           {
-            title: '申请额 (MYR)', dataIndex: 'requestMyr', width: 120, align: 'right',
+            title: '账户', dataIndex: 'awsAccountId', width: 130,
+            // 12 位数字要给足宽度，否则会折成两行
+            render: (v: string) => v
+              ? <Text style={{ fontSize: 12, whiteSpace: 'nowrap' }}>{v}</Text>
+              : <Text type="secondary">—</Text>,
+          },
+          {
+            title: '商机', dataIndex: 'opportunityId', width: 115,
+            render: (v: string) => v
+              ? <Text style={{ whiteSpace: 'nowrap' }}>{v}</Text>
+              : <Text type="secondary">—</Text>,
+          },
+          {
+            title: '申请额 (MYR)', dataIndex: 'requestMyr', width: 125, align: 'right',
             render: (v: number | null) => v != null ? v.toLocaleString() : '—',
           },
           {
-            title: 'PO 号', dataIndex: 'purchaseOrder', width: 140,
-            render: (v: string | null) => v || <Text type="secondary">待 AWS 回填</Text>,
+            title: 'PO 号', dataIndex: 'purchaseOrder', width: 160,
+            render: (v: string | null) => v
+              ? <Text style={{ fontSize: 12 }}>{v}</Text>
+              : <Text type="secondary" style={{ fontSize: 12 }}>待 AWS 回填</Text>,
           },
           {
             title: '到账金额', dataIndex: 'approvedAmount', width: 110, align: 'right',
             render: (v: string | null) => v || <Text type="secondary">—</Text>,
           },
           {
-            title: '周期', width: 180,
-            render: (_: any, r) => r.startDate ? `${r.startDate} ~ ${r.endDate}` : '—',
+            title: '周期', width: 200,
+            render: (_: any, r) => r.startDate
+              ? <Text style={{ fontSize: 12, whiteSpace: 'nowrap' }}>
+                {r.startDate} ~ {r.endDate}</Text>
+              : <Text type="secondary">—</Text>,
           },
           {
-            title: '计算器', dataIndex: 'calculatorUrl', width: 90,
+            title: '计算器', dataIndex: 'calculatorUrl', width: 80, align: 'center',
             render: (u: string) => u
               ? <a href={u} target="_blank" rel="noreferrer">打开</a>
               : <Text type="secondary">—</Text>,
           },
           {
-            title: '操作', width: 90, fixed: 'right',
+            title: '操作', width: 80, fixed: 'right', align: 'center',
             render: (_: any, r) => r.status === 'PENDING_SUBMISSION'
               ? <Button size="small" type="link" onClick={() => doPocSubmit(r)}>提交</Button>
-              : null,
+              : <Text type="secondary">—</Text>,
           },
         ]} />
     </>
@@ -1030,12 +1052,13 @@ const PocCashPage: React.FC = () => {
     <Card title={<Space><RocketOutlined />POC Cash</Space>}>
       <Tabs activeKey={tab} onChange={(k) => {
         setTab(k);
-        // 首次进入 POC Tab 才拉列表：要逐条 Get 补全，别在页面加载时就跑
-        if (k === 'poc' && !pocRows.length && !pocLoading) loadPocRows();
+        // 首次进入进展 Tab 才拉列表：要逐条 Get 补全，别在页面加载时就跑
+        if (k === 'progress' && !pocRows.length && !pocLoading) loadPocRows();
       }} items={[
         { key: 'create', label: '创建商机', children: renderCreateTab() },
         { key: 'stage', label: '阶段检查', children: renderStageTab() },
         { key: 'poc', label: 'POC 申请', children: renderPocTab() },
+        { key: 'progress', label: 'POC 进展', children: renderProgressTab() },
       ]} />
     </Card>
   );

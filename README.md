@@ -3,7 +3,7 @@
 企业级 AWS 多账户（多 Organizations）管理平台。带强制 MFA 登录、页面级权限与全量操作审计。
 
 **线上**：https://markxu.co（EC2 Singapore，PM2 进程 `aws-toolbox`）
-**当前版本**：`0.37.1`（见 `web/client/src/version.ts`，左下角展示）
+**当前版本**：`0.37.2`（见 `web/client/src/version.ts`，左下角展示）
 
 **生产接入规模**（快照 2026-09-06，取自线上 db.json）
 
@@ -527,7 +527,15 @@ POC 申请额 > 9,900 USD（实测 114 条记录的经验上限）。
 
 ### POC 资金申请（0.37.0）
 
-第三个 Tab「POC 申请」：一键创建 + 提交 + 进度看板 + CSV 台账。
+四个 Tab：创建商机 / 阶段检查 / POC 申请 / **POC 进展**。
+申请与进展分开（0.37.2）—— 表单本身就长，再挂一张宽表会挤成一团。
+创建成功后自动跳到进展页。
+
+⚠️ 进展表的**状态列不要设 `fixed: 'left'`**：该列较宽（含 Stage），
+固定后会盖住相邻的 Fund Request ID 列，实测 ID 被压掉一半。
+首列放 ID 更利于对账；只有右侧「操作」列固定。
+账户号（12 位）、周期、PO 号都要 `whiteSpace: nowrap` + 足够宽度，
+否则会折成两行把行高撑开。
 
 **硬前置：必须先有商机**，且已到 Technical Validation、ReviewStatus 为
 Approved / Action Required。不满足直接拒绝，不降级 —— AWS 侧会打回。
