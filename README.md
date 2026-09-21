@@ -67,7 +67,11 @@
 
 ## 功能模块
 
-左侧导航包含十个可分配页面和一个独立权限页（批量提额）。页面 key 必须三处一致：`navItems`、`PAGE_META`（`MainLayout.tsx`）与后端 `ALL_PAGE_KEYS`（`auth.ts`）。页面 key 同时就是 URL 路径（`/accounts` 等，dashboard 归 `/`），由 `navigate()`/`popstate` 同步。运维监控属于敏感页面：admin 恒有，其他角色需在用户的页面权限中显式授权。
+左侧导航共 14 项 = **11 个可分配页面**（`PAGE_META` / 后端 `ALL_PAGE_KEYS`，可通过「页面权限」勾选授予）+ **3 个独立权限页**（`bulkquota` / `rootreset` / `poccash`，刻意不在 `ALL_PAGE_KEYS` 里，勾选不了，只能由独立权限开关决定）。
+
+可分配页面的 key 必须三处一致：`navItems`、`PAGE_META`（`MainLayout.tsx`）与后端 `ALL_PAGE_KEYS`（`auth.ts`）。页面 key 同时就是 URL 路径（`/accounts` 等，dashboard 归 `/`），由 `navigate()`/`popstate` 同步；合法路径集合 `VALID_PAGE_KEYS` 由 `PAGE_META` + 3 个独立权限页 key 推导。
+
+敏感度分三档：普通可分配页 → `ops` / `bedrock`（在 `ALL_PAGE_KEYS` 里但 non-admin 必须显式勾选，旧用户不自动继承）→ `poccash`（**连勾选都无法授予，仅 admin**）。
 
 | 页面 key | 页面文件 | 主要后端前缀 | 说明 |
 |----------|----------|--------------|------|
@@ -75,7 +79,9 @@
 | `accounts` | `Accounts.tsx` | `/api/aws/accounts*`、`/api/aws/root-credentials*`、`/api/aws/temp-credentials` | 账户列表与详情、免登录进控制台、根用户凭证操作 |
 | `quotas` | `Quotas.tsx` | `/api/aws/quotas/*`、`/api/aws/bedrock/quotas/*` | 配额查询、一键提额、流式同步、生成提额 PDF、一键提交文档到 Support Case。Tab：当前配额 / Bedrock 配额 / 当前账户请求 / 在线查询 / 提升记录 |
 | `bulkquota` | `BulkQuota.tsx` | `/api/aws/bulk-quota/*` | 批量提额（按 payer 组织 × 多区域）。**不在 `ALL_PAGE_KEYS` 里**，可见性只由独立权限 `bulk_quota_access` 决定 |
+| `rootreset` | `BulkRootReset.tsx` | `/api/aws/root-email/*` | 批量设置 Root 新密码。**不在 `ALL_PAGE_KEYS` 里**，由独立权限 `root_reset_access`（`none`/`view`/`operate`）决定可见与可操作。详见「批量自动设置 Root 新密码」与 [`web/ROOT_EMAIL.md`](web/ROOT_EMAIL.md) |
 | `bedrock` | `Bedrock.tsx` | `/api/bedrock/*` | Bedrock 工具（从桌面版 Bedrock Profile Manager 迁移）：Inference Profile 管理/批量创建/模型测试/模型列表/FTU 开通/Fable 5 数据共享/IAM 用户/交付表格。**敏感页面**：全部走 Admin 凭证，non-admin 需显式授权；创建/打 Tag 的 Tag 必须每次手动输入（前后端均无默认值） |
+| `poccash` | `PocCash.tsx` | `/api/poc-cash/*` | POC Cash：创建 AWS Partner Central 商机、阶段检查、POC 资金申请与进展台账。**admin 专属**，连「页面权限」勾选都无法授予（创建的是提交给 AWS 的真实商机）。四 Tab：创建商机 / 阶段检查 / POC 申请 / POC 进展 |
 | `regions` | `Regions.tsx` | `/api/regions/*` | opt-in 区域开通状态扫描与单个/批量开通 |
 | `billing` | `Billing.tsx` | `/api/aws/billing/*` | AWS 官方账单 PDF 批量导出、历史任务、取消与 ZIP 下载 |
 | `cleanup` | `Cleanup.tsx` | `/api/aws/resources/*` | 扫描最近 7 天的 EC2/EBS/S3/Lambda/IAM 用户，展示 IAM 非敏感详情并手动勾选删除；S3 只读 |
@@ -85,7 +91,7 @@
 | `settings` | `Settings.tsx` | `/api/auth/*` | 改密码、MFA、用户管理 |
 | —（登录流程） | `Login.tsx`、`SetupMFA.tsx` | `/api/auth/login`、`/api/auth/mfa/*` | 登录、强制绑定 MFA |
 
-移动端底部导航只保留五项：概览 / 账户 / 配额 / 账单 / 设置。
+移动端底栏放 4 个高频入口（`MOBILE_PRIMARY_KEYS`：概览 / 账户 / 配额 / Bedrock，底栏用短名），其余全部收进「更多」抽屉。抽屉按 `navItems` 全名展示，**所有有权限的页面在手机上都能进** —— 早先底栏是写死的 5 项，Bedrock/区域/清理/MAP 标签/审计/运维/批量提额在移动端完全无法访问。若高频页因权限缺失不足 4 个，会按 `navItems` 顺序自动补位，避免底栏空位。
 
 ---
 
@@ -93,54 +99,97 @@
 
 ```
 AWS/
+├── CLAUDE.md                       # AI 指令入口（导入 .kiro/steering/*）
 ├── config.json                     # ★真实配置（gitignore，含密钥）
 ├── config.example.json             # 配置示例（可提交）
-├── data/
-│   ├── db.json                     # ★运行时数据库（gitignore）
-│   └── backups/                    # 每日自动备份（保留 7 天）
+├── .kiro/steering/                 # 开发规范与流程（deployment / coding-standards / …）
+├── docs/                           # 领域文档：poc-cash-guide、partner-central-api、bedrock-quota-api-and-permissions
+├── data/                           # ★全部 gitignore
+│   ├── db.json                     # ★运行时数据库
+│   ├── root-email-jobs.json        # ★永久 Root 凭证库（AES-256-GCM 密文）
+│   ├── backups/                    # db 与 root-email-jobs 每日备份（各保留 7 天）
+│   ├── exports/billing/<jobId>/    # 账单 ZIP，长期保留，只经鉴权端点下载
+│   └── poc-cash/                   # POC 台账 CSV 快照（首次导出时创建）
 ├── doc-templates/architectures/    # 各公司架构图（静态资源，可提交）
-├── electron/                       # 桌面版主进程（冻结）
-├── src/                            # 桌面版前端（冻结）
+├── scripts/                        # Python 运维脚本（与 web/scripts 的 TS 脚本分开）
+│   ├── cleanup.py                  # 账户资源清空（.kiro/skills/aws-account-cleanup 依赖）
+│   ├── setup_partner_central_role.py # ★APN 账户建 partner-central-tool role（dry-run/--execute/--verify）
+│   ├── partner_central.py / poc_*.py / create_*_opportunity.py  # POC Cash 相关
+│   └── calculator_api.py / find-p-quota.py / …
+├── tools/                          # 独立小工具：console-launcher、ocr-lab
+├── electron/ + src/                # 桌面版（冻结）
 └── web/
     ├── server/                     # 后端（Express，tsx 直跑）
+    │   # —— 基础设施 ——
     │   ├── index.ts                # 入口：中间件、CORS 白名单、限速（GET/写分离）、挂载路由、API 兜底 404、静态服务（immutable 缓存）、启动 scheduler
-    │   ├── ops-monitor.ts          # 运维监控：请求/系统指标进程内采集（24h 环形缓冲）+ 健康评分 + /api/ops 页面权限守卫
-    │   ├── auth.ts                 # authRouter（登录/MFA/用户CRUD）+ authMiddleware + 页面权限模型
+    │   ├── auth.ts                 # authRouter（登录/MFA/用户CRUD）+ authMiddleware + 页面权限模型（DEFAULT_PAGE_KEYS / ALL_PAGE_KEYS）
+    │   ├── step-up-mfa.ts          # 敏感操作二次 TOTP 校验（Root 批次创建、单独重试等）
+    │   ├── db.ts                   # ★数据层：db.json 读写、字段加密、每日备份
     │   ├── audit.ts                # auditMiddleware：记录所有已认证 API 调用
     │   ├── audit-presentation.ts   # 审计日志展示增强 + CSV 导出
-    │   ├── aws-service.ts          # ★AWS 核心：AssumeRole 链、成本、配额、资源、根凭证、控制台 URL
-    │   ├── db.ts                   # ★数据层：db.json 读写、字段加密、每日备份
-    │   ├── scheduler.ts            # 后台定时同步（账户/配额/区域/仪表盘）
-    │   ├── doc-generator.ts        # 生成提额申请 PDF（puppeteer）
-    │   ├── doc-templates.ts        # ★公司模板 + 账户→公司 / payer→公司 映射 + 区域显示名
+    │   ├── scheduler.ts            # 后台定时同步（账户 30min / 配额 4h / 区域 24h / 账户角色自愈）
+    │   ├── ops-monitor.ts          # 运维监控：请求/系统指标进程内采集（24h 环形缓冲）+ 健康评分 + /api/ops 页面权限守卫
+    │   ├── security-alerts.ts      # 安全告警：登录爆破/429、5xx 突增 → 飞书
     │   ├── notify.ts               # 飞书通知（账户角色缺失告警）
-    │   ├── tag-compliance.ts       # MAP 标签合规（编排中央工具账户的 Step Functions + S3 报告；payer 自身 auto-tagger-role 单独创建）
-    │   ├── tag-onboarding.ts       # MAP 全自动接入持久化 runner（资源、索引、StackSet、S3 配置与校验）
+    │   # —— AWS 接入 ——
+    │   ├── aws-service.ts          # ★AWS 核心：AssumeRole 链、成本、配额、资源、根凭证、控制台 URL
     │   ├── account-roles.ts        # ★账户角色自愈：探测 → 缺失则触发 StackSet 补齐 → 超限告警
     │   ├── account-lifecycle.ts    # 离场账户追踪：快照 diff（防 payer 同步失败误判）+ 重新加入 + 历史补录
     │   ├── restricted-accounts.ts  # ★敏感权限客户：账户级权限收窄 + ExternalId（StackSet 下发必须排除）
+    │   # —— 提额文档 ——
+    │   ├── doc-generator.ts        # 生成提额申请 PDF（puppeteer）
+    │   ├── doc-templates.ts        # ★公司模板 + 账户→公司 / payer→公司 映射 + 区域显示名
+    │   ├── case-doc-submitter.ts   # ★一键提交提额文档到 Support Case（生成 PDF → 联邦登录 → Reply → 传附件 → Submit）
+    │   # —— 账单导出 ——
     │   ├── billing-export-jobs.ts  # 账单导出持久化 job、全局队列、永久历史、重复下载与重启恢复
     │   ├── billing-exporter.ts     # 严格只读抓取 AWS 官方账单 PDF + 可取消 zip 打包
+    │   # —— Bedrock ——
     │   ├── bedrock-tools.ts        # Bedrock 工具：Profile 管理/批量创建/FTU/数据共享/IAM（全部走 Admin 凭证，50min 缓存）
     │   ├── bedrock-delivery.ts     # Bedrock 客户交付 xlsx（v1 三列 / v2 李浩版五列含 TPM/TPD；按变体白名单筛选模型 + 固定排序；校验 map-migrated tag 唯一）
-    │   ├── case-doc-submitter.ts   # ★一键提交提额文档到 Support Case（生成 PDF → 联邦登录 → Reply → 传附件 → Submit）
-    │   ├── security-alerts.ts      # 安全告警：登录爆破/429、5xx 突增 → 飞书
+    │   # —— MAP 标签 ——
+    │   ├── tag-compliance.ts       # MAP 标签合规（编排中央工具账户的 Step Functions + S3 报告；payer 自身 auto-tagger-role 单独创建）
+    │   ├── tag-onboarding.ts       # MAP 全自动接入持久化 runner（资源、索引、StackSet、S3 配置与校验）
+    │   # —— 批量 Root 改密（详见 web/ROOT_EMAIL.md）——
+    │   ├── root-email-jobs.ts      # 队列、单账户安全重试、永久加密凭证、重复 CSV 下载、重启恢复
+    │   ├── root-email-core.ts      # ★原子任务存储、提交边界/重试血缘、自动改密状态机、旧任务兼容
+    │   ├── root-email-browser.ts   # 独立 Chrome：兼容原页面与 AWS 独立安全验证 iframe 的两阶段 OCR + reset 填充
+    │   ├── root-email-execution-slot.ts # 单活动执行槽；人工会话挂起不阻塞队列，回复后优先恢复
+    │   ├── root-email-manual.ts    # 九张 OCR 用尽后原会话手工接管；一次性图片 ID、权限复验、10 分钟超时
+    │   ├── root-email-reconcile.ts # 提交超时后保留会话，短时查邮箱并验证表单后继续验证码
+    │   ├── root-password-secrets.ts # 24 位 CSPRNG、AES-256-GCM 任务绑定密文、CSV 生成
+    │   ├── root-reset-permissions.ts # root_reset_access 守卫与 none/view/operate 解析
+    │   ├── root-mail-poll.ts       # 按任务游标查询、精确匹配恢复邮件
+    │   ├── root-mail-links.ts      # AWS RootUser 链接解析；任务不存正文或重置 URL
+    │   ├── mail-api.ts             # 自建邮箱 HMAC 只读客户端，共用节流队列
+    │   ├── mail-api-config.ts      # 邮箱 API 端点与密钥配置
+    │   # —— POC Cash ——
+    │   ├── poc-cash.ts             # Partner Central 商机：创建 / 关联 Solution / 提交 / 阶段检查
+    │   ├── poc-cash-funding.ts     # POC 资金申请、进展查询、CSV 台账
+    │   ├── pricing-calculator.ts   # 8 服务定价计算器链接与金额推导（带零头，MRR 做种子）
     │   └── routes/
     │       ├── aws.ts              # ★awsRouter：主业务端点（50+），含权限守卫
     │       ├── regions.ts          # regionsRouter：区域 opt-in 状态/扫描/开通
-    │       └── bedrock.ts          # bedrockRouter：Bedrock 工具端点（挂 /api/bedrock；tags 强校验无默认值）
+    │       ├── bedrock.ts          # bedrockRouter：挂 /api/bedrock；tags 强校验无默认值
+    │       └── poc-cash.ts         # pocCashRouter：挂 /api/poc-cash；全部 requireStrictAdmin
     ├── client/
     │   ├── vite.config.ts          # dev 端口 5174；manualChunks 三包分割（vendor/charts/业务）
     │   └── src/
     │       ├── App.tsx             # 认证门禁：Login →（未绑 MFA）SetupMFA → MainLayout
     │       ├── api.ts              # ★统一 HTTP 客户端，token 存 localStorage
     │       ├── version.ts          # ★APP_VERSION，单一版本源，每次部署递增
-    │       ├── components/         # MainLayout / RootCredentialsPanel / DangerConfirm / EmptyState / ErrorBoundary
-    │       ├── pages/              # 每个业务页面一个文件
+    │       ├── components/         # MainLayout（导航+URL 同步+keep-alive）/ RootCredentialsPanel / RootEmailPanel
+    │       │                       # / RootManualCaptchaModal / DangerConfirm / EmptyState / ErrorBoundary
+    │       ├── pages/              # 每个业务页面一个文件（16 个，见「功能模块」表）
     │       └── utils/              # cache(内存TTL) / color / console-launch / export
+    │                               # / account-import{,.worker,-config}（浏览器本地 xlsx 解析，不上传）
+    │                               # / root-account-selection / root-email-status / root-reset-link
+    ├── tests/                      # 14 个回归测试（bedrock 交付名匹配、账户级 TPD、MAP 策略、poc-cash、root-email 系列）
     ├── scripts/
-    │   ├── setup-org-stacksets.ts  # ★加新 payer 时下发两个角色 StackSet（幂等，支持 --dry-run）
-    │   └── print-bills.mts
+    │   ├── setup-org-stacksets.ts  # ★加新 payer 时下发两个角色 StackSet（幂等，支持 --dry-run / --refresh-template）
+    │   ├── setup-payer-tagger.ts   # payer 账户内单独创建 auto-tagger-role（StackSet 覆盖不到）
+    │   ├── fix-payer-tagger-policy.ts / audit-org-roles.mts / check-billing-iam-access.mts
+    │   └── print-bills.mts / ce-untagged-audit.ts / probe-*.ts / scan-p-quota.ts   # 一次性排查脚本
+    ├── ROOT_EMAIL.md               # ★批量 Root 改密的完整运行与恢复语义
     ├── setup-nginx.sh              # Nginx + HTTPS 配置脚本
     └── Dockerfile / docker-compose.yml
 ```
@@ -227,16 +276,28 @@ Admin 临时凭证时长默认 1 小时。数据库当前角色为 `admin` 的�
 | Bedrock 工具（独立前缀 `/api/bedrock`） | `GET /profiles/:accountId?regions=`（**最多 12 个区域**）、`GET /models/:accountId?region=`、`GET /foundation-models/:accountId?region=`、`POST /profiles/create`(admin,**tags 必填强校验**)、`POST /profiles/delete`(admin)、`POST /profiles/tag`(admin,tags 必填)、`POST /profiles/untag`(admin)、`POST /invoke`(admin)、`POST /ftu`(admin)、`GET /data-retention/:accountId?regions=`（**最多 20 个区域**）、`POST /data-retention/enable`(strict admin)、`GET /iam-users/:accountId`(admin)、`POST /iam-users/create`(strict admin)、`POST /delivery`(admin，服务端校验 map-migrated tag 唯一且必存在)、`POST /delivery-v2`(admin，李浩版五列含 TPM/TPD) |
 | 批量提额 | `GET /bulk-quota/payers`、`GET /bulk-quota/accounts/:payerAccountId`、`POST /bulk-quota/submit`、`GET /bulk-quota/job/:jobId`（全部 `requireBulkQuotaAccess`） |
 | 根凭证 | `GET /root-credentials/:accountId`、`GET /temp-credentials/:accountId?durationHours=1`（rootAccess；仅 admin 可请求 2–12 小时）、`POST /root-credentials/:accountId/delete-mfa`(rootAccess)、`.../recover-password`(rootAccess)、`.../delete-access-key`(rootAccess)、`.../delete-key`(admin) |
+| 批量 Root 改密 | 批次：`GET/POST /root-email/batches`、`GET /root-email/batches/:id`、`POST .../:id/credentials-csv`、`POST .../:id/cancel`；单账户：`GET/POST /root-email/accounts/:accountId/jobs`、`POST /root-email/jobs/:id/cancel`、`.../retry`、`.../reset-link`、`.../manual-reset-link`、`.../manual-captcha`、`.../manual-captcha/answer`；其它：`GET /root-email/availability`、`GET /root-email/catalog`。全部经 `root_reset_access` 守卫（`root-reset-permissions.ts`），创建批次与单独重试另需 step-up TOTP（`step-up-mfa.ts`） |
 | 资源清理 | `GET /resources/:accountId/:region`（最近 7 天；Lambda 按最近修改；IAM/S3 为全局；失败服务通过 warnings 返回）、`POST /resources/:accountId/delete`（服务端重新读取时间并复验；EC2/EBS/Lambda 兼容 admin/partadmin，IAM 用户仅实时 strict admin 且级联清理依赖；S3 不可删除） |
 | 审计 | `GET /audit`、`GET /audit/export`（均 `requireAuditAccess`） |
 | 控制台 | `GET /console-url/:accountId` |
-| MAP 标签 | `GET /tag-compliance/status\|config\|executions\|report\|precheck\|notify-emails\|re-indexes/status`；`PUT /config`、`POST /scan`、`POST /notify-emails`、`DELETE /notify-emails`、`POST /re-indexes`、`POST /provision`（写操作均 admin）；全自动接入：`POST /tag-compliance/onboarding`、`GET /tag-compliance/onboarding?payer=...`、`GET /tag-compliance/onboarding/:jobId`、`POST /tag-compliance/onboarding/:jobId/retry` |
+| MAP 标签 | `GET /tag-compliance/status\|config\|executions\|report\|precheck\|notify-emails\|re-indexes/status`；`PUT /config`、`POST /scan`、`POST /notify-emails`、`DELETE /notify-emails`、`POST /re-indexes`、`POST /provision`（**写操作均 `requireStrictAdmin`**，partadmin 被拒）；`GET /tag-compliance/enabled-regions` 也挂 `requireStrictAdmin`；全自动接入：`POST /tag-compliance/onboarding`、`GET /tag-compliance/onboarding?payer=...`、`GET /tag-compliance/onboarding/:jobId`、`POST /tag-compliance/onboarding/:jobId/retry` |
 
 **Bedrock 路径特意不放在 `/quotas/` 下**，否则会被 `/quotas/:accountId/:serviceCode` 通配吃掉。
 
 ### `/api/regions`（regionsRouter）
 
 `GET /status`、`POST /scan`、`POST /scan/:accountId`、`POST /enable`、`POST /enable-batch`
+
+### `/api/poc-cash`（pocCashRouter）
+
+**整个 router 在挂载处 `pocCashRouter.use(requireStrictAdmin)`**，逐条端点无需再加守卫；该守卫实时查库，不信任 token 里的 role。
+
+| 分组 | 端点 |
+|------|------|
+| 元数据 | `GET /meta`（partner 列表/用例/行业/凭证状态）、`GET /solutions`、`GET /amounts`、`POST /preview-title` |
+| 商机 | `GET /opportunities`、`GET /opportunities/:id`、`POST /opportunities`（创建 → 关联 Solution → 提交）、`GET/POST /opportunities/:id/stage`（阶段检查与推进） |
+| POC 资金 | `GET /funding/meta`、`GET /funding/account/:id`（按账户带出项目桶）、`POST /funding/preview`、`POST /funding`、`POST /funding/:id/submit`、`GET /funding`（进展台账） |
+| 台账导出 | `POST /funding/export`（19 列 CSV）、`GET /funding/exports` |
 
 ### 其它
 
@@ -248,15 +309,19 @@ Admin 临时凭证时长默认 1 小时。数据库当前角色为 `admin` 的�
 
 **权限守卫**（`routes/aws.ts`）：
 
-| 守卫 | 实际放行范围 | 用途 |
-|------|--------------|------|
-| `requireAdmin` | **admin + partadmin**（只拦 viewer） | 提额、资源删除、MAP 标签写操作、删 access key |
-| `requireStrictAdmin` | 仅 admin | 账户权限检测 |
-| `requireOpsAccess` | admin 或 `allowed_pages` 显式包含 `ops` | 运维监控；实时读取数据库，旧用户默认拒绝 |
-| `requireRootAccess` | root_access 或 admin | 根用户敏感操作 |
-| `requireAuditAccess` | 审计页可见者 | 审计日志 |
-| `requireBillingAccess` | billing 页可见者 | 账单 PDF job；任务状态、取消和下载另校验创建者或 admin |
-| `requireBulkQuotaAccess` | bulk_quota_access 或 admin | 批量提额 |
+| 守卫 | 定义处 | 实际放行范围 | 用途 |
+|------|--------|--------------|------|
+| `requireAdmin` | `routes/aws.ts` | **admin + partadmin**（只拦 viewer） | 提额、EC2/EBS/Lambda 资源删除、删 access key、Bedrock 多数写操作 |
+| `requireStrictAdmin` | `routes/aws.ts` | 仅 admin（实时查库） | **MAP 标签全部写端点**、账户权限检测（`roles-status`/`roles-check`）、离场账户补录、敏感权限客户标记与 ExternalId 查看、IAM 用户删除 |
+| `requireStrictAdmin` | `routes/poc-cash.ts` | 仅 admin（实时查库） | 同名但独立定义，**整个 `/api/poc-cash` 在 router 层 `use()`** |
+| `requireOpsAccess` | `ops-monitor.ts` | admin 或 `allowed_pages` 显式包含 `ops` | 运维监控；实时读取数据库，旧用户默认拒绝 |
+| `requireRootAccess` | `routes/aws.ts` | root_access 或 admin | 根用户敏感操作 |
+| `requireAuditAccess` | `routes/aws.ts` | 审计页可见者 | 审计日志 |
+| `requireBillingAccess` | `routes/aws.ts` | billing 页可见者 | 账单 PDF job；任务状态、取消和下载另校验创建者或 admin |
+| `requireBulkQuotaAccess` | `routes/aws.ts` | bulk_quota_access 或 admin | 批量提额 |
+| `root_reset_access` 守卫 | `root-reset-permissions.ts` | `view` / `operate`（admin 恒有） | 批量 Root 改密；创建批次与单独重试另需 step-up TOTP |
+
+⚠️ **MAP 标签的写端点用的是 `requireStrictAdmin` 而非 `requireAdmin`** —— partadmin 进不去。这一条曾在文档里写反过，改动前以 `routes/aws.ts` 实际代码为准。`GET /tag-compliance/enabled-regions` 虽是读取端点，同样挂了 `requireStrictAdmin`。
 
 `requireAdmin` 的名字容易误解 —— 它放行 partadmin，这是预期行为。需要严格 admin 的场景用 `requireStrictAdmin`。
 
@@ -285,6 +350,8 @@ admin 恒有，其他角色必须显式授予，且**都不受 `allowed_pages` �
 - `root_access` → 账户页「根用户」敏感操作（Admin 临时凭证 / 删除 Root MFA / 恢复根密码 / 删除 Root Access Key）以及 Admin 控制台登录；`GET /root-credentials/:accountId` 的状态读取当前不经过该守卫
 - `bulk_quota_access` → 「批量提额」页；未授予时菜单完全不可见，后端 `requireBulkQuotaAccess` 也会拒绝
 - `root_reset_access` → 「批量设置 Root 密码」页，值为 `none` / `view` / `operate`；非 admin 只看本人批次，admin 查看/管理全部。创建批次仍要求 step-up TOTP；CSV 下载不再额外 MFA，Owner 可重复下载本人永久归档，Admin 可重复下载全部永久归档
+
+`poccash` 页**不是开关**：它既不在 `ALL_PAGE_KEYS` 里（勾不到），也没有对应的独立权限字段，`isPageAllowed()` 直接判 `role === 'admin'`，后端 router 层 `requireStrictAdmin` 实时查库。这是全站最严的一档，理由是它创建的是提交给 AWS 的真实商机。
 
 `requireRootAccess` 和 Admin 控制台门禁都会用 `db.getUser(username)` 实时读取数据库，严格要求字段为 `true`（admin 恒有），不信任旧 JWT 中缓存的权限。
 
@@ -340,10 +407,15 @@ admin 恒有，其他角色必须显式授予，且**都不受 `allowed_pages` �
 - `audit_log` — 审计日志，**上限 5000 条滚动**
 - `region_data` — 各账户区域 opt-in 状态
 - `accounts_cache` + `accounts_cache_time` — 账户列表缓存（调度器每 30min 刷新）
+- `account_roles` — 各账户 `support-quota` / `admin-console` 可用性与自愈状态（`ok` / `partial` / `pending` / `unreachable` + 尝试次数）
 - `tag_onboarding_jobs` — MAP 全自动接入任务、阶段产物、重试与恢复状态
 - `billing_export_jobs` — 账单导出队列、进度、结果、取消/中断状态与下载元数据
 - `restricted_accounts` — 敏感权限客户账户（加密的 `external_id_enc`、state、last_error）。**同时是 `setup-org-stacksets.ts` 的 StackSet 排除名单来源**
 - `departed_accounts` — 已移出组织的账户记录（含 `rejoined_at` 轨迹）
+
+这些键**按需创建**：本地开发库通常只有 `users` / `quota_requests` / `audit_log` / `accounts_cache` / `region_data` 几个，缺少 `account_roles`、`billing_export_jobs`、`restricted_accounts` 等属正常现象。**判断 schema 一律以 `db.ts` 代码为准，不要拿本地 `db.json` 当权威** —— 本地库的账户数也远少于生产。
+
+永久 Root 凭证库 `data/root-email-jobs.json` 是**独立文件，不是 `db.json` 的键**，备份与恢复也分开做。
 
 旧数据库可能仍有 `dashboard_cache` 字段；从 0.21.2 起应用不再读取或写入该字段，保留旧值仅为避免直接修改生产运行时数据。
 
@@ -882,7 +954,7 @@ Nginx 反代 + Let's Encrypt（`markxu.co`，自动续期），80 强制跳 443�
 | 需求 | 改动点 |
 |------|--------|
 | 新增业务接口 | `routes/aws.ts` 加路由（按需加守卫）→ `aws-service.ts` 加函数复用 `assumeToAccount()` → `api.ts` 加方法 → 页面调用 |
-| 新增页面 | `pages/Xxx.tsx` → `MainLayout.tsx` 的 `navItems`/`PAGE_META`/`pageComponent()` switch 各加一项（同一 key）→ `auth.ts` 的 `ALL_PAGE_KEYS` 加同名 key；要移动端入口再加 `mobileNavItems`。key 会自动成为 URL 路径（`VALID_PAGE_KEYS` 由 PAGE_META + 独立权限页推导）。高频页可加进 `KEEP_ALIVE_PAGES` 保活，但有轮询定时器的页面别加（隐藏时白轮询） |
+| 新增页面 | `pages/Xxx.tsx` → `MainLayout.tsx` 的 `navItems`/`PAGE_META`/`pageComponent()` switch 各加一项（同一 key）→ `auth.ts` 的 `ALL_PAGE_KEYS` 加同名 key。<br>**若是独立权限页**（不想让「页面权限」勾选到）：**不要**加进 `PAGE_META` / `ALL_PAGE_KEYS`，改为导出一个 `XXX_PAGE_KEY` 常量，再补 `navItems`、`VALID_PAGE_KEYS`、`isPageAllowed()` 分支、`pageComponent()` 分支，以及 `MainLayout` 里按 URL 直达时的 `independentAccess` 判断——**漏掉最后一条会让有权限的用户直链进不去**。<br>移动端底栏 4 个高频位在 `MOBILE_PRIMARY_KEYS` + `MOBILE_SHORT_LABEL`；不放底栏的页面会自动出现在「更多」抽屉，无需额外登记。key 会自动成为 URL 路径（`VALID_PAGE_KEYS` 由 PAGE_META + 独立权限页推导）。高频页可加进 `KEEP_ALIVE_PAGES` 保活，但有轮询定时器的页面别加（隐藏时白轮询） |
 | 加 payer | 按下方「新增 payer 安全 Runbook」执行；角色、双 StackSet、生产配置和验收缺一不可，不能只改 `config.json` |
 | 新增公司模板 | `doc-templates.ts` 的 `COMPANY_PROFILES` 加资料 + `ACCOUNT_TO_COMPANY`/`PAYER_TO_COMPANY` 加映射 → 架构图放 `doc-templates/architectures/` |
 | 调同步频率 | `scheduler.ts` |
