@@ -3,7 +3,7 @@
 企业级 AWS 多账户（多 Organizations）管理平台。带强制 MFA 登录、页面级权限与全量操作审计。
 
 **线上**：https://markxu.co（EC2 Singapore，PM2 进程 `aws-toolbox`）
-**当前版本**：`0.37.3`（见 `web/client/src/version.ts`，左下角展示）
+**当前版本**：`0.37.4`（见 `web/client/src/version.ts`，左下角展示）
 
 **生产接入规模**（快照 2026-09-06，取自线上 db.json）
 
@@ -81,7 +81,7 @@
 | `bulkquota` | `BulkQuota.tsx` | `/api/aws/bulk-quota/*` | 批量提额（按 payer 组织 × 多区域）。**不在 `ALL_PAGE_KEYS` 里**，可见性只由独立权限 `bulk_quota_access` 决定 |
 | `rootreset` | `BulkRootReset.tsx` | `/api/aws/root-email/*` | 批量设置 Root 新密码。**不在 `ALL_PAGE_KEYS` 里**，由独立权限 `root_reset_access`（`none`/`view`/`operate`）决定可见与可操作。详见「批量自动设置 Root 新密码」与 [`web/ROOT_EMAIL.md`](web/ROOT_EMAIL.md) |
 | `bedrock` | `Bedrock.tsx` | `/api/bedrock/*` | Bedrock 工具（从桌面版 Bedrock Profile Manager 迁移）：Inference Profile 管理/批量创建/模型测试/模型列表/FTU 开通/Fable 5 数据共享/IAM 用户/交付表格。**敏感页面**：全部走 Admin 凭证，non-admin 需显式授权；创建/打 Tag 的 Tag 必须每次手动输入（前后端均无默认值） |
-| `poccash` | `PocCash.tsx` | `/api/poc-cash/*` | POC Cash：创建 AWS Partner Central 商机、阶段检查、POC 资金申请与进展台账。**admin 专属**，连「页面权限」勾选都无法授予（创建的是提交给 AWS 的真实商机）。四 Tab：创建商机 / 阶段检查 / POC 申请 / POC 进展 |
+| `poccash` | `PocCash.tsx` | `/api/poc-cash/*` | POC Cash：创建 AWS Partner Central 商机、阶段检查、POC 资金申请与进展台账。**admin 专属**，连「页面权限」勾选都无法授予（创建的是提交给 AWS 的真实商机）。四 Tab：创建商机 / 商机阶段检查 / POC 申请 / POC 进展 |
 | `regions` | `Regions.tsx` | `/api/regions/*` | opt-in 区域开通状态扫描与单个/批量开通 |
 | `billing` | `Billing.tsx` | `/api/aws/billing/*` | AWS 官方账单 PDF 批量导出、历史任务、取消与 ZIP 下载 |
 | `cleanup` | `Cleanup.tsx` | `/api/aws/resources/*` | 扫描最近 7 天的 EC2/EBS/S3/Lambda/IAM 用户，展示 IAM 非敏感详情并手动勾选删除；S3 只读 |
@@ -617,7 +617,7 @@ POC 申请额 > 9,900 USD（实测 114 条记录的经验上限）。
 
 ### POC 资金申请（0.37.0）
 
-四个 Tab：创建商机 / 阶段检查 / POC 申请 / **POC 进展**。
+四个 Tab：创建商机 / 商机阶段检查 / POC 申请 / **POC 进展**。
 申请与进展分开（0.37.2）—— 表单本身就长，再挂一张宽表会挤成一团。
 创建成功后自动跳到进展页。
 
@@ -667,8 +667,8 @@ CSV 19 列严格对齐现有台账，`PO ID` 就是商机 ID。服务器留存�
 （`data/poc-cash/`）+ `poc-cash-latest.csv`，同时浏览器下载一份 ——
 留存是为了回溯 PO 号、到账金额是何时被 AWS 回填的。
 
-**阶段检查（0.36.0）**：页面分「创建商机 / 阶段检查」两个 Tab。提交后商机被
-AWS 锁定，用阶段检查确认审到哪一步了，并在允许时推进阶段。
+**商机阶段检查（0.36.0，Tab 名 0.37.4 起加「商机」前缀）**：提交后商机被
+AWS 锁定，用这个 Tab 确认审到哪一步了，并在允许时推进阶段。
 
 可编辑性严格跟随 `ReviewStatus`，三段互斥：
 

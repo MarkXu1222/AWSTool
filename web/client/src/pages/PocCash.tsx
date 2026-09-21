@@ -1056,7 +1056,7 @@ const PocCashPage: React.FC = () => {
         if (k === 'progress' && !pocRows.length && !pocLoading) loadPocRows();
       }} items={[
         { key: 'create', label: '创建商机', children: renderCreateTab() },
-        { key: 'stage', label: '阶段检查', children: renderStageTab() },
+        { key: 'stage', label: '商机阶段检查', children: renderStageTab() },
         { key: 'poc', label: 'POC 申请', children: renderPocTab() },
         { key: 'progress', label: 'POC 进展', children: renderProgressTab() },
       ]} />
