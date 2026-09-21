@@ -193,6 +193,39 @@ export function deliveryOrderFor(variant: DeliveryVariant): string[] {
 }
 
 /**
+ * Profile 名归一化，用于精确匹配失败后的**回退**匹配。
+ *
+ * 起因：账户 703844615335（HDL Account 7）里 6 个核心模型全都在，
+ * 但 Profile 名是控制台默认风格「Global Anthropic Claude Opus 4.6」，
+ * 而清单用的是「sef-global-claude-opus-4-6-v1」，精确查表一条都命不中，
+ * 导致交付表导出报「找不到任何交付清单内的 Profile」。
+ *
+ * 归一化规则（只做无歧义的形态折叠，不做语义猜测）：
+ *   1. 转小写、去首尾空格
+ *   2. 丢弃 `sef-` 前缀（内部命名约定，非模型信息）
+ *   3. 丢弃 `anthropic` / `claude` 词（各账户写法不一，不携带区分度）
+ *   4. 版本号里的 `.` 视同 `-`（4.6 ≡ 4-6）
+ *   5. 丢弃结尾的 `-v1` 版本后缀（清单有、控制台没有）
+ *   6. 所有非字母数字压成单个 `-`
+ *
+ * ⚠️ scope 词（us / global）**必须保留**：它是变体 A 里区分
+ * `sef-us-claude-opus-4-8` 与 `sef-global-claude-opus-4-8` 的唯一依据，
+ * 折叠掉会让两者互相顶替，交付表出错且难以察觉。
+ */
+export function normalizeProfileName(s: string): string {
+  return String(s || '')
+    .toLowerCase()
+    .trim()
+    .replace(/^sef-/, '')
+    .replace(/\banthropic\b/g, ' ')
+    .replace(/\bclaude\b/g, ' ')
+    .replace(/(\d)\.(\d)/g, '$1-$2')
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/-v\d+$/, '')
+    .replace(/^-+|-+$/g, '');
+}
+
+/**
  * 按变体筛选 + 排序。规范要求交付表只含核心 6 模型，且顺序固定；
  * 账户里的老模型（3-haiku / opus-4-1 / opus-4-5 / sonnet-4 / sonnet-4-5 /
  * haiku-4-5 / fable-5 / fable-5-1）一律不出现在交付表中。
@@ -207,27 +240,42 @@ export function filterAndSortForDelivery<T extends { name: string; region: strin
   const order = deliveryOrderFor(variant);
   const rank = new Map(order.map((n, i) => [n, i]));
   const norm = (s: string) => String(s || '').trim();
+  // 清单名的归一化形态 → 清单原名。用于精确匹配失败后的回退。
+  const normOrder = new Map(order.map(n => [normalizeProfileName(n), n]));
 
   const kept: T[] = [];
+  const matchedNames = new Set<string>();
   const missingByRegion = new Map<string, string[]>();
   // 按区域分组后，各区内按清单顺序取；同名重复保留首个（与源表/历史一致）
   const byRegion = new Map<string, Map<string, T>>();
+  const byRegionNorm = new Map<string, Map<string, T>>();
   for (const r of rows) {
     const reg = norm(r.region);
-    if (!byRegion.has(reg)) byRegion.set(reg, new Map());
+    if (!byRegion.has(reg)) { byRegion.set(reg, new Map()); byRegionNorm.set(reg, new Map()); }
     const m = byRegion.get(reg)!;
     if (!m.has(norm(r.name))) m.set(norm(r.name), r);
+    // 归一化索引同样「保留首个」，避免同区内两个变体名互相覆盖
+    const mn = byRegionNorm.get(reg)!;
+    const nk = normalizeProfileName(r.name);
+    if (nk && !mn.has(nk)) mn.set(nk, r);
   }
   for (const [reg, m] of byRegion) {
+    const mn = byRegionNorm.get(reg)!;
     const missing: string[] = [];
     for (const name of order) {
-      const hit = m.get(name);
-      if (hit) kept.push(hit);
+      // 精确优先：历史交付件与规范都按原名对齐，不能被回退逻辑改变既有行为
+      const hit = m.get(name) ?? mn.get(normalizeProfileName(name));
+      if (hit) { kept.push(hit); matchedNames.add(norm(hit.name)); }
       else missing.push(name);
     }
     if (missing.length) missingByRegion.set(reg, missing);
   }
-  const dropped = [...new Set(rows.map(r => norm(r.name)).filter(n => !rank.has(n)))].sort();
+  // dropped 表示「账户里有、但不属于交付清单」。经回退命中的行已进交付表，
+  // 不能再算作 dropped，否则审计日志里的剔除数会虚高。
+  const dropped = [...new Set(
+    rows.map(r => norm(r.name))
+      .filter(n => !rank.has(n) && !matchedNames.has(n) && !normOrder.has(normalizeProfileName(n))),
+  )].sort();
   return { kept, dropped, missingByRegion };
 }
 
