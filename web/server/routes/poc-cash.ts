@@ -6,8 +6,51 @@
  * requireStrictAdmin 实时查库，避免 token 里的旧角色绕过。
  */
 import { Router, Request, Response, NextFunction } from 'express';
+import fs from 'fs';
+import path from 'path';
 import { db } from '../db';
 import * as poc from '../poc-cash';
+import * as fund from '../poc-cash-funding';
+
+// CSV 快照目录。与账单导出同级，纳入同一套磁盘监控。
+const POC_CSV_DIR = path.join(__dirname, '../../../data/poc-cash');
+
+function savePocCsv(csv: string) {
+  fs.mkdirSync(POC_CSV_DIR, { recursive: true });
+  const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+  const file = `poc-cash-${ts}.csv`;
+  fs.writeFileSync(path.join(POC_CSV_DIR, file), csv, 'utf-8');
+  // 同时维护一份 latest，方便直接覆盖到本地台账
+  fs.writeFileSync(path.join(POC_CSV_DIR, 'poc-cash-latest.csv'), csv, 'utf-8');
+  return { file, savedAt: new Date().toISOString() };
+}
+
+function listPocCsvFiles() {
+  try {
+    return fs.readdirSync(POC_CSV_DIR)
+      .filter(f => f.endsWith('.csv') && f !== 'poc-cash-latest.csv')
+      .sort().reverse().slice(0, 50)
+      .map(f => {
+        const st = fs.statSync(path.join(POC_CSV_DIR, f));
+        return { file: f, size: st.size, savedAt: st.mtime.toISOString() };
+      });
+  } catch {
+    return [];
+  }
+}
+
+/** 生成定价计算器链接。calculator.aws 的后端是未公开端点，
+ *  失败不应让整个 POC 创建挂掉 —— 抛出明确错误由调用方决定。 */
+async function makeCalculator(name: string, region: string, mrrUsd: number) {
+  const { buildPocEstimate, saveEstimate, shareUrl, verifyEstimate } =
+    await import('../pricing-calculator');
+  const est = await buildPocEstimate(name, region, mrrUsd);
+  const key = await saveEstimate(est);
+  const v = await verifyEstimate(key, est.totalCost.monthly,
+    Object.keys(est.services).length);
+  if (!v.ok) throw new Error(`计算器读回校验失败：${v.problems.join('；')}`);
+  return shareUrl(key);
+}
 
 export const pocCashRouter = Router();
 
@@ -74,6 +117,167 @@ pocCashRouter.get('/opportunities/:id', async (req: Request, res: Response) => {
 });
 
 const OPP_ID_RE = /^O\d+$/;
+const APP_ID_RE = /^benappl-[a-z0-9]+$/i;
+const ACCOUNT_RE = /^\d{12}$/;
+
+// ===== POC 资金申请 =====
+
+/** 表单选项：竞争对手、默认值、前置说明 */
+pocCashRouter.get('/funding/meta', (_req: Request, res: Response) => {
+  res.json({
+    considering: fund.CONSIDERING_OPTIONS,
+    minLeadDays: fund.MIN_LEAD_DAYS,
+    defaults: { people: 2, days: 3, calcRegion: 'ap-southeast-5' },
+  });
+});
+
+/** 账户 → 项目桶（payer）。用平台 accounts_cache，毫秒级返回；
+ *  遍历 45 个 payer 的 Organizations 要 60~90 秒，不能放表单里。 */
+pocCashRouter.get('/funding/account/:id', (req: Request, res: Response) => {
+  const id = String(req.params.id || '');
+  if (!ACCOUNT_RE.test(id)) return res.status(400).json({ error: '账户 ID 应为 12 位数字' });
+  const info = fund.accountInfo(id);
+  if (!info) {
+    return res.status(404).json({ error: '账户不在平台缓存中，请先在账户管理页刷新' });
+  }
+  res.json(info);
+});
+
+/** 金额预览 + 风险项（提交前可先看） */
+pocCashRouter.post('/funding/preview', async (req: Request, res: Response) => {
+  const b = req.body || {};
+  const oppId = String(b.opportunityId || '');
+  if (!OPP_ID_RE.test(oppId)) return res.status(400).json({ error: '无效的商机 ID' });
+  try {
+    const pre = await fund.precheckOpportunity(oppId);
+    const people = Number(b.people) || 2;
+    const days = Number(b.days) || 3;
+    const leadDays = Number(b.leadDays) || fund.MIN_LEAD_DAYS;
+    const amounts = fund.computeAmounts(pre.mrrUsd, people, days);
+    res.json({
+      precheck: pre,
+      amounts,
+      warnings: fund.warningsFor(amounts, leadDays),
+      bucket: b.awsAccountId ? fund.bucketOfAccount(String(b.awsAccountId)) : null,
+    });
+  } catch (e: any) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
+/** 创建 POC 申请（可选提交）。商机不合格会直接拒绝 —— 没有商机不能提 POC。 */
+pocCashRouter.post('/funding', async (req: Request, res: Response) => {
+  const b = req.body || {};
+  try {
+    if (!OPP_ID_RE.test(String(b.opportunityId || ''))) {
+      throw new Error('必须先选择商机 —— 没有商机不能提 POC');
+    }
+    if (!ACCOUNT_RE.test(String(b.awsAccountId || ''))) {
+      throw new Error('AWS 账户 ID 应为 12 位数字');
+    }
+    const desc = String(b.description || '').trim();
+    if (desc.length < 50) throw new Error('业务描述至少 50 字');
+
+    const result = await fund.createPocApplication({
+      opportunityId: String(b.opportunityId),
+      awsAccountId: String(b.awsAccountId),
+      description: desc,
+      activityName: b.activityName ? String(b.activityName) : undefined,
+      name: b.name ? String(b.name) : undefined,
+      considering: b.considering ? String(b.considering) : undefined,
+      people: Number(b.people) || undefined,
+      days: Number(b.days) || undefined,
+      leadDays: Number(b.leadDays) || undefined,
+      budgetYear: Number(b.budgetYear) || undefined,
+      calculatorUrl: b.calculatorUrl ? String(b.calculatorUrl) : undefined,
+      calcRegion: b.calcRegion ? String(b.calcRegion) : undefined,
+      submit: b.submit !== false,
+      force: !!b.force,
+    }, makeCalculator);
+
+    const user = (req as any).user;
+    db.addAuditLog(user?.userId, 'POC_FUNDING_CREATE',
+      `${result.applicationId} | ${result.name} | 商机 ${result.opportunityId}`
+      + ` | ${result.amounts.pocUsd} USD | ${result.submitted ? '已提交' : '未提交'}`
+      + `${result.warnings.length ? ` | 警告 ${result.warnings.length} 条` : ''}`,
+      user?.username, req.ip);
+    (res.locals as any).audited = true;
+    res.json(result);
+  } catch (e: any) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
+/** 提交已创建的申请（不新建，避免重复单据） */
+pocCashRouter.post('/funding/:id/submit', async (req: Request, res: Response) => {
+  const id = String(req.params.id || '');
+  if (!APP_ID_RE.test(id)) return res.status(400).json({ error: '无效的申请 ID' });
+  try {
+    const r = await fund.submitExisting(id);
+    const user = (req as any).user;
+    db.addAuditLog(user?.userId, 'POC_FUNDING_SUBMIT',
+      `${id} | ${r.status} / ${r.stage}`, user?.username, req.ip);
+    (res.locals as any).audited = true;
+    res.json(r);
+  } catch (e: any) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
+/** POC 进度列表 */
+pocCashRouter.get('/funding', async (req: Request, res: Response) => {
+  try {
+    res.json({
+      applications: await fund.listPocApplications({
+        includeMigrated: req.query.includeMigrated === '1',
+      }),
+    });
+  } catch (e: any) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
+/**
+ * CSV 台账：服务器留存一份带时间戳的快照，同时回传供下载。
+ *
+ * 留存而非纯下载，是为了保留变更历史 —— PO 号、到账金额是 AWS 事后回填的，
+ * 有历史快照才能回溯「什么时候批的、什么时候到账的」。
+ */
+pocCashRouter.post('/funding/export', async (req: Request, res: Response) => {
+  try {
+    const rows = await fund.listPocApplications();
+    // 商机标题/MRR/阶段在 Benefits API 里没有，逐个补齐
+    const oppIds = [...new Set(rows.map(r => r.opportunityId).filter(Boolean))];
+    const opportunities: Record<string, any> = {};
+    await Promise.all(oppIds.map(async (id) => {
+      try {
+        const t = await poc.getStageStatus(id as string);
+        opportunities[id as string] = {
+          title: t.title, mrrUsd: t.mrrUsd, stage: t.stage,
+        };
+      } catch { /* 单条失败不影响整表 */ }
+    }));
+
+    const user = (req as any).user;
+    const csv = fund.buildCsv(rows, {
+      opportunities,
+      owner: String(req.body?.owner || user?.username || ''),
+    });
+
+    const saved = savePocCsv(csv);
+    db.addAuditLog(user?.userId, 'POC_FUNDING_EXPORT',
+      `导出 ${rows.length} 条 | ${saved.file}`, user?.username, req.ip);
+    (res.locals as any).audited = true;
+    res.json({ rows: rows.length, file: saved.file, savedAt: saved.savedAt, csv });
+  } catch (e: any) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
+/** 历史快照列表 */
+pocCashRouter.get('/funding/exports', (_req: Request, res: Response) => {
+  res.json({ files: listPocCsvFiles() });
+});
 
 /** 查商机阶段与可操作性（提交后用它确认 AWS 审到哪一步了）。 */
 pocCashRouter.get('/opportunities/:id/stage', async (req: Request, res: Response) => {

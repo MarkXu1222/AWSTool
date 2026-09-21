@@ -198,6 +198,27 @@ async function assumeCredentials() {
   return creds;
 }
 
+export const CATALOG_NAME = CATALOG;
+
+/** 供 poc-cash-funding.ts 复用：同一套 role 凭证，避免各自 assume。 */
+export async function sellingClient(): Promise<PartnerCentralSellingClient> {
+  return client();
+}
+
+export async function benefitsClient() {
+  if (!isConfigured()) {
+    throw new Error(
+      'Partner Central 未配置：请在 config.json 增加 partnerCentral '
+      + '{ roleArn, externalId }');
+  }
+  const { PartnerCentralBenefitsClient } =
+    await import('@aws-sdk/client-partnercentral-benefits');
+  return new PartnerCentralBenefitsClient({
+    region: REGION,
+    credentials: await assumeCredentials(),
+  });
+}
+
 async function client(): Promise<PartnerCentralSellingClient> {
   if (!isConfigured()) {
     throw new Error(
