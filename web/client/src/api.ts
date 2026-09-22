@@ -354,6 +354,19 @@ async function bedrockDeliveryFetch(path: string, body: any): Promise<DeliveryRe
   };
 }
 
+/** 只拼 partnerKey 的查询串；空值返回空串（让服务端走默认主体） */
+function pk(partnerKey?: string): string {
+  return partnerKey ? `?partnerKey=${encodeURIComponent(partnerKey)}` : '';
+}
+
+/** 拼多个可选查询参数，自动跳过空值并处理 ?/& 分隔 */
+function qs(params: Record<string, string | undefined>): string {
+  const parts = Object.entries(params)
+    .filter(([, v]) => v !== undefined && v !== null && v !== '')
+    .map(([k, v]) => `${k}=${encodeURIComponent(String(v))}`);
+  return parts.length ? `?${parts.join('&')}` : '';
+}
+
 export const api = {
   // Auth
   login: async (username: string, password: string, totpCode?: string) => {
@@ -450,17 +463,23 @@ export const api = {
     bedrockDeliveryFetch('/bedrock/delivery-v2', body),
 
   // ===== POC Cash（admin-only，创建真实商机并提交 AWS 审核）=====
+  // 见下方 pk() / qs()：拼 partnerKey 查询串的小工具
   pocCashMeta: () => request('/poc-cash/meta'),
-  pocCashSolutions: () => request('/poc-cash/solutions'),
+  // 以下接口都要带 partnerKey：不同主体对应不同 APN 账户，
+  // 漏传会回落到默认主体（webby），查到的是另一个账户的数据。
+  pocCashSolutions: (partnerKey?: string) =>
+    request(`/poc-cash/solutions${pk(partnerKey)}`),
   // 参考已有商机：列表只有摘要，选中后再 Get 拿完整模板
-  pocCashOpportunities: (search?: string) =>
-    request(`/poc-cash/opportunities${search ? `?search=${encodeURIComponent(search)}` : ''}`),
-  pocCashTemplate: (id: string) => request(`/poc-cash/opportunities/${encodeURIComponent(id)}`),
+  pocCashOpportunities: (search?: string, partnerKey?: string) =>
+    request(`/poc-cash/opportunities${qs({ search, partnerKey })}`),
+  pocCashTemplate: (id: string, partnerKey?: string) =>
+    request(`/poc-cash/opportunities/${encodeURIComponent(id)}${pk(partnerKey)}`),
   // 阶段检查与推进（提交后确认 AWS 审到哪一步）
-  pocCashStage: (id: string) => request(`/poc-cash/opportunities/${encodeURIComponent(id)}/stage`),
-  pocCashAdvanceStage: (id: string, stage: string) =>
+  pocCashStage: (id: string, partnerKey?: string) =>
+    request(`/poc-cash/opportunities/${encodeURIComponent(id)}/stage${pk(partnerKey)}`),
+  pocCashAdvanceStage: (id: string, stage: string, partnerKey?: string) =>
     request(`/poc-cash/opportunities/${encodeURIComponent(id)}/stage`,
-      { method: 'POST', body: JSON.stringify({ stage }) }),
+      { method: 'POST', body: JSON.stringify({ stage, partnerKey }) }),
   // POC 资金申请
   pocFundingMeta: () => request('/poc-cash/funding/meta'),
   pocFundingAccount: (id: string) =>

@@ -61,10 +61,34 @@ test('未知 partner 抛错而不是静默回退', () => {
   assert.throws(() => getPartner(''), /未知的 Partner/);
 });
 
-test('目前只开放 Webby', () => {
-  assert.equal(PARTNERS.length, 1);
-  assert.equal(PARTNERS[0].key, 'webby');
-  assert.equal(PARTNERS[0].defaultSolutionId, 'S-0070517');
+test('已开放的主体及其 Solution 约定', () => {
+  const webby = getPartner('webby');
+  assert.equal(webby.defaultSolutionId, 'S-0070517');
+  assert.equal(webby.apnAccountId, '105673812363');
+
+  // Mergebytes 账户里 ListSolutions 实测返回 0 条，故意留空。
+  // 留空不是遗漏 —— createOpportunity 会据此跳过关联而不是传空串给 AWS。
+  const mb = getPartner('mergebytes');
+  assert.equal(mb.defaultSolutionId, '');
+  assert.equal(mb.apnAccountId, '072471709462');
+});
+
+test('各主体的 APN 账户与 configKey 必须互不相同', () => {
+  // 两个主体指向同一账户或同一配置键，会让商机静默建到错误账户
+  const accounts = PARTNERS.map(p => p.apnAccountId);
+  assert.equal(new Set(accounts).size, accounts.length, 'apnAccountId 重复');
+  const keys = PARTNERS.map(p => p.configKey || p.key);
+  assert.equal(new Set(keys).size, keys.length, 'configKey 重复');
+  // 每个主体都必须显式声明账户，空值会让排错时无从判断数据落到哪
+  for (const p of PARTNERS) {
+    assert.match(p.apnAccountId, /^\d{12}$/, `${p.key} 的 apnAccountId 非法`);
+  }
+});
+
+test('标题前缀随主体变化，不会串用', () => {
+  const t = buildTitle(getPartner('mergebytes'), 'FOO SDN. BHD.', 'Data Lake');
+  assert.equal(t, 'Mergebytes - FOO Data Lake #ADPL');
+  assert.equal(t.includes('Webby'), false);
 });
 
 test('创建日期统一成 ISO，不能用 String(Date)', () => {

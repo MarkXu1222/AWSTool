@@ -45,8 +45,14 @@ export interface PartnerProfile {
   titlePrefix: string;
   titleSuffix: string;
   owner: { email: string; firstName: string; lastName: string; title: string };
-  /** 默认关联的 Solution（迁移类咨询服务） */
+  /** 默认关联的 Solution。空串表示该主体在 Partner Central 里没有已发布的
+   *  Solution —— 此时商机照建，只是跳过关联并记一条 warning。
+   *  Mergebytes 实测 ListSolutions 返回 0 条。 */
   defaultSolutionId: string;
+  /** 该主体的 APN 账户（跨账户 role 所在账户），用于前端展示与排错 */
+  apnAccountId: string;
+  /** config.json -> partnerCentral 下的键名。缺省走顶层配置（兼容旧结构） */
+  configKey?: string;
 }
 
 export const PARTNERS: PartnerProfile[] = [
@@ -62,12 +68,33 @@ export const PARTNERS: PartnerProfile[] = [
       title: 'OpportunityOwner',
     },
     defaultSolutionId: 'S-0070517', // Migration services
+    apnAccountId: '105673812363',
+    configKey: 'webby',
+  },
+  {
+    key: 'mergebytes',
+    label: 'Mergebytes',
+    titlePrefix: 'Mergebytes - ',
+    titleSuffix: ' #ADPL',
+    owner: {
+      // 取自该账户既有商机 O28440608 的 OpportunityTeam
+      email: 'cloud@mergebytes.ai',
+      firstName: 'SY',
+      lastName: 'Siow',
+      title: 'OpportunityOwner',
+    },
+    defaultSolutionId: '',  // 实测账户内无已发布 Solution
+    apnAccountId: '072471709462',
+    configKey: 'mergebytes',
   },
 ];
 
 export function getPartner(key: string): PartnerProfile {
   const p = PARTNERS.find(x => x.key === key);
-  if (!p) throw new Error(`未知的 Partner: ${key}（目前仅支持 Webby）`);
+  if (!p) {
+    const known = PARTNERS.map(x => x.key).join(' / ');
+    throw new Error(`未知的 Partner: ${key}（可选：${known}）`);
+  }
   return p;
 }
 
@@ -162,9 +189,36 @@ try {
 }
 const pcConfig = rootConfig.partnerCentral || {};
 
-const PC_ROLE_ARN: string = pcConfig.roleArn || process.env.PARTNERCENTRAL_ROLE_ARN || '';
-const PC_EXTERNAL_ID: string = pcConfig.externalId
-  || process.env.PARTNERCENTRAL_EXTERNAL_ID || '';
+/**
+ * 解析某个 partner 的 role 配置。支持两种 config.json 结构：
+ *
+ *   扁平（旧，单主体）        嵌套（新，多主体）
+ *   partnerCentral: {        partnerCentral: {
+ *     roleArn, externalId      webby:      { roleArn, externalId },
+ *   }                          mergebytes: { roleArn, externalId },
+ *                            }
+ *
+ * 扁平结构只对 configKey='webby' 生效 —— 它就是旧配置描述的那个主体。
+ * 若给别的主体回退到扁平配置，会拿着 Webby 的 role 去建 Mergebytes 的
+ * 商机，数据落到错误账户且难以察觉。
+ */
+function roleConfigFor(p: PartnerProfile): { roleArn: string; externalId: string } {
+  const nested = p.configKey ? pcConfig[p.configKey] : null;
+  if (nested && nested.roleArn) {
+    return { roleArn: nested.roleArn, externalId: nested.externalId || '' };
+  }
+  if (p.key === 'webby' && pcConfig.roleArn) {
+    return { roleArn: pcConfig.roleArn, externalId: pcConfig.externalId || '' };
+  }
+  // 环境变量兜底同样只认 webby，理由同上
+  if (p.key === 'webby' && process.env.PARTNERCENTRAL_ROLE_ARN) {
+    return {
+      roleArn: process.env.PARTNERCENTRAL_ROLE_ARN,
+      externalId: process.env.PARTNERCENTRAL_EXTERNAL_ID || '',
+    };
+  }
+  return { roleArn: '', externalId: '' };
+}
 
 // 平台 tools 凭证（与 aws-service.ts 同源）用来 assume 上面的 role
 const BASE_CREDENTIALS = {
@@ -173,61 +227,89 @@ const BASE_CREDENTIALS = {
     || process.env.AWS_SECRET_ACCESS_KEY || '',
 };
 
-export function isConfigured(): boolean {
-  return !!(PC_ROLE_ARN && BASE_CREDENTIALS.accessKeyId && BASE_CREDENTIALS.secretAccessKey);
+/** 平台侧基础凭证是否就绪（与具体 partner 无关） */
+function hasBaseCredentials(): boolean {
+  return !!(BASE_CREDENTIALS.accessKeyId && BASE_CREDENTIALS.secretAccessKey);
 }
 
-// 临时凭证缓存：role 会话 1 小时，留 10 分钟余量避免边界过期
-let credsCache: { creds: any; expiry: number } | null = null;
+/** 某个 partner 是否可用。不传则只要有任一主体可用就算已配置。 */
+export function isConfigured(partnerKey?: string): boolean {
+  if (!hasBaseCredentials()) return false;
+  if (partnerKey) return !!roleConfigFor(getPartner(partnerKey)).roleArn;
+  return PARTNERS.some(p => !!roleConfigFor(p).roleArn);
+}
 
-async function assumeCredentials() {
-  if (credsCache && credsCache.expiry > Date.now()) return credsCache.creds;
+// 临时凭证缓存：role 会话 1 小时，留 10 分钟余量避免边界过期。
+// 必须按 partner 分键 —— 共用一个槽会让先后访问两个主体时拿到上一个
+// 主体的凭证，商机静默建到错误账户。
+const credsCache = new Map<string, { creds: any; expiry: number }>();
+
+async function assumeCredentials(partnerKey: string) {
+  const hit = credsCache.get(partnerKey);
+  if (hit && hit.expiry > Date.now()) return hit.creds;
+
+  const p = getPartner(partnerKey);
+  const { roleArn, externalId } = roleConfigFor(p);
+  if (!roleArn) {
+    throw new Error(
+      `Partner「${p.label}」未配置 role：请在 config.json 的 partnerCentral.`
+      + `${p.configKey || p.key} 下填 { roleArn, externalId }`);
+  }
   const sts = new STSClient({ region: REGION, credentials: BASE_CREDENTIALS });
   const resp = await sts.send(new AssumeRoleCommand({
-    RoleArn: PC_ROLE_ARN,
-    RoleSessionName: 'poc-cash',
+    RoleArn: roleArn,
+    // 会话名带上主体，CloudTrail 里能直接看出是谁发起的
+    RoleSessionName: `poc-cash-${partnerKey}`.slice(0, 64),
     DurationSeconds: 3600,
-    ...(PC_EXTERNAL_ID ? { ExternalId: PC_EXTERNAL_ID } : {}),
+    ...(externalId ? { ExternalId: externalId } : {}),
   }));
   const creds = {
     accessKeyId: resp.Credentials!.AccessKeyId!,
     secretAccessKey: resp.Credentials!.SecretAccessKey!,
     sessionToken: resp.Credentials!.SessionToken!,
   };
-  credsCache = { creds, expiry: Date.now() + 50 * 60 * 1000 };
+  credsCache.set(partnerKey, { creds, expiry: Date.now() + 50 * 60 * 1000 });
   return creds;
 }
 
 export const CATALOG_NAME = CATALOG;
 
+/** 默认主体：老调用点不传 partnerKey 时沿用 webby，保持行为不变 */
+export const DEFAULT_PARTNER_KEY = 'webby';
+
 /** 供 poc-cash-funding.ts 复用：同一套 role 凭证，避免各自 assume。 */
-export async function sellingClient(): Promise<PartnerCentralSellingClient> {
-  return client();
+export async function sellingClient(
+  partnerKey: string = DEFAULT_PARTNER_KEY,
+): Promise<PartnerCentralSellingClient> {
+  return client(partnerKey);
 }
 
-export async function benefitsClient() {
-  if (!isConfigured()) {
-    throw new Error(
-      'Partner Central 未配置：请在 config.json 增加 partnerCentral '
-      + '{ roleArn, externalId }');
-  }
+export async function benefitsClient(partnerKey: string = DEFAULT_PARTNER_KEY) {
+  assertBaseCredentials();
   const { PartnerCentralBenefitsClient } =
     await import('@aws-sdk/client-partnercentral-benefits');
   return new PartnerCentralBenefitsClient({
     region: REGION,
-    credentials: await assumeCredentials(),
+    credentials: await assumeCredentials(partnerKey),
   });
 }
 
-async function client(): Promise<PartnerCentralSellingClient> {
-  if (!isConfigured()) {
+function assertBaseCredentials() {
+  if (!hasBaseCredentials()) {
     throw new Error(
-      'Partner Central 未配置：请在 config.json 增加 partnerCentral '
-      + '{ roleArn, externalId }（role 建在 APN 账户，信任中心账户）');
+      'Partner Central 未配置：config.json 缺少平台凭证 credentials '
+      + '{ accessKeyId, secretAccessKey }');
   }
+}
+
+async function client(
+  partnerKey: string = DEFAULT_PARTNER_KEY,
+): Promise<PartnerCentralSellingClient> {
+  assertBaseCredentials();
   return new PartnerCentralSellingClient({
     region: REGION,
-    credentials: await assumeCredentials(),
+    // role 缺失的报错在 assumeCredentials 里抛，带主体名更好定位
+    credentials: await assumeCredentials(partnerKey),
   });
 }
 
@@ -248,8 +330,8 @@ export interface CreateResult {
 }
 
 /** 列出可关联的 Solutions（只返回 Active 的，Delete/Inactive 关联会失败） */
-export async function listSolutions() {
-  const c = await client();
+export async function listSolutions(partnerKey: string = DEFAULT_PARTNER_KEY) {
+  const c = await client(partnerKey);
   const out: any[] = [];
   let token: string | undefined;
   do {
@@ -294,9 +376,9 @@ export interface OpportunityBrief {
  * 不在这里对每条都 Get：账户里有 246 个商机，会打爆 API 且很慢。
  */
 export async function listOpportunityBriefs(
-  opts: { search?: string; limit?: number } = {},
+  opts: { search?: string; limit?: number; partnerKey?: string } = {},
 ): Promise<OpportunityBrief[]> {
-  const c = await client();
+  const c = await client(opts.partnerKey || DEFAULT_PARTNER_KEY);
   const limit = Math.min(Math.max(opts.limit || 60, 1), 300);
   const search = (opts.search || '').trim().toLowerCase();
 
@@ -352,8 +434,10 @@ export interface OpportunityTemplate {
 }
 
 /** 取单个商机的完整内容作为新建模板（含 Title / UseCase / 业务描述）。 */
-export async function getOpportunityTemplate(id: string): Promise<OpportunityTemplate> {
-  const c = await client();
+export async function getOpportunityTemplate(
+  id: string, partnerKey: string = DEFAULT_PARTNER_KEY,
+): Promise<OpportunityTemplate> {
+  const c = await client(partnerKey);
   const o: any = await c.send(new GetOpportunityCommand({
     Catalog: CATALOG, Identifier: id,
   }));
@@ -462,8 +546,10 @@ function evaluateStage(o: any): StageStatus {
 }
 
 /** 查单个商机的阶段与可操作性。 */
-export async function getStageStatus(id: string): Promise<StageStatus> {
-  const c = await client();
+export async function getStageStatus(
+  id: string, partnerKey: string = DEFAULT_PARTNER_KEY,
+): Promise<StageStatus> {
+  const c = await client(partnerKey);
   const o: any = await c.send(new GetOpportunityCommand({
     Catalog: CATALOG, Identifier: id,
   }));
@@ -477,11 +563,13 @@ export async function getStageStatus(id: string): Promise<StageStatus> {
  * 否则抛 ConflictException —— 所以这里先 Get 再 Update，不接受前端传来的时间戳。
  * ⚠️ ReviewStatus 只读，只能改 Stage。
  */
-export async function advanceStage(id: string, targetStage: string) {
+export async function advanceStage(
+  id: string, targetStage: string, partnerKey: string = DEFAULT_PARTNER_KEY,
+) {
   if (![...STAGES, CLOSED_LOST].includes(targetStage as any)) {
     throw new Error(`非法阶段：${targetStage}`);
   }
-  const c = await client();
+  const c = await client(partnerKey);
   const cur: any = await c.send(new GetOpportunityCommand({
     Catalog: CATALOG, Identifier: id,
   }));
@@ -503,7 +591,7 @@ export async function advanceStage(id: string, targetStage: string) {
     LastModifiedDate: cur.LastModifiedDate,  // 乐观锁
     LifeCycle: payloadLc,
   }));
-  return getStageStatus(id);
+  return getStageStatus(id, partnerKey);
 }
 
 /** 创建 → 关联 Solution → 提交。任一后续步骤失败都不回滚商机，
@@ -515,7 +603,7 @@ export async function createOpportunity(input: OpportunityInput): Promise<Create
     || buildTitle(partner, input.companyName, input.projectName);
   const solutionId = input.solutionId || partner.defaultSolutionId;
   const warnings: string[] = [];
-  const c = await client();
+  const c = await client(input.partnerKey);
 
   const created: any = await c.send(new CreateOpportunityCommand({
     Catalog: CATALOG,
@@ -567,16 +655,25 @@ export async function createOpportunity(input: OpportunityInput): Promise<Create
     solutionAssociated: false, submitted: false, amounts, warnings,
   };
 
-  try {
-    await c.send(new AssociateOpportunityCommand({
-      Catalog: CATALOG,
-      OpportunityIdentifier: opportunityId,
-      RelatedEntityType: 'Solutions',
-      RelatedEntityIdentifier: solutionId,
-    }));
-    result.solutionAssociated = true;
-  } catch (e: any) {
-    warnings.push(`关联 Solution ${solutionId} 失败：${e.message}`);
+  // Mergebytes 等主体在 Partner Central 里没有已发布的 Solution。
+  // 传空的 RelatedEntityIdentifier 会被 AWS 拒绝，所以直接跳过关联 ——
+  // 商机本身不依赖 Solution，只是少一层关联信息。
+  if (!solutionId) {
+    warnings.push(
+      `${partner.label} 没有可关联的 Solution，已跳过关联。`
+      + '若后续在 Partner Central 发布了 Solution，可在创建时手动指定。');
+  } else {
+    try {
+      await c.send(new AssociateOpportunityCommand({
+        Catalog: CATALOG,
+        OpportunityIdentifier: opportunityId,
+        RelatedEntityType: 'Solutions',
+        RelatedEntityIdentifier: solutionId,
+      }));
+      result.solutionAssociated = true;
+    } catch (e: any) {
+      warnings.push(`关联 Solution ${solutionId} 失败：${e.message}`);
+    }
   }
 
   if (input.submit) {

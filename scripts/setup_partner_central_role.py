@@ -24,29 +24,44 @@ import boto3
 from botocore.config import Config
 from botocore.exceptions import ClientError
 
-APN_PROFILE = "WebbyAPN"          # 105673812363
-APN_ACCOUNT = "105673812363"
+# 支持多个 APN 主体。新增主体时在这里加一行，不要复制整个脚本。
+PARTNERS = {
+    "webby": {
+        "profile": "WebbyAPN", "account": "105673812363",
+        "externalId": "webby-apn-poc-cash",
+    },
+    "mergebytes": {
+        "profile": "MergebytesAPN", "account": "072471709462",
+        "externalId": "mergebytes-apn-poc-cash",
+    },
+}
+
 CENTER_ACCOUNT = "509399618054"   # 平台 tools 凭证所在账户
 CENTER_PRINCIPAL = f"arn:aws:iam::{CENTER_ACCOUNT}:user/mark"
 
 ROLE_NAME = "partner-central-tool"
 POLICY_NAME = "PartnerCentralOpportunityAndPoc"
-# 跨账户信任带 ExternalId（防混淆代理人攻击）。
-# 它不是密钥，但属于安全参数，支持用环境变量覆盖以免写死在仓库里。
-# 改这个值后 config.json 的 partnerCentral.externalId 必须同步改。
-EXTERNAL_ID = os.environ.get("PARTNERCENTRAL_EXTERNAL_ID", "webby-apn-poc-cash")
+
+# 以下三个由 --partner 决定，main() 里赋值
+APN_PROFILE = ""
+APN_ACCOUNT = ""
+# 跨账户信任带 ExternalId（防混淆代理人攻击）。每个主体用不同的值，
+# 泄露一个不会波及另一个。环境变量可覆盖以免写死在仓库里。
+EXTERNAL_ID = ""
 
 _CFG = Config(connect_timeout=15, read_timeout=60, retries={"max_attempts": 3})
 
-TRUST_POLICY = {
-    "Version": "2012-10-17",
-    "Statement": [{
-        "Effect": "Allow",
-        "Principal": {"AWS": CENTER_PRINCIPAL},
-        "Action": "sts:AssumeRole",
-        "Condition": {"StringEquals": {"sts:ExternalId": EXTERNAL_ID}},
-    }],
-}
+def trust_policy():
+    """运行时构造：EXTERNAL_ID 由 --partner 决定，不能在模块加载时固化。"""
+    return {
+        "Version": "2012-10-17",
+        "Statement": [{
+            "Effect": "Allow",
+            "Principal": {"AWS": CENTER_PRINCIPAL},
+            "Action": "sts:AssumeRole",
+            "Condition": {"StringEquals": {"sts:ExternalId": EXTERNAL_ID}},
+        }],
+    }
 
 PERMISSION_POLICY = {
     "Version": "2012-10-17",
@@ -170,7 +185,7 @@ def setup(execute=False):
 
     if not execute:
         print("\n[dry-run] 信任策略：")
-        print(json.dumps(TRUST_POLICY, indent=1))
+        print(json.dumps(trust_policy(), indent=1))
         print("\n[dry-run] 权限策略：")
         print(json.dumps(PERMISSION_POLICY, indent=1))
         print("\n加 --execute 真正创建。")
@@ -180,7 +195,7 @@ def setup(execute=False):
     try:
         iam.create_role(
             RoleName=ROLE_NAME,
-            AssumeRolePolicyDocument=json.dumps(TRUST_POLICY),
+            AssumeRolePolicyDocument=json.dumps(trust_policy()),
             Description="Platform access for Partner Central opportunities and POC funding",
             MaxSessionDuration=3600,
         )
@@ -188,7 +203,7 @@ def setup(execute=False):
     except ClientError as e:
         if e.response["Error"]["Code"] == "EntityAlreadyExists":
             iam.update_assume_role_policy(
-                RoleName=ROLE_NAME, PolicyDocument=json.dumps(TRUST_POLICY))
+                RoleName=ROLE_NAME, PolicyDocument=json.dumps(trust_policy()))
             print(f"\n[1/2] role 已存在，已更新信任策略")
         else:
             print(f"\n[1/2] 创建失败：{e.response['Error']['Message']}")
@@ -252,12 +267,22 @@ def verify(center_profile="mark-center"):
 
 
 def main():
+    global APN_PROFILE, APN_ACCOUNT, EXTERNAL_ID
     p = argparse.ArgumentParser(description="配置 Partner Central 跨账户 role")
+    p.add_argument("--partner", default="webby", choices=sorted(PARTNERS),
+                   help="APN 主体（默认 webby）")
     p.add_argument("--execute", action="store_true", help="真正创建（默认 dry-run）")
     p.add_argument("--verify", action="store_true", help="从中心账户验证权限边界")
     p.add_argument("--center-profile", default="mark-center",
                    help="中心账户 profile（默认 mark-center）")
     a = p.parse_args()
+
+    cfg = PARTNERS[a.partner]
+    APN_PROFILE = cfg["profile"]
+    APN_ACCOUNT = cfg["account"]
+    EXTERNAL_ID = os.environ.get("PARTNERCENTRAL_EXTERNAL_ID", cfg["externalId"])
+    print(f"[partner={a.partner}] profile={APN_PROFILE} account={APN_ACCOUNT}\n")
+
     if a.verify:
         verify(a.center_profile)
     else:

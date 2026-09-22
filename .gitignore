@@ -8,6 +8,11 @@ config.json
 data/db.json
 data/root-email-jobs.json
 data/root-email-jobs.json.*.tmp
+# db.json 原子写的临时文件含**完整数据库内容**，与 db.json 同等敏感。
+# 此前只忽略了 root-email-jobs 的同类文件，db 的漏在外面（EC2 上实际残留过 3 个）。
+data/db.json.*.tmp
+# POC 资金台账快照：含客户名称与申请金额
+data/poc-cash/
 
 # 密钥与凭证备份：绝不入库
 config.json.bak*

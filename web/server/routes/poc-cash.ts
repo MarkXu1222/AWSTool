@@ -66,6 +66,20 @@ const requireStrictAdmin = (req: Request, res: Response, next: NextFunction) => 
 
 pocCashRouter.use(requireStrictAdmin);
 
+/**
+ * 从 query / body 取 partnerKey，缺省回落到默认主体。
+ * 非法值直接交给 getPartner 抛错，不静默当成默认主体 ——
+ * 否则前端传错 key 会把数据建到 Webby 账户里。
+ */
+function partnerKeyOf(req: Request): string {
+  const raw = String(
+    (req.query?.partnerKey ?? req.body?.partnerKey ?? '') || '',
+  ).trim();
+  if (!raw) return poc.DEFAULT_PARTNER_KEY;
+  poc.getPartner(raw);   // 校验，非法则抛
+  return raw;
+}
+
 /** 表单选项：partner 列表、用例、行业、凭证状态 */
 pocCashRouter.get('/meta', (_req: Request, res: Response) => {
   res.json({
@@ -74,6 +88,10 @@ pocCashRouter.get('/meta', (_req: Request, res: Response) => {
       key: p.key, label: p.label,
       titlePrefix: p.titlePrefix, titleSuffix: p.titleSuffix,
       defaultSolutionId: p.defaultSolutionId,
+      apnAccountId: p.apnAccountId,
+      // 逐个主体报告可用性：某个主体没配 role 时前端能直接标出来，
+      // 而不是等用户提交后才报错
+      configured: poc.isConfigured(p.key),
     })),
     useCases: poc.USE_CASES,
     industries: poc.INDUSTRIES,
@@ -83,9 +101,9 @@ pocCashRouter.get('/meta', (_req: Request, res: Response) => {
 });
 
 /** 可关联的 Solutions（仅 Active） */
-pocCashRouter.get('/solutions', async (_req: Request, res: Response) => {
+pocCashRouter.get('/solutions', async (req: Request, res: Response) => {
   try {
-    res.json({ solutions: await poc.listSolutions() });
+    res.json({ solutions: await poc.listSolutions(partnerKeyOf(req)) });
   } catch (e: any) {
     res.status(400).json({ error: e.message });
   }
@@ -96,7 +114,11 @@ pocCashRouter.get('/opportunities', async (req: Request, res: Response) => {
   try {
     const search = typeof req.query.search === 'string' ? req.query.search : '';
     const limit = Number(req.query.limit) || 60;
-    res.json({ opportunities: await poc.listOpportunityBriefs({ search, limit }) });
+    res.json({
+      opportunities: await poc.listOpportunityBriefs({
+        search, limit, partnerKey: partnerKeyOf(req),
+      }),
+    });
   } catch (e: any) {
     res.status(400).json({ error: e.message });
   }
@@ -110,7 +132,7 @@ pocCashRouter.get('/opportunities/:id', async (req: Request, res: Response) => {
     return res.status(400).json({ error: '无效的商机 ID' });
   }
   try {
-    res.json(await poc.getOpportunityTemplate(id));
+    res.json(await poc.getOpportunityTemplate(id, partnerKeyOf(req)));
   } catch (e: any) {
     res.status(400).json({ error: e.message });
   }
@@ -284,7 +306,7 @@ pocCashRouter.get('/opportunities/:id/stage', async (req: Request, res: Response
   const id = String(req.params.id || '');
   if (!OPP_ID_RE.test(id)) return res.status(400).json({ error: '无效的商机 ID' });
   try {
-    res.json(await poc.getStageStatus(id));
+    res.json(await poc.getStageStatus(id, partnerKeyOf(req)));
   } catch (e: any) {
     res.status(400).json({ error: e.message });
   }
@@ -297,10 +319,11 @@ pocCashRouter.post('/opportunities/:id/stage', async (req: Request, res: Respons
   if (!OPP_ID_RE.test(id)) return res.status(400).json({ error: '无效的商机 ID' });
   const stage = String(req.body?.stage || '');
   try {
-    const after = await poc.advanceStage(id, stage);
+    const pk = partnerKeyOf(req);
+    const after = await poc.advanceStage(id, stage, pk);
     const user = (req as any).user;
     db.addAuditLog(user?.userId, 'POC_OPPORTUNITY_STAGE',
-      `${id} | 阶段推进到 ${after.stage} | ReviewStatus ${after.reviewStatus}`,
+      `[${pk}] ${id} | 阶段推进到 ${after.stage} | ReviewStatus ${after.reviewStatus}`,
       user?.username, req.ip);
     (res.locals as any).audited = true;
     res.json(after);

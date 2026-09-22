@@ -8,6 +8,9 @@
     "dev:server": "tsx watch server/index.ts",
     "dev:client": "vite --config client/vite.config.ts",
     "build": "vite build --config client/vite.config.ts && tsc -p server/tsconfig.json && node scripts/copy-runtime-assets.cjs",
+    "build:client": "vite build --config client/vite.config.ts",
+    "test": "node --import tsx --test tests/*.test.ts",
+    "typecheck": "tsc --noEmit -p client/tsconfig.json && tsc --noEmit -p server/tsconfig.json",
     "start": "node dist/server/index.js",
     "setup": "node -e \"const { generateSecret } = require('./dist/server/auth'); console.log(generateSecret())\""
   },

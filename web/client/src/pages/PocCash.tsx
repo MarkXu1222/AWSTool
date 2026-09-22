@@ -22,7 +22,12 @@ const { Text, Paragraph } = Typography;
 
 interface Meta {
   configured: boolean;
-  partners: { key: string; label: string; defaultSolutionId: string }[];
+  partners: {
+    key: string; label: string; defaultSolutionId: string;
+    apnAccountId: string;
+    /** 该主体是否配了跨账户 role；false 时前端置灰不可选 */
+    configured?: boolean;
+  }[];
   useCases: string[];
   industries: string[];
   stages?: string[];
@@ -110,6 +115,14 @@ const PocCashPage: React.FC = () => {
   const [stageInfo, setStageInfo] = useState<StageStatus | null>(null);
   const [checking, setChecking] = useState(false);
   const [advancing, setAdvancing] = useState(false);
+  /**
+   * 当前生效的 APN 主体，全页面共享。
+   *
+   * 不能只靠创建表单里的 partnerKey 字段 —— 「阶段检查」等 Tab 不在那个
+   * Form 里，只读表单字段会在切 Tab 后拿到 undefined，请求便悄悄落到
+   * 默认主体（webby）上，查别的主体的商机会一律报「找不到」。
+   */
+  const [activePartner, setActivePartner] = useState<string>('');
   // POC 资金申请
   const [pocForm] = Form.useForm();
   const [pocPreview, setPocPreview] = useState<any>(null);
@@ -124,19 +137,40 @@ const PocCashPage: React.FC = () => {
   useEffect(() => {
     api.pocCashMeta().then((m: Meta) => {
       setMeta(m);
-      if (m.partners[0]) form.setFieldValue('partnerKey', m.partners[0].key);
-      if (m.configured) {
-        api.pocCashSolutions()
-          .then((r: any) => setSolutions(r.solutions || []))
-          .catch(() => { /* 凭证问题已由 configured 提示，不重复报错 */ });
-        setOppsLoading(true);
-        api.pocCashOpportunities()
-          .then((r: any) => setOpps(r.opportunities || []))
-          .catch(() => { /* 同上 */ })
-          .finally(() => setOppsLoading(false));
+      // 默认选第一个「已配置」的主体；全都没配则退回第一个，
+      // 让页面照常渲染并由 configured 提示去引导排错
+      const first = m.partners.find(p => p.configured !== false) || m.partners[0];
+      if (first) {
+        form.setFieldValue('partnerKey', first.key);
+        setActivePartner(first.key);
       }
     }).catch((e: any) => message.error(e.message || '加载失败'));
   }, []);
+
+  /**
+   * 切换主体后重新拉取该主体账户下的数据。
+   *
+   * Solutions 与商机列表都是**按 APN 账户隔离**的，不重拉会让
+   * Mergebytes 的表单里列出 Webby 的 Solution / 商机，选中即出错。
+   */
+  useEffect(() => {
+    if (!meta?.configured || !activePartner) return;
+    let stale = false;   // 快速切换时丢弃过期响应，避免回填错主体的数据
+
+    setSolutions([]);
+    api.pocCashSolutions(activePartner)
+      .then((r: any) => { if (!stale) setSolutions(r.solutions || []); })
+      .catch(() => { /* 凭证问题已由 configured 提示，不重复报错 */ });
+
+    setOppsLoading(true);
+    setOpps([]);
+    api.pocCashOpportunities(undefined, activePartner)
+      .then((r: any) => { if (!stale) setOpps(r.opportunities || []); })
+      .catch(() => { /* 同上 */ })
+      .finally(() => { if (!stale) setOppsLoading(false); });
+
+    return () => { stale = true; };
+  }, [meta?.configured, activePartner]);
 
   /**
    * 套用已有商机作为模板。
@@ -147,7 +181,7 @@ const PocCashPage: React.FC = () => {
    */
   const applyTemplate = async (id: string) => {
     try {
-      const t = await api.pocCashTemplate(id);
+      const t = await api.pocCashTemplate(id, activePartner);
       form.setFieldsValue({
         companyName: t.companyName,
         industry: t.industry,
@@ -261,7 +295,7 @@ const PocCashPage: React.FC = () => {
     }
     setChecking(true);
     try {
-      const s = await api.pocCashStage(target);
+      const s = await api.pocCashStage(target, activePartner);
       setStageInfo(s);
       setCheckId(target);
     } catch (e: any) {
@@ -272,10 +306,15 @@ const PocCashPage: React.FC = () => {
     }
   };
 
+  /** 当前主体的元信息，用于在表单上展示账户号与 Solution 情况 */
+  const activeP = (meta?.partners || []).find(p => p.key === activePartner);
+
   const resetAll = () => {
     setResult(null); form.resetFields(); setMrr(null); setAutoTitle('');
     setTitleMode('auto'); setPeople(2); setDays(5); setRefFrom(null);
-    if (meta?.partners[0]) form.setFieldValue('partnerKey', meta.partners[0].key);
+    // resetFields 会清空 partnerKey，这里把当前主体写回去，
+    // 避免重置后表单主体与 activePartner（及已加载的列表）不一致
+    if (activePartner) form.setFieldValue('partnerKey', activePartner);
   };
 
   if (result) {
@@ -362,7 +401,7 @@ const PocCashPage: React.FC = () => {
       onOk: async () => {
         setAdvancing(true);
         try {
-          const after = await api.pocCashAdvanceStage(stageInfo.id, to);
+          const after = await api.pocCashAdvanceStage(stageInfo.id, to, activePartner);
           setStageInfo(after);
           message.success(`已推进到 ${after.stage}`);
         } catch (e: any) {
@@ -785,6 +824,34 @@ const PocCashPage: React.FC = () => {
         <Text code>Approved</Text> 或 <Text code>Action Required</Text> 才能继续改阶段，
         到 <Text code>Technical Validation</Text> 才能提 POC 资金申请。
       </Paragraph>
+
+      {/* 本 Tab 不在创建表单里，必须有独立的主体切换 —— 否则查别的主体的
+          商机会一直落到默认主体账户上，报「找不到」 */}
+      <Space style={{ marginBottom: 12 }} wrap>
+        <Text type="secondary">Partner 主体</Text>
+        <Select
+          style={{ width: 260 }}
+          value={activePartner || undefined}
+          onChange={(v: string) => {
+            setActivePartner(v);
+            form.setFieldValue('partnerKey', v);
+            // 商机属于旧主体，换主体后必须清空，否则会拿新主体的凭证
+            // 去查旧主体的 ID
+            setCheckId('');
+            setStageInfo(null);
+          }}
+          options={(meta?.partners || []).map(p => ({
+            value: p.key,
+            label: p.configured === false ? `${p.label}（未配置）` : p.label,
+            disabled: p.configured === false,
+          }))} />
+        {activeP && (
+          <Text type="secondary" style={{ fontSize: 12 }}>
+            APN 账户 {activeP.apnAccountId}
+          </Text>
+        )}
+      </Space>
+
       <Space.Compact style={{ width: '100%', maxWidth: 620, marginBottom: 16 }}>
         <Select
           style={{ width: '100%' }} showSearch allowClear
@@ -956,9 +1023,19 @@ const PocCashPage: React.FC = () => {
 
         <Divider orientation="left">Partner</Divider>
         <Form.Item name="partnerKey" label="Partner 主体" rules={[{ required: true }]}
-          extra="目前仅开放 Webby；其他主体的发票信息与 Solution 不同，需逐个核对后再放开">
+          extra={activeP
+            ? `APN 账户 ${activeP.apnAccountId}｜`
+              + (activeP.defaultSolutionId
+                ? `默认 Solution ${activeP.defaultSolutionId}`
+                : '该主体暂无可关联的 Solution，创建时会自动跳过关联')
+            : '切换主体会同时切换 Solution 与商机列表（各主体数据互相隔离）'}>
           <Select style={{ maxWidth: 320 }}
-            options={(meta?.partners || []).map(p => ({ value: p.key, label: p.label }))} />
+            onChange={(v: string) => setActivePartner(v)}
+            options={(meta?.partners || []).map(p => ({
+              value: p.key,
+              label: p.configured === false ? `${p.label}（未配置 role）` : p.label,
+              disabled: p.configured === false,
+            }))} />
         </Form.Item>
 
         <Divider orientation="left">客户</Divider>

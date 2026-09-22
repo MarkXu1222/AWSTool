@@ -3,7 +3,7 @@
 企业级 AWS 多账户（多 Organizations）管理平台。带强制 MFA 登录、页面级权限与全量操作审计。
 
 **线上**：https://markxu.co（EC2 Singapore，PM2 进程 `aws-toolbox`）
-**当前版本**：`0.37.4`（见 `web/client/src/version.ts`，左下角展示）
+**当前版本**：`0.38.0`（见 `web/client/src/version.ts`，左下角展示）
 
 **生产接入规模**（快照 2026-09-06，取自线上 db.json）
 
@@ -557,10 +557,46 @@ v2 按 `variant` 筛选核心 6 模型并固定排序：`global`（每区 6 条�
 `requireStrictAdmin` 实时查库，不信任 token 里的 role。理由是这里创建的是
 **真实商机并提交给 AWS**，属于对外发生实际业务动作的写操作。
 
-**凭证走跨账户 role，不存静态密钥**。APN 账户（105673812363）里建
+**凭证走跨账户 role，不存静态密钥**。每个 APN 账户里各建一个
 `partner-central-tool` role，信任中心账户的 tools 凭证（`user/mark`）+ ExternalId；
-平台 assume 后拿 1 小时临时票据（缓存 50 分钟）。配置在 `config.json` 的
-`partnerCentral { roleArn, externalId }`。
+平台 assume 后拿 1 小时临时票据（缓存 50 分钟）。
+
+### 多 APN 主体（0.38.0）
+
+| 主体 | APN 账户 | 默认 Solution | 说明 |
+|---|---|---|---|
+| Webby | `105673812363` | `S-0070517` | 商机 + POC 全流程 |
+| Mergebytes | `072471709462` | 无 | 仅商机创建 / 阶段检查，POC 待补发票信息 |
+
+`config.json` 用**嵌套结构**，每个主体一套 role 与独立 ExternalId：
+
+```jsonc
+"partnerCentral": {
+  "webby":      { "roleArn": "arn:aws:iam::105673812363:role/partner-central-tool",
+                  "externalId": "webby-apn-poc-cash" },
+  "mergebytes": { "roleArn": "arn:aws:iam::072471709462:role/partner-central-tool",
+                  "externalId": "mergebytes-apn-poc-cash" }
+}
+```
+
+ExternalId 每个主体一个，泄露其一不波及另一个。
+
+⚠️ **凭证缓存必须按主体分键**：早期是单个模块级变量，先后访问两个主体会
+拿到上一个主体的临时凭证，商机**静默建到错误账户**。现为
+`Map<partnerKey, creds>`，会话名也带主体（`poc-cash-mergebytes`）便于查
+CloudTrail。
+
+⚠️ **扁平配置只对 webby 生效**：旧的 `partnerCentral { roleArn, externalId }`
+仍兼容，但只回落给 webby。若对任意主体都回落，会拿着 Webby 的 role 去建别
+的主体的商机。
+
+⚠️ **切换主体要清空已加载的列表**：Solutions 与商机列表按账户隔离，不重拉
+会让 Mergebytes 的表单里列出 Webby 的选项，选中即报错。「阶段检查」Tab 有
+独立的主体选择器 —— 它不在创建表单的 `Form` 里，读不到那个 `partnerKey`。
+
+⚠️ **Mergebytes 无 Solution**：实测 `ListSolutions` 返回 0 条。
+`defaultSolutionId` 留空是刻意的，`createOpportunity` 据此**跳过关联**并记一
+条 warning，而不是把空串传给 AWS（会被拒）。
 
 > 最初方案是存 APN 的 AK/SK —— 但那个 IAM 用户挂着 **AdministratorAccess**，
 > 把长期密钥放进配置文件等于泄露整个 APN 账户的管理员权限。改成 role 后
@@ -569,10 +605,19 @@ v2 按 `variant` 筛选核心 6 模型并固定排序：`global`（每区 6 条�
 一键创建与验证：
 
 ```bash
+# 默认 webby
 python3 scripts/setup_partner_central_role.py            # dry-run 看策略
 python3 scripts/setup_partner_central_role.py --execute  # 创建
 python3 scripts/setup_partner_central_role.py --verify   # 验权限边界
+
+# 其他主体用 --partner（脚本内 PARTNERS 里登记）
+python3 scripts/setup_partner_central_role.py --partner mergebytes --execute
+python3 scripts/setup_partner_central_role.py --partner mergebytes --verify
 ```
+
+新增主体的完整步骤：① 本地配好该账户的 AWS profile → ② 在脚本的
+`PARTNERS` 加一条 → ③ `--execute` 建 role → ④ `--verify` 验边界 →
+⑤ `poc-cash.ts` 的 `PARTNERS` 加主体资料 → ⑥ `config.json` 填 role。
 
 ⚠️ **IAM action 前缀是 `partnercentral:`，不是 `partnercentral-selling:`**。
 这是实测确认的（建无权限 role 调 ListSolutions，AWS 拒绝信息里写的是
