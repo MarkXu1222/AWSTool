@@ -3,7 +3,7 @@
 企业级 AWS 多账户（多 Organizations）管理平台。带强制 MFA 登录、页面级权限与全量操作审计。
 
 **线上**：https://markxu.co（EC2 Singapore，PM2 进程 `aws-toolbox`）
-**当前版本**：`0.38.1`（见 `web/client/src/version.ts`，左下角展示）
+**当前版本**：`0.38.2`（见 `web/client/src/version.ts`，左下角展示）
 
 **生产接入规模**（快照 2026-09-06，取自线上 db.json）
 
@@ -609,6 +609,32 @@ CloudTrail。
   不再只 `console.error`（截图里看不到任何线索，定位得靠猜）。
 - 创建商机的 400 分支补 `console.error` 记字段特征（长度、取值，
   不记完整业务描述），此前失败是静默的：审计日志只在成功分支写。
+
+⚠️ **`Marketing.Source` 与 `AwsFundingUsed` 是配对字段**（0.38.2）：
+
+| Source | AwsFundingUsed |
+|---|---|
+| `Marketing Activity` | **必填**（`Yes`/`No`） |
+| `None` | **必须省略** |
+
+违反会被拒：`ACTION_NOT_PERMITTED: You cannot perform Create action.
+marketing.awsFundingUsed is required when marketing.source is Yes.`
+（文案里的 "Yes" 指「Source 非 None」，不是字面的 `Source='Yes'`。）
+
+此前默认 `Marketing Activity` 却从不传 `AwsFundingUsed`，**创建必失败**。
+现在默认改成 `None` —— 账户内 9 个商机实测 8 个是 `None`，且它不需要
+额外字段。规则集中在 `buildMarketing()`。
+
+⚠️ **`UpdateOpportunity` 是全量替换，不是增量补丁**（0.38.2）：只传
+`LifeCycle` 会被一串 `REQUIRED_FIELD_MISSING` 拒掉 —— `marketing.source`
+/ `project.title` / `project.customerBusinessProblem` / `customer.contact`。
+
+所以推进阶段必须先 `Get` 再把**所有必填字段原样回传**，见
+`buildUpdateEchoFields()`。同时只能回传可写字段：`Id` / `Arn` /
+`ReviewStatus` / `ExpectedCustomerSpend[].EstimationUrl` 带上同样会被拒。
+
+> 这意味着**阶段推进功能此前从未成功过**，直到 0.38.2 才真正跑通
+> （实测 `O28440608` Prospect → Qualified → 回滚 Prospect）。
 
 ⚠️ **Mergebytes 无 Solution**：实测 `ListSolutions` 返回 0 条。
 `defaultSolutionId` 留空是刻意的，`createOpportunity` 据此**跳过关联**并记一

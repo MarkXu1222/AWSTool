@@ -190,7 +190,9 @@ const PocCashPage: React.FC = () => {
         postalCode: t.postalCode,
         customerUseCase: t.customerUseCase,
         customerBusinessProblem: t.customerBusinessProblem,
-        marketingSource: t.marketingSource === 'None' ? 'None' : 'Marketing Activity',
+        marketingSource: t.marketingSource === 'Marketing Activity'
+          ? 'Marketing Activity' : 'None',
+        marketingAwsFundingUsed: t.marketingAwsFundingUsed === 'Yes' ? 'Yes' : 'No',
         solutionId: t.solutionIds?.[0],
         // MRR 不带过来：不同项目金额不同，沿用旧值是常见错误
       });
@@ -208,6 +210,8 @@ const PocCashPage: React.FC = () => {
   const companyName = Form.useWatch('companyName', form);
   const projectName = Form.useWatch('projectName', form);
   const partnerKey = Form.useWatch('partnerKey', form);
+  // 控制 AwsFundingUsed 的显隐：它只在 Source='Marketing Activity' 时有效
+  const marketingSource = Form.useWatch('marketingSource', form);
   useEffect(() => {
     if (titleMode !== 'auto' || !partnerKey || !companyName || !projectName) {
       setAutoTitle('');
@@ -993,7 +997,10 @@ const PocCashPage: React.FC = () => {
 
       <Form form={form} layout="vertical" onFinish={doSubmit}
         initialValues={{
-          countryCode: 'MY', submit: true, marketingSource: 'Marketing Activity',
+          // 默认 None：绝大多数商机不涉及 MDF 资金。选 'Marketing Activity'
+          // 必须同时给 AwsFundingUsed，否则 AWS 拒绝创建。
+          countryCode: 'MY', submit: true,
+          marketingSource: 'None', marketingAwsFundingUsed: 'No',
           customerUseCase: 'Migration / Database Migration',
         }}>
 
@@ -1128,12 +1135,26 @@ const PocCashPage: React.FC = () => {
             <DatePicker style={{ width: 180 }}
               disabledDate={d => !!d && d < dayjs().endOf('day')} />
           </Form.Item>
-          <Form.Item name="marketingSource" label="Marketing Source">
+          <Form.Item name="marketingSource" label="Marketing Source"
+            extra="选 Marketing Activity 时必须填右侧 MDF 资金">
             <Select style={{ width: 200 }} options={[
-              { value: 'Marketing Activity', label: 'Marketing Activity' },
               { value: 'None', label: 'None' },
+              { value: 'Marketing Activity', label: 'Marketing Activity' },
             ]} />
           </Form.Item>
+          {/* AwsFundingUsed 与 Source 是配对字段：Source='Marketing Activity'
+              时必填，否则 AWS 报 ACTION_NOT_PERMITTED。Source='None' 时
+              必须省略，所以这里整项隐藏而不是置灰。 */}
+          {marketingSource === 'Marketing Activity' && (
+            <Form.Item name="marketingAwsFundingUsed" label="用了 AWS MDF 资金？"
+              rules={[{ required: true, message: '选 Marketing Activity 时必填' }]}
+              extra="AWS 必填项，不填会被拒绝创建">
+              <Select style={{ width: 160 }} options={[
+                { value: 'No', label: 'No（未用 MDF）' },
+                { value: 'Yes', label: 'Yes（MDF 资助）' },
+              ]} />
+            </Form.Item>
+          )}
         </Space>
         {renderAmounts()}
         {renderSubmitSection()}

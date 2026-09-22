@@ -150,8 +150,123 @@ export interface OpportunityInput {
   solutionId?: string;
   /** Marketing.Source：Marketing Activity 或 None */
   marketingSource?: 'Marketing Activity' | 'None';
+  /**
+   * Marketing.AwsFundingUsed —— 是否用了 AWS MDF 资金。
+   *
+   * ⚠️ Source='Marketing Activity' 时**必填**，否则 AWS 报
+   * `ACTION_NOT_PERMITTED: marketing.awsFundingUsed is required
+   * when marketing.source is Yes`（报错里的 "Yes" 指 Source 非 None）。
+   * Source='None' 时必须省略。
+   */
+  marketingAwsFundingUsed?: 'Yes' | 'No';
   /** 建完是否立即提交给 AWS 审核 */
   submit?: boolean;
+}
+
+/**
+ * 构造 Marketing 字段。两个字段是**配对**的，必须一起决定：
+ *
+ *   Source='Marketing Activity' → 必须带 AwsFundingUsed（Yes/No）
+ *   Source='None'               → 必须省略 AwsFundingUsed
+ *
+ * 违反任一条都会被 AWS 拒：
+ *   ACTION_NOT_PERMITTED: marketing.awsFundingUsed is required
+ *   when marketing.source is Yes
+ *
+ * （报错文案里的 "Yes" 指「Source 非 None」，不是字面的 Source='Yes'。）
+ *
+ * 账户内 9 个既有商机实测：8 个 {Source:'None'} 不带该字段，
+ * 1 个 {Source:'Marketing Activity', AwsFundingUsed:'Yes'}。
+ */
+export function buildMarketing(
+  source?: 'Marketing Activity' | 'None',
+  awsFundingUsed?: 'Yes' | 'No',
+): { Source: 'Marketing Activity' | 'None'; AwsFundingUsed?: 'Yes' | 'No' } {
+  // 默认 None：不带 MDF 资金的普通商机是绝大多数，且它不需要额外字段，
+  // 默认成 'Marketing Activity' 会让没填 AwsFundingUsed 的调用直接失败。
+  const s = source === 'Marketing Activity' ? 'Marketing Activity' : 'None';
+  if (s === 'None') return { Source: 'None' };
+  return { Source: s, AwsFundingUsed: awsFundingUsed === 'Yes' ? 'Yes' : 'No' };
+}
+
+/**
+ * 构造 UpdateOpportunity 需要原样回传的字段。
+ *
+ * ⚠️ **UpdateOpportunity 是全量替换，不是增量补丁**。只传 LifeCycle
+ * 会被一连串 REQUIRED_FIELD_MISSING 拒掉（实测）：
+ *   marketing.source / project.title / project.customerBusinessProblem
+ *   / customer.contact ...
+ *
+ * 所以除了要改的字段，其余必填项必须从 Get 的结果里原样带回去。
+ * 只回传可写字段 —— ReviewStatus、Id、Arn 等只读字段带上同样会被拒。
+ */
+export function buildUpdateEchoFields(cur: any): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+
+  // Marketing：必填，且 Source/AwsFundingUsed 要配对
+  const m = cur.Marketing || {};
+  out.Marketing = buildMarketing(m.Source, m.AwsFundingUsed);
+
+  // Project：Title 与 CustomerBusinessProblem 必填
+  const p = cur.Project || {};
+  const project: Record<string, unknown> = {};
+  if (p.Title) project.Title = p.Title;
+  if (p.CustomerBusinessProblem) {
+    project.CustomerBusinessProblem = p.CustomerBusinessProblem;
+  }
+  if (p.CustomerUseCase) project.CustomerUseCase = p.CustomerUseCase;
+  if (p.DeliveryModels?.length) project.DeliveryModels = p.DeliveryModels;
+  if (p.SalesActivities?.length) project.SalesActivities = p.SalesActivities;
+  if (p.ExpectedCustomerSpend?.length) {
+    // 只保留可写子字段，EstimationUrl 等回传会被拒
+    project.ExpectedCustomerSpend = p.ExpectedCustomerSpend.map((s: any) => ({
+      Amount: s.Amount,
+      CurrencyCode: s.CurrencyCode,
+      Frequency: s.Frequency,
+      TargetCompany: s.TargetCompany,
+    }));
+  }
+  if (Object.keys(project).length) out.Project = project;
+
+  // Customer：Account 必填，Contacts 在部分商机上也必填
+  const acct = cur.Customer?.Account;
+  if (acct) {
+    const account: Record<string, unknown> = {};
+    for (const k of ['Industry', 'CompanyName', 'WebsiteUrl',
+      'OtherIndustry', 'Duns'] as const) {
+      if (acct[k]) account[k] = acct[k];
+    }
+    if (acct.Address) {
+      const a = acct.Address;
+      const addr: Record<string, unknown> = {};
+      for (const k of ['City', 'CountryCode', 'PostalCode',
+        'StateOrRegion', 'StreetAddress'] as const) {
+        if (a[k]) addr[k] = a[k];
+      }
+      if (Object.keys(addr).length) account.Address = addr;
+    }
+    const customer: Record<string, unknown> = { Account: account };
+    const contacts = cur.Customer?.Contacts;
+    if (contacts?.length) {
+      customer.Contacts = contacts.map((x: any) => ({
+        Email: x.Email, FirstName: x.FirstName, LastName: x.LastName,
+        BusinessTitle: x.BusinessTitle, Phone: x.Phone,
+      }));
+    }
+    out.Customer = customer;
+  }
+
+  // 顶层必填枚举
+  if (cur.OpportunityType) out.OpportunityType = cur.OpportunityType;
+  if (cur.PrimaryNeedsFromAws?.length) {
+    out.PrimaryNeedsFromAws = cur.PrimaryNeedsFromAws;
+  }
+  if (cur.NationalSecurity) out.NationalSecurity = cur.NationalSecurity;
+  if (cur.PartnerOpportunityIdentifier) {
+    out.PartnerOpportunityIdentifier = cur.PartnerOpportunityIdentifier;
+  }
+
+  return out;
 }
 
 /** 由 MRR 推导全部联动金额 */
@@ -426,6 +541,8 @@ export interface OpportunityTemplate {
   customerBusinessProblem?: string;
   customerUseCase?: string;
   marketingSource?: string;
+  /** 仅当 Source='Marketing Activity' 时存在 */
+  marketingAwsFundingUsed?: string;
   mrrUsd?: number;
   targetCloseDate?: string;
   solutionIds: string[];
@@ -454,6 +571,7 @@ export async function getOpportunityTemplate(
     customerBusinessProblem: o.Project?.CustomerBusinessProblem,
     customerUseCase: o.Project?.CustomerUseCase,
     marketingSource: o.Marketing?.Source,
+    marketingAwsFundingUsed: o.Marketing?.AwsFundingUsed,
     mrrUsd: spend?.Amount ? Number(spend.Amount) : undefined,
     targetCloseDate: o.LifeCycle?.TargetCloseDate,
     solutionIds: o.RelatedEntityIdentifiers?.Solutions || [],
@@ -584,12 +702,17 @@ export async function advanceStage(
   // 只回传可写字段，ReviewStatus 等只读字段带上会被拒
   if (lc.TargetCloseDate) payloadLc.TargetCloseDate = lc.TargetCloseDate;
   if (lc.NextSteps) payloadLc.NextSteps = lc.NextSteps;
+  // Closed Lost 必须给原因，否则 REQUIRED_FIELD_MISSING
+  if (targetStage === CLOSED_LOST) {
+    payloadLc.ClosedLostReason = lc.ClosedLostReason || 'Other';
+  }
 
   await c.send(new UpdateOpportunityCommand({
     Catalog: CATALOG,
     Identifier: id,
     LastModifiedDate: cur.LastModifiedDate,  // 乐观锁
     LifeCycle: payloadLc,
+    ...buildUpdateEchoFields(cur),
   }));
   return getStageStatus(id, partnerKey);
 }
@@ -638,7 +761,8 @@ export async function createOpportunity(input: OpportunityInput): Promise<Create
         TargetCompany: 'AWS',
       }],
     },
-    Marketing: { Source: input.marketingSource || 'Marketing Activity' },
+    // Source 与 AwsFundingUsed 必须配对，规则见 buildMarketing
+    Marketing: buildMarketing(input.marketingSource, input.marketingAwsFundingUsed),
     OpportunityTeam: [{
       Email: partner.owner.email,
       FirstName: partner.owner.firstName,

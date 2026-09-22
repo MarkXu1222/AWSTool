@@ -12,7 +12,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  deriveAmounts, buildTitle, getPartner, PARTNERS, USE_CASES, INDUSTRIES,
+  deriveAmounts, buildTitle, buildMarketing, buildUpdateEchoFields, getPartner, PARTNERS,
+  USE_CASES, INDUSTRIES,
   __test__toIsoDate, __test__evaluateStage,
 } from '../server/poc-cash';
 
@@ -89,6 +90,112 @@ test('标题前缀随主体变化，不会串用', () => {
   const t = buildTitle(getPartner('mergebytes'), 'FOO SDN. BHD.', 'Data Lake');
   assert.equal(t, 'Mergebytes - FOO Data Lake #ADPL');
   assert.equal(t.includes('Webby'), false);
+});
+
+test('Marketing.Source 与 AwsFundingUsed 必须配对', () => {
+  // AWS 实测报错：ACTION_NOT_PERMITTED: You cannot perform Create action.
+  // marketing.awsFundingUsed is required when marketing.source is Yes.
+  // 此前只传 Source 且默认 'Marketing Activity'，创建必失败。
+  assert.deepEqual(buildMarketing('Marketing Activity', 'Yes'),
+    { Source: 'Marketing Activity', AwsFundingUsed: 'Yes' });
+  assert.deepEqual(buildMarketing('Marketing Activity', 'No'),
+    { Source: 'Marketing Activity', AwsFundingUsed: 'No' });
+
+  // Source='Marketing Activity' 但没给 AwsFundingUsed：必须补默认值 'No'，
+  // 不能把字段漏掉（漏掉就是线上那个报错）
+  assert.deepEqual(buildMarketing('Marketing Activity', undefined),
+    { Source: 'Marketing Activity', AwsFundingUsed: 'No' });
+});
+
+test('Source=None 时不能带 AwsFundingUsed', () => {
+  // 账户内 8 个 Source='None' 的商机实测都不含该字段
+  assert.deepEqual(buildMarketing('None'), { Source: 'None' });
+  // 即便调用方传了值也要丢弃 —— None + AwsFundingUsed 同样非法
+  assert.deepEqual(buildMarketing('None', 'Yes'), { Source: 'None' });
+  const r = buildMarketing('None', 'No');
+  assert.equal('AwsFundingUsed' in r, false, 'None 时字段必须完全省略');
+});
+
+test('Marketing 默认走 None 而不是 Marketing Activity', () => {
+  // 默认值若是 'Marketing Activity'，没填 AwsFundingUsed 的调用会被 AWS 拒。
+  // 选 None 既安全又符合账户内 9 条里 8 条的实际用法。
+  assert.deepEqual(buildMarketing(undefined), { Source: 'None' });
+  assert.deepEqual(buildMarketing(undefined, 'Yes'), { Source: 'None' });
+  assert.deepEqual(buildMarketing('' as any), { Source: 'None' });
+});
+
+/** GetOpportunity 的真实返回形状（取自 O28440608） */
+const fullOpp = () => ({
+  Id: 'O28440608',
+  Arn: 'arn:aws:partnercentral::072471709462:catalog/AWS/opportunity/O28440608',
+  OpportunityType: 'Net New Business',
+  PrimaryNeedsFromAws: ['Co-Sell - Deal Support'],
+  NationalSecurity: 'No',
+  Marketing: { Source: 'None' },
+  Project: {
+    Title: 'Core System Cloud-Native Modernization – MAP',
+    CustomerBusinessProblem: '客户需要把核心系统迁移到 AWS。',
+    CustomerUseCase: 'Migration / Database Migration',
+    DeliveryModels: ['Professional Services'],
+    SalesActivities: ['Customer has shown interest in solution'],
+    ExpectedCustomerSpend: [{
+      Amount: '5000', CurrencyCode: 'USD', Frequency: 'Monthly',
+      TargetCompany: 'AWS', EstimationUrl: 'https://calculator.aws/#/x',
+    }],
+  },
+  Customer: {
+    Account: {
+      Industry: 'Gaming', CompanyName: 'CENTURY TOTO GAMING SDN. BHD.',
+      WebsiteUrl: 'https://example.com/',
+      Address: { CountryCode: 'MY', PostalCode: '50000' },
+    },
+    Contacts: [{ Email: 'a@b.com', FirstName: 'A', LastName: 'B',
+      BusinessTitle: 'IT Manager', Phone: '+60123456789' }],
+  },
+  LifeCycle: { Stage: 'Prospect', ReviewStatus: 'Approved' },
+});
+
+test('Update 必须回传必填字段（全量替换语义）', () => {
+  // 实测：只传 LifeCycle 会被一串 REQUIRED_FIELD_MISSING 拒掉 ——
+  // marketing.source / project.title / project.customerBusinessProblem
+  // / customer.contact。UpdateOpportunity 不是增量补丁。
+  const e: any = buildUpdateEchoFields(fullOpp());
+  assert.deepEqual(e.Marketing, { Source: 'None' });
+  assert.equal(e.Project.Title, 'Core System Cloud-Native Modernization – MAP');
+  assert.equal(typeof e.Project.CustomerBusinessProblem, 'string');
+  assert.equal(e.Customer.Account.CompanyName, 'CENTURY TOTO GAMING SDN. BHD.');
+  assert.equal(e.Customer.Contacts.length, 1);
+  assert.equal(e.OpportunityType, 'Net New Business');
+  assert.equal(e.NationalSecurity, 'No');
+});
+
+test('Update 回传不能带只读字段', () => {
+  // Id / Arn / ReviewStatus 等只读字段带上会被 AWS 拒
+  const e: any = buildUpdateEchoFields(fullOpp());
+  for (const k of ['Id', 'Arn', 'LifeCycle', 'ReviewStatus',
+    'CreatedDate', 'LastModifiedDate', 'RelatedEntityIdentifiers']) {
+    assert.equal(k in e, false, `只读字段 ${k} 不该回传`);
+  }
+  // ExpectedCustomerSpend 里的 EstimationUrl 同样是只读的
+  assert.equal('EstimationUrl' in e.Project.ExpectedCustomerSpend[0], false);
+});
+
+test('Update 回传能容忍残缺的 Get 结果', () => {
+  // 老商机可能缺 Contacts / Address / 部分 Project 字段，不能因此抛错
+  assert.doesNotThrow(() => buildUpdateEchoFields({}));
+  assert.doesNotThrow(() => buildUpdateEchoFields({ Customer: {} }));
+  assert.doesNotThrow(() => buildUpdateEchoFields({ Project: {}, Marketing: {} }));
+  const e: any = buildUpdateEchoFields({});
+  // 即便全空也要给出合法的 Marketing —— 它是必填项
+  assert.deepEqual(e.Marketing, { Source: 'None' });
+});
+
+test('Update 回传保留 Marketing 原值不篡改归因', () => {
+  const opp: any = fullOpp();
+  opp.Marketing = { Source: 'Marketing Activity', AwsFundingUsed: 'Yes' };
+  const e: any = buildUpdateEchoFields(opp);
+  assert.deepEqual(e.Marketing,
+    { Source: 'Marketing Activity', AwsFundingUsed: 'Yes' });
 });
 
 test('创建日期统一成 ISO，不能用 String(Date)', () => {

@@ -403,7 +403,11 @@ pocCashRouter.post('/opportunities', async (req: Request, res: Response) => {
       mrrUsd,
       targetCloseDate: String(b.targetCloseDate),
       solutionId: b.solutionId ? String(b.solutionId) : undefined,
-      marketingSource: b.marketingSource === 'None' ? 'None' : 'Marketing Activity',
+      // 默认 None —— 带 MDF 的商机是少数，且 'Marketing Activity' 还要
+      // 配 AwsFundingUsed，默认成它会让没填该字段的提交被 AWS 拒。
+      marketingSource: b.marketingSource === 'Marketing Activity'
+        ? 'Marketing Activity' : 'None',
+      marketingAwsFundingUsed: b.marketingAwsFundingUsed === 'Yes' ? 'Yes' : 'No',
       submit: b.submit !== false,
     });
 
