@@ -205,6 +205,12 @@ export interface TagOnboardingJob {
   id: string;
   payerAccountId: string;
   tagValue: string;
+  /**
+   * 额外自定义标签（可选）。MAP 主标签 map-migrated 之外，
+   * 每个组织可再打一组自定义 kv，用于成本归集等场景。
+   */
+  extraTagKey?: string;
+  extraTagValue?: string;
   status: TagOnboardingStatus;
   phase: TagOnboardingPhase;
   progress: number;
@@ -394,6 +400,8 @@ export class TagOnboardingConflictError extends Error {
 export function createOrReuseTagOnboardingJob(input: {
   payerAccountId: string;
   tagValue: string;
+  extraTagKey?: string;
+  extraTagValue?: string;
   steps: TagOnboardingStep[];
   requestedBy?: string;
 }): { job: TagOnboardingJob; reused: boolean } {
@@ -402,7 +410,12 @@ export function createOrReuseTagOnboardingJob(input: {
     job.payerAccountId === input.payerAccountId
     && ['queued', 'running', 'waiting_retry'].includes(job.status));
   if (active) {
-    if (active.tagValue !== input.tagValue) throw new TagOnboardingConflictError(cloneJob(active));
+    // 标签参数不一致就是另一次意图，必须冲突而不是复用 —— 复用会让
+    // 用户新填的额外标签被静默丢弃，任务跑完却是旧配置。
+    const sameTag = active.tagValue === input.tagValue
+      && (active.extraTagKey || '') === (input.extraTagKey || '')
+      && (active.extraTagValue || '') === (input.extraTagValue || '');
+    if (!sameTag) throw new TagOnboardingConflictError(cloneJob(active));
     return { job: cloneJob(active), reused: true };
   }
 
@@ -412,6 +425,8 @@ export function createOrReuseTagOnboardingJob(input: {
     id: randomUUID(),
     payerAccountId: input.payerAccountId,
     tagValue: input.tagValue,
+    extraTagKey: input.extraTagKey,
+    extraTagValue: input.extraTagValue,
     status: 'queued',
     phase: 'provision_org',
     progress: 0,

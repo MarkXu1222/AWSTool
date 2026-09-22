@@ -687,8 +687,13 @@ export const api = {
   // MAP 标签合规
   tagStatus: () => request('/aws/tag-compliance/status'),
   // 全自动组织接入：提交持久化任务、查询进度、按 payer 恢复、失败重试
-  tagStartOnboarding: (payerAccountId: string, tagValue: string) =>
-    request('/aws/tag-compliance/onboarding', { method: 'POST', body: JSON.stringify({ payerAccountId, tagValue }) }),
+  // extraTag*：MAP 主标签之外的额外自定义 kv，可选（两者要么都给要么都不给）
+  tagStartOnboarding: (payerAccountId: string, tagValue: string,
+    extraTagKey?: string, extraTagValue?: string) =>
+    request('/aws/tag-compliance/onboarding', {
+      method: 'POST',
+      body: JSON.stringify({ payerAccountId, tagValue, extraTagKey, extraTagValue }),
+    }),
   tagOnboardingJob: (jobId: string) =>
     request(`/aws/tag-compliance/onboarding/${encodeURIComponent(jobId)}`),
   tagLatestOnboarding: (payerAccountId: string) =>

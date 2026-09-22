@@ -113,6 +113,72 @@ function withOrgConfigWriteLock<T>(work: () => Promise<T>): Promise<T> {
   return operation;
 }
 
+/**
+ * MAP 主标签的 key —— 业务纪律，固定不可改。
+ * 每个组织只能自定义它的 value（orgs.json 的 tag_value）。
+ */
+export const MAP_TAG_KEY = 'map-migrated';
+
+/** AWS 的 tag key 长度上限 128，value 上限 256 */
+const TAG_KEY_MAX = 128;
+const TAG_VALUE_MAX = 256;
+
+/** tag key/value 允许的字符集（AWS 通用规则） */
+const TAG_CHAR_RE = /^[\w\s+\-=.:/@]+$/;
+
+/**
+ * 校验组织的「额外自定义标签」。
+ *
+ * 业务背景：MAP 标签 `map-migrated` 是固定纪律不能动，但不同组织有各自的
+ * 成本归集需求（如 Project / CostCenter），所以允许每个组织**额外**再打
+ * 一组 kv。留空表示不打额外标签。
+ *
+ * ⚠️ key 不允许再写 `map-migrated` —— 那会和主标签撞车，
+ * 谁后写谁生效，属于难排查的静默覆盖。
+ */
+function normalizeExtraTag(org: any, index: number):
+  { extra_tag_key?: string; extra_tag_value?: string } {
+  const rawKey = typeof org.extra_tag_key === 'string' ? org.extra_tag_key.trim() : '';
+  const rawValue = typeof org.extra_tag_value === 'string'
+    ? org.extra_tag_value.trim() : '';
+
+  // 两者都空 = 不配额外标签，合法
+  if (!rawKey && !rawValue) return {};
+
+  // 只填一半是配置错误：单独的 key 或 value 都打不出标签，
+  // 静默忽略会让用户以为配好了
+  if (!rawKey) {
+    throw new Error(`第 ${index + 1} 项填了 extra_tag_value 但没有 extra_tag_key`);
+  }
+  if (!rawValue) {
+    throw new Error(`第 ${index + 1} 项填了 extra_tag_key 但没有 extra_tag_value`);
+  }
+
+  if (rawKey.length > TAG_KEY_MAX) {
+    throw new Error(`第 ${index + 1} 项 extra_tag_key 超过 ${TAG_KEY_MAX} 字符`);
+  }
+  if (rawValue.length > TAG_VALUE_MAX) {
+    throw new Error(`第 ${index + 1} 项 extra_tag_value 超过 ${TAG_VALUE_MAX} 字符`);
+  }
+  if (!TAG_CHAR_RE.test(rawKey)) {
+    throw new Error(`第 ${index + 1} 项 extra_tag_key 含非法字符：${rawKey}`);
+  }
+  if (!TAG_CHAR_RE.test(rawValue)) {
+    throw new Error(`第 ${index + 1} 项 extra_tag_value 含非法字符：${rawValue}`);
+  }
+  // aws: 前缀是 AWS 保留的，打不上去
+  if (/^aws:/i.test(rawKey)) {
+    throw new Error(`第 ${index + 1} 项 extra_tag_key 不能以 aws: 开头（AWS 保留前缀）`);
+  }
+  if (rawKey.toLowerCase() === MAP_TAG_KEY) {
+    throw new Error(
+      `第 ${index + 1} 项 extra_tag_key 不能是 ${MAP_TAG_KEY} —— `
+      + '它由 tag_value 单独控制，重复配置会互相覆盖');
+  }
+
+  return { extra_tag_key: rawKey, extra_tag_value: rawValue };
+}
+
 function normalizeOrgsConfig(orgs: any[]): any[] {
   if (!Array.isArray(orgs)) throw new Error('orgs 配置必须是一个数组');
 
@@ -123,7 +189,14 @@ function normalizeOrgsConfig(orgs: any[]): any[] {
     }
     const tagValue = typeof org.tag_value === 'string' ? org.tag_value.trim() : '';
     if (!tagValue) throw new Error(`第 ${index + 1} 项缺少必填字段 tag_value`);
-    const normalizedOrg = { ...org, tag_value: tagValue };
+
+    // 额外自定义标签：空值必须**删掉键**而不是留空串 —— 中央 Lambda
+    // 若按「字段存在」判断是否打标，空串会让它尝试打一个空 key 的标签。
+    const extra = normalizeExtraTag(org, index);
+    const normalizedOrg: any = { ...org, tag_value: tagValue };
+    delete normalizedOrg.extra_tag_key;
+    delete normalizedOrg.extra_tag_value;
+    Object.assign(normalizedOrg, extra);
 
     // 中央 search Lambda 的配置契约是逗号分隔字符串。兼容页面旧版本
     // 已产生的数组输入，但落盘前必须统一为字符串，否则扫描器调用 split() 会失败。
@@ -140,6 +213,11 @@ function normalizeOrgsConfig(orgs: any[]): any[] {
 
     return { ...normalizedOrg, exclude_accounts: [...new Set(accountIds)].join(',') };
   });
+}
+
+/** 仅供测试：规范化逻辑含多条静默故障防线，需要单独覆盖 */
+export function __test__normalizeOrgsConfig(orgs: any[]): any[] {
+  return normalizeOrgsConfig(orgs);
 }
 
 export interface OrgsConfigSnapshot {
@@ -215,6 +293,12 @@ export interface OrgConfigUpsertInput {
   searchRoleArn: string;
   viewArn: string;
   tagValue: string;
+  /**
+   * 额外自定义标签（可选）。两者要么都给、要么都不给。
+   * 传空串表示**清除**已有的额外标签。
+   */
+  extraTagKey?: string;
+  extraTagValue?: string;
 }
 
 /**
@@ -243,6 +327,21 @@ export async function upsertOrgConfig(input: OrgConfigUpsertInput): Promise<{ co
         view_arn: input.viewArn,
         tag_value: tagValue,
       };
+
+      // 额外标签：只有调用方**显式传了**才改动，否则保留 existing 里的值。
+      // 用 undefined 区分「没传」与「传空串要清除」—— 一键接入不传这两个
+      // 字段时，不能把用户先前配好的额外标签抹掉。
+      if (input.extraTagKey !== undefined || input.extraTagValue !== undefined) {
+        const k = String(input.extraTagKey || '').trim();
+        const v = String(input.extraTagValue || '').trim();
+        if (k || v) {
+          candidate.extra_tag_key = k;
+          candidate.extra_tag_value = v;
+        } else {
+          delete candidate.extra_tag_key;
+          delete candidate.extra_tag_value;
+        }
+      }
       // 2026-09-18 起不再默认排除 payer 自身：业务要求 payer 管理账户的资源
       // 同样要打 MAP 标签。配套改动是 provisionOrg 会在 payer 账户内单独创建
       // auto-tagger-role（SERVICE_MANAGED StackSet 覆盖不到管理账户）。
@@ -267,6 +366,14 @@ export async function upsertOrgConfig(input: OrgConfigUpsertInput): Promise<{ co
         || verified.view_arn !== input.viewArn
         || verified.tag_value !== tagValue) {
         throw new Error('S3 组织配置写入后回读校验失败');
+      }
+      // 额外标签同样要回读核对：写进去但没落盘会让用户以为配好了，
+      // 而扫描器读到的仍是旧值
+      const expectKey = candidate.extra_tag_key || undefined;
+      const expectValue = candidate.extra_tag_value || undefined;
+      if ((verified.extra_tag_key || undefined) !== expectKey
+        || (verified.extra_tag_value || undefined) !== expectValue) {
+        throw new Error('S3 组织配置的额外标签写入后回读校验失败');
       }
       return { count: normalized.length, created, org: verified, etag: verifiedSnapshot.etag };
     }

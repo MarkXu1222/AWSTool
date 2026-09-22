@@ -356,8 +356,15 @@ async function runUpsertConfig(job: TagOnboardingJob): Promise<void> {
     searchRoleArn,
     viewArn,
     tagValue: job.tagValue,
+    // 没填额外标签时传 undefined（而非空串），让 upsert 保留该组织
+    // 已有的配置，不要被一次重跑抹掉
+    extraTagKey: job.extraTagKey || undefined,
+    extraTagValue: job.extraTagValue || undefined,
   });
-  advance(job, 'verify', `${result.created ? '新增' : '更新'}组织 ${orgId}，S3 回读成功`);
+  const extraNote = job.extraTagKey
+    ? `，额外标签 ${job.extraTagKey}=${job.extraTagValue}` : '';
+  advance(job, 'verify',
+    `${result.created ? '新增' : '更新'}组织 ${orgId}${extraNote}，S3 回读成功`);
 }
 
 async function runVerify(job: TagOnboardingJob): Promise<void> {
@@ -377,7 +384,10 @@ async function runVerify(job: TagOnboardingJob): Promise<void> {
   const configValid = org
     && org.search_role_arn === searchRoleArn
     && org.view_arn === viewArn
-    && org.tag_value === job.tagValue;
+    && org.tag_value === job.tagValue
+    // 额外标签也要核对，否则写失败时任务照样报成功
+    && (org.extra_tag_key || '') === (job.extraTagKey || '')
+    && (org.extra_tag_value || '') === (job.extraTagValue || '');
   const checksValid = precheck.reachable
     && precheck.orgId === orgId
     && precheck.checks.searchRole?.status === 'ok'
@@ -466,18 +476,34 @@ export function startTagOnboardingRunner(): void {
 export function submitTagOnboarding(input: {
   payerAccountId: string;
   tagValue: string;
+  /** 额外自定义标签（可选），两者要么都给要么都不给 */
+  extraTagKey?: string;
+  extraTagValue?: string;
   requestedBy?: string;
 }): { job: TagOnboardingJob; reused: boolean } {
   const payerAccountId = String(input.payerAccountId || '').trim();
   const tagValue = String(input.tagValue || '').trim();
+  const extraTagKey = String(input.extraTagKey || '').trim();
+  const extraTagValue = String(input.extraTagValue || '').trim();
   if (!/^\d{12}$/.test(payerAccountId)) throw new Error('请提供 12 位 payer 账户 ID');
   if (!tagValue) throw new Error('tag_value 必填');
   if (tagValue.length > 256) throw new Error('tag_value 不能超过 256 个字符');
+  // 只填一半会让用户以为配好了，实际打不出标签 —— 提前拦住而不是到
+  // upsert 阶段才失败（那时任务已经跑了十几分钟）
+  if (!!extraTagKey !== !!extraTagValue) {
+    throw new Error('额外标签的 key 与 value 必须同时填写或同时留空');
+  }
+  if (extraTagKey.toLowerCase() === tagCompliance.MAP_TAG_KEY) {
+    throw new Error(
+      `额外标签的 key 不能是 ${tagCompliance.MAP_TAG_KEY}，它由 tag_value 单独控制`);
+  }
   if (!tagCompliance.isConfigured()) throw new Error('MAP Tag 合规功能尚未配置');
 
   const result = createOrReuseTagOnboardingJob({
     payerAccountId,
     tagValue,
+    extraTagKey: extraTagKey || undefined,
+    extraTagValue: extraTagValue || undefined,
     requestedBy: input.requestedBy,
     steps: initialSteps(),
   });

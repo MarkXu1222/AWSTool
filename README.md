@@ -3,7 +3,7 @@
 企业级 AWS 多账户（多 Organizations）管理平台。带强制 MFA 登录、页面级权限与全量操作审计。
 
 **线上**：https://markxu.co（EC2 Singapore，PM2 进程 `aws-toolbox`）
-**当前版本**：`0.39.0`（见 `web/client/src/version.ts`，左下角展示）
+**当前版本**：`0.40.0`（见 `web/client/src/version.ts`，左下角展示）
 
 **生产接入规模**（快照 2026-09-06，取自线上 db.json）
 
@@ -864,6 +864,42 @@ POC 可申请额。
 - `provisionOrg()` 增加一步，在 payer 账户内**单独创建** `auto-tagger-role`（StackSet 覆盖不到，只能直接建）
 - 新建组织不再自动把 payer 写进 `exclude_accounts`，默认全账户打标；仍可显式传值排除特定账户
 - payer 角色的权限由 `AUTO_TAGGER_INLINE_POLICY()` 从 `AUTO_TAGGER_ROLE_TEMPLATE` 正则解析生成（约 136 个 Action），与 StackSet 模板**同源**，避免两处维护漂移
+
+#### 组织级额外自定义标签（v0.40.0）
+
+MAP 主标签 `map-migrated` 是固定纪律（key 不可改，每个组织只能定制它的
+`tag_value`）。在此之外，每个组织可**额外**再打一组自定义 kv，用于成本
+归集等场景，写入 `orgs.json` 的 `extra_tag_key` / `extra_tag_value`：
+
+```jsonc
+{
+  "org_id": "o-96n4c10zzb",
+  "tag_value": "migEY52ZIK63T",      // map-migrated 的值
+  "extra_tag_key": "CostCenter",      // 可选，额外标签
+  "extra_tag_value": "CC-1001"
+}
+```
+
+> ⚠️ **这个字段需要中央 TagFunction 配合**。平台只负责把它写进
+> `orgs.json`；真正打标的是中央账户 `382309211956` 的
+> `tag-compliance-prod-TagFunction`（源码在 RE-AUTOTAG 项目，不在本仓库）。
+> 它若尚未读取这两个字段，配置会被静默忽略 —— 资源上只有 `map-migrated`。
+> 页面在填了额外标签时会显式提示这一点，接入后务必到报告或资源上确认。
+
+校验规则（`normalizeExtraTag()`，回归测试见 `tests/tag-extra-tag.test.ts`）：
+
+- **只填一半直接报错** —— 单独的 key 或 value 都打不出标签，静默忽略会让
+  用户以为配好了
+- **key 不能是 `map-migrated`** —— 会和主标签撞车，谁后写谁生效，属于难
+  排查的静默覆盖
+- **key 不能以 `aws:` 开头**（AWS 保留前缀）
+- 长度受 AWS 限制：key ≤ 128、value ≤ 256；字符集 `[\w\s+\-=.:/@]`
+- **留空必须删掉键而不是写空串** —— 扫描器若按「字段存在」判断是否打标，
+  空串会让它尝试打一个空 key 的标签
+
+一键接入任务（`tag_onboarding_jobs`）也带这两个字段。复用在跑的任务时会
+**比对标签是否一致**，不一致则抛冲突而非复用 —— 否则用户新填的额外标签会
+被静默丢弃，任务跑完却是旧配置。
 
 > ⚠️ **不要用托管策略 `ResourceGroupsandTagEditorFullAccess` 替代这份内联策略。**
 > 它只授予 `tag:TagResources` / `resource-groups:*`，不含各服务自身的打标 API；

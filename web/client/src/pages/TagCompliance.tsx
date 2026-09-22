@@ -99,6 +99,9 @@ const AddOrgModal: React.FC<{
   const [viewArn, setViewArn] = useState('');
   const [tagValue, setTagValue] = useState('');
   const [excludeAccounts, setExcludeAccounts] = useState('');
+  // 额外自定义标签（可选），与一键接入入口保持一致
+  const [advExtraKey, setAdvExtraKey] = useState('');
+  const [advExtraValue, setAdvExtraValue] = useState('');
 
   const [provisioning, setProvisioning] = useState(false);
   const [provResult, setProvResult] = useState<ProvisionResult | null>(null);
@@ -208,6 +211,7 @@ const AddOrgModal: React.FC<{
     regionRequestIdRef.current += 1;
     setPayer(''); setData(null); setChecking(false);
     setOrgId(''); setSearchRoleArn(''); setViewArn(''); setTagValue(''); setExcludeAccounts('');
+    setAdvExtraKey(''); setAdvExtraValue('');
     setProvisioning(false); setProvResult(null);
     setAggRegion('us-east-1'); setAvailableRegions([]); setAggregatorRegions([]); setLocalRegions([]);
     setRegionsLoading(false); setRegionAccountCounts({});
@@ -272,12 +276,24 @@ const AddOrgModal: React.FC<{
     if (existingOrgIds.includes(orgId.trim())) { message.warning('该 org_id 已存在于配置中'); return; }
     if (!tagValue.trim()) { message.warning('tag_value 为必填项，请填写该组织的 map-migrated 标签值'); return; }
     if (!searchRoleArn.trim() || !viewArn.trim()) { message.warning('缺少 search_role_arn / view_arn，请完成前置条件后重新检测或手动填写'); return; }
+    const ek = advExtraKey.trim();
+    const ev = advExtraValue.trim();
+    if (!!ek !== !!ev) {
+      message.warning('额外标签的 key 与 value 必须同时填写或同时留空');
+      return;
+    }
+    if (ek.toLowerCase() === 'map-migrated') {
+      message.warning('额外标签的 key 不能是 map-migrated，它由 tag_value 控制');
+      return;
+    }
     const entry: any = {
       org_id: orgId.trim(),
       search_role_arn: searchRoleArn.trim(),
       view_arn: viewArn.trim(),
       tag_value: tagValue.trim(),
     };
+    // 空值不写进去 —— 留空串会让扫描器尝试打一个空 key 的标签
+    if (ek) { entry.extra_tag_key = ek; entry.extra_tag_value = ev; }
     const excl = excludeAccounts.split(',').map(s => s.trim()).filter(Boolean);
     if (excl.length) entry.exclude_accounts = excl.join(',');
     onAdd(entry);
@@ -487,6 +503,23 @@ const AddOrgModal: React.FC<{
         </Row>
         <Form.Item label="search_role_arn" required><Input value={searchRoleArn} onChange={e => setSearchRoleArn(e.target.value)} placeholder={`arn:aws:iam::${payer || '<payer>'}:role/resource-explorer-search-role`} /></Form.Item>
         <Form.Item label="view_arn" required><Input value={viewArn} onChange={e => setViewArn(e.target.value)} placeholder="arn:aws:resource-explorer-2:us-east-1:<payer>:view/OrgView/..." /></Form.Item>
+        <Row gutter={12}>
+          <Col span={12}>
+            <Form.Item label="额外标签 key（可选）" extra="留空则只打 map-migrated">
+              <Input value={advExtraKey} onChange={e => setAdvExtraKey(e.target.value)}
+                placeholder="如 CostCenter" />
+            </Form.Item>
+          </Col>
+          <Col span={12}>
+            <Form.Item label="额外标签 value（可选）"
+              extra={advExtraKey.trim() && !advExtraValue.trim()
+                ? <span style={{ color: '#faad14' }}>填了 key 就必须填 value</span>
+                : '与左侧 key 成对生效'}>
+              <Input value={advExtraValue} onChange={e => setAdvExtraValue(e.target.value)}
+                placeholder="如 CC-1001" />
+            </Form.Item>
+          </Col>
+        </Row>
         <Form.Item label="exclude_accounts（逗号分隔，可选）"><Input value={excludeAccounts} onChange={e => setExcludeAccounts(e.target.value)} placeholder="留空 = 全部账户都打标（含 payer 自身）" /></Form.Item>
       </Form>
     </Modal>
@@ -510,6 +543,9 @@ interface OnboardingJob {
   id: string;
   payerAccountId: string;
   tagValue: string;
+  /** 额外自定义标签（可选），map-migrated 之外再打的一组 kv */
+  extraTagKey?: string;
+  extraTagValue?: string;
   status: OnboardingJobStatus;
   progress: number;
   phase: string;
@@ -545,6 +581,9 @@ const AutomatedAddOrgModal: React.FC<{
 }> = ({ open, onClose, onCompleted }) => {
   const [payer, setPayer] = useState('');
   const [tagValue, setTagValue] = useState('');
+  // 额外自定义标签（可选）：map-migrated 之外再打一组 kv
+  const [extraTagKey, setExtraTagKey] = useState('');
+  const [extraTagValue, setExtraTagValue] = useState('');
   const [job, setJob] = useState<OnboardingJob | null>(null);
   const [starting, setStarting] = useState(false);
   const [restoring, setRestoring] = useState(false);
@@ -577,6 +616,8 @@ const AutomatedAddOrgModal: React.FC<{
         if (response.success && response.data) {
           setJob(response.data);
           setTagValue(response.data.tagValue || '');
+          setExtraTagKey(response.data.extraTagKey || '');
+          setExtraTagValue(response.data.extraTagValue || '');
         } else if (!response.success) {
           message.error(response.error || '恢复接入任务失败');
         } else {
@@ -618,10 +659,21 @@ const AutomatedAddOrgModal: React.FC<{
     const value = tagValue.trim();
     if (!/^\d{12}$/.test(accountId)) { message.warning('请输入 12 位 payer 账户 ID'); return; }
     if (!value) { message.warning('tag_value 为必填项'); return; }
+    const ek = extraTagKey.trim();
+    const ev = extraTagValue.trim();
+    // 只填一半打不出标签，前端先拦住（后端也会校验）
+    if (!!ek !== !!ev) {
+      message.warning('额外标签的 key 与 value 必须同时填写或同时留空');
+      return;
+    }
+    if (ek.toLowerCase() === 'map-migrated') {
+      message.warning('额外标签的 key 不能是 map-migrated，它由上方 tag_value 控制');
+      return;
+    }
     setStarting(true);
     completedNotifiedRef.current = '';
     try {
-      const response = await api.tagStartOnboarding(accountId, value);
+      const response = await api.tagStartOnboarding(accountId, value, ek, ev);
       const nextJob = response.data?.job as OnboardingJob | undefined;
       if (response.success && nextJob) {
         setJob(nextJob);
@@ -631,6 +683,9 @@ const AutomatedAddOrgModal: React.FC<{
       } else if (response.data?.activeJob) {
         setJob(response.data.activeJob);
         setTagValue(response.data.activeJob.tagValue || value);
+        // 冲突时回填正在跑的那个任务的标签，让用户看清差异在哪
+        setExtraTagKey(response.data.activeJob.extraTagKey || '');
+        setExtraTagValue(response.data.activeJob.extraTagValue || '');
         localStorage.setItem(LAST_ONBOARDING_PAYER_KEY, accountId);
         message.warning(response.error || '该 payer 已有接入任务');
       } else {
@@ -689,6 +744,8 @@ const AutomatedAddOrgModal: React.FC<{
   const startAnother = () => {
     setPayer('');
     setTagValue('');
+    setExtraTagKey('');
+    setExtraTagValue('');
     setJob(null);
     setDiagnostic(null);
     setIndexStatus(null);
@@ -734,9 +791,52 @@ const AutomatedAddOrgModal: React.FC<{
             </Form.Item>
           </Col>
         </Row>
+
+        {/* 额外自定义标签：MAP 主标签之外，每个组织可再打一组 kv。
+            两者必须同时填或同时留空 —— 只填一半打不出标签。
+
+            ⚠️ 这个字段只是写进 orgs.json，真正打标的是中央账户的
+            TagFunction。它若还没读这两个字段，配了也不会生效，
+            所以这里必须显式提示，不能让用户以为配完就完事了。 */}
+        {extraTagKey.trim() && (
+          <Alert type="warning" showIcon style={{ marginBottom: 12 }}
+            message="额外标签需要中央打标程序支持"
+            description={
+              <>额外标签会写入 <Typography.Text code>orgs.json</Typography.Text> 的{' '}
+              <Typography.Text code>extra_tag_key</Typography.Text> /{' '}
+              <Typography.Text code>extra_tag_value</Typography.Text>。
+              实际打标由中央账户的 TagFunction 执行 —— 若它尚未读取这两个字段，
+              配置会被忽略（资源上只有 map-migrated）。
+              接入后请在报告或资源上确认额外标签确实打上了。</>
+            } />
+        )}
+        <Row gutter={12}>
+          <Col span={12}>
+            <Form.Item label="额外标签 key（可选）"
+              extra="留空则只打 map-migrated">
+              <Input value={extraTagKey} disabled={active}
+                onChange={event => setExtraTagKey(event.target.value)}
+                placeholder="如 CostCenter" />
+            </Form.Item>
+          </Col>
+          <Col span={12}>
+            <Form.Item label="额外标签 value（可选）"
+              extra={extraTagKey.trim() && !extraTagValue.trim()
+                ? <span style={{ color: '#faad14' }}>填了 key 就必须填 value</span>
+                : '与左侧 key 成对生效'}>
+              <Input value={extraTagValue} disabled={active}
+                onChange={event => setExtraTagValue(event.target.value)}
+                onPressEnter={() => { if (!active) void handleStart(); }}
+                placeholder="如 CC-1001" />
+            </Form.Item>
+          </Col>
+        </Row>
         {!job && (
           <Button type="primary" block size="large" icon={<ThunderboltOutlined />}
-            loading={starting || restoring} disabled={!/^\d{12}$/.test(payer) || !tagValue.trim()}
+            loading={starting || restoring}
+            disabled={!/^\d{12}$/.test(payer) || !tagValue.trim()
+              // 额外标签只填一半时禁用，避免提交后才报错
+              || (!!extraTagKey.trim() !== !!extraTagValue.trim())}
             onClick={handleStart}>开始一键接入</Button>
         )}
       </Form>

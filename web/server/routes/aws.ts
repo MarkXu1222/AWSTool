@@ -74,13 +74,17 @@ awsRouter.post('/tag-compliance/onboarding', requireStrictAdmin, async (req: Req
     const result = tagOnboarding.submitTagOnboarding({
       payerAccountId: req.body?.payerAccountId,
       tagValue: req.body?.tagValue,
+      extraTagKey: req.body?.extraTagKey,
+      extraTagValue: req.body?.extraTagValue,
       requestedBy: user?.username,
     });
     try {
       db.addAuditLog(
         user?.userId,
         'TAG_ONBOARDING_SUBMIT',
-        `${result.reused ? '复用' : '创建'} MAP 一键接入任务 ${result.job.id}，payer ${result.job.payerAccountId}`,
+        `${result.reused ? '复用' : '创建'} MAP 一键接入任务 ${result.job.id}，payer ${result.job.payerAccountId}`
+        + (result.job.extraTagKey
+          ? `，额外标签 ${result.job.extraTagKey}=${result.job.extraTagValue}` : ''),
         user?.username,
         req.ip,
       );
