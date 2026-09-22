@@ -573,6 +573,119 @@ const ONBOARDING_STEP_META: Record<OnboardingStepStatus, { color: string; text: 
 };
 const LAST_ONBOARDING_PAYER_KEY = 'map-tag-last-onboarding-payer';
 
+/**
+ * 已接入组织的额外标签管理。
+ *
+ * 存在的理由：一键接入只在**新增**时能填额外标签，已经跑完的组织想补标签
+ * 只能手改下面那块 orgs.json 文本 —— 少个逗号、key 拼错、误删 view_arn
+ * 都会让整份配置出问题。这里把编辑限制在两个字段上，其余原样保留。
+ */
+const ExtraTagModal: React.FC<{
+  open: boolean;
+  orgsText: string;
+  onClose: () => void;
+  onApply: (nextOrgs: any[]) => void;
+}> = ({ open, orgsText, onClose, onApply }) => {
+  const [rows, setRows] = useState<any[]>([]);
+  const [parseError, setParseError] = useState('');
+
+  useEffect(() => {
+    if (!open) return;
+    try {
+      const arr = JSON.parse(orgsText || '[]');
+      if (!Array.isArray(arr)) throw new Error('配置不是数组');
+      setRows(arr.map((o: any) => ({
+        ...o,
+        _key: String(o?.extra_tag_key || ''),
+        _value: String(o?.extra_tag_value || ''),
+      })));
+      setParseError('');
+    } catch (e: any) {
+      setParseError(e.message || 'orgs.json 解析失败');
+      setRows([]);
+    }
+  }, [open, orgsText]);
+
+  const update = (idx: number, field: '_key' | '_value', v: string) => {
+    setRows(prev => prev.map((r, i) => (i === idx ? { ...r, [field]: v } : r)));
+  };
+
+  const handleApply = () => {
+    for (const r of rows) {
+      const k = r._key.trim();
+      const v = r._value.trim();
+      if (!!k !== !!v) {
+        message.warning(`组织 ${r.org_id} 的额外标签只填了一半`);
+        return;
+      }
+      if (k.toLowerCase() === 'map-migrated') {
+        message.warning(`组织 ${r.org_id} 的额外标签 key 不能是 map-migrated`);
+        return;
+      }
+    }
+    // 只动这两个字段，其余原样写回 —— 避免把 view_arn 等误删
+    const next = rows.map(({ _key, _value, ...rest }) => {
+      const copy: any = { ...rest };
+      delete copy.extra_tag_key;
+      delete copy.extra_tag_value;
+      const k = _key.trim();
+      const v = _value.trim();
+      if (k) { copy.extra_tag_key = k; copy.extra_tag_value = v; }
+      return copy;
+    });
+    onApply(next);
+    onClose();
+  };
+
+  return (
+    <Modal open={open} onCancel={onClose} title="管理各组织的额外标签" width={860}
+      okText="应用到下方配置" cancelText="取消" onOk={handleApply}
+      okButtonProps={{ disabled: !!parseError }}>
+      {parseError ? (
+        <Alert type="error" showIcon message="无法解析当前 orgs.json"
+          description={`${parseError}。请先修正下方 JSON 文本。`} />
+      ) : (
+        <>
+          <Alert type="info" showIcon style={{ marginBottom: 12 }}
+            message="额外标签与 map-migrated 一起打在资源上"
+            description={<>留空表示该组织只打 <Typography.Text code>map-migrated</Typography.Text>。
+              应用后仍需点「保存到 S3」才会写入，下次扫描生效。</>} />
+          <Table<any> rowKey="org_id" size="small" pagination={false}
+            dataSource={rows}
+            columns={[
+              {
+                title: '组织', dataIndex: 'org_id', width: 220,
+                render: (v: string, r: any) => (
+                  <div style={{ lineHeight: 1.5 }}>
+                    <div><Typography.Text code>{v}</Typography.Text></div>
+                    <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                      map-migrated = {r.tag_value || '-'}
+                    </Typography.Text>
+                  </div>
+                ),
+              },
+              {
+                title: '额外标签 key', width: 220,
+                render: (_: any, r: any, i: number) => (
+                  <Input value={r._key} placeholder="留空 = 不打"
+                    onChange={e => update(i, '_key', e.target.value)} />
+                ),
+              },
+              {
+                title: '额外标签 value', width: 220,
+                render: (_: any, r: any, i: number) => (
+                  <Input value={r._value} placeholder="留空 = 不打"
+                    status={r._key.trim() && !r._value.trim() ? 'warning' : undefined}
+                    onChange={e => update(i, '_value', e.target.value)} />
+                ),
+              },
+            ]} />
+        </>
+      )}
+    </Modal>
+  );
+};
+
 /** 默认接入入口：用户只需 payer ID + tag_value，其余工作由持久化后台任务完成。 */
 const AutomatedAddOrgModal: React.FC<{
   open: boolean;
@@ -1037,6 +1150,8 @@ const TagCompliancePage: React.FC = () => {
   const [cfgLoading, setCfgLoading] = useState(false);
   const [addOpen, setAddOpen] = useState(false);
   const [advancedAddOpen, setAdvancedAddOpen] = useState(false);
+  // 给已接入的组织补/改额外标签（一键接入只覆盖新增场景）
+  const [extraTagOpen, setExtraTagOpen] = useState(false);
 
   // 从当前 orgs.json 文本里解析出已有 org_id，供去重
   const existingOrgIds = (() => {
@@ -1275,6 +1390,8 @@ const TagCompliancePage: React.FC = () => {
         description="这是扫描器的组织清单（存于工具账户 S3）。每个组织需包含 org_id / search_role_arn / view_arn 等字段。保存后下次扫描即生效，无需重新部署。" />
       <Space style={{ marginBottom: 8 }} wrap>
         <Button size="small" type="primary" icon={<PlusOutlined />} onClick={() => setAddOpen(true)}>一键接入组织</Button>
+        <Button size="small" icon={<TagsOutlined />}
+          onClick={() => setExtraTagOpen(true)}>管理额外标签</Button>
         <Button size="small" onClick={() => setAdvancedAddOpen(true)}>高级手工工具</Button>
         <Button size="small" icon={<ReloadOutlined />} onClick={loadConfig} loading={cfgLoading}>重新加载</Button>
         <Popconfirm title="确认保存组织配置？" description="将覆盖工具账户 S3 里的 orgs.json，请确认 JSON 无误。" okText="保存" cancelText="取消" onConfirm={handleSaveConfig}>
@@ -1284,6 +1401,15 @@ const TagCompliancePage: React.FC = () => {
       </Space>
       <AutomatedAddOrgModal open={addOpen} onClose={() => setAddOpen(false)} onCompleted={() => { void loadConfig(); }} />
       <AddOrgModal open={advancedAddOpen} existingOrgIds={existingOrgIds} onClose={() => setAdvancedAddOpen(false)} onAdd={handleAddOrg} />
+      <ExtraTagModal open={extraTagOpen} orgsText={orgsText}
+        onClose={() => setExtraTagOpen(false)}
+        onApply={(next) => {
+          setOrgsText(JSON.stringify(next, null, 2));
+          setOrgsCount(next.length);
+          const withTag = next.filter((o: any) => o.extra_tag_key).length;
+          message.success(
+            `已更新 ${withTag} 个组织的额外标签，请核对后点「保存到 S3」`);
+        }} />
       <Input.TextArea value={orgsText} onChange={e => setOrgsText(e.target.value)}
         spellCheck={false}
         style={{ fontFamily: 'monospace', fontSize: 12 }} autoSize={{ minRows: 16, maxRows: 40 }} />

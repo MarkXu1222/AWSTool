@@ -2,4 +2,4 @@
 // 版本规则：每次部署都更新。
 //   - 小修改（样式微调、文案、小 bug 修复）：递增末位 patch，如 0.1.1 -> 0.1.2
 //   - 大改动（新功能、结构调整、破坏性变更）：递增前面的 minor/major，如 0.1.x -> 0.2.0 / 1.0.0
-export const APP_VERSION = '0.40.1';
+export const APP_VERSION = '0.41.0';

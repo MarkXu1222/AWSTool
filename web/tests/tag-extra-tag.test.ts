@@ -107,6 +107,69 @@ test('额外标签不影响 exclude_accounts 的既有规范化', () => {
   assert.equal(out.extra_tag_key, 'K');
 });
 
+/**
+ * 复刻 ExtraTagModal 的 handleApply：只改额外标签两个字段，
+ * 其余原样写回。这是给**已接入组织**补标签的路径。
+ */
+function applyExtraTags(
+  orgs: any[], edits: Record<string, { key: string; value: string }>,
+): any[] {
+  return orgs.map((o) => {
+    const copy: any = { ...o };
+    delete copy.extra_tag_key;
+    delete copy.extra_tag_value;
+    const e = edits[o.org_id];
+    const k = (e?.key || '').trim();
+    const v = (e?.value || '').trim();
+    if (k) { copy.extra_tag_key = k; copy.extra_tag_value = v; }
+    return copy;
+  });
+}
+
+test('给已接入组织补标签不碰其他字段', () => {
+  // 手改 JSON 最容易误删 view_arn / search_role_arn，那会让整个组织扫不了
+  const before = [{
+    ...base(), tagger_role_name: 'auto-tagger-role',
+    exclude_accounts: '123456789012',
+  }];
+  const [after]: any = applyExtraTags(before, {
+    'o-96n4c10zzb': { key: 'CostCenter', value: 'CC-1001' },
+  });
+  assert.equal(after.search_role_arn, before[0].search_role_arn);
+  assert.equal(after.view_arn, before[0].view_arn);
+  assert.equal(after.tag_value, before[0].tag_value);
+  assert.equal(after.tagger_role_name, 'auto-tagger-role');
+  assert.equal(after.exclude_accounts, '123456789012');
+  assert.equal(after.extra_tag_key, 'CostCenter');
+  // 结果仍要能通过后端校验
+  assert.doesNotThrow(() => __test__normalizeOrgsConfig([after]));
+});
+
+test('清空额外标签会删键而不是留空串', () => {
+  const before = [{ ...base(), extra_tag_key: 'CostCenter', extra_tag_value: 'CC-1001' }];
+  const [after]: any = applyExtraTags(before, {
+    'o-96n4c10zzb': { key: '', value: '' },
+  });
+  assert.equal('extra_tag_key' in after, false);
+  assert.equal('extra_tag_value' in after, false);
+  assert.equal(after.tag_value, 'migEY52ZIK63T', '主标签不受影响');
+});
+
+test('只改一个组织时其他组织保持不变', () => {
+  const before = [
+    { ...base(), org_id: 'o-aaaaaaaaaa' },
+    { ...base(), org_id: 'o-bbbbbbbbbb', extra_tag_key: 'Team', extra_tag_value: 'T1' },
+  ];
+  const after: any = applyExtraTags(before, {
+    'o-aaaaaaaaaa': { key: 'CostCenter', value: 'CC-1' },
+    // o-bbbbbbbbbb 在弹窗里原样回显，编辑时也要带上原值
+    'o-bbbbbbbbbb': { key: 'Team', value: 'T1' },
+  });
+  assert.equal(after[0].extra_tag_key, 'CostCenter');
+  assert.equal(after[1].extra_tag_key, 'Team');
+  assert.equal(after[1].extra_tag_value, 'T1');
+});
+
 test('多组织各自独立配置额外标签', () => {
   const out: any = __test__normalizeOrgsConfig([
     { ...base(), org_id: 'o-aaaaaaaaaa', extra_tag_key: 'A', extra_tag_value: '1' },
