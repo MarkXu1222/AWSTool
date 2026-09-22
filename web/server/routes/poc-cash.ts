@@ -418,6 +418,22 @@ pocCashRouter.post('/opportunities', async (req: Request, res: Response) => {
 
     res.json(result);
   } catch (e: any) {
+    // 校验/创建失败要留痕。此前失败是静默的（审计日志只在成功分支写、
+    // 访问日志也没记），用户报「创建有问题」时无从还原是哪条规则拦的。
+    // 只记字段特征，不记完整业务描述（可能含客户敏感信息）。
+    console.error('[poc-cash] 创建商机失败:', e.message, '| 提交内容特征:',
+      JSON.stringify({
+        partnerKey: b.partnerKey,
+        companyName: b.companyName,
+        industry: b.industry,
+        countryCode: b.countryCode,
+        useCase: b.customerUseCase,
+        problemLen: String(b.customerBusinessProblem || '').trim().length,
+        mrrUsd: b.mrrUsd,
+        targetCloseDate: b.targetCloseDate,
+        hasTitleOverride: !!b.titleOverride,
+        projectName: b.projectName,
+      }));
     res.status(400).json({ error: e.message });
   }
 });

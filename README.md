@@ -3,7 +3,7 @@
 企业级 AWS 多账户（多 Organizations）管理平台。带强制 MFA 登录、页面级权限与全量操作审计。
 
 **线上**：https://markxu.co（EC2 Singapore，PM2 进程 `aws-toolbox`）
-**当前版本**：`0.38.0`（见 `web/client/src/version.ts`，左下角展示）
+**当前版本**：`0.38.1`（见 `web/client/src/version.ts`，左下角展示）
 
 **生产接入规模**（快照 2026-09-06，取自线上 db.json）
 
@@ -593,6 +593,22 @@ CloudTrail。
 ⚠️ **切换主体要清空已加载的列表**：Solutions 与商机列表按账户隔离，不重拉
 会让 Mergebytes 的表单里列出 Webby 的选项，选中即报错。「阶段检查」Tab 有
 独立的主体选择器 —— 它不在创建表单的 `Form` 里，读不到那个 `partnerKey`。
+
+⚠️ **`request()` 对非 2xx 不抛错**（0.38.1 踩坑）：它把后端的
+`{ error: "..." }` 原样 resolve 回来。创建商机若直接 `setResult(r)`，
+结果页会渲染出「**商机 undefined 已创建**」，再解引用 `r.amounts.mrrUsd`
+就整页崩进 ErrorBoundary —— 用户只看到「页面出错了」，真正的失败原因
+（如「业务描述至少 50 字」）被完全吞掉。
+
+调用方必须自己判：`if (r?.error || !r?.opportunityId) throw ...`。
+改 `request()` 全局抛错会波及大量既有页面，故只在调用点拦。
+回归测试见 `tests/poc-cash-create-result.test.ts`。
+
+配套改了两处可观测性短板：
+- ErrorBoundary 把 `error.message` / 堆栈 / 组件栈显示出来并支持一键复制，
+  不再只 `console.error`（截图里看不到任何线索，定位得靠猜）。
+- 创建商机的 400 分支补 `console.error` 记字段特征（长度、取值，
+  不记完整业务描述），此前失败是静默的：审计日志只在成功分支写。
 
 ⚠️ **Mergebytes 无 Solution**：实测 `ListSolutions` 返回 0 条。
 `defaultSolutionId` 留空是刻意的，`createOpportunity` 据此**跳过关联**并记一

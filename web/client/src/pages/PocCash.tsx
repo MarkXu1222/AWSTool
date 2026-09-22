@@ -269,6 +269,12 @@ const PocCashPage: React.FC = () => {
         setSubmitting(true);
         try {
           const r = await api.pocCashCreate(payload);
+          // request() 对非 2xx 不抛错，会把 { error } 原样 resolve 回来。
+          // 不在这里拦住，下面的结果页会渲染出「商机 undefined 已创建」，
+          // 并在解引用 r.amounts.mrrUsd 时整页崩成错误边界（实测）。
+          if (r?.error || !r?.opportunityId) {
+            throw new Error(r?.error || '创建失败：服务端未返回商机 ID');
+          }
           setResult(r);
           if (r.warnings?.length) {
             message.warning(`商机 ${r.opportunityId} 已创建，但有 ${r.warnings.length} 条警告`);
@@ -321,7 +327,7 @@ const PocCashPage: React.FC = () => {
     return (
       <Card>
         <Result
-          status={result.warnings.length ? 'warning' : 'success'}
+          status={result.warnings?.length ? 'warning' : 'success'}
           title={`商机 ${result.opportunityId} ${result.submitted ? '已提交' : '已创建'}`}
           subTitle={result.title}
           extra={[
@@ -349,16 +355,24 @@ const PocCashPage: React.FC = () => {
               : <Tag color="error">未关联</Tag>}
           </Descriptions.Item>
           <Descriptions.Item label="Engagement">{result.engagementId || '—'}</Descriptions.Item>
+          {/* amounts 理论上必有，但残缺响应不该让整页崩掉 —— 这里的
+              解引用曾是「商机 undefined 已创建」白屏的直接崩溃点 */}
           <Descriptions.Item label="MRR">
-            {result.amounts.mrrUsd.toLocaleString()} USD/月</Descriptions.Item>
+            {result.amounts ? `${result.amounts.mrrUsd.toLocaleString()} USD/月` : '—'}
+          </Descriptions.Item>
           <Descriptions.Item label="ARR">
-            {result.amounts.arrUsd.toLocaleString()} USD</Descriptions.Item>
+            {result.amounts ? `${result.amounts.arrUsd.toLocaleString()} USD` : '—'}
+          </Descriptions.Item>
           <Descriptions.Item label="POC 可申请" span={2}>
-            <Text strong>{result.amounts.pocUsd.toLocaleString()} USD</Text>
-            <Text type="secondary">
-              {' '}≈ {(result.amounts.pocUsd * MYR_RATE).toLocaleString(undefined,
-                { maximumFractionDigits: 2 })} MYR
-            </Text>
+            {result.amounts ? (
+              <>
+                <Text strong>{result.amounts.pocUsd.toLocaleString()} USD</Text>
+                <Text type="secondary">
+                  {' '}≈ {(result.amounts.pocUsd * MYR_RATE).toLocaleString(undefined,
+                    { maximumFractionDigits: 2 })} MYR
+                </Text>
+              </>
+            ) : '—'}
           </Descriptions.Item>
           {result.arn && (
             <Descriptions.Item label="ARN" span={2}>
@@ -367,18 +381,20 @@ const PocCashPage: React.FC = () => {
           )}
         </Descriptions>
 
-        {result.warnings.length > 0 && (
+        {(result.warnings?.length ?? 0) > 0 && (
           <Alert style={{ marginTop: 16 }} type="warning" showIcon
             message="以下步骤未成功，但商机本身已创建"
             description={<ul style={{ margin: 0, paddingLeft: 18 }}>
-              {result.warnings.map((w, i) => <li key={i}>{w}</li>)}
+              {(result.warnings || []).map((w, i) => <li key={i}>{w}</li>)}
             </ul>} />
         )}
 
         <Alert style={{ marginTop: 16 }} type="info" showIcon message="下一步"
           description={`等 AWS 审批通过（ReviewStatus 变为 Approved）后才能把阶段推到 `
-            + `Technical Validation，然后做定价计算器（目标 ARR `
-            + `${result.amounts.arrUsd.toLocaleString()} USD）并提交 POC 资金申请。`} />
+            + `Technical Validation，然后做定价计算器`
+            + (result.amounts
+              ? `（目标 ARR ${result.amounts.arrUsd.toLocaleString()} USD）` : '')
+            + `并提交 POC 资金申请。`} />
       </Card>
     );
   }
