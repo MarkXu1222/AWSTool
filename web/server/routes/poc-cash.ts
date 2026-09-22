@@ -312,6 +312,32 @@ pocCashRouter.get('/opportunities/:id/stage', async (req: Request, res: Response
   }
 });
 
+/**
+ * 给已创建但未提交的商机补提交（Pending Submission → Submitted）。
+ *
+ * 创建时选「只创建，暂不提交」会停在 Pending Submission，此前没有
+ * 补提交入口 —— 页面提示「需先提交」却没有按钮。
+ */
+pocCashRouter.post('/opportunities/:id/submit', async (req: Request, res: Response) => {
+  const id = String(req.params.id || '');
+  if (!OPP_ID_RE.test(id)) return res.status(400).json({ error: '无效的商机 ID' });
+  try {
+    const pk = partnerKeyOf(req);
+    const r = await poc.submitOpportunity(id, pk);
+    const user = (req as any).user;
+    db.addAuditLog(user?.userId, 'POC_OPPORTUNITY_SUBMIT',
+      `[${pk}] ${id} | 提交给 AWS | task ${r.taskStatus}`
+      + ` | ReviewStatus ${r.status.reviewStatus}`
+      + `${r.warnings.length ? ` | 警告 ${r.warnings.length} 条` : ''}`,
+      user?.username, req.ip);
+    (res.locals as any).audited = true;
+    res.json(r);
+  } catch (e: any) {
+    console.error('[poc-cash] 提交商机失败:', id, e.message);
+    res.status(400).json({ error: e.message });
+  }
+});
+
 /** 推进阶段。服务端自己 Get 最新 LastModifiedDate 做乐观锁，
  *  不接受前端传时间戳（避免用陈旧值触发 ConflictException）。 */
 pocCashRouter.post('/opportunities/:id/stage', async (req: Request, res: Response) => {

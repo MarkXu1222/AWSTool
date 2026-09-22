@@ -480,6 +480,10 @@ export const api = {
   pocCashAdvanceStage: (id: string, stage: string, partnerKey?: string) =>
     request(`/poc-cash/opportunities/${encodeURIComponent(id)}/stage`,
       { method: 'POST', body: JSON.stringify({ stage, partnerKey }) }),
+  // 补提交：创建时选了「暂不提交」的商机停在 Pending Submission
+  pocCashSubmitOpportunity: (id: string, partnerKey?: string) =>
+    request(`/poc-cash/opportunities/${encodeURIComponent(id)}/submit`,
+      { method: 'POST', body: JSON.stringify({ partnerKey }) }),
   // POC 资金申请
   pocFundingMeta: () => request('/poc-cash/funding/meta'),
   pocFundingAccount: (id: string) =>

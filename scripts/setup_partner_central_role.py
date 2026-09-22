@@ -88,11 +88,26 @@ PERMISSION_POLICY = {
             "Action": [
                 # 提交商机必须先建 engagement，AWS 不允许直接 SubmitOpportunity
                 "partnercentral:StartEngagementFromOpportunityTask",
+                # ⚠️ 上面那个 task 内部会建 Engagement 并关联资源，光给 task
+                # 权限不够。缺这三个会报：
+                #   is not authorized to perform: partnercentral:CreateEngagement
+                # 实测确认（提交一直失败，但错误被吞进 warnings 没暴露出来）。
+                "partnercentral:CreateEngagement",
+                "partnercentral:CreateEngagementInvitation",
+                "partnercentral:CreateResourceSnapshot",
+                "partnercentral:CreateResourceSnapshotJob",
+                "partnercentral:StartResourceSnapshotJob",
                 "partnercentral:ListEngagementFromOpportunityTasks",
                 "partnercentral:GetEngagement",
                 "partnercentral:ListEngagements",
                 "partnercentral:ListEngagementMembers",
                 "partnercentral:ListEngagementResourceAssociations",
+                "partnercentral:ListEngagementInvitations",
+                "partnercentral:GetEngagementInvitation",
+                "partnercentral:GetResourceSnapshot",
+                "partnercentral:GetResourceSnapshotJob",
+                "partnercentral:ListResourceSnapshots",
+                "partnercentral:ListResourceSnapshotJobs",
             ],
             "Resource": "*",
         },

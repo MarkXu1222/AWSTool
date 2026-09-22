@@ -198,6 +198,40 @@ test('Update 回传保留 Marketing 原值不篡改归因', () => {
     { Source: 'Marketing Activity', AwsFundingUsed: 'Yes' });
 });
 
+test('Pending Submission 可提交但不可改阶段', () => {
+  // 创建时选「只创建，暂不提交」就停在这个状态。此前页面只提示
+  // 「需先提交」却没有提交按钮，用户只能去 Partner Central 控制台。
+  const s = __test__evaluateStage(opp('Prospect', 'Pending Submission'));
+  assert.equal(s.submittable, true, 'Pending Submission 必须可提交');
+  assert.equal(s.editable, false, '未提交时不能改阶段');
+  assert.equal(s.nextStage, null);
+  assert.match(s.reason, /需先提交/);
+});
+
+test('已提交/审核中的商机不可再提交', () => {
+  for (const review of ['Submitted', 'In review', 'Approved', 'Action Required']) {
+    const s = __test__evaluateStage(opp('Prospect', review));
+    assert.equal(s.submittable, false, `${review} 不该可提交`);
+  }
+});
+
+test('ReviewStatus 缺失按待提交处理', () => {
+  // 刚建好的商机可能还没有 ReviewStatus
+  const s = __test__evaluateStage(opp('Prospect', undefined));
+  assert.equal(s.submittable, true);
+  assert.equal(s.editable, false);
+});
+
+test('Rejected 的文案要说明审核已结束而非进行中', () => {
+  // 原文案「AWS 审核中，商机已锁定」会让人以为再等等就好，
+  // 实际是已被拒、不会再变，只能新建商机。
+  const s = __test__evaluateStage(opp('Prospect', 'Rejected'));
+  assert.equal(s.editable, false);
+  assert.equal(s.submittable, false);
+  assert.match(s.reason, /已拒绝/);
+  assert.equal(s.reason.includes('审核中'), false, '不能说成审核中');
+});
+
 test('创建日期统一成 ISO，不能用 String(Date)', () => {
   // SDK 把 CreatedDate 反序列化成 Date 对象。String(date).slice(0,10)
   // 会得到 "Mon Sep 21" —— 既显示错误，又让「按日期倒序」的字符串排序失效

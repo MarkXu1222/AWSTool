@@ -3,7 +3,7 @@
 企业级 AWS 多账户（多 Organizations）管理平台。带强制 MFA 登录、页面级权限与全量操作审计。
 
 **线上**：https://markxu.co（EC2 Singapore，PM2 进程 `aws-toolbox`）
-**当前版本**：`0.38.2`（见 `web/client/src/version.ts`，左下角展示）
+**当前版本**：`0.39.0`（见 `web/client/src/version.ts`，左下角展示）
 
 **生产接入规模**（快照 2026-09-06，取自线上 db.json）
 
@@ -660,6 +660,27 @@ python3 scripts/setup_partner_central_role.py --partner mergebytes --verify
 新增主体的完整步骤：① 本地配好该账户的 AWS profile → ② 在脚本的
 `PARTNERS` 加一条 → ③ `--execute` 建 role → ④ `--verify` 验边界 →
 ⑤ `poc-cash.ts` 的 `PARTNERS` 加主体资料 → ⑥ `config.json` 填 role。
+
+⚠️ **提交商机要 `CreateEngagement` 等一组权限**（0.39.0）：光给
+`StartEngagementFromOpportunityTask` 不够 —— 那个 task 内部会建
+Engagement 并做资源快照。缺权限时报：
+
+```
+is not authorized to perform: partnercentral:CreateEngagement
+```
+
+需要同时给 `CreateEngagement` / `CreateEngagementInvitation` /
+`CreateResourceSnapshot` / `CreateResourceSnapshotJob` /
+`StartResourceSnapshotJob`（role 现为 42 个 action）。
+
+> 这个问题此前**一直存在但没暴露**：`createOpportunity` 把提交失败
+> 写进 `warnings` 而不是抛错，所以「创建并提交」看起来成功了，实际
+> 商机一直停在 `Pending Submission`。
+
+⚠️ **补提交入口**（0.39.0）：创建时选「只创建，暂不提交」会停在
+`Pending Submission`。此前阶段检查页提示「需先提交」却**没有提交按钮**，
+只能去 Partner Central 控制台。现在 `StageStatus.submittable` 为 true
+时显示「提交给 AWS 审核」，走 `POST /opportunities/:id/submit`。
 
 ⚠️ **IAM action 前缀是 `partnercentral:`，不是 `partnercentral-selling:`**。
 这是实测确认的（建无权限 role 调 ListSolutions，AWS 拒绝信息里写的是

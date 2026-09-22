@@ -610,6 +610,14 @@ export interface StageStatus {
   reason: string;
   /** 按顺序的下一个阶段，已在末尾或不可推进时为 null */
   nextStage: string | null;
+  /**
+   * 能否现在提交给 AWS。
+   *
+   * 只有 Pending Submission 能提交 —— 它是「建好但没提交」的状态。
+   * 创建时选了「只创建，暂不提交」就会停在这里，此前平台没有补提交的
+   * 入口，用户只能看到「需先提交」却无从操作。
+   */
+  submittable: boolean;
   /** POC 申请的前置：要到 Technical Validation */
   readyForPoc: boolean;
   amounts?: { mrrUsd: number; arrUsd: number; pocUsd: number };
@@ -632,12 +640,20 @@ function evaluateStage(o: any): StageStatus {
   // Submitted / In review 期间商机被锁，要等 AWS 审完。
   let editable: boolean;
   let reason: string;
+  let submittable = false;
   if (!review || review === 'Pending Submission') {
     editable = false;
-    reason = '尚未提交给 AWS —— 未提交状态下不能改阶段，需先提交';
+    submittable = true;   // 这个状态才能提交
+    reason = '尚未提交给 AWS —— 改阶段前需先提交（下方有提交按钮）';
   } else if (EDITABLE_REVIEW_STATUS.has(review)) {
     editable = true;
     reason = `ReviewStatus=${review}，可以推进阶段`;
+  } else if (review === 'Rejected') {
+    // Rejected 是审核已结束且被拒，不是「审核中」。
+    // 原文案写成「AWS 审核中，商机已锁定」会让人以为再等等就好。
+    editable = false;
+    reason = 'ReviewStatus=Rejected —— AWS 已拒绝该商机，无法再修改；'
+      + '如需继续请新建商机';
   } else {
     editable = false;
     reason = `ReviewStatus=${review}，AWS 审核中，商机已锁定`;
@@ -657,7 +673,7 @@ function evaluateStage(o: any): StageStatus {
       ? new Date(o.LastModifiedDate).toISOString() : undefined,
     mrrUsd: mrr,
     solutionIds: o.RelatedEntityIdentifiers?.Solutions || [],
-    editable, reason, nextStage,
+    editable, reason, nextStage, submittable,
     readyForPoc: stage === 'Technical Validation' && editable,
     amounts: mrr ? deriveAmounts(mrr) : undefined,
   };
@@ -715,6 +731,101 @@ export async function advanceStage(
     ...buildUpdateEchoFields(cur),
   }));
   return getStageStatus(id, partnerKey);
+}
+
+interface EngagementTaskResult {
+  taskId?: string;
+  taskStatus?: string;
+  engagementId?: string;
+  submitted: boolean;
+  message?: string;
+}
+
+/**
+ * 提交商机给 AWS（建 Engagement 并提交）。
+ *
+ * ⚠️ 必须用 StartEngagementFromOpportunityTask —— 直接调 SubmitOpportunity
+ * 会报 "Cannot submit opportunity without an engagement."
+ *
+ * 创建流程与「补提交」共用这一份实现，避免两处参数分叉
+ * （InvolvementType / Visibility 写得不一致会导致提交结果不同）。
+ */
+async function startEngagementTask(
+  c: PartnerCentralSellingClient, opportunityId: string,
+): Promise<EngagementTaskResult> {
+  const task: any = await c.send(new StartEngagementFromOpportunityTaskCommand({
+    Catalog: CATALOG,
+    ClientToken: randomUUID(),
+    Identifier: opportunityId,
+    AwsSubmission: { InvolvementType: 'Co-Sell', Visibility: 'Full' },
+  }));
+  return {
+    taskId: task.TaskId,
+    taskStatus: task.TaskStatus,
+    engagementId: task.EngagementId,
+    // 任务是异步的：IN_PROGRESS 不代表失败，但也还没真正提交完
+    submitted: task.TaskStatus === 'COMPLETE',
+    message: task.Message,
+  };
+}
+
+export interface SubmitResult {
+  opportunityId: string;
+  taskId?: string;
+  taskStatus?: string;
+  engagementId?: string;
+  submitted: boolean;
+  /** 提交后回读的最新状态 */
+  status: StageStatus;
+  warnings: string[];
+}
+
+/**
+ * 给已创建但未提交的商机补提交。
+ *
+ * 场景：创建时选了「只创建，暂不提交」，商机停在 Pending Submission。
+ * 此前平台没有补提交入口 —— 阶段检查页提示「需先提交」，但页面上
+ * 只有「刷新状态」按钮，用户无从操作，只能去 Partner Central 控制台。
+ */
+export async function submitOpportunity(
+  id: string, partnerKey: string = DEFAULT_PARTNER_KEY,
+): Promise<SubmitResult> {
+  const c = await client(partnerKey);
+  const cur: any = await c.send(new GetOpportunityCommand({
+    Catalog: CATALOG, Identifier: id,
+  }));
+  const before = evaluateStage(cur);
+
+  // 只有 Pending Submission 能提交。已提交的再提交会被 AWS 拒，
+  // 这里先拦下来给出明确原因，而不是把 SDK 的原始报错抛给用户。
+  if (!before.submittable) {
+    throw new Error(
+      `商机 ${id} 当前 ReviewStatus=${before.reviewStatus || '未知'}，`
+      + '不是待提交状态，无需再次提交');
+  }
+
+  const warnings: string[] = [];
+  // Solution 未关联不阻断提交，但要提示 —— AWS 审核时会看
+  if (!before.solutionIds.length) {
+    warnings.push('该商机未关联 Solution，AWS 审核时可能要求补充。');
+  }
+
+  const task = await startEngagementTask(c, id);
+  if (!task.submitted) {
+    warnings.push(`提交任务状态为 ${task.taskStatus}`
+      + `${task.message ? '：' + task.message : ''}`
+      + '。任务是异步的，可稍后刷新状态确认。');
+  }
+
+  return {
+    opportunityId: id,
+    taskId: task.taskId,
+    taskStatus: task.taskStatus,
+    engagementId: task.engagementId,
+    submitted: task.submitted,
+    status: await getStageStatus(id, partnerKey),
+    warnings,
+  };
 }
 
 /** 创建 → 关联 Solution → 提交。任一后续步骤失败都不回滚商机，
@@ -802,21 +913,14 @@ export async function createOpportunity(input: OpportunityInput): Promise<Create
 
   if (input.submit) {
     try {
-      // 必须用 StartEngagementFromOpportunityTask —— 直接调 SubmitOpportunity
-      // 会报 "Cannot submit opportunity without an engagement."
-      const task: any = await c.send(new StartEngagementFromOpportunityTaskCommand({
-        Catalog: CATALOG,
-        ClientToken: randomUUID(),
-        Identifier: opportunityId,
-        AwsSubmission: { InvolvementType: 'Co-Sell', Visibility: 'Full' },
-      }));
-      result.taskId = task.TaskId;
-      result.taskStatus = task.TaskStatus;
-      result.engagementId = task.EngagementId;
-      result.submitted = task.TaskStatus === 'COMPLETE';
-      if (task.TaskStatus !== 'COMPLETE') {
-        warnings.push(`提交任务状态为 ${task.TaskStatus}`
-          + `${task.Message ? '：' + task.Message : ''}`);
+      const task = await startEngagementTask(c, opportunityId);
+      result.taskId = task.taskId;
+      result.taskStatus = task.taskStatus;
+      result.engagementId = task.engagementId;
+      result.submitted = task.submitted;
+      if (!task.submitted) {
+        warnings.push(`提交任务状态为 ${task.taskStatus}`
+          + `${task.message ? '：' + task.message : ''}`);
       }
     } catch (e: any) {
       warnings.push(`提交失败：${e.message}`);

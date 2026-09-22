@@ -59,6 +59,8 @@ interface StageStatus {
   mrrUsd?: number; solutionIds: string[];
   editable: boolean; reason: string;
   nextStage: string | null; readyForPoc: boolean;
+  /** Pending Submission 时为 true —— 显示「提交给 AWS 审核」按钮 */
+  submittable?: boolean;
   amounts?: { mrrUsd: number; arrUsd: number; pocUsd: number };
 }
 
@@ -115,6 +117,8 @@ const PocCashPage: React.FC = () => {
   const [stageInfo, setStageInfo] = useState<StageStatus | null>(null);
   const [checking, setChecking] = useState(false);
   const [advancing, setAdvancing] = useState(false);
+  /** 补提交（Pending Submission → Submitted）进行中 */
+  const [submittingOpp, setSubmittingOpp] = useState(false);
   /**
    * 当前生效的 APN 主体，全页面共享。
    *
@@ -402,6 +406,57 @@ const PocCashPage: React.FC = () => {
       </Card>
     );
   }
+
+  /**
+   * 补提交商机给 AWS。
+   *
+   * 提交后商机会被 AWS 锁定直到审批完成，属于不可逆操作，故二次确认。
+   */
+  const doSubmitOpportunity = () => {
+    if (!stageInfo) return;
+    const noSolution = !stageInfo.solutionIds?.length;
+    Modal.confirm({
+      title: '确认提交给 AWS 审核？',
+      width: 560,
+      content: (
+        <div style={{ lineHeight: 1.9 }}>
+          <Text strong>{stageInfo.title || stageInfo.id}</Text>
+          <div style={{ marginTop: 8 }}>
+            {stageInfo.id} · {stageInfo.companyName}
+          </div>
+          {noSolution && (
+            <Alert style={{ marginTop: 12 }} type="warning" showIcon
+              message="该商机未关联 Solution"
+              description="AWS 审核时可能要求补充。" />
+          )}
+          <Alert style={{ marginTop: 12 }} type="warning" showIcon
+            message="提交后商机会被 AWS 锁定，直到审批完成才能修改阶段。" />
+        </div>
+      ),
+      okText: '提交',
+      cancelText: '再想想',
+      onOk: async () => {
+        setSubmittingOpp(true);
+        try {
+          const r = await api.pocCashSubmitOpportunity(stageInfo.id, activePartner);
+          // request() 对非 2xx 不抛错，必须自己判（同创建商机）
+          if (r?.error || !r?.status) {
+            throw new Error(r?.error || '提交失败：服务端未返回状态');
+          }
+          setStageInfo(r.status);
+          if (r.warnings?.length) {
+            message.warning(`已提交，但有 ${r.warnings.length} 条提示`);
+          } else {
+            message.success(`商机 ${r.opportunityId} 已提交给 AWS`);
+          }
+        } catch (e: any) {
+          message.error(e.message || '提交失败');
+        } finally {
+          setSubmittingOpp(false);
+        }
+      },
+    });
+  };
 
   const doAdvance = (to: string) => {
     if (!stageInfo) return;
@@ -799,9 +854,13 @@ const PocCashPage: React.FC = () => {
           </Descriptions.Item>
         </Descriptions>
 
+        {/* 三态：可改阶段 / 待提交（有操作可做）/ 被锁定。
+            待提交不该显示成纯警告 —— 它是正常流程的一环，有按钮可点。 */}
         <Alert style={{ maxWidth: 900, marginTop: 16 }}
-          type={stageInfo.editable ? 'success' : 'warning'} showIcon
-          message={stageInfo.editable ? '可以操作' : '当前不可改阶段'}
+          type={stageInfo.editable ? 'success'
+            : stageInfo.submittable ? 'info' : 'warning'} showIcon
+          message={stageInfo.editable ? '可以操作'
+            : stageInfo.submittable ? '待提交给 AWS' : '当前不可改阶段'}
           description={stageInfo.reason} />
 
         {stageInfo.readyForPoc && a && (
@@ -815,6 +874,14 @@ const PocCashPage: React.FC = () => {
 
         <div style={{ marginTop: 16 }}>
           <Space wrap>
+            {/* 补提交入口：创建时选「暂不提交」的商机停在 Pending Submission，
+                此前只提示「需先提交」却没有按钮，用户只能去控制台操作 */}
+            {stageInfo.submittable && (
+              <Button type="primary" icon={<RocketOutlined />} loading={submittingOpp}
+                onClick={doSubmitOpportunity}>
+                提交给 AWS 审核
+              </Button>
+            )}
             {stageInfo.editable && stageInfo.nextStage && (
               <Button type="primary" loading={advancing}
                 onClick={() => doAdvance(stageInfo.nextStage!)}>
