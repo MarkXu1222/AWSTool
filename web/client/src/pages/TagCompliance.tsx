@@ -799,15 +799,18 @@ const AutomatedAddOrgModal: React.FC<{
             TagFunction。它若还没读这两个字段，配了也不会生效，
             所以这里必须显式提示，不能让用户以为配完就完事了。 */}
         {extraTagKey.trim() && (
-          <Alert type="warning" showIcon style={{ marginBottom: 12 }}
-            message="额外标签需要中央打标程序支持"
+          <Alert type="info" showIcon style={{ marginBottom: 12 }}
+            message="额外标签需要中央扫描器已部署新版本"
             description={
-              <>额外标签会写入 <Typography.Text code>orgs.json</Typography.Text> 的{' '}
+              <>会写入 <Typography.Text code>orgs.json</Typography.Text> 的{' '}
               <Typography.Text code>extra_tag_key</Typography.Text> /{' '}
-              <Typography.Text code>extra_tag_value</Typography.Text>。
-              实际打标由中央账户的 TagFunction 执行 —— 若它尚未读取这两个字段，
-              配置会被忽略（资源上只有 map-migrated）。
-              接入后请在报告或资源上确认额外标签确实打上了。</>
+              <Typography.Text code>extra_tag_value</Typography.Text>，
+              由中央账户的 TagFunction 与 map-migrated 一起打上。
+              <br />
+              RE-AUTOTAG 项目代码已支持 —— 若中央栈尚未重新部署（
+              <Typography.Text code>sam deploy</Typography.Text>），
+              该字段会被旧版 Lambda 忽略，资源上只有 map-migrated。
+              接入后请到资源上确认。</>
             } />
         )}
         <Row gutter={12}>

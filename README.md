@@ -3,7 +3,7 @@
 企业级 AWS 多账户（多 Organizations）管理平台。带强制 MFA 登录、页面级权限与全量操作审计。
 
 **线上**：https://markxu.co（EC2 Singapore，PM2 进程 `aws-toolbox`）
-**当前版本**：`0.40.0`（见 `web/client/src/version.ts`，左下角展示）
+**当前版本**：`0.40.1`（见 `web/client/src/version.ts`，左下角展示）
 
 **生产接入规模**（快照 2026-09-06，取自线上 db.json）
 
@@ -880,11 +880,21 @@ MAP 主标签 `map-migrated` 是固定纪律（key 不可改，每个组织只�
 }
 ```
 
-> ⚠️ **这个字段需要中央 TagFunction 配合**。平台只负责把它写进
-> `orgs.json`；真正打标的是中央账户 `382309211956` 的
-> `tag-compliance-prod-TagFunction`（源码在 RE-AUTOTAG 项目，不在本仓库）。
-> 它若尚未读取这两个字段，配置会被静默忽略 —— 资源上只有 `map-migrated`。
-> 页面在填了额外标签时会显式提示这一点，接入后务必到报告或资源上确认。
+**中央扫描器侧已配套改好**（RE-AUTOTAG 项目，本地 `~/Downloads/RE-AUTOTAG`）：
+
+| 文件 | 改动 |
+|---|---|
+| `functions/search_handler.py` | 读 org 的两个字段，校验后写进 Distributed Map manifest |
+| `functions/tag_handler.py` | `tags = {TAG_KEY: tag_value}` → 再合入额外标签，**同一次 `TagResources` 调用**打两个 tag |
+| `tests/test_extra_tag.py` | 新增 9 个用例 |
+
+`config_handler` 原样透传整个 org 对象，State Machine 与 IAM 都不用改
+（`auto-tagger-role` 的 `tag:TagResources` 没有 `aws:TagKeys` 限制）。
+
+> ⚠️ **改完要重新部署 SAM 栈才生效**（`sam build && sam deploy`，
+> 中央账户 `382309211956`）。平台侧写进 `orgs.json` 的字段，在旧版
+> Lambda 上会被静默忽略 —— 资源上只有 `map-migrated`。
+> 页面在填了额外标签时会提示这一点，接入后请到资源上确认。
 
 校验规则（`normalizeExtraTag()`，回归测试见 `tests/tag-extra-tag.test.ts`）：
 
