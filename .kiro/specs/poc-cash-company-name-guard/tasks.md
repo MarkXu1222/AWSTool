@@ -1,5 +1,8 @@
 # 任务拆分 —— poc-cash-company-name-guard
 
+> ⚠️ **本任务已作废，未执行。** 见 `requirements.md` 顶部说明。
+> 实际实现为后端自动纠正（`canonicalizeCompanyName()`，v0.44.0）。
+
 | # | 任务名 | 独占文件 | 依赖 | design.md 章节 | 验收命令 |
 |---|--------|----------|------|----------------|----------|
 | T1 | POC Cash 客户主体误填防护 | `web/client/src/pages/PocCash.tsx`<br>`web/tests/poc-cash.test.ts` | — | §6 改动 1–4、§8、§9 | `cd web && npm install && npm test && npm run typecheck && npx vite build --config client/vite.config.ts`，外加 §1 的 5 条页面行为核对 |

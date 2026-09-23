@@ -1,3 +1,6 @@
+> ⚠️ **本方案已作废，未实施。** 见 `requirements.md` 顶部说明。
+> 实际实现为后端自动纠正（`canonicalizeCompanyName()` / `canonicalizeTitle()`，v0.44.0）。
+
 # design.md — POC Cash 客户主体误填防护
 
 > 本文是实现者的**唯一依据**。承接同目录 `requirements.md`。
