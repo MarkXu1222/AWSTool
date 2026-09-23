@@ -211,6 +211,8 @@ const PocCashPage: React.FC = () => {
   };
 
   // 标题预览：自动模式下随客户名/项目名实时更新（防抖，避免每次按键都打后端）
+  // 公司名被服务端修正成权威写法时的提示（null = 未修正）
+  const [companyFix, setCompanyFix] = useState<{ from: string; to: string } | null>(null);
   const companyName = Form.useWatch('companyName', form);
   const projectName = Form.useWatch('projectName', form);
   const partnerKey = Form.useWatch('partnerKey', form);
@@ -223,8 +225,14 @@ const PocCashPage: React.FC = () => {
     }
     const t = setTimeout(() => {
       api.pocCashPreviewTitle({ partnerKey, companyName, projectName })
-        .then((r: any) => setAutoTitle(r.title))
-        .catch(() => setAutoTitle(''));
+        .then((r: any) => {
+          setAutoTitle(r.title);
+          // 公司名被收敛成权威写法时提前告知 —— 商机一旦 Approved，
+          // 公司名和标题都改不了，必须在提交前就让人看见
+          setCompanyFix(r.companyNameCorrected
+            ? { from: r.originalCompanyName, to: r.companyName } : null);
+        })
+        .catch(() => { setAutoTitle(''); setCompanyFix(null); });
     }, 250);
     return () => clearTimeout(t);
   }, [titleMode, partnerKey, companyName, projectName]);
@@ -1146,8 +1154,14 @@ const PocCashPage: React.FC = () => {
 
         <Divider orientation="left">客户</Divider>
         <Space align="start" wrap size="large">
-          <Form.Item name="companyName" label="客户公司全称" rules={[{ required: true }]}>
-            <Input style={{ width: 360 }} placeholder="Korea Wallpaper (KL) Sdn Bhd" />
+          <Form.Item name="companyName" label="客户公司全称" rules={[{ required: true }]}
+            extra={companyFix
+              ? <span style={{ color: '#d46b08' }}>
+                  将按权威写法提交为「{companyFix.to}」（商机批准后公司名无法再改）
+                </span>
+              : undefined}>
+            {/* placeholder 原本写的是 (KL) —— 那是错误主体，等于在教人填错 */}
+            <Input style={{ width: 360 }} placeholder="Korea Wallpaper (HQ) Sdn Bhd" />
           </Form.Item>
           <Form.Item name="industry" label="行业" rules={[{ required: true }]}>
             <Select style={{ width: 220 }} showSearch placeholder="选择行业"

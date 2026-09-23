@@ -20,7 +20,8 @@ import {
 } from '@aws-sdk/client-partnercentral-benefits';
 import { randomUUID } from 'crypto';
 import { GetOpportunityCommand } from '@aws-sdk/client-partnercentral-selling';
-import { benefitsClient, sellingClient, CATALOG_NAME as CATALOG } from './poc-cash';
+import { benefitsClient, sellingClient, CATALOG_NAME as CATALOG,
+  canonicalizeCompanyName, canonicalizeTitle } from './poc-cash';
 import { db } from './db';
 
 export const BENEFIT_POC_FUNDING = 'ben-un8hh6qdrxqx50';   // 事前预批
@@ -128,10 +129,16 @@ export async function precheckOpportunity(oppId: string): Promise<OppPrecheck> {
   }
   if (!mrrUsd) problems.push('商机没有 MRR，无法推导 POC 额度');
 
+  // 商机侧可能留着错误主体写法（已 Approved 的改不了），但 POC 申请是新建的，
+  // 不必继承这个错误 —— 这里收敛后再往下传，避免错误名字进入新的 POC 记录。
+  const rawCompany = o.Customer?.Account?.CompanyName || '';
+  const company = canonicalizeCompanyName(rawCompany).value;
+
   return {
     ok: problems.length === 0, problems,
-    arn: o.Arn, title: o.Project?.Title,
-    company: o.Customer?.Account?.CompanyName,
+    arn: o.Arn,
+    title: canonicalizeTitle(o.Project?.Title || '', company),
+    company,
     stage: lc.Stage, reviewStatus: lc.ReviewStatus, mrrUsd,
   };
 }
@@ -233,7 +240,9 @@ export async function createPocApplication(
     throw new Error(`存在风险项：${warnings.join('；')}（确认无误可强制提交）`);
   }
 
-  const activityName = input.activityName || pre.title || '';
+  // 用户手填的 activityName 也可能带错误主体，统一洗一遍
+  const activityName = canonicalizeTitle(
+    input.activityName || pre.title || '', pre.company || '');
   const calculatorUrl = input.calculatorUrl
     || (calcFactory
       ? await calcFactory(activityName, input.calcRegion || 'ap-southeast-5', pre.mrrUsd)
@@ -249,7 +258,11 @@ export async function createPocApplication(
   });
 
   const ben = await benefitsClient();
-  const name = input.name || `POC - ${pre.company}`;
+  // 申请名同理：默认由公司名拼出（已收敛），手填的也洗一遍。
+  // POC 申请名一旦建成，实测 UpdateBenefitApplication 改 Name 会被**静默丢弃**
+  // （返回成功、Revision 变了，但名字没变），所以必须在创建时就写对。
+  const name = canonicalizeTitle(
+    input.name || `POC - ${pre.company}`, pre.company || '');
   const created: any = await ben.send(new CreateBenefitApplicationCommand({
     Catalog: CATALOG,
     ClientToken: randomUUID(),

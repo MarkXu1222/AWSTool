@@ -362,11 +362,18 @@ pocCashRouter.post('/opportunities/:id/stage', async (req: Request, res: Respons
 pocCashRouter.post('/preview-title', (req: Request, res: Response) => {
   try {
     const partner = poc.getPartner(String(req.body.partnerKey || ''));
-    const title = poc.buildTitle(
-      partner,
-      String(req.body.companyName || ''),
-      String(req.body.projectName || ''));
-    res.json({ title });
+    // 预览也要走公司名收敛，否则用户看到的标题与实际提交的不一致
+    const company = poc.canonicalizeCompanyName(String(req.body.companyName || ''));
+    const title = poc.canonicalizeTitle(
+      poc.buildTitle(partner, company.value, String(req.body.projectName || '')),
+      company.value);
+    res.json({
+      title,
+      // 前端据此提示「公司名将被修正为 X」，让用户提交前就看到
+      companyName: company.value,
+      companyNameCorrected: company.corrected,
+      originalCompanyName: company.original,
+    });
   } catch (e: any) {
     res.status(400).json({ error: e.message });
   }

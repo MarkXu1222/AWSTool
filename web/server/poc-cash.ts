@@ -276,6 +276,72 @@ export function deriveAmounts(mrrUsd: number) {
   return { mrrUsd, arrUsd, pocUsd };
 }
 
+/**
+ * 客户公司名的权威写法修正。
+ *
+ * 背景：Korea Wallpaper 的正确主体是 **(HQ)**，但 2026-09 有 3 个商机
+ * 写成了 (KL)（O28666903 / O28666335 / O28604112），且其中一个连标题里
+ * 都嵌着 "(KL)"。这些商机一旦被 AWS 置为 Approved，`customer.account.companyName`
+ * 和 `project.title` 就**都不可再改**（实测 ACTION_NOT_PERMITTED），
+ * 关联的 POC 申请改名也会被静默丢弃 —— 也就是说写错一次就永久留错。
+ *
+ * 错误会自我扩散：前端「复用已有商机」把 companyName 原样带入新表单，
+ * 所以一个错记录会不断复制给后续商机。只在前端提示挡不住这条路径，
+ * 必须在服务端落库前统一收敛。
+ *
+ * 规则保持极窄：只处理已确认的主体，不做模糊猜测 —— 猜错等于制造新的错误数据。
+ */
+interface CanonicalCompany {
+  /** 匹配到该主体的判据（全部小写比较） */
+  match: (normalized: string) => boolean;
+  canonical: string;
+  /** 标题里也要顺带替换的错误片段 */
+  titleFixes?: Array<{ from: RegExp; to: string }>;
+}
+
+const CANONICAL_COMPANIES: CanonicalCompany[] = [
+  {
+    // Korea Wallpaper 只有 HQ 一个主体；(KL) 是笔误。
+    // 用 includes('korea wallpaper') 覆盖大小写与 SDN BHD / Sdn Bhd 等写法差异。
+    match: n => n.includes('korea wallpaper'),
+    canonical: 'Korea Wallpaper (HQ) Sdn Bhd',
+    titleFixes: [{ from: /\(\s*KL\s*\)/gi, to: '(HQ)' }],
+  },
+];
+
+function lookupCanonical(companyName: string): CanonicalCompany | undefined {
+  const n = companyName.toLowerCase().replace(/\s+/g, ' ').trim();
+  return CANONICAL_COMPANIES.find(c => c.match(n));
+}
+
+/**
+ * 把客户公司名收敛成权威写法。返回是否发生了修正，供调用方记录 warning。
+ * 未命中已知主体时原样返回（只 trim + 压缩空格）。
+ */
+export function canonicalizeCompanyName(companyName: string): {
+  value: string; corrected: boolean; original: string;
+} {
+  const original = String(companyName || '');
+  const tidy = original.replace(/\s+/g, ' ').trim();
+  const hit = lookupCanonical(tidy);
+  if (!hit) return { value: tidy, corrected: false, original: tidy };
+  return {
+    value: hit.canonical,
+    corrected: hit.canonical !== tidy,
+    original: tidy,
+  };
+}
+
+/**
+ * 修正标题里嵌着的错误主体片段（如 "Webby - Korea Wallpaper (KL) ..."）。
+ * 标题可能由用户手填（titleOverride），只改 companyName 挡不住。
+ */
+export function canonicalizeTitle(title: string, companyName: string): string {
+  const hit = lookupCanonical(companyName);
+  if (!hit?.titleFixes) return title;
+  return hit.titleFixes.reduce((t, f) => t.replace(f.from, f.to), title);
+}
+
 /** 自动生成标题：<前缀><客户简称> <项目描述><后缀> */
 export function buildTitle(p: PartnerProfile, companyName: string,
                            projectName: string): string {
@@ -563,7 +629,9 @@ export async function getOpportunityTemplate(
   return {
     id: o.Id,
     title: o.Project?.Title,
-    companyName: acct.CompanyName || '',
+    // 复用模板是错误写法的主要扩散途径：老商机里的 (KL) 会被原样带进新表单。
+    // 这些老商机已 Approved 改不动，但不能让它继续污染新建的商机。
+    companyName: canonicalizeCompanyName(acct.CompanyName || '').value,
     industry: acct.Industry,
     websiteUrl: acct.WebsiteUrl,
     countryCode: acct.Address?.CountryCode,
@@ -833,10 +901,27 @@ export async function submitOpportunity(
 export async function createOpportunity(input: OpportunityInput): Promise<CreateResult> {
   const partner = getPartner(input.partnerKey);
   const amounts = deriveAmounts(input.mrrUsd);
-  const title = (input.titleOverride || '').trim()
-    || buildTitle(partner, input.companyName, input.projectName);
-  const solutionId = input.solutionId || partner.defaultSolutionId;
   const warnings: string[] = [];
+
+  // 公司名先收敛成权威写法，再据此生成标题 —— 顺序不能反，
+  // 否则标题会用错误的公司名生成。
+  const company = canonicalizeCompanyName(input.companyName);
+  if (company.corrected) {
+    warnings.push(
+      `客户公司名已按权威写法修正：「${company.original}」→「${company.value}」。`
+      + `商机一旦被 AWS 批准，公司名与标题都无法再改，故在创建前统一。`);
+  }
+
+  // 标题：自动生成的用修正后的公司名；手填的（titleOverride）单独再洗一遍，
+  // 因为用户可能把错误主体直接写进标题里。
+  const rawTitle = (input.titleOverride || '').trim()
+    || buildTitle(partner, company.value, input.projectName);
+  const title = canonicalizeTitle(rawTitle, company.value);
+  if (title !== rawTitle) {
+    warnings.push(`商机标题中的主体写法已修正：「${rawTitle}」→「${title}」。`);
+  }
+
+  const solutionId = input.solutionId || partner.defaultSolutionId;
   const c = await client(input.partnerKey);
 
   const created: any = await c.send(new CreateOpportunityCommand({
@@ -851,7 +936,8 @@ export async function createOpportunity(input: OpportunityInput): Promise<Create
         // 用户输入的下拉框。服务端已按 INDUSTRIES / ISO 3166 校验过，
         // 这里断言以避免把整份枚举复制进来（复制反而更易与 SDK 版本脱节）。
         Industry: input.industry as any,
-        CompanyName: input.companyName,
+        // 用收敛后的权威写法，不是原始输入
+        CompanyName: company.value,
         WebsiteUrl: input.websiteUrl,
         Address: {
           CountryCode: input.countryCode as any,

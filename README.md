@@ -667,6 +667,34 @@ Root 凭证与密码重置、配额、MAP 标签、账单与区域数据。
 ⚠️ **probe 要比对返回的账户 ID**：role ARN 填错主体时 AssumeRole 一样成功，
 只是进错账户。不比对就会把「商机建到错误主体」当成连通正常。
 
+### 客户公司名的权威写法（0.44.0）
+
+`canonicalizeCompanyName()` / `canonicalizeTitle()`（`server/poc-cash.ts`）在
+**服务端落库前**把已知主体收敛成权威写法。目前只有一条规则：
+Korea Wallpaper 一律为 `Korea Wallpaper (HQ) Sdn Bhd`，标题里的 `(KL)` 同步换成 `(HQ)`。
+
+起因：2026-09 有 3 个商机写成了 (KL)（`O28666903` / `O28666335` / `O28604112`），
+其中 `O28666335` 连标题里都嵌着 `(KL)`。实测**这些已经改不回来了**：
+
+```
+companyName（Approved 后）→ ACTION_NOT_PERMITTED
+project.title（Approved 后）→ ACTION_NOT_PERMITTED
+POC 申请 UpdateBenefitApplication 改 Name
+  → 返回成功、Revision 变了，但 Name 原封不动（静默丢弃）
+```
+
+⚠️ **写错一次就永久留错**，所以只能在创建前拦截。
+
+⚠️ **错误会自我扩散**：前端「复用已有商机」把老商机的 `companyName` 原样带进
+新表单，一个错记录会不断复制给后续商机。因此 `getOpportunityTemplate()` 的返回
+也做收敛 —— 只在创建时拦截挡不住这条路径。
+
+收敛点覆盖：创建商机、标题预览、复用模板、POC `precheckOpportunity`、
+POC 申请名与 ActivityName（含用户手填的 `titleOverride` / `name` / `activityName`）。
+
+规则刻意保持极窄，只处理已确认的主体，不做模糊猜测 —— 猜错等于制造新的错误数据。
+新增主体在 `CANONICAL_COMPANIES` 里加一条。
+
 ⚠️ **切换主体要清空已加载的列表**：Solutions 与商机列表按账户隔离，不重拉
 会让 Mergebytes 的表单里列出 Webby 的选项，选中即报错。「阶段检查」Tab 有
 独立的主体选择器 —— 它不在创建表单的 `Form` 里，读不到那个 `partnerKey`。
