@@ -747,70 +747,86 @@ const PocCashPage: React.FC = () => {
           共 {pocRows.length} 条 · 服务器留存带时间戳快照 · PO 号与到账金额由 AWS 审批后回填
         </Text>
       </Space>
+      {/* 列宽按实测内容宽度分配，合计 1334 < 常见内容区宽度，
+          正常屏下不触发横向滚动 —— 一旦滚动，右侧 fixed 的「操作」列会压住
+          「周期」，日期被截成半截（改版前就是这个毛病）。
+          调宽任何一列时记得同步下面的 scroll.x。 */}
       <Table<PocRow> rowKey="applicationId" size="small" loading={pocLoading}
-        dataSource={pocRows} scroll={{ x: 1560 }} pagination={{ pageSize: 20 }}
+        dataSource={pocRows} scroll={{ x: 1334 }} pagination={{ pageSize: 20 }}
         columns={[
           // 状态不设 fixed：列本身较宽，固定后会盖住相邻的 ID 列（实测截图里
           // Fund Request ID 被压掉了一半）。首列放 ID 更利于对账。
           {
-            title: 'Fund Request ID', dataIndex: 'applicationId', width: 215,
-            render: (v: string) => <Text style={{ fontSize: 12 }} copyable={{ text: v }}>{v}</Text>,
-          },
-          {
-            title: '状态', dataIndex: 'status', width: 190,
-            render: (s: string, r) => (
-              <Tag color={pocColor(s)} style={{ whiteSpace: 'normal' }}>
-                {POC_LABEL[s] || s}{r.stage ? ` · ${r.stage}` : ''}
-              </Tag>
+            title: 'Fund Request ID', dataIndex: 'applicationId', width: 192,
+            render: (v: string) => (
+              <Text style={{ fontSize: 12, whiteSpace: 'nowrap' }} copyable={{ text: v }}>{v}</Text>
             ),
           },
           {
-            title: '项目桶', dataIndex: 'bucket', width: 130,
+            // Tag 只放中文状态，AWS 的阶段枚举（BUSINESS_APPROVAL 等）降为下方
+            // 次要行：塞进同一个 Tag 会折行撑出一个两行高的大色块，
+            // 视觉权重盖过真正的主键 Fund Request ID。
+            title: '状态', dataIndex: 'status', width: 132,
+            render: (s: string, r) => (
+              <>
+                <Tag color={pocColor(s)} style={{ marginInlineEnd: 0 }}>
+                  {POC_LABEL[s] || s}
+                </Tag>
+                {r.stage && (
+                  <Text type="secondary" style={{ fontSize: 11, display: 'block', marginTop: 2 }}
+                    ellipsis={{ tooltip: r.stage }}>{r.stage}</Text>
+                )}
+              </>
+            ),
+          },
+          {
+            title: '项目桶', dataIndex: 'bucket', width: 128, ellipsis: true,
             // 不在任何 payer 下的账户（客户自有/APN 账户）留空，不编造
             render: (b: string | null) => b || <Text type="secondary">—</Text>,
           },
           {
-            title: '账户', dataIndex: 'awsAccountId', width: 130,
+            title: '账户', dataIndex: 'awsAccountId', width: 118,
             // 12 位数字要给足宽度，否则会折成两行
             render: (v: string) => v
               ? <Text style={{ fontSize: 12, whiteSpace: 'nowrap' }}>{v}</Text>
               : <Text type="secondary">—</Text>,
           },
           {
-            title: '商机', dataIndex: 'opportunityId', width: 115,
+            title: '商机', dataIndex: 'opportunityId', width: 104,
+            // 与「账户」同为 ID，统一 12px，避免两列字号打架
             render: (v: string) => v
-              ? <Text style={{ whiteSpace: 'nowrap' }}>{v}</Text>
+              ? <Text style={{ fontSize: 12, whiteSpace: 'nowrap' }}>{v}</Text>
               : <Text type="secondary">—</Text>,
           },
           {
-            title: '申请额 (MYR)', dataIndex: 'requestMyr', width: 125, align: 'right',
+            title: '申请额 (MYR)', dataIndex: 'requestMyr', width: 116, align: 'right',
             render: (v: number | null) => v != null ? v.toLocaleString() : '—',
           },
           {
-            title: 'PO 号', dataIndex: 'purchaseOrder', width: 160,
+            title: 'PO 号', dataIndex: 'purchaseOrder', width: 120, ellipsis: true,
             render: (v: string | null) => v
               ? <Text style={{ fontSize: 12 }}>{v}</Text>
               : <Text type="secondary" style={{ fontSize: 12 }}>待 AWS 回填</Text>,
           },
           {
-            title: '到账金额', dataIndex: 'approvedAmount', width: 110, align: 'right',
+            title: '到账金额', dataIndex: 'approvedAmount', width: 104, align: 'right',
             render: (v: string | null) => v || <Text type="secondary">—</Text>,
           },
           {
-            title: '周期', width: 200,
+            title: '周期', width: 172,
             render: (_: any, r) => r.startDate
               ? <Text style={{ fontSize: 12, whiteSpace: 'nowrap' }}>
                 {r.startDate} ~ {r.endDate}</Text>
               : <Text type="secondary">—</Text>,
           },
           {
-            title: '计算器', dataIndex: 'calculatorUrl', width: 80, align: 'center',
+            title: '计算器', dataIndex: 'calculatorUrl', width: 72, align: 'center',
             render: (u: string) => u
               ? <a href={u} target="_blank" rel="noreferrer">打开</a>
               : <Text type="secondary">—</Text>,
           },
           {
-            title: '操作', width: 80, fixed: 'right', align: 'center',
+            title: '操作', width: 76, fixed: 'right', align: 'center',
             render: (_: any, r) => r.status === 'PENDING_SUBMISSION'
               ? <Button size="small" type="link" onClick={() => doPocSubmit(r)}>提交</Button>
               : <Text type="secondary">—</Text>,
