@@ -274,12 +274,27 @@ const AccountsPage: React.FC = () => {
   // payer 管理账户：默认进 Admin（有权限时），因为它不存在 support-quota 角色
   // 成员账户：_consoleDual 的组织给双选项，其余走 auto 回退链
   const ConsoleButton: React.FC<{ account: any; style?: React.CSSProperties }> = ({ account, style }) => {
-    // APN 账户没有 support-quota / admin-console 角色，控制台联邦登录必然失败。
-    // 渲染成禁用并说明原因，好过让人点了拿到一个 AccessDenied。
+    // APN 账户走独立的 apn-console 角色（AdministratorAccess）。
+    // 该角色是完整管理员，所以与 Admin 控制台同样需要根用户权限。
     if (account?._isApn) {
+      if (!account.consoleConfigured) {
+        return (
+          <Tooltip title="该主体未配置 consoleRoleArn，请先用 scripts/setup_apn_console_role.py 创建 apn-console 角色">
+            <Button size="small" disabled style={style} icon={<LoginOutlined />}>控制台未配置</Button>
+          </Tooltip>
+        );
+      }
+      if (!canRoot) {
+        return (
+          <Tooltip title="APN 控制台角色为完整管理员权限，需具备根用户权限才能使用">
+            <Button size="small" disabled style={style} icon={<LoginOutlined />}>控制台需授权</Button>
+          </Tooltip>
+        );
+      }
       return (
-        <Tooltip title={`APN 合作伙伴账户，平台仅有 Partner Central 权限，无法登录控制台。不可用：${(account.unavailable || []).join('；')}`}>
-          <Button size="small" disabled style={style} icon={<LoginOutlined />}>控制台不可用</Button>
+        <Tooltip title="以 AdministratorAccess 进入该 APN 账户控制台（会话 1 小时，操作已审计）">
+          <Button type="primary" danger size="small" icon={<LoginOutlined />} loading={consoleLoading}
+            style={style} onClick={() => openConsole(account.Id, 'admin')}>Admin 控制台</Button>
         </Tooltip>
       );
     }
@@ -395,15 +410,23 @@ const AccountsPage: React.FC = () => {
               <strong> Partner Central </strong>一条通路（带 ExternalId 的 <code>partner-central-tool</code> 角色，
               权限仅 <code>partnercentral:*</code>）。
             </p>
-            <p style={{ marginBottom: 4 }}>因此以下功能<strong>不可用</strong>：</p>
+            <p style={{ margin: '0 0 4px' }}>
+              <strong>控制台登录</strong>走独立的 <code>apn-console</code> 角色
+              （AdministratorAccess，会话 1 小时），需根用户权限，每次登录都写审计。
+            </p>
+            <p style={{ marginBottom: 4 }}>以下功能仍<strong>不可用</strong>（平台未在该账户部署对应角色）：</p>
             <ul style={{ paddingLeft: 18, margin: '0 0 10px' }}>
               {(acct.unavailable || []).map((u: string) => <li key={u}>{u}</li>)}
             </ul>
             <p style={{ margin: '0 0 10px' }}>
-              role 配置：{acct.configured
+              Partner Central role：{acct.configured
                 ? <Tag color="green">已配置</Tag>
                 : <Tag color="red">缺少 roleArn</Tag>}
               ExternalId：{acct.externalIdConfigured
+                ? <Tag color="green">已配置</Tag>
+                : <Tag color="orange">未配置</Tag>}
+              <br />
+              控制台 role：{acct.consoleConfigured
                 ? <Tag color="green">已配置</Tag>
                 : <Tag color="orange">未配置</Tag>}
             </p>

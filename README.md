@@ -616,8 +616,40 @@ Organizations DescribeOrganization / ListAccounts
 配额、账单、MAP 标签共用，塞进不可达账户会连锁误报（尤其离场检测会把它们
 判为「已移出组织」）。
 
-对应地，这些功能对 APN 账户不可用，前端按钮直接禁用并说明原因：
-控制台登录、Root 凭证与密码重置、配额、MAP 标签、账单与区域数据。
+### APN 控制台登录（0.43.0）
+
+APN 账户可以进控制台，走**独立的 `apn-console` 角色**（`AdministratorAccess`），
+由 `scripts/setup_apn_console_role.py` 创建，config 里配 `consoleRoleArn` /
+`consoleExternalId`。
+
+```jsonc
+"partnerCentral": {
+  "mergebytes": {
+    "roleArn":        "...role/partner-central-tool",  // 自动化：仅 partnercentral:*
+    "externalId":     "mergebytes-apn-poc-cash",
+    "consoleRoleArn": "...role/apn-console",           // 人工：AdministratorAccess
+    "consoleExternalId": "mergebytes-apn-console"
+  }
+}
+```
+
+⚠️ **两个 role 刻意分开，不要合并**。把 Administrator 加到
+`partner-central-tool` 上，会让所有 POC Cash 的自动化调用**顺带获得管理员权限**
+—— 一个代码 bug 就能删资源。ExternalId 也用不同的值：权限差距悬殊，
+共用会让其中一个泄露时把管理员 role 一起暴露。
+
+⚠️ **门禁与 Admin 控制台一致**：需 `role === 'admin'` 或 `root_access === true`，
+每次登录写 `CONSOLE_ADMIN_LOGIN` 审计。会话 1 小时（联邦上限 12 小时，
+但这是管理员权限，窗口越短越好）。
+
+⚠️ **生成链接前比对账户 ID**：`consoleRoleArn` 填错主体时 AssumeRole 一样成功，
+不比对会把人送进**另一个 APN 账户**的控制台且毫无提示。
+
+路由复用 `GET /aws/console-url/:accountId`，在函数开头按 `apnPartnerKeyForAccount()`
+分流 —— 常规链路依赖 support-quota / OAAR / payer 二级跳，这两个账户一个都没有。
+
+对应地，这些功能对 APN 账户仍不可用，前端按钮直接禁用并说明原因：
+Root 凭证与密码重置、配额、MAP 标签、账单与区域数据。
 
 ⚠️ **APN 账户不查 `/accounts/:id/detail`**：该接口在 assume 失败时会回退到
 `PAYERS[0]` 的凭证（`aws-service.ts:1109`），那样会把**另一个账户**的 IAM/MFA

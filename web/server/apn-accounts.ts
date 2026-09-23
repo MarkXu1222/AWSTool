@@ -44,9 +44,9 @@ function readConfig(): any {
   return {};
 }
 
-/** 平台对 APN 账户不可用的功能。前端据此给出禁用理由，避免点了才报错。 */
+/** 平台对 APN 账户不可用的功能。前端据此给出禁用理由，避免点了才报错。
+ *  控制台登录已通过独立的 apn-console 角色打通，不在此列。 */
 export const APN_UNAVAILABLE = [
-  '控制台登录（无 support-quota / admin-console 角色）',
   'Root 凭证与密码重置',
   '配额查询与提额',
   'MAP 标签接入',
@@ -69,7 +69,28 @@ export interface ApnAccountView {
   /** role 是否已配置（roleArn 非空） */
   configured: boolean;
   externalIdConfigured: boolean;
+  /** 控制台登录角色是否已配置（apn-console，AdministratorAccess） */
+  consoleConfigured: boolean;
   unavailable: string[];
+}
+
+/** 读某主体的控制台角色配置。与 Partner Central 那套是**独立的一对**
+ *  role + ExternalId —— 权限差距悬殊，不共用凭据。 */
+export function consoleRoleFor(partnerKey: string): { roleArn: string; externalId: string } {
+  const p = PARTNERS.find(x => x.key === partnerKey);
+  if (!p) return { roleArn: '', externalId: '' };
+  const pc = readConfig().partnerCentral || {};
+  const entry = p.configKey ? pc[p.configKey] : null;
+  return {
+    roleArn: entry?.consoleRoleArn || '',
+    externalId: entry?.consoleExternalId || '',
+  };
+}
+
+/** 该账户 ID 是否是 APN 账户；是则返回主体 key。供控制台路由分流。 */
+export function apnPartnerKeyForAccount(accountId: string): string | null {
+  const p = PARTNERS.find(x => x.apnAccountId === accountId);
+  return p ? p.key : null;
 }
 
 /**
@@ -101,9 +122,93 @@ export function listApnAccounts(): ApnAccountView[] {
       partnerKey: p.key,
       configured: Boolean(entry?.roleArn),
       externalIdConfigured: Boolean(entry?.externalId),
+      consoleConfigured: Boolean(nested?.consoleRoleArn),
       unavailable: APN_UNAVAILABLE,
     };
   });
+}
+
+/**
+ * 为 APN 账户生成控制台联邦登录 URL。
+ *
+ * 走 apn-console 角色（AdministratorAccess），**不是** partner-central-tool ——
+ * 后者只有 partnercentral:*，登进控制台什么都点不开。
+ *
+ * ⚠️ 调用方必须先做根用户权限门禁。这里拿到的是完整管理员会话，
+ * 等同于 Admin 控制台，不能对所有登录用户开放。
+ */
+export async function getApnConsoleSigninUrl(
+  partnerKey: string,
+  destinationUrl: string,
+): Promise<string> {
+  const view = listApnAccounts().find(a => a.partnerKey === partnerKey);
+  if (!view) throw new Error(`未知的 APN 主体: ${partnerKey}`);
+
+  const { roleArn, externalId } = consoleRoleFor(partnerKey);
+  if (!roleArn) {
+    throw new Error(
+      `主体「${view.Name}」未配置控制台角色：请在 config.json 的 `
+      + `partnerCentral.${partnerKey} 下填 consoleRoleArn / consoleExternalId，`
+      + `并用 scripts/setup_apn_console_role.py 创建该角色`);
+  }
+
+  const cfg = readConfig();
+  const base = {
+    accessKeyId: cfg.credentials?.accessKeyId || process.env.AWS_ACCESS_KEY_ID || '',
+    secretAccessKey: cfg.credentials?.secretAccessKey || process.env.AWS_SECRET_ACCESS_KEY || '',
+  };
+  if (!base.accessKeyId || !base.secretAccessKey) {
+    throw new Error('平台基础凭证未配置，无法生成控制台链接');
+  }
+
+  const { STSClient, AssumeRoleCommand, GetCallerIdentityCommand } =
+    await import('@aws-sdk/client-sts');
+  const sts = new STSClient({ region: 'us-east-1', credentials: base });
+  let creds: { accessKeyId: string; secretAccessKey: string; sessionToken: string };
+  try {
+    const r = await sts.send(new AssumeRoleCommand({
+      RoleArn: roleArn,
+      RoleSessionName: `apn-console-${partnerKey}`.slice(0, 64),
+      DurationSeconds: 3600,
+      ...(externalId ? { ExternalId: externalId } : {}),
+    }));
+    creds = {
+      accessKeyId: r.Credentials!.AccessKeyId!,
+      secretAccessKey: r.Credentials!.SecretAccessKey!,
+      sessionToken: r.Credentials!.SessionToken!,
+    };
+  } finally {
+    sts.destroy();
+  }
+
+  // 确认进的是目标账户：role ARN 填错主体时 AssumeRole 一样成功，
+  // 不比对就会把用户送进**另一个 APN 账户**的控制台。
+  const probe = new STSClient({ region: 'us-east-1', credentials: creds });
+  try {
+    const id = await probe.send(new GetCallerIdentityCommand({}));
+    if (id.Account !== view.Id) {
+      throw new Error(
+        `控制台角色实际进入的是 ${id.Account}，与该主体的账户 ${view.Id} 不一致，已中止`);
+    }
+  } finally {
+    probe.destroy();
+  }
+
+  const sessionJson = JSON.stringify({
+    sessionId: creds.accessKeyId,
+    sessionKey: creds.secretAccessKey,
+    sessionToken: creds.sessionToken,
+  });
+  const tokenUrl = 'https://signin.aws.amazon.com/federation'
+    + `?Action=getSigninToken&Session=${encodeURIComponent(sessionJson)}`;
+  const resp = await fetch(tokenUrl, { signal: AbortSignal.timeout(20_000) });
+  if (!resp.ok) throw new Error(`获取登录令牌失败: ${resp.status}`);
+  const { SigninToken } = await resp.json() as { SigninToken: string };
+
+  return 'https://signin.aws.amazon.com/federation?Action=login'
+    + `&Issuer=${encodeURIComponent('AWS-Toolbox')}`
+    + `&Destination=${encodeURIComponent(destinationUrl)}`
+    + `&SigninToken=${SigninToken}`;
 }
 
 /**

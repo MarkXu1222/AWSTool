@@ -12,7 +12,8 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { listApnAccounts, APN_UNAVAILABLE } from '../server/apn-accounts';
+import { listApnAccounts, APN_UNAVAILABLE, consoleRoleFor,
+  apnPartnerKeyForAccount } from '../server/apn-accounts';
 import { PARTNERS } from '../server/poc-cash';
 import fs from 'fs';
 import path from 'path';
@@ -71,11 +72,70 @@ test('不可用功能清单非空且覆盖关键入口', () => {
   assert.ok(APN_UNAVAILABLE.length > 0);
   const joined = APN_UNAVAILABLE.join(' ');
   // 这几项都是账户页上真实存在、且对 APN 账户必然失败的入口
-  ['控制台', 'Root', '配额', 'MAP'].forEach(k =>
+  ['Root', '配额', 'MAP'].forEach(k =>
     assert.ok(joined.includes(k), `不可用清单应说明 ${k}`));
+  // 控制台已通过 apn-console 角色打通，不应再出现在「不可用」里，
+  // 否则前端会继续渲染禁用按钮，功能等于白做
+  assert.ok(!joined.includes('控制台'), '控制台已可用，不应列为不可用');
   for (const a of listApnAccounts()) {
     assert.deepEqual(a.unavailable, APN_UNAVAILABLE);
   }
+});
+
+test('控制台角色与 Partner Central 角色是独立的一对，不共用凭据', () => {
+  // 两者权限差距悬殊（仅 partnercentral:* vs AdministratorAccess）。
+  // 共用 role 会让 POC Cash 的自动化顺带拿到管理员权限；
+  // 共用 ExternalId 会让其中一个泄露时把管理员 role 一起暴露。
+  const pc = rootConfig.partnerCentral || {};
+  for (const p of PARTNERS) {
+    const e = pc[p.configKey || p.key] || {};
+    if (!e.consoleRoleArn) continue;
+    assert.notEqual(e.consoleRoleArn, e.roleArn,
+      `${p.key} 的控制台角色与 Partner Central 角色不得是同一个`);
+    assert.notEqual(e.consoleExternalId, e.externalId,
+      `${p.key} 的两个 ExternalId 不得相同`);
+  }
+});
+
+test('控制台角色 ARN 指向该主体自己的账户', () => {
+  // ARN 填错主体时 AssumeRole 一样成功，只是进错账户 ——
+  // 用户会被送进另一个 APN 账户的控制台且毫无提示
+  const pc = rootConfig.partnerCentral || {};
+  for (const p of PARTNERS) {
+    const arn = pc[p.configKey || p.key]?.consoleRoleArn;
+    if (!arn) continue;
+    const m = /^arn:aws:iam::(\d{12}):role\//.exec(arn);
+    assert.ok(m, `${p.key} 的 consoleRoleArn 格式非法: ${arn}`);
+    assert.equal(m![1], p.apnAccountId,
+      `${p.key} 的控制台角色指向了 ${m![1]}，应为 ${p.apnAccountId}`);
+  }
+});
+
+test('consoleConfigured 如实反映配置状态', () => {
+  const pc = rootConfig.partnerCentral || {};
+  for (const a of listApnAccounts()) {
+    const expected = Boolean(pc[a.partnerKey]?.consoleRoleArn);
+    assert.equal(a.consoleConfigured, expected,
+      `${a.partnerKey} 的 consoleConfigured 与配置不符`);
+  }
+});
+
+test('未知主体取控制台角色返回空而不抛错', () => {
+  // 前端可能传任意值；返回空让调用方走「未配置」提示，
+  // 抛错会变成 500，掩盖真实原因
+  const r = consoleRoleFor('does-not-exist');
+  assert.equal(r.roleArn, '');
+  assert.equal(r.externalId, '');
+});
+
+test('apnPartnerKeyForAccount 只认 APN 账户', () => {
+  for (const p of PARTNERS) {
+    assert.equal(apnPartnerKeyForAccount(p.apnAccountId), p.key);
+  }
+  // 组织内的普通账户不能被误判成 APN —— 否则会被路由到 apn-console 分支，
+  // 拿着错误的角色去登录
+  assert.equal(apnPartnerKeyForAccount('225214954491'), null);
+  assert.equal(apnPartnerKeyForAccount(''), null);
 });
 
 test('配置齐全的主体为 ACTIVE，缺 roleArn 的为 UNCONFIGURED', () => {

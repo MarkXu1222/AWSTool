@@ -19,7 +19,8 @@ import {
   getRestrictedAccounts, markRestricted, unmarkRestricted,
   getExternalId, RESTRICTED_UNAVAILABLE,
 } from '../restricted-accounts';
-import { listApnAccounts, probeApnAccount, APN_UNAVAILABLE } from '../apn-accounts';
+import { listApnAccounts, probeApnAccount, APN_UNAVAILABLE,
+  getApnConsoleSigninUrl, apnPartnerKeyForAccount } from '../apn-accounts';
 import * as tagCompliance from '../tag-compliance';
 import * as tagOnboarding from '../tag-onboarding';
 import { pipeline } from 'stream/promises';
@@ -772,6 +773,27 @@ awsRouter.get('/console-url/:accountId', async (req: Request, res: Response) => 
     if (!/^\d{12}$/.test(accountId)) return res.status(400).json({ error: '无效的账户 ID' });
     const { caseId, destination, access } = req.query;
     const mode: 'auto' | 'support' | 'admin' = access === 'admin' ? 'admin' : access === 'support' ? 'support' : 'auto';
+
+    // APN 账户走独立的 apn-console 角色（AdministratorAccess）。
+    // 不能走下面的常规链路：那条链依赖 support-quota / OAAR / payer 二级跳，
+    // 这两个账户一个都没有，只会得到一串 AccessDenied。
+    const apnKey = apnPartnerKeyForAccount(accountId);
+    if (apnKey) {
+      // 该角色是完整管理员，门禁与 Admin 控制台一致
+      const tokenUser = (req as any).user;
+      const currentUser = tokenUser?.username ? db.getUser(tokenUser.username) : null;
+      if (!currentUser) return res.status(401).json({ error: '用户不存在或登录已失效' });
+      if (!(currentUser.role === 'admin' || (currentUser as any).root_access === true)) {
+        return res.status(403).json({ error: '无权登录 APN 账户控制台（该角色为完整管理员），请联系管理员分配根用户权限' });
+      }
+      const apnDest = (destination as string) || 'https://console.aws.amazon.com/';
+      const apnUrl = await getApnConsoleSigninUrl(apnKey, apnDest);
+      db.addAuditLog(tokenUser?.userId, 'CONSOLE_ADMIN_LOGIN',
+        `APN 账户 ${accountId}（${apnKey}）· 生成管理员控制台免登录链接`,
+        tokenUser?.username, req.ip);
+      (res.locals as any).audited = true;
+      return res.json({ success: true, url: apnUrl });
+    }
 
     // 安全门禁：Admin 控制台 = 完整管理员权限，等同生成 Admin 临时凭证，
     // 需具备根用户权限（admin 角色或被授予 root_access）。只读选项对所有登录用户开放。
