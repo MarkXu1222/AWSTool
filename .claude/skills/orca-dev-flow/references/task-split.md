@@ -2,6 +2,26 @@
 
 并行开发唯一的失败模式是**撞车**。这份文档的目的是让拆分阶段就把撞车消灭掉，而不是等到合并时解冲突。
 
+**前置条件：`.kiro/specs/<需求名>/design.md` 已写完并通过闸门 G1。** 没有方案就拆任务，拆出来的是猜测。
+
+拆分产出 `.kiro/specs/<需求名>/tasks.md`：
+
+```markdown
+# 任务拆分 —— <需求名>
+
+| # | 任务名 | 独占文件 | 依赖 | design.md 章节 | 验收命令 |
+|---|--------|----------|------|----------------|----------|
+| T1 | 后端导出模块 | web/server/billing-group-export.ts<br>web/tests/billing-group-export.test.ts | — | §5.1 | `npm test -- tests/billing-group-export.test.ts` |
+| T2 | 前端分组 UI | web/client/src/pages/Billing.tsx | — | §6 | 页面操作：… |
+| T3 | 接线 | web/server/routes/aws.ts<br>web/client/src/api.ts | T1,T2 | §5.2 §6 | `npm run build` |
+
+## 波次
+- 波次 1（并行）：T1、T2
+- 波次 2：T3
+```
+
+「design.md 章节」这一列不是装饰——worker 的简报靠它定位。**每个任务都必须能指到方案里的具体一节**；指不过去，说明方案漏写了那部分，回 P1 补。
+
 ## 第一原则：按文件所有权拆，不按功能拆
 
 错误示范（按功能拆）：
@@ -55,6 +75,9 @@
 
 出任务表前逐条过：
 
+- [ ] `design.md` 已通过闸门 G1
+- [ ] 每个任务都能指到 `design.md` 的具体章节；指不过去说明方案有洞，回 P1 补
+- [ ] `design.md` 里的每一节都被至少一个任务覆盖；有遗漏说明拆漏了
 - [ ] 任意两个任务的"独占文件"集合**无交集**
 - [ ] 每个枢纽文件在同一波次里最多被一个任务持有
 - [ ] 协调者独占文件没有出现在任何任务里
