@@ -19,6 +19,7 @@ import {
   getRestrictedAccounts, markRestricted, unmarkRestricted,
   getExternalId, RESTRICTED_UNAVAILABLE,
 } from '../restricted-accounts';
+import { listApnAccounts, probeApnAccount, APN_UNAVAILABLE } from '../apn-accounts';
 import * as tagCompliance from '../tag-compliance';
 import * as tagOnboarding from '../tag-onboarding';
 import { pipeline } from 'stream/promises';
@@ -632,6 +633,28 @@ awsRouter.post('/accounts/departed/backfill', requireStrictAdmin, async (_req: R
   try {
     const r = backfillDepartures();
     res.json({ success: true, data: { ...r, summary: getDepartedSummary() } });
+  } catch (e: any) { res.status(500).json({ error: e.message }); }
+});
+
+// APN 合作伙伴账户 —— 只读目录。
+// 刻意独立于 /accounts：这些账户不在任何组织里，平台只有 Partner Central
+// 一条通路，混进 accounts_cache 会污染角色自愈/离场检测/批量操作。
+awsRouter.get('/apn-accounts', async (_req: Request, res: Response) => {
+  try {
+    res.json({ success: true, data: { records: listApnAccounts(), unavailable: APN_UNAVAILABLE } });
+  } catch (e: any) { res.status(500).json({ error: e.message }); }
+});
+
+// 按需实测连通性（会真的 AssumeRole，不放进列表接口以免拖慢账户页首屏）
+awsRouter.post('/apn-accounts/probe', requireStrictAdmin, async (req: Request, res: Response) => {
+  try {
+    const { partnerKey } = req.body || {};
+    const targets = partnerKey ? [String(partnerKey)] : listApnAccounts().map(a => a.partnerKey);
+    const results = await Promise.all(targets.map(k =>
+      probeApnAccount(k).catch((e: any) => ({
+        partnerKey: k, accountId: '', ok: false, error: e.message,
+      }))));
+    res.json({ success: true, data: results });
   } catch (e: any) { res.status(500).json({ error: e.message }); }
 });
 

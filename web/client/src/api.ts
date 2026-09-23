@@ -394,6 +394,10 @@ export const api = {
   },
   refreshAccounts: () => request('/aws/accounts/refresh', { method: 'POST' }),
   getAccountDetail: (id: string) => request(`/aws/accounts/${id}/detail`),
+  // APN 合作伙伴账户（Partner Central 专用，不属于任何组织）
+  getApnAccounts: () => request('/aws/apn-accounts'),
+  probeApnAccounts: (partnerKey?: string) =>
+    request('/aws/apn-accounts/probe', { method: 'POST', body: JSON.stringify(partnerKey ? { partnerKey } : {}) }),
   // 敏感权限客户账户：收窄平台权限 + ExternalId
   getRestrictedAccounts: () => request('/aws/accounts/restricted'),
   markRestrictedAccounts: (accountIds: string[], note?: string) =>

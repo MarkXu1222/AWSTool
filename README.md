@@ -590,6 +590,42 @@ CloudTrail。
 仍兼容，但只回落给 webby。若对任意主体都回落，会拿着 Webby 的 role 去建别
 的主体的商机。
 
+### APN 账户在账户管理页的呈现（0.42.0）
+
+两个 APN 账户会出现在**账户管理**列表里，带 cyan 的 `APN` 标签（替代 `Payer` 标签），
+排序沉底，点开详情有「说明」Tab 展示 role/ExternalId 配置与实测连通性
+（admin 可点「实测连通性」，走 `POST /aws/apn-accounts/probe`）。
+
+⚠️ **它们不能写进 `config.payers`**。实测平台基础凭证对这两个账户：
+
+```
+AssumeRole  tool / OrganizationAccountAccessRole / support-quota / admin-console
+            → 全部 AccessDenied
+Organizations DescribeOrganization / ListAccounts
+            → AccessDeniedException
+```
+
+平台对它们**只有 Partner Central 一条通路**（`partner-central-tool`，权限仅
+`partnercentral:*`）。而 `aws-service.listAccounts()` 的 payer 循环是
+`catch { skip }` —— 写进 payers 只会让 AssumeRole 失败被**静默吞掉**，
+账户永远不出现且界面上看不出任何异常。
+
+因此数据走**独立接口** `GET /aws/apn-accounts`（`server/apn-accounts.ts`，
+纯读 config，不发 AWS 调用），仅在**前端展示层**与账户列表合并，
+**不进 `accounts_cache`** —— 那份缓存被角色自愈、离场检测、Root 邮件批次、
+配额、账单、MAP 标签共用，塞进不可达账户会连锁误报（尤其离场检测会把它们
+判为「已移出组织」）。
+
+对应地，这些功能对 APN 账户不可用，前端按钮直接禁用并说明原因：
+控制台登录、Root 凭证与密码重置、配额、MAP 标签、账单与区域数据。
+
+⚠️ **APN 账户不查 `/accounts/:id/detail`**：该接口在 assume 失败时会回退到
+`PAYERS[0]` 的凭证（`aws-service.ts:1109`），那样会把**另一个账户**的 IAM/MFA
+数据显示在这个 APN 账户名下 —— 静默串号，比查不到更危险。前端直接短路。
+
+⚠️ **probe 要比对返回的账户 ID**：role ARN 填错主体时 AssumeRole 一样成功，
+只是进错账户。不比对就会把「商机建到错误主体」当成连通正常。
+
 ⚠️ **切换主体要清空已加载的列表**：Solutions 与商机列表按账户隔离，不重拉
 会让 Mergebytes 的表单里列出 Webby 的选项，选中即报错。「阶段检查」Tab 有
 独立的主体选择器 —— 它不在创建表单的 `Form` 里，读不到那个 `partnerKey`。

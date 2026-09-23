@@ -64,6 +64,13 @@ const AccountsPage: React.FC = () => {
   const [restrictTargets, setRestrictTargets] = useState<string[]>([]);
   const [restrictNote, setRestrictNote] = useState('');
 
+  // APN 合作伙伴账户：不在任何组织里，走独立接口，仅在展示层与主列表合并。
+  // 不并入 accounts_cache —— 那份缓存被角色自愈/离场检测/批量操作共用。
+  const [apnAccounts, setApnAccounts] = useState<any[]>([]);
+  const [apnUnavailable, setApnUnavailable] = useState<string[]>([]);
+  const [apnProbe, setApnProbe] = useState<Record<string, any>>({});
+  const [apnProbing, setApnProbing] = useState(false);
+
   const fetchAccounts = async () => {
     setLoading(true);
     try {
@@ -74,7 +81,33 @@ const AccountsPage: React.FC = () => {
     finally { setLoading(false); }
   };
 
-  useEffect(() => { fetchAccounts(); loadDeparted(); loadRestricted(); }, []);
+  const loadApnAccounts = async () => {
+    try {
+      const res = await api.getApnAccounts();
+      if (res.success) {
+        setApnAccounts(res.data?.records || []);
+        setApnUnavailable(res.data?.unavailable || []);
+      }
+    } catch { /* 附加信息，失败不影响主账户列表 */ }
+  };
+
+  const probeApn = async () => {
+    setApnProbing(true);
+    try {
+      const res = await api.probeApnAccounts();
+      if (res.success) {
+        const m: Record<string, any> = {};
+        (res.data || []).forEach((r: any) => { m[r.partnerKey] = r; });
+        setApnProbe(m);
+        const bad = (res.data || []).filter((r: any) => !r.ok);
+        if (bad.length === 0) message.success('APN 账户连通正常');
+        else message.warning(`${bad.length} 个 APN 账户不可达：${bad[0].error || ''}`);
+      } else message.error(res.error || '探测失败');
+    } catch (e: any) { message.error(e.message || '探测失败'); }
+    finally { setApnProbing(false); }
+  };
+
+  useEffect(() => { fetchAccounts(); loadDeparted(); loadRestricted(); loadApnAccounts(); }, []);
 
   const loadRestricted = async () => {
     try {
@@ -241,6 +274,15 @@ const AccountsPage: React.FC = () => {
   // payer 管理账户：默认进 Admin（有权限时），因为它不存在 support-quota 角色
   // 成员账户：_consoleDual 的组织给双选项，其余走 auto 回退链
   const ConsoleButton: React.FC<{ account: any; style?: React.CSSProperties }> = ({ account, style }) => {
+    // APN 账户没有 support-quota / admin-console 角色，控制台联邦登录必然失败。
+    // 渲染成禁用并说明原因，好过让人点了拿到一个 AccessDenied。
+    if (account?._isApn) {
+      return (
+        <Tooltip title={`APN 合作伙伴账户，平台仅有 Partner Central 权限，无法登录控制台。不可用：${(account.unavailable || []).join('；')}`}>
+          <Button size="small" disabled style={style} icon={<LoginOutlined />}>控制台不可用</Button>
+        </Tooltip>
+      );
+    }
     if (account?._isPayer) {
       return (
         <Dropdown.Button
@@ -280,6 +322,13 @@ const AccountsPage: React.FC = () => {
   const openDetail = async (account: any) => {
     setSelectedAccount(account);
     setDetail(null);
+    // APN 账户绝不能查详情：getAccountDetail 在 assume 失败时会回退到
+    // PAYERS[0] 的凭证（aws-service.ts:1109），那样拿到的是**另一个账户**的
+    // IAM/MFA 数据，却挂在这个 APN 账户名下 —— 静默串号，比查不到更危险。
+    if (account?._isApn) {
+      setDetailLoading(false);
+      return;
+    }
     setDetailLoading(true);
     try {
       const [detailRes, rootRes] = await Promise.allSettled([
@@ -294,17 +343,107 @@ const AccountsPage: React.FC = () => {
     finally { setDetailLoading(false); }
   };
 
-  const filtered = accounts.filter(a => {
-    if (isAdmin && onlyRoleIssues && !roleMap[a.Id]) return false;
+  // APN 账户合并进主列表。用 Id 去重：万一将来某个 APN 账户真的被纳入组织，
+  // 组织侧的真实记录优先，避免同一账户出现两行。
+  const allAccounts = React.useMemo(() => {
+    const ids = new Set(accounts.map(a => a.Id));
+    return [...accounts, ...apnAccounts.filter(a => !ids.has(a.Id))];
+  }, [accounts, apnAccounts]);
+
+  const filtered = allAccounts.filter(a => {
+    // 角色异常筛选只对组织内账户有意义：APN 账户本就不部署平台角色，
+    // 留在结果里会被误读成「有异常」
+    if (isAdmin && onlyRoleIssues && (a._isApn || !roleMap[a.Id])) return false;
     return !searchText
       || a.Id?.includes(searchText) || a.Name?.toLowerCase().includes(searchText.toLowerCase()) || a.Email?.toLowerCase().includes(searchText.toLowerCase());
   });
 
-  // Payer(组织管理账户)始终置顶，其余按名称排序。这样筛选某个组织时，该组织的 payer 一定显示在第一位。
+  // Payer(组织管理账户)始终置顶，APN 账户沉底（功能受限，不该抢占视线），其余按名称排序。
   const sorted = [...filtered].sort((a, b) => {
+    if (!!a._isApn !== !!b._isApn) return a._isApn ? 1 : -1;
     if (!!a._isPayer !== !!b._isPayer) return a._isPayer ? -1 : 1;
     return (a.Name || '').localeCompare(b.Name || '');
   });
+
+  /**
+   * 账户详情的 Tab。桌面侧栏与移动全屏共用，避免两处各写一份而行为分叉。
+   * APN 账户只给「基本」+「说明」：安全/根用户面板依赖平台角色，
+   * 对这类账户既取不到数据，也不该给出可点击的入口。
+   *
+   * 必须定义在移动端提前 return 之前 —— const 箭头函数不提升，
+   * 放在后面会在移动端触发 TDZ ReferenceError。
+   */
+  const renderDetailTabs = (acct: any) => {
+    const info = {
+      key: 'info', label: '基本', children: (
+        <Descriptions size="small" column={1} bordered>
+          <Descriptions.Item label="ID"><code style={{ fontSize: 12 }}>{acct.Id}</code></Descriptions.Item>
+          <Descriptions.Item label="邮箱">{acct.Email}</Descriptions.Item>
+          <Descriptions.Item label={acct._isApn ? '类型' : '组织'}><Tag>{acct._payer}</Tag></Descriptions.Item>
+          <Descriptions.Item label="状态"><Tag color={acct.Status === 'ACTIVE' ? 'green' : 'red'}>{acct.Status}</Tag></Descriptions.Item>
+        </Descriptions>
+      ),
+    };
+
+    if (acct._isApn) {
+      return [info, {
+        key: 'apn', label: '说明', children: (
+          <div style={{ fontSize: 13, lineHeight: 1.8 }}>
+            <p style={{ marginTop: 0 }}>
+              <strong>APN 合作伙伴账户</strong>（POC Cash 主体 <code>{acct.partnerKey}</code>）。
+              该账户不属于平台管理的任何 AWS Organization，平台只有
+              <strong> Partner Central </strong>一条通路（带 ExternalId 的 <code>partner-central-tool</code> 角色，
+              权限仅 <code>partnercentral:*</code>）。
+            </p>
+            <p style={{ marginBottom: 4 }}>因此以下功能<strong>不可用</strong>：</p>
+            <ul style={{ paddingLeft: 18, margin: '0 0 10px' }}>
+              {(acct.unavailable || []).map((u: string) => <li key={u}>{u}</li>)}
+            </ul>
+            <p style={{ margin: '0 0 10px' }}>
+              role 配置：{acct.configured
+                ? <Tag color="green">已配置</Tag>
+                : <Tag color="red">缺少 roleArn</Tag>}
+              ExternalId：{acct.externalIdConfigured
+                ? <Tag color="green">已配置</Tag>
+                : <Tag color="orange">未配置</Tag>}
+            </p>
+            {apnProbe[acct.partnerKey] && (
+              <p style={{ margin: '0 0 10px' }}>
+                连通性：{apnProbe[acct.partnerKey].ok
+                  ? <Tag color="green">正常（{apnProbe[acct.partnerKey].actualAccountId}）</Tag>
+                  : <Tag color="red">{apnProbe[acct.partnerKey].error}</Tag>}
+              </p>
+            )}
+            {isAdmin && (
+              <Button size="small" loading={apnProbing} onClick={probeApn}>实测连通性</Button>
+            )}
+          </div>
+        ),
+      }];
+    }
+
+    return [
+      info,
+      { key: 'mfa', label: '安全', children: detailLoading ? <div style={{ textAlign: 'center', padding: 30 }}><Spin /></div> : detail?.mfa ? (
+        <>
+          <Card size="small" style={{ marginBottom: 8 }}>
+            <p style={{ fontWeight: 600 }}>Root MFA: {detail.mfa.root ? <Tag color="green">已启用</Tag> : <Tag color="red">未启用</Tag>}</p>
+          </Card>
+          {detail.mfa.users.map((u: any) => (
+            <div key={u.user} style={{ display: 'flex', justifyContent: 'space-between', padding: '8px 0', borderBottom: '1px solid #f0f0f0' }}>
+              <code>{u.user}</code>
+              <span>{u.hasMFA
+                ? <CheckCircleOutlined style={{ color: 'var(--color-success)' }} aria-label="已绑定 MFA" />
+                : <CloseCircleOutlined style={{ color: 'var(--color-error)' }} aria-label="未绑定 MFA" />}</span>
+            </div>
+          ))}
+        </>
+      ) : <span style={{ color: '#8a94a6' }}>无数据</span> },
+      { key: 'root', label: '根用户', children: (
+        <RootCredentialsPanel accountId={acct.Id} rootCredentials={detail?.rootCredentials} canRoot={canRoot} rootResetAccess={rootResetAccess} isAdmin={isAdmin} isPayer={!!acct._isPayer} adminExcluded={!!acct._adminRoleExcluded} loading={detailLoading} />
+      ) },
+    ];
+  };
 
   // Mobile detail view (full screen overlay)
   if (selectedAccount && detailFullScreen) {
@@ -323,37 +462,12 @@ const AccountsPage: React.FC = () => {
           </div>
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginTop: 8 }}>
             <Tag style={{ margin: 0 }}>{selectedAccount._payer}</Tag>
-            {selectedAccount._isPayer && <Tag color="gold" style={{ margin: 0 }}>Payer</Tag>}
+            {selectedAccount._isApn
+              ? <Tag color="cyan" style={{ margin: 0 }}>APN</Tag>
+              : selectedAccount._isPayer && <Tag color="gold" style={{ margin: 0 }}>Payer</Tag>}
           </div>
         </div>
-        <Tabs size="small" items={[
-          { key: 'info', label: '基本', children: (
-            <Descriptions size="small" column={1} bordered>
-              <Descriptions.Item label="ID"><code style={{ fontSize: 12 }}>{selectedAccount.Id}</code></Descriptions.Item>
-              <Descriptions.Item label="邮箱">{selectedAccount.Email}</Descriptions.Item>
-              <Descriptions.Item label="组织"><Tag>{selectedAccount._payer}</Tag></Descriptions.Item>
-              <Descriptions.Item label="状态"><Tag color={selectedAccount.Status === 'ACTIVE' ? 'green' : 'red'}>{selectedAccount.Status}</Tag></Descriptions.Item>
-            </Descriptions>
-          )},
-          { key: 'mfa', label: '安全', children: detailLoading ? <div style={{ textAlign: 'center', padding: 30 }}><Spin /></div> : detail?.mfa ? (
-            <>
-              <Card size="small" style={{ marginBottom: 8 }}>
-                <p style={{ fontWeight: 600 }}>Root MFA: {detail.mfa.root ? <Tag color="green">已启用</Tag> : <Tag color="red">未启用</Tag>}</p>
-              </Card>
-              {detail.mfa.users.map((u: any) => (
-                <div key={u.user} style={{ display: 'flex', justifyContent: 'space-between', padding: '8px 0', borderBottom: '1px solid #f0f0f0' }}>
-                  <code>{u.user}</code>
-                  <span>{u.hasMFA
-                    ? <CheckCircleOutlined style={{ color: 'var(--color-success)' }} aria-label="已绑定 MFA" />
-                    : <CloseCircleOutlined style={{ color: 'var(--color-error)' }} aria-label="未绑定 MFA" />}</span>
-                </div>
-              ))}
-            </>
-          ) : <span style={{ color: '#8a94a6' }}>无数据</span> },
-          { key: 'root', label: '根用户', children: (
-            <RootCredentialsPanel accountId={selectedAccount.Id} rootCredentials={detail?.rootCredentials} canRoot={canRoot} rootResetAccess={rootResetAccess} isAdmin={isAdmin} isPayer={!!selectedAccount._isPayer} adminExcluded={!!selectedAccount._adminRoleExcluded} loading={detailLoading} />
-          ) },
-        ]} />
+        <Tabs size="small" items={renderDetailTabs(selectedAccount)} />
       </div>
     );
   }
@@ -776,7 +890,23 @@ const AccountsPage: React.FC = () => {
           <div style={{ minWidth: 0 }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
               <span style={{ fontWeight: 600, color: '#1a2233', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{a.Name}</span>
-              {a._isPayer && <Tag color="gold" style={{ margin: 0, fontSize: 10, lineHeight: '16px', padding: '0 5px', flexShrink: 0 }}>Payer</Tag>}
+              {a._isApn ? (
+                <Tooltip title={`APN 合作伙伴账户（${a.partnerKey}），仅用于 POC Cash 商机与 POC 申请。不可用：${(a.unavailable || []).join('；')}`}>
+                  <Tag color="cyan" style={{ margin: 0, fontSize: 10, lineHeight: '16px', padding: '0 5px', flexShrink: 0 }}>APN</Tag>
+                </Tooltip>
+              ) : a._isPayer && <Tag color="gold" style={{ margin: 0, fontSize: 10, lineHeight: '16px', padding: '0 5px', flexShrink: 0 }}>Payer</Tag>}
+              {a._isApn && !a.configured && (
+                <Tooltip title="config.json 的 partnerCentral 下缺少该主体的 roleArn，POC Cash 无法使用">
+                  <Tag color="red" style={{ margin: 0, fontSize: 10, lineHeight: '16px', padding: '0 5px', flexShrink: 0 }}>未配置</Tag>
+                </Tooltip>
+              )}
+              {a._isApn && apnProbe[a.partnerKey] && (
+                <Tooltip title={apnProbe[a.partnerKey].ok ? `连通正常（${apnProbe[a.partnerKey].actualAccountId}）` : apnProbe[a.partnerKey].error}>
+                  <Tag color={apnProbe[a.partnerKey].ok ? 'green' : 'red'} style={{ margin: 0, fontSize: 10, lineHeight: '16px', padding: '0 5px', flexShrink: 0 }}>
+                    {apnProbe[a.partnerKey].ok ? '已连通' : '不可达'}
+                  </Tag>
+                </Tooltip>
+              )}
               {restrictedMap[a.Id] && (
                 <Tooltip title={`敏感权限客户账户：平台权限已收窄并启用 ExternalId。不可用功能：${restrictedUnavailable.join('；')}`}>
                   <Tag color="purple" style={{ margin: 0, fontSize: 10, lineHeight: '16px', padding: '0 5px', flexShrink: 0 }}>已收窄</Tag>
@@ -791,7 +921,8 @@ const AccountsPage: React.FC = () => {
     },
     { title: 'ID', dataIndex: 'Id', key: 'Id', width: 130, render: (id: string) => <code style={{ fontSize: 12, color: '#4a5468' }}>{id}</code> },
     { title: '组织', dataIndex: '_payer', key: '_payer', width: 180,
-      filters: [...new Set(accounts.map(a => a._payer))].filter(Boolean).map(p => ({ text: p, value: p })),
+      // 用合并后的列表取值，否则「APN 合作伙伴账户」这一组筛不出来
+      filters: [...new Set(allAccounts.map(a => a._payer))].filter(Boolean).map(p => ({ text: p, value: p })),
       onFilter: (value: any, record: any) => record._payer === value,
       render: (p: string) => {
         if (!p) return null;
@@ -799,9 +930,11 @@ const AccountsPage: React.FC = () => {
         return <Tag style={{ margin: 0, border: 'none', color: c.fg, background: c.bg, maxWidth: 168, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={p}>{p}</Tag>;
       }, responsive: ['md'] as any },
     { title: '状态', dataIndex: 'Status', key: 'Status', width: 100, align: 'center' as const,
-      filters: [{ text: 'ACTIVE', value: 'ACTIVE' }, { text: 'SUSPENDED', value: 'SUSPENDED' }],
+      filters: [{ text: 'ACTIVE', value: 'ACTIVE' }, { text: 'SUSPENDED', value: 'SUSPENDED' },
+        { text: 'UNCONFIGURED', value: 'UNCONFIGURED' }],
       onFilter: (value: any, record: any) => record.Status === value,
-      render: (s: string) => <Badge status={s === 'ACTIVE' ? 'success' : 'error'} text={<span style={{ fontSize: 12 }}>{s}</span>} /> },
+      // UNCONFIGURED 是 APN 账户缺 roleArn 的状态，用 warning 区别于 SUSPENDED
+      render: (s: string) => <Badge status={s === 'ACTIVE' ? 'success' : s === 'UNCONFIGURED' ? 'warning' : 'error'} text={<span style={{ fontSize: 12 }}>{s}</span>} /> },
   ];
 
   return (
@@ -814,9 +947,16 @@ const AccountsPage: React.FC = () => {
         </div>
         {!isMobile && accounts.length > 0 && (
           <div className="stat-chips" style={{ margin: 0 }}>
+            {/* 统计口径只算组织内账户：APN 账户不属于任何组织，
+                计进「总账户/组织」会让这两个数与实际管理规模对不上 */}
             <span className="stat-chip">总账户 <strong>{accounts.length}</strong></span>
             <span className="stat-chip success">Active <strong>{accounts.filter(a => a.Status === 'ACTIVE').length}</strong></span>
             <span className="stat-chip">组织 <strong>{[...new Set(accounts.map(a => a._payer))].length}</strong></span>
+            {apnAccounts.length > 0 && (
+              <Tooltip title="AWS Partner Network 合作伙伴主体账户，仅用于 POC Cash，不属于任何组织">
+                <span className="stat-chip">APN <strong>{apnAccounts.length}</strong></span>
+              </Tooltip>
+            )}
             <Tooltip title="按客户安全要求收窄了平台权限的账户，点击管理">
               <span
                 className="stat-chip"
@@ -898,7 +1038,9 @@ const AccountsPage: React.FC = () => {
             {sorted.slice(0, 50).map(a => (
               <div key={a.Id} className="account-card" onClick={() => openDetail(a)}>
                 <div className="account-card-info">
-                  <h4>{a.Name} {a._isPayer && <Tag color="gold" style={{ margin: 0, fontSize: 10, lineHeight: '16px', padding: '0 5px' }}>Payer</Tag>}</h4>
+                  <h4>{a.Name} {a._isApn
+                    ? <Tag color="cyan" style={{ margin: 0, fontSize: 10, lineHeight: '16px', padding: '0 5px' }}>APN</Tag>
+                    : a._isPayer && <Tag color="gold" style={{ margin: 0, fontSize: 10, lineHeight: '16px', padding: '0 5px' }}>Payer</Tag>}</h4>
                   <p>{a.Id} · {a._payer}</p>
                 </div>
                 <Tag color={a.Status === 'ACTIVE' ? 'green' : 'red'}>{a.Status}</Tag>
@@ -917,33 +1059,16 @@ const AccountsPage: React.FC = () => {
             </div>
             {selectedAccount && (
               <div style={{ width: 360, minWidth: 360 }}>
-                <Card size="small" style={{ height: '100%' }} title={<span>{selectedAccount.Name}{selectedAccount._isPayer && <Tag color="gold" style={{ marginLeft: 8 }}>Payer</Tag>}</span>}
+                <Card size="small" style={{ height: '100%' }} title={<span>{selectedAccount.Name}{selectedAccount._isApn
+                  ? <Tag color="cyan" style={{ marginLeft: 8 }}>APN</Tag>
+                  : selectedAccount._isPayer && <Tag color="gold" style={{ marginLeft: 8 }}>Payer</Tag>}</span>}
                   extra={
                     <Space size={4}>
                       <ConsoleButton account={selectedAccount} />
                       <Button type="text" size="small" aria-label="关闭" onClick={() => setSelectedAccount(null)}>✕</Button>
                     </Space>
                   }>
-                  <Tabs size="small" items={[
-                    { key: 'info', label: '基本', children: (
-                      <Descriptions size="small" column={1} bordered>
-                        <Descriptions.Item label="ID"><code>{selectedAccount.Id}</code></Descriptions.Item>
-                        <Descriptions.Item label="邮箱">{selectedAccount.Email}</Descriptions.Item>
-                        <Descriptions.Item label="组织"><Tag>{selectedAccount._payer}</Tag></Descriptions.Item>
-                        <Descriptions.Item label="状态"><Tag color={selectedAccount.Status === 'ACTIVE' ? 'green' : 'red'}>{selectedAccount.Status}</Tag></Descriptions.Item>
-                      </Descriptions>
-                    )},
-                    { key: 'mfa', label: '安全', children: detailLoading ? <Spin /> : detail?.mfa ? (
-                      <>
-                        <p>Root MFA: {detail.mfa.root ? <Tag color="green">✓</Tag> : <Tag color="red">✗</Tag>}</p>
-                        <Table size="small" pagination={false} rowKey="user" dataSource={detail.mfa.users}
-                          columns={[{ title: '用户', dataIndex: 'user' }, { title: 'MFA', dataIndex: 'hasMFA', width: 50, render: (h: boolean) => h ? '✓' : '✗' }]} />
-                      </>
-                    ) : '无数据' },
-                    { key: 'root', label: '根用户', children: (
-                      <RootCredentialsPanel accountId={selectedAccount.Id} rootCredentials={detail?.rootCredentials} canRoot={canRoot} rootResetAccess={rootResetAccess} isAdmin={isAdmin} isPayer={!!selectedAccount._isPayer} adminExcluded={!!selectedAccount._adminRoleExcluded} loading={detailLoading} />
-                    ) },
-                  ]} />
+                  <Tabs size="small" items={renderDetailTabs(selectedAccount)} />
                 </Card>
               </div>
             )}
