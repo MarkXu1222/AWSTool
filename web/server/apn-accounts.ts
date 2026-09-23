@@ -25,14 +25,23 @@ import fs from 'fs';
 import path from 'path';
 import { PARTNERS } from './poc-cash';
 
-const CONFIG_PATH = path.join(__dirname, '../../config.json');
+// 运行方式有两种，__dirname 不同：
+//   pm2 跑源码 tsx server/index.ts → web/server      → ../../config.json
+//   编译产物 node dist/server/...  → web/dist/server → ../../../config.json
+// 只写一个路径会在另一种方式下读不到，而本模块的降级行为是「当作未配置」——
+// 那会让页面显示 UNCONFIGURED，看起来像配置丢了，实则只是路径没对上。
+const CONFIG_CANDIDATES = [
+  path.join(__dirname, '../../config.json'),
+  path.join(__dirname, '../../../config.json'),
+];
 
 function readConfig(): any {
-  try {
-    return JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf-8'));
-  } catch {
-    return {};
+  for (const p of CONFIG_CANDIDATES) {
+    try {
+      return JSON.parse(fs.readFileSync(p, 'utf-8'));
+    } catch { /* 试下一个候选路径 */ }
   }
+  return {};
 }
 
 /** 平台对 APN 账户不可用的功能。前端据此给出禁用理由，避免点了才报错。 */
