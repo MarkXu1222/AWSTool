@@ -13,7 +13,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { listApnAccounts, APN_UNAVAILABLE, consoleRoleFor,
-  apnPartnerKeyForAccount } from '../server/apn-accounts';
+  apnPartnerKeyForAccount, APN_CONSOLE_DESTINATION } from '../server/apn-accounts';
 import { PARTNERS } from '../server/poc-cash';
 import fs from 'fs';
 import path from 'path';
@@ -126,6 +126,23 @@ test('未知主体取控制台角色返回空而不抛错', () => {
   const r = consoleRoleFor('does-not-exist');
   assert.equal(r.roleArn, '');
   assert.equal(r.externalId, '');
+});
+
+test('默认落地页是 Partner Central，且 host 区域与 region 参数一致', () => {
+  const u = new URL(APN_CONSOLE_DESTINATION);
+  assert.ok(u.pathname.includes('partnercentral'),
+    'APN 账户应直接落在 Partner Central，而不是通用控制台首页');
+
+  // host 里的区域与 region 参数打架时，控制台会按 region 再跳一次 ——
+  // 白白多一跳，且在两个区域间摇摆（曾出现 host=us-east-1 而 region=us-east-2）
+  const hostRegion = u.hostname.split('.')[0];
+  const qsRegion = u.searchParams.get('region');
+  assert.equal(hostRegion, qsRegion,
+    `host 区域(${hostRegion})与 region 参数(${qsRegion})必须一致`);
+
+  // Partner Central 的 API 侧固定 us-east-1，控制台保持同一区域
+  assert.equal(qsRegion, 'us-east-1');
+  assert.equal(u.protocol, 'https:');
 });
 
 test('apnPartnerKeyForAccount 只认 APN 账户', () => {

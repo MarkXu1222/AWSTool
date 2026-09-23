@@ -87,6 +87,24 @@ export function consoleRoleFor(partnerKey: string): { roleArn: string; externalI
   };
 }
 
+/**
+ * APN 账户控制台的默认落地页 —— Partner Central。
+ *
+ * 不用通用的 console.aws.amazon.com：AWS 会把你带到该账户「上次访问的服务」，
+ * 而这两个账户几乎没有其他资源（实测 0 台 EC2、1 个桶），落点实际由 AWS 决定，
+ * 我们控制不了也无法预期。显式指定后行为稳定，且省掉一次跳转。
+ *
+ * ⚠️ host 的区域与 region 参数必须一致。曾见到
+ * `us-east-1.console.aws.amazon.com/partnercentral/dashboard?region=us-east-2`
+ * 这种 host 与 region 打架的链接 —— 控制台会按 region 参数再跳一次，
+ * 白白多一跳，且在两个区域间摇摆。Partner Central 的 API 我们统一走 us-east-1，
+ * 这里保持同一个区域。
+ */
+// 路径取自 AWS 自己的重定向落点（实际观察到的是 /partnercentral/dashboard），
+// 不自行猜测 /home 之类 —— 猜错会落到 404 或被再次重定向。
+export const APN_CONSOLE_DESTINATION =
+  'https://us-east-1.console.aws.amazon.com/partnercentral/dashboard?region=us-east-1';
+
 /** 该账户 ID 是否是 APN 账户；是则返回主体 key。供控制台路由分流。 */
 export function apnPartnerKeyForAccount(accountId: string): string | null {
   const p = PARTNERS.find(x => x.apnAccountId === accountId);
@@ -139,7 +157,7 @@ export function listApnAccounts(): ApnAccountView[] {
  */
 export async function getApnConsoleSigninUrl(
   partnerKey: string,
-  destinationUrl: string,
+  destinationUrl: string = APN_CONSOLE_DESTINATION,
 ): Promise<string> {
   const view = listApnAccounts().find(a => a.partnerKey === partnerKey);
   if (!view) throw new Error(`未知的 APN 主体: ${partnerKey}`);

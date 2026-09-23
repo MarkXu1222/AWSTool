@@ -20,7 +20,8 @@ import {
   getExternalId, RESTRICTED_UNAVAILABLE,
 } from '../restricted-accounts';
 import { listApnAccounts, probeApnAccount, APN_UNAVAILABLE,
-  getApnConsoleSigninUrl, apnPartnerKeyForAccount } from '../apn-accounts';
+  getApnConsoleSigninUrl, apnPartnerKeyForAccount,
+  APN_CONSOLE_DESTINATION } from '../apn-accounts';
 import * as tagCompliance from '../tag-compliance';
 import * as tagOnboarding from '../tag-onboarding';
 import { pipeline } from 'stream/promises';
@@ -786,7 +787,10 @@ awsRouter.get('/console-url/:accountId', async (req: Request, res: Response) => 
       if (!(currentUser.role === 'admin' || (currentUser as any).root_access === true)) {
         return res.status(403).json({ error: '无权登录 APN 账户控制台（该角色为完整管理员），请联系管理员分配根用户权限' });
       }
-      const apnDest = (destination as string) || 'https://console.aws.amazon.com/';
+      // 默认进 Partner Central —— 这是这两个账户的实际用途。
+      // 用通用控制台首页会被 AWS 按「上次访问的服务」再跳一次，落点不可预期。
+      // 调用方显式传 destination 时仍以其为准。
+      const apnDest = (destination as string) || APN_CONSOLE_DESTINATION;
       const apnUrl = await getApnConsoleSigninUrl(apnKey, apnDest);
       db.addAuditLog(tokenUser?.userId, 'CONSOLE_ADMIN_LOGIN',
         `APN 账户 ${accountId}（${apnKey}）· 生成管理员控制台免登录链接`,

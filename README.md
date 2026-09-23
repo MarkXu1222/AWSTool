@@ -648,6 +648,15 @@ APN 账户可以进控制台，走**独立的 `apn-console` 角色**（`Administ
 路由复用 `GET /aws/console-url/:accountId`，在函数开头按 `apnPartnerKeyForAccount()`
 分流 —— 常规链路依赖 support-quota / OAAR / payer 二级跳，这两个账户一个都没有。
 
+**默认落地页是 Partner Central**（`APN_CONSOLE_DESTINATION`），不是通用控制台首页。
+用 `console.aws.amazon.com` 会被 AWS 按「该账户上次访问的服务」再跳一次；这两个
+账户几乎没有其他资源（实测 0 台 EC2、1 个桶），落点实际由 AWS 决定，不可预期。
+显式指定后行为稳定且少一跳。调用方传 `destination` 时仍以其为准。
+
+⚠️ **host 区域与 `region` 参数必须一致**。曾观察到
+`us-east-1.console.aws.amazon.com/partnercentral/dashboard?region=us-east-2`
+这种互相打架的链接 —— 控制台会按 `region` 再跳一次，在两个区域间摇摆。
+
 对应地，这些功能对 APN 账户仍不可用，前端按钮直接禁用并说明原因：
 Root 凭证与密码重置、配额、MAP 标签、账单与区域数据。
 

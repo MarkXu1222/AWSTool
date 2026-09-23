@@ -292,7 +292,7 @@ const AccountsPage: React.FC = () => {
         );
       }
       return (
-        <Tooltip title="以 AdministratorAccess 进入该 APN 账户控制台（会话 1 小时，操作已审计）">
+        <Tooltip title="以 AdministratorAccess 进入该 APN 账户的 Partner Central 控制台（会话 1 小时，操作已审计）">
           <Button type="primary" danger size="small" icon={<LoginOutlined />} loading={consoleLoading}
             style={style} onClick={() => openConsole(account.Id, 'admin')}>Admin 控制台</Button>
         </Tooltip>
