@@ -211,10 +211,17 @@ export async function buildPocEstimate(
   const r = RATES[region] || RATES['ap-southeast-5'];
 
   // 目标金额带零头：整数（如 2400.00）一看就是凑的，真实估算不会那么齐。
-  // 用商机 MRR 做种子，同一商机每次生成的偏移一致（可复现、可对账），
-  // 幅度 +30~170 USD，落在「多个几十到一百多」的区间。
+  // 用商机 MRR 做种子，同一商机每次生成的偏移一致（可复现、可对账）。
+  //
+  // 幅度 +100~150 USD（业务要求）：计算器金额应在商机 MRR 上下浮动，
+  // 既不能等于 MRR（显得是照抄），也不能差太远（AWS 会质疑估算依据）。
+  // 原为 +30~170，下限太低时偏移不明显、上限又偏大，故收窄到这个区间。
   const seed = Math.round(mrrUsd * 7919) % 1000;
-  const target = mrrUsd + 30 + (seed % 140) + (seed % 100) / 100;
+  // seed % 51 → 0~50，加上基数 100 得 100~150。
+  // 小数部分必须非零：seed%100 为 0 时（如 MRR 5000）会算出 5100.00 这种
+  // 整数，正是要避免的「一看就是凑的」。用 1~99 分保证永远带零头。
+  const cents = (seed % 99) + 1;
+  const target = mrrUsd + 100 + (seed % 51) + cents / 100;
 
   // 基准配置（比例来自实测配比）
   let app = 7, load = 4, db = 4, ebs = 1800, s3 = 500, alb = 4;

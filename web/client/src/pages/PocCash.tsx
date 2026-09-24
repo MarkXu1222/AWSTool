@@ -11,7 +11,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import {
   Card, Form, Input, InputNumber, Select, Button, Space, Radio, Alert,
   Descriptions, Typography, Divider, message, Modal, Tag, DatePicker, Result, Tabs,
-  Table,
+  Table, Tooltip,
 } from 'antd';
 import { RocketOutlined, CopyOutlined, DownloadOutlined } from '@ant-design/icons';
 import dayjs, { Dayjs } from 'dayjs';
@@ -568,6 +568,13 @@ const PocCashPage: React.FC = () => {
         setPocBusy(true);
         try {
           const r = await api.pocFundingCreate(values);
+          // request() 对 HTTP 400 不抛错，而是把 { error } 当正常结果返回。
+          // 不在这里拦住，下面的结果页会渲染出「undefined 已创建」，
+          // 真实失败原因被这条假的成功提示盖掉（与创建商机同一类问题）。
+          if (r?.error || !r?.applicationId) {
+            message.error(r?.error || 'POC 申请创建失败：服务端未返回申请号');
+            return;
+          }
           setPocResult(r);
           if (r.warnings?.length) {
             message.warning(`${r.applicationId} 已创建，${r.warnings.length} 条提醒`);
@@ -735,14 +742,20 @@ const PocCashPage: React.FC = () => {
       {pocResult && (
         <Alert style={{ marginBottom: 16 }} closable onClose={() => setPocResult(null)}
           type={pocResult.warnings?.length ? 'warning' : 'success'} showIcon
-          message={`${pocResult.applicationId} ${pocResult.submitted ? '已提交' : '已创建'}`}
+          message={`${pocResult.applicationId || '(未返回申请号)'} ${pocResult.submitted ? '已提交' : '已创建'}`}
           description={<div style={{ lineHeight: 1.8 }}>
-            <div>{pocResult.name} · {pocResult.status}
+            {/* 残缺响应不再渲染成空白字段：以前金额/计算器取不到时
+                会显示「申请额 USD （ MYR）」「计算器」这种半截文案 */}
+            <div>{pocResult.name || '(无名称)'} · {pocResult.status || '状态未知'}
               {pocResult.stage ? ` / ${pocResult.stage}` : ''}</div>
-            <div>申请额 {pocResult.amounts?.pocUsd?.toLocaleString()} USD
-              （{pocResult.amounts?.requestMyr?.toLocaleString()} MYR）</div>
-            <div>计算器 <a href={pocResult.calculatorUrl} target="_blank"
-              rel="noreferrer">{pocResult.calculatorUrl}</a></div>
+            {pocResult.amounts?.pocUsd != null ? (
+              <div>申请额 {pocResult.amounts.pocUsd.toLocaleString()} USD
+                （{pocResult.amounts.requestMyr?.toLocaleString() ?? '—'} MYR）</div>
+            ) : <div><Text type="secondary">申请额未返回</Text></div>}
+            {pocResult.calculatorUrl ? (
+              <div>计算器 <a href={pocResult.calculatorUrl} target="_blank"
+                rel="noreferrer">{pocResult.calculatorUrl}</a></div>
+            ) : <div><Text type="secondary">计算器链接未返回</Text></div>}
             {pocResult.warnings?.map((w: string, i: number) =>
               <div key={i}><Text type="warning">⚠️ {w}</Text></div>)}
           </div>} />
@@ -789,8 +802,14 @@ const PocCashPage: React.FC = () => {
           },
           {
             title: '项目桶', dataIndex: 'bucket', width: 128, ellipsis: true,
-            // 不在任何 payer 下的账户（客户自有/APN 账户）留空，不编造
-            render: (b: string | null) => b || <Text type="secondary">—</Text>,
+            // 项目桶 = 该 AWS 账户所属的 payer，取自平台账户缓存。
+            // 客户自有账户不在我们的组织里，查不到是**正常结果**，不是故障 ——
+            // 加 tooltip 说明，否则一列「—」看起来像功能坏了。
+            render: (b: string | null) => b || (
+              <Tooltip title="该 AWS 账户不在平台管理的任何组织内（客户自有账户），因此没有对应的项目桶">
+                <Text type="secondary">—</Text>
+              </Tooltip>
+            ),
           },
           {
             title: '账户', dataIndex: 'awsAccountId', width: 118,
