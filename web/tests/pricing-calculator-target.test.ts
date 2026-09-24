@@ -10,7 +10,7 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildPocEstimate } from '../server/pricing-calculator';
+import { buildPocEstimate, sanitizeEstimateName } from '../server/pricing-calculator';
 
 /** 与实现保持一致的目标值推导，用于验证区间与零头 */
 function targetFor(mrrUsd: number) {
@@ -60,6 +60,34 @@ test('不同 MRR 的零头不应全部相同', () => {
     cents.add(Math.round(targetFor(mrr) * 100) % 100);
   }
   assert.ok(cents.size > 10, `零头种类过少: ${cents.size}`);
+});
+
+test('估算名里的 & < > 被清洗', () => {
+  // calculator.aws 拒绝这三个字符：Group Name cannot contain ">", "<" and "&"
+  // 真实事故：商机标题 "Network Configuration & Security Hardening" 导致
+  // 整个 POC 创建失败
+  assert.equal(
+    sanitizeEstimateName('Webby-koreawallpaper- Network Configuration & Security Hardening'),
+    'Webby-koreawallpaper- Network Configuration and Security Hardening');
+  assert.ok(!/[<>&]/.test(sanitizeEstimateName('A & B <C> D')));
+});
+
+test('& 替换成 and 而不是删掉', () => {
+  // 删掉会得到 "Configuration  Security" 这种读不通的名字
+  const out = sanitizeEstimateName('Configuration & Security');
+  assert.equal(out, 'Configuration and Security');
+  assert.ok(!out.includes('  '), '不应留下双空格');
+});
+
+test('没有特殊字符的名字原样保留', () => {
+  const clean = 'Webby - Korea Wallpaper (HQ) Core Platform Modernization #ADPL';
+  assert.equal(sanitizeEstimateName(clean), clean);
+});
+
+test('buildPocEstimate 出口的 name 一定干净', async () => {
+  // 清洗放在 buildPocEstimate 内部，保证所有调用路径都覆盖到
+  const est = await buildPocEstimate('X & Y <Z>', 'ap-southeast-5', 5000);
+  assert.ok(!/[<>&]/.test(est.name), `est.name 仍含非法字符: ${est.name}`);
 });
 
 test('生成的估算总额贴近目标（收敛逻辑没被改坏）', async () => {

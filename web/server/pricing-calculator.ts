@@ -47,6 +47,28 @@ const HOURS = 730;
 
 function svcKey(code: string) { return `${code}-${randomUUID()}`; }
 
+/**
+ * 估算名里的 `<` `>` `&` 会被 calculator.aws 拒绝：
+ *   Group Name cannot contain ">", "<" and "&"
+ *
+ * 商机标题里出现 `&` 很自然（如 "Network Configuration & Security Hardening"），
+ * 而标题是直接拿来当估算名的，于是整个 POC 创建失败。
+ *
+ * 替换而不是删除：`&` 承载语义，删掉会变成 "Configuration  Security"
+ * 这种读不通的名字。用 "and" 替换保留原意；`<` `>` 极少出现在标题里，
+ * 按连字符处理即可。
+ *
+ * ⚠️ 只清洗发给计算器的名字，不回头改商机标题 —— 商机一旦 Approved
+ * 标题就不可改，且 `&` 在 Partner Central 侧完全合法。
+ */
+export function sanitizeEstimateName(name: string): string {
+  return String(name || '')
+    .replace(/&/g, 'and')
+    .replace(/[<>]/g, '-')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
+}
+
 function ec2Block(region: string, instanceType: string, count: number,
                   monthly: number, storageGb = 0) {
   return [svcKey('ec2Enhancement'), {
@@ -282,7 +304,9 @@ export async function buildPocEstimate(
     .reduce((s: number, b: any) => s + b.serviceCost.monthly, 0).toFixed(2);
 
   return {
-    name, services, groups: {},
+    // 清洗放在这里而不是调用方：所有生成路径都会经过 buildPocEstimate，
+    // 放在入口能保证漏不掉
+    name: sanitizeEstimateName(name), services, groups: {},
     groupSubtotal: { monthly: total, upfront: 0 },
     totalCost: { monthly: total, upfront: 0 },
     support: {},
@@ -306,8 +330,11 @@ export async function saveEstimate(est: Estimate): Promise<string> {
     signal: AbortSignal.timeout(40000),
   });
   if (!resp.ok) {
+    // 截断到 200 字会把关键信息切掉：曾经因此看到
+    // "name has value: Webby-koreawallpaper- Network Config" 就以为名字是干净的，
+    // 实际真名是 "...Network Configuration & Security Hardening"，罪魁 & 在 200 字之外。
     throw new Error(`计算器保存失败 HTTP ${resp.status}: `
-      + (await resp.text()).slice(0, 200));
+      + (await resp.text()).slice(0, 800));
   }
   const data: any = await resp.json();
   if (![200, 201].includes(data?.statusCode)) {
