@@ -12,7 +12,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  deriveAmounts, buildTitle, buildMarketing, buildUpdateEchoFields, getPartner, PARTNERS,
+  deriveAmounts, buildTitle, buildMarketing, buildUpdateEchoFields, ensureTitleTags, getPartner, PARTNERS,
   USE_CASES, INDUSTRIES,
   __test__toIsoDate, __test__evaluateStage,
 } from '../server/poc-cash';
@@ -44,17 +44,29 @@ test('金额由 MRR 单向推导', () => {
 test('标题使用账户内的两段式惯例并剥掉公司后缀', () => {
   assert.equal(
     buildTitle(webby, 'Korea Wallpaper (KL) Sdn Bhd', 'Application Service Migration'),
-    'Webby - Korea Wallpaper (KL) Application Service Migration #ADPL');
+    'Webby - Korea Wallpaper (KL) Application Service Migration #ADPL #HarimauBlitz26');
   assert.equal(
     buildTitle(webby, 'FF CLOUD PG NETWORK TECHNOLOGY SDN. BHD.', 'Data Platform Migration'),
-    'Webby - FF CLOUD PG NETWORK TECHNOLOGY Data Platform Migration #ADPL');
+    'Webby - FF CLOUD PG NETWORK TECHNOLOGY Data Platform Migration #ADPL #HarimauBlitz26');
 });
 
 test('标题不产生多余空格', () => {
   const t = buildTitle(webby, 'Acme  Sdn Bhd', 'Migration');
   assert.equal(t.includes('  '), false, `标题有连续空格: ${JSON.stringify(t)}`);
   assert.equal(t.startsWith('Webby - '), true);
-  assert.equal(t.endsWith(' #ADPL'), true);
+  assert.equal(t.endsWith(' #ADPL #HarimauBlitz26'), true);
+});
+
+test('手填标题只补缺失的主体标签', () => {
+  assert.equal(
+    ensureTitleTags('Webby - Demo #ADPL', webby.requiredTags),
+    'Webby - Demo #ADPL #HarimauBlitz26');
+  assert.equal(
+    ensureTitleTags('Webby - Demo #adpl #HarimauBlitz26', webby.requiredTags),
+    'Webby - Demo #adpl #HarimauBlitz26');
+  assert.equal(
+    ensureTitleTags('Mergebytes - Demo #ADPL', getPartner('mergebytes').requiredTags),
+    'Mergebytes - Demo #ADPL');
 });
 
 test('未知 partner 抛错而不是静默回退', () => {

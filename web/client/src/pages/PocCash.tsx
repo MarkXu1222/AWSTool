@@ -25,6 +25,7 @@ interface Meta {
   partners: {
     key: string; label: string; defaultSolutionId: string;
     apnAccountId: string;
+    requiredTags: string[];
     /** 该主体是否配了跨账户 role；false 时前端置灰不可选 */
     configured?: boolean;
   }[];
@@ -179,9 +180,8 @@ const PocCashPage: React.FC = () => {
   /**
    * 套用已有商机作为模板。
    *
-   * 刻意**不填** projectName —— 新商机是别的项目，项目描述必须重写，
-   * 自动带过来会让标题指向错误的项目内容。
-   * 业务描述会带过来但需要改：AWS 审的时候看描述是否贴合本次项目。
+   * 复用客户资料、Marketing 字段和 Solution。新项目的标题、Use Case 和业务描述都要重新填写，
+   * 否则旧项目的内容会与新标题不一致。
    */
   const applyTemplate = async (id: string) => {
     try {
@@ -192,17 +192,19 @@ const PocCashPage: React.FC = () => {
         websiteUrl: t.websiteUrl,
         countryCode: t.countryCode,
         postalCode: t.postalCode,
-        customerUseCase: t.customerUseCase,
-        customerBusinessProblem: t.customerBusinessProblem,
+        projectName: undefined,
+        titleOverride: undefined,
+        customerUseCase: undefined,
+        customerBusinessProblem: undefined,
+        mrrUsd: undefined,
         marketingSource: t.marketingSource === 'Marketing Activity'
           ? 'Marketing Activity' : 'None',
         marketingAwsFundingUsed: t.marketingAwsFundingUsed === 'Yes' ? 'Yes' : 'No',
         solutionId: t.solutionIds?.[0],
-        // MRR 不带过来：不同项目金额不同，沿用旧值是常见错误
       });
       setRefFrom(id);
       setTitleMode('auto');
-      form.setFieldValue('projectName', undefined);
+      setMrr(null);
       setAutoTitle('');
       message.success(`已套用 ${id} 的客户信息${t.title ? `（原标题：${t.title}）` : ''}`);
     } catch (e: any) {
@@ -251,22 +253,36 @@ const PocCashPage: React.FC = () => {
     };
   }, [mrr, people, days]);
 
-  const doSubmit = (values: any) => {
+  const doSubmit = async (values: any) => {
     const willSubmit = values.submit !== false;
-    const finalTitle = titleMode === 'manual' ? values.titleOverride : autoTitle;
     const payload = {
       ...values,
       targetCloseDate: (values.targetCloseDate as Dayjs).format('YYYY-MM-DD'),
       titleOverride: titleMode === 'manual' ? values.titleOverride : undefined,
     };
+    let preview: { title: string; companyName: string };
+    try {
+      preview = await api.pocCashPreviewTitle({
+        partnerKey: values.partnerKey,
+        companyName: values.companyName,
+        projectName: values.projectName || '',
+        titleOverride: payload.titleOverride,
+      });
+      if ((preview as any)?.error || !preview?.title) {
+        throw new Error((preview as any)?.error || '无法预览最终商机标题');
+      }
+    } catch (e: any) {
+      message.error(e.message || '标题预览失败');
+      return;
+    }
 
     Modal.confirm({
       title: '确认创建商机？',
       width: 580,
       content: (
         <div style={{ lineHeight: 1.9 }}>
-          <Text strong>{finalTitle}</Text>
-          <div style={{ marginTop: 8 }}>客户：{values.companyName}</div>
+          <Text strong>{preview.title}</Text>
+          <div style={{ marginTop: 8 }}>客户：{preview.companyName || values.companyName}</div>
           <div>
             MRR：{Number(values.mrrUsd).toLocaleString()} USD/月
             {amounts && <Text type="secondary">
@@ -330,6 +346,7 @@ const PocCashPage: React.FC = () => {
 
   /** 当前主体的元信息，用于在表单上展示账户号与 Solution 情况 */
   const activeP = (meta?.partners || []).find(p => p.key === activePartner);
+  const requiredTags = activeP?.requiredTags || [];
 
   const resetAll = () => {
     setResult(null); form.resetFields(); setMrr(null); setAutoTitle('');
@@ -1111,12 +1128,11 @@ const PocCashPage: React.FC = () => {
           // 必须同时给 AwsFundingUsed，否则 AWS 拒绝创建。
           countryCode: 'MY', submit: true,
           marketingSource: 'None', marketingAwsFundingUsed: 'No',
-          customerUseCase: 'Migration / Database Migration',
         }}>
 
         <Divider orientation="left">参考已有商机（可选）</Divider>
         <Form.Item
-          extra="同一客户做新项目时，选一条已有商机可带出客户信息、Use Case、业务描述和 Solution。项目名称与 MRR 不会带过来 —— 新项目必须自己填。">
+          extra="同一客户做新项目时，带出客户信息、Marketing 字段和 Solution。标题、Use Case、业务描述及 MRR 都需按新项目填写。">
           <Select
             style={{ width: '100%', maxWidth: 720 }}
             showSearch allowClear
@@ -1150,7 +1166,7 @@ const PocCashPage: React.FC = () => {
         {refFrom && (
           <Alert style={{ maxWidth: 720, marginBottom: 16 }} type="info" showIcon
             message={`已套用 ${refFrom} 的信息`}
-            description="业务描述是上一个项目的，请按本次项目改写 —— AWS 会看描述是否贴合实际项目内容。"
+            description="Use Case 和业务描述已留空，请按本次项目填写。"
             action={<Button size="small" onClick={() => setRefFrom(null)}>知道了</Button>} />
         )}
 
@@ -1223,20 +1239,34 @@ const PocCashPage: React.FC = () => {
             <Form.Item name="titleOverride" noStyle
               rules={[{ required: titleMode === 'manual', message: '标题必填' }]}>
               <Input style={{ maxWidth: 640 }}
-                placeholder="Webby - Korea Wallpaper Application Service Migration #ADPL" />
+                placeholder="Webby - Korea Wallpaper (HQ) Application Service Migration #ADPL #HarimauBlitz26" />
             </Form.Item>
+          )}
+          {/* 手填标题绕开自动生成，缺的标签会在提交时由服务端补上。
+              这里提前说明，免得用户以为标题被莫名改写了。 */}
+          {titleMode === 'manual' && requiredTags.length > 0 && (
+            <div style={{ marginTop: 8 }}>
+              <Text type="secondary">
+                提交时会自动补齐必填标签 <Text code>{requiredTags.join(' ')}</Text>（已有的不重复添加）
+              </Text>
+            </div>
+          )}
+          {titleMode === 'manual' && (
+            <div style={{ marginTop: 8 }}>
+              <Text type="secondary">下方的 Use Case 和业务描述请按手填标题自行填写，不会从标题自动生成。</Text>
+            </div>
           )}
         </Form.Item>
 
         <Form.Item name="customerUseCase" label="Use Case" rules={[{ required: true }]}
-          extra="必须用 AWS 的完整字面量，写简写（如 Migration）会被拒">
+          extra="请自行选择与本次项目相符的 AWS 标准值；不能输入任意文字或简写（如 Migration）">
           <Select style={{ maxWidth: 480 }} showSearch
             options={(meta?.useCases || []).map(v => ({ value: v, label: v }))} />
         </Form.Item>
 
         <Form.Item name="customerBusinessProblem" label="业务描述"
           rules={[{ required: true, min: 50, message: '至少 50 字 —— AWS 会看描述是否具体' }]}
-          extra="写清楚客户现状、要迁什么、partner 做哪些事、用到哪些 AWS 服务">
+          extra="按本次商机标题写清客户现状、项目目标、partner 做哪些事、用到哪些 AWS 服务">
           <TextArea rows={6} style={{ maxWidth: 900 }} showCount />
         </Form.Item>
 

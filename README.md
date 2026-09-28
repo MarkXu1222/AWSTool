@@ -902,9 +902,8 @@ POC 可申请额。
 回传 `LifeCycle` 时只带可写字段，带上只读字段会被拒。
 
 **参考已有商机（0.35.1）**：同一客户做新项目时，从下拉选一条已有商机，
-带出客户信息、Use Case、业务描述、Solution。**项目名称与 MRR 刻意不带过来** ——
-新项目的描述和金额必须自己填，沿用旧值是常见错误。套用后会提示"业务描述是上一个
-项目的，请按本次项目改写"。
+带出客户信息、Marketing 字段和 Solution。标题、Use Case、业务描述及 MRR 均需按新项目填写，
+避免旧项目内容与新标题不一致。Use Case 必须从 AWS 标准值中选择；业务描述由用户填写。
 
 ⚠️ `ListOpportunities` **不返回 Title / CustomerUseCase / CustomerBusinessProblem**，
 只有 `GetOpportunity` 才有。所以列表只显示客户名等摘要，选中后再单独拉完整模板——
@@ -915,9 +914,10 @@ POC 可申请额。
 `toISOString()`。`TargetCloseDate` 是 string 类型，不受影响。
 
 **商机名称**支持自动生成与手动输入。自动模式按账户内惯例拼成两段式
-`Webby - <客户简称> <项目描述> #ADPL`（不是 YanHuang 的三段式），并剥掉
+`Webby - <客户简称> <项目描述> #ADPL #HarimauBlitz26`（不是 YanHuang 的三段式），并剥掉
 `SDN. BHD.` 等公司后缀。`CustomerUseCase` 必须用 AWS 的完整字面量 ——
 写成 `Migration` 会被拒，正确值是 `Migration / Database Migration`。
+手填标题也会补齐当前 Partner 要求的标签；创建确认框会向服务端重新预览最终标题。
 
 回归测试见 `tests/poc-cash.test.ts`。
 

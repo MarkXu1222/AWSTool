@@ -43,7 +43,13 @@ export interface PartnerProfile {
   label: string;
   /** 商机标题前缀，账户内惯例为两段式：Webby - <客户> <项目描述> #ADPL */
   titlePrefix: string;
+  /** @deprecated 保留仅为兼容；实际拼接与补齐都走 requiredTags */
   titleSuffix: string;
+  /**
+   * 该主体所有商机标题必须带的标签，按声明顺序追加。
+   * 手填标题也会被补齐 —— 不能只在 buildTitle 里拼。
+   */
+  requiredTags: string[];
   owner: { email: string; firstName: string; lastName: string; title: string };
   /** 默认关联的 Solution。空串表示该主体在 Partner Central 里没有已发布的
    *  Solution —— 此时商机照建，只是跳过关联并记一条 warning。
@@ -61,6 +67,9 @@ export const PARTNERS: PartnerProfile[] = [
     label: 'Webby',
     titlePrefix: 'Webby - ',
     titleSuffix: ' #ADPL',
+    // #HarimauBlitz26 是 2026 年活动标签，Webby 所有商机都要带。
+    // 实测账户内既有商机**没有一个**带这个标签，属新增要求。
+    requiredTags: ['#ADPL', '#HarimauBlitz26'],
     owner: {
       email: 'sy.siow@webbygroup.com',
       firstName: 'SY',
@@ -76,6 +85,9 @@ export const PARTNERS: PartnerProfile[] = [
     label: 'Mergebytes',
     titlePrefix: 'Mergebytes - ',
     titleSuffix: ' #ADPL',
+    // 只有 Webby 要求 #HarimauBlitz26，不替 Mergebytes 推断 ——
+    // 标签影响 AWS 侧的活动归属，加错比不加更麻烦
+    requiredTags: ['#ADPL'],
     owner: {
       // 取自该账户既有商机 O28440608 的 OpportunityTeam
       email: 'cloud@mergebytes.ai',
@@ -342,6 +354,29 @@ export function canonicalizeTitle(title: string, companyName: string): string {
   return hit.titleFixes.reduce((t, f) => t.replace(f.from, f.to), title);
 }
 
+/**
+ * 保证标题末尾带齐该主体要求的所有标签。
+ *
+ * 为什么不能只靠 `titleSuffix` 拼接：手填标题（titleOverride）走的是另一条路，
+ * 完全绕开 buildTitle。实测最近 12 个 Webby 商机里有 5 个没有 #ADPL，
+ * 就是这么漏掉的。
+ *
+ * 规则：
+ *  - 已存在的标签不重复添加（大小写不敏感 —— AWS 侧标签是区分大小写的字面量，
+ *    但人可能写成 #adpl，重复加两个视觉上更糟）
+ *  - 缺哪个补哪个，保持 requiredTags 声明的顺序
+ *  - 已有标签保持原位不动，不做重排（重排会让人以为标题被改写了）
+ */
+export function ensureTitleTags(title: string, tags: string[]): string {
+  let out = String(title || '').trim();
+  for (const tag of tags) {
+    // \s 边界防止 #ADPL 误匹配 #ADPLX 这类更长的标签
+    const re = new RegExp(`(^|\\s)${tag.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(\\s|$)`, 'i');
+    if (!re.test(out)) out = `${out} ${tag}`;
+  }
+  return out.replace(/\s{2,}/g, ' ').trim();
+}
+
 /** 自动生成标题：<前缀><客户简称> <项目描述><后缀> */
 export function buildTitle(p: PartnerProfile, companyName: string,
                            projectName: string): string {
@@ -353,7 +388,10 @@ export function buildTitle(p: PartnerProfile, companyName: string,
     .replace(/[,.\s]+$/g, '')
     .replace(/\s{2,}/g, ' ')
     .trim();
-  return `${p.titlePrefix}${short} ${projectName}${p.titleSuffix}`.replace(/\s{2,}/g, ' ');
+  // 标签统一由 ensureTitleTags 补，不再直接拼 titleSuffix ——
+  // 否则项目描述里已经写了 #ADPL 时会出现两个
+  const base = `${p.titlePrefix}${short} ${projectName}`.replace(/\s{2,}/g, ' ').trim();
+  return ensureTitleTags(base, p.requiredTags);
 }
 
 // ===== 凭证 =====
@@ -916,9 +954,18 @@ export async function createOpportunity(input: OpportunityInput): Promise<Create
   // 因为用户可能把错误主体直接写进标题里。
   const rawTitle = (input.titleOverride || '').trim()
     || buildTitle(partner, company.value, input.projectName);
-  const title = canonicalizeTitle(rawTitle, company.value);
-  if (title !== rawTitle) {
-    warnings.push(`商机标题中的主体写法已修正：「${rawTitle}」→「${title}」。`);
+  const fixedTitle = canonicalizeTitle(rawTitle, company.value);
+  if (fixedTitle !== rawTitle) {
+    warnings.push(`商机标题中的主体写法已修正：「${rawTitle}」→「${fixedTitle}」。`);
+  }
+
+  // 补齐必填标签。手填标题走的是 titleOverride，完全绕开 buildTitle ——
+  // 实测最近 12 个 Webby 商机有 5 个因此漏了 #ADPL。这里兜底。
+  const title = ensureTitleTags(fixedTitle, partner.requiredTags);
+  if (title !== fixedTitle) {
+    const added = partner.requiredTags.filter(t =>
+      !new RegExp(`(^|\\s)${t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(\\s|$)`, 'i').test(fixedTitle));
+    warnings.push(`商机标题已补上必填标签 ${added.join(' ')}：「${title}」。`);
   }
 
   const solutionId = input.solutionId || partner.defaultSolutionId;

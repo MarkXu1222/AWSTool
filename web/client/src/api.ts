@@ -501,7 +501,7 @@ export const api = {
   pocFundingList: () => request('/poc-cash/funding'),
   pocFundingExport: (owner?: string) =>
     request('/poc-cash/funding/export', { method: 'POST', body: JSON.stringify({ owner }) }),
-  pocCashPreviewTitle: (body: { partnerKey: string; companyName: string; projectName: string }) =>
+  pocCashPreviewTitle: (body: { partnerKey: string; companyName: string; projectName: string; titleOverride?: string }) =>
     request('/poc-cash/preview-title', { method: 'POST', body: JSON.stringify(body) }),
   pocCashCreate: (body: any) =>
     request('/poc-cash/opportunities', { method: 'POST', body: JSON.stringify(body) }),

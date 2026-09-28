@@ -207,6 +207,7 @@ Bedrock 配额特意用 `/api/bedrock` 独立前缀，就是为了躲开 `/quota
 - 账单 PDF 用**持久化后台 job + 单 job 全局队列**，严格只读 support 会话，可取消，重启中的活动任务明确标为 `interrupted`
 - 敏感度分档而非一刀切：可分配页 → 需显式勾选的 `ops`/`bedrock` → 勾不到的 `poccash`
 - 强制 **MFA + 审计日志 + 限速**；平台长期凭证只在服务端
+- POC Cash 参考旧商机复用客户资料、Marketing 字段和 Solution；新商机的 Use Case 与业务描述由用户按本次标题填写，不沿用旧项目内容
 
 ---
 

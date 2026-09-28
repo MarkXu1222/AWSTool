@@ -87,6 +87,7 @@ pocCashRouter.get('/meta', (_req: Request, res: Response) => {
     partners: poc.PARTNERS.map(p => ({
       key: p.key, label: p.label,
       titlePrefix: p.titlePrefix, titleSuffix: p.titleSuffix,
+      requiredTags: p.requiredTags,
       defaultSolutionId: p.defaultSolutionId,
       apnAccountId: p.apnAccountId,
       // 逐个主体报告可用性：某个主体没配 role 时前端能直接标出来，
@@ -364,15 +365,20 @@ pocCashRouter.post('/preview-title', (req: Request, res: Response) => {
     const partner = poc.getPartner(String(req.body.partnerKey || ''));
     // 预览也要走公司名收敛，否则用户看到的标题与实际提交的不一致
     const company = poc.canonicalizeCompanyName(String(req.body.companyName || ''));
-    const title = poc.canonicalizeTitle(
-      poc.buildTitle(partner, company.value, String(req.body.projectName || '')),
-      company.value);
+    // 手填标题也要能预览补标签后的结果 —— 它绕开 buildTitle，
+    // 不预览的话用户看不到自己的标题会被追加什么
+    const override = String(req.body.titleOverride || '').trim();
+    const base = override
+      ? poc.ensureTitleTags(override, partner.requiredTags)
+      : poc.buildTitle(partner, company.value, String(req.body.projectName || ''));
+    const title = poc.canonicalizeTitle(base, company.value);
     res.json({
       title,
       // 前端据此提示「公司名将被修正为 X」，让用户提交前就看到
       companyName: company.value,
       companyNameCorrected: company.corrected,
       originalCompanyName: company.original,
+      requiredTags: partner.requiredTags,
     });
   } catch (e: any) {
     res.status(400).json({ error: e.message });
