@@ -37,6 +37,9 @@ export const QUOTA_PRESETS = [
   { label: 'WorkSpaces Images (镜像)', serviceCode: 'workspaces', quotaName: 'Images', unit: 'Images' },
   // AWS 已把 Fargate 配额改为按 vCPU 计（原 "Fargate On-Demand resource count" 已不存在）
   { label: 'Fargate On-Demand vCPU', serviceCode: 'fargate', quotaName: 'Fargate On-Demand vCPU resource count', unit: 'vCPUs' },
+  // 区域级 gp3 卷总容量（L-7A658B76）。必须用完整官方名：同服务下还有 gp2/io1/io2/st1/sc1 等同构名称，
+  // 精确匹配才能保证解析到 gp3 而不是别的卷类型
+  { label: 'EBS gp3 存储容量 (TiB)', serviceCode: 'ebs', quotaName: 'Storage for General Purpose SSD (gp3) volumes, in TiB', unit: 'TiB' },
   { label: 'Route 53 Domains', serviceCode: 'route53', quotaName: 'Domain count limit', unit: 'Domains' },
   { label: 'Global Accelerator - Standard Accelerators', serviceCode: 'globalaccelerator', quotaName: 'Standard accelerators per AWS account', unit: 'Accelerators' },
   { label: 'Global Accelerator - Custom Routing Accelerators', serviceCode: 'globalaccelerator', quotaName: 'Custom routing accelerators per AWS account', unit: 'Accelerators' },

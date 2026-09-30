@@ -473,6 +473,7 @@ HTML 模板 + Puppeteer 渲染。公司背景库在 `doc-templates.ts`（12 家�
 - **流式同步（SSE）**：全量同步用 Server-Sent Events 实时推进度，边查边出
 - **Bedrock 配额**：按区域查 TPM/RPM/TPD，多区域并发；按 Provider、推理范围（Global Cross-Region / Cross-Region / On-Demand / Latency-Optimized）筛选
 - **批量提额**：按 payer 组织 × 多区域批量提交，只传配额名 + 目标值，QuotaCode 后端解析，已达标账户自动跳过；job 模式（submit → jobId → 轮询）
+- **配额预设 `QUOTA_PRESETS`**（`Quotas.tsx`，快速提额 / 批量提额 / 手动生成文档三处共用）：EC2 各 vCPU 族、EIP、Mac 主机、Lightsail、WorkSpaces、Fargate、**EBS gp3 存储容量（`ebs` / `L-7A658B76`，单位 TiB，0.44.4 起）**、Route 53 域名、Global Accelerator。EBS 各卷类型配额名同构（`Storage for … (gp2|gp3|io1|io2|st1|sc1) volumes, in TiB`），预设必须写完整官方名，靠精确匹配命中，不能写缩略名
 
 ### Bedrock 工具
 
