@@ -62,12 +62,25 @@ function bedrock(creds: any, region: string) {
   return new BedrockClient({ region, credentials: creds, maxAttempts: 2 });
 }
 
+// 按 SYSTEM_DEFINED profile ID 的厂商段（如 us.openai.gpt-6-sol 的 openai）与名称做关键词匹配，首个命中生效。
+// 新厂商上架后若这里漏配，会落进 Unknown，批量创建页的 Provider 下拉就选不到它（曾漏掉 OpenAI/xAI 等 30 个 profile）。
+// 规范名与配额页 BEDROCK_PROVIDER_HINTS（aws-service.ts）保持一致。
 const PROVIDER_HINTS: Array<[string, string]> = [
   ['anthropic', 'Anthropic'], ['claude', 'Anthropic'],
   ['amazon', 'Amazon'], ['nova', 'Amazon'], ['titan', 'Amazon'],
   ['meta', 'Meta'], ['llama', 'Meta'], ['mistral', 'Mistral'],
   ['cohere', 'Cohere'], ['ai21', 'AI21'], ['jamba', 'AI21'],
   ['stability', 'Stability'], ['deepseek', 'DeepSeek'], ['qwen', 'Qwen'],
+  ['openai', 'OpenAI'], ['gpt', 'OpenAI'],
+  ['xai', 'xAI'], ['grok', 'xAI'],
+  ['moonshot', 'Moonshot'], ['kimi', 'Moonshot'],
+  ['twelvelabs', 'TwelveLabs'], ['pegasus', 'TwelveLabs'], ['marengo', 'TwelveLabs'],
+  ['writer', 'Writer'], ['palmyra', 'Writer'],
+  ['google', 'Google'], ['gemma', 'Google'], ['gemini', 'Google'],
+  ['minimax', 'MiniMax'],
+  ['nvidia', 'NVIDIA'], ['nemotron', 'NVIDIA'],
+  ['z.ai', 'Z.ai'], ['zai', 'Z.ai'], ['glm', 'Z.ai'],
+  ['luma', 'Luma'],
 ];
 export function inferProvider(...values: string[]): string {
   const hay = values.filter(Boolean).join(' ').toLowerCase();

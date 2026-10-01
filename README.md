@@ -479,6 +479,10 @@ HTML 模板 + Puppeteer 渲染。公司背景库在 `doc-templates.ts`（12 家�
 
 区域下拉为 30 个 Bedrock 可用区域（带中文别名，支持搜索），与 `Quotas.tsx` 的列表保持一致。**各下拉按后端实际上限设了 `maxCount`**：`/profiles` 与交付表格 12 个、`/data-retention` 20 个、配额查询 30 个 —— 早期区域表只有 10 个时永远碰不到上限，补全后不加限制会直接吃 400。
 
+**批量创建的 Provider 归类**（0.44.5）：模型来源是 SYSTEM_DEFINED profile，provider 由 `bedrock-tools.ts` 的 `PROVIDER_HINTS` 按 profile ID 厂商段 + 名称关键词推断，认不出归 `Unknown`。原表只有 9 家，OpenAI / xAI / Moonshot / TwelveLabs / Writer 的 profile（us-east-1 实测 93 个里 30 个）全落进 Unknown，Provider 下拉选不到 OpenAI。现已补齐，规范名与配额页 `BEDROCK_PROVIDER_HINTS` 一致，前端 `KNOWN_PROVIDERS` 同步。AWS 上新厂商时三处一起加，回归测试见 `tests/bedrock-provider.test.ts`。
+
+**模型测试的 Profile 下拉**（0.45.0）：模型输入框是 AutoComplete —— 选区域后自动并发拉取该区域的 Application Profiles（值为 ARN，复用 `/profiles`）和系统 Profiles（值为 profile ID，复用 `/models`），分组展示、按名称/后端模型/ID 搜索；也可以直接手动输入任意 Model ID 或 ARN。切区域时若当前值是从旧区域下拉选的会自动清空（ARN 与区域前缀 profile 跨区调用必然失败），手动输入的值保留。旧请求晚到按序号丢弃，避免把别的区域的 ARN 塞进下拉；任一来源加载失败只提示、不影响手动输入。没有新增后端接口。
+
 Profiles 列表的 ARN 列完整展示（不截断、等宽字体），每行带复制按钮，工具栏另有「复制选中 / 全部 ARN」（每行一条，可直接粘进脚本）。批量复制用的是**当前可见且选中**的行，与批量删除/打 Tag 口径一致 —— `selectedKeys` 会包含被搜索框过滤掉的行，直接用会多复制。
 
 **客户交付表格**有两种格式：

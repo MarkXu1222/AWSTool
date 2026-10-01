@@ -3,12 +3,12 @@
  * Tab：Profiles 管理 / 批量创建 / 模型测试 / 模型列表 / 模型开通(FTU) / 数据共享 / IAM 用户 / 交付表格。
  * ⚠️ Tag 纪律：创建/打 Tag 的 tags 必须每次显式输入，前后端都不提供默认值。
  */
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   Card, Tabs, Select, Button, Table, Tag, Input, Space, message, Modal, Form,
-  Checkbox, Alert, Tooltip, Popconfirm, InputNumber, Typography,
+  Checkbox, Alert, Tooltip, Popconfirm, InputNumber, Typography, AutoComplete,
 } from 'antd';
-import { ReloadOutlined, PlusOutlined, DeleteOutlined, TagsOutlined, ThunderboltOutlined, DownloadOutlined, UserAddOutlined, CopyOutlined } from '@ant-design/icons';
+import { ReloadOutlined, PlusOutlined, DeleteOutlined, TagsOutlined, ThunderboltOutlined, DownloadOutlined, UserAddOutlined, CopyOutlined, LoadingOutlined } from '@ant-design/icons';
 import { api } from '../api';
 
 /**
@@ -69,7 +69,11 @@ const REGION_OPTS = BEDROCK_REGIONS.map(r => ({
 const PROFILE_REGION_LIMIT = 12;
 
 // 常见 Provider（未加载模型前也可选；加载后与实际数据合并去重）
-const KNOWN_PROVIDERS = ['Anthropic', 'Amazon', 'Meta', 'Mistral', 'Cohere', 'AI21', 'Stability', 'DeepSeek', 'Qwen'];
+// 须与后端 bedrock-tools.ts 的 PROVIDER_HINTS 规范名一致，否则加载后会出现两个同名不同写法的选项
+const KNOWN_PROVIDERS = [
+  'Anthropic', 'Amazon', 'OpenAI', 'Meta', 'Mistral', 'Cohere', 'AI21', 'Stability', 'DeepSeek', 'Qwen',
+  'xAI', 'Moonshot', 'TwelveLabs', 'Writer', 'Google', 'MiniMax', 'NVIDIA', 'Z.ai', 'Luma',
+];
 
 // Tag key 固定用 map-migrated（业务纪律）；value 每次必须手动输入，无默认值
 const FIXED_TAG_KEY = 'map-migrated';
@@ -414,6 +418,15 @@ const CreateTab: React.FC<{ accountId: string }> = ({ accountId }) => {
 };
 
 // ===== Tab 3: 模型测试 =====
+type ProfileOption = { value: string; label: React.ReactNode; searchText: string };
+
+const profileOptionLabel = (name: string, id: string) => (
+  <div className="invoke-profile-option">
+    <span>{name}</span>
+    <span className="invoke-profile-option-id">{id}</span>
+  </div>
+);
+
 const InvokeTab: React.FC<{ accountId: string }> = ({ accountId }) => {
   const [region, setRegion] = useState('us-east-1');
   const [modelId, setModelId] = useState('');
@@ -421,6 +434,73 @@ const InvokeTab: React.FC<{ accountId: string }> = ({ accountId }) => {
   const [maxTokens, setMaxTokens] = useState(1024);
   const [output, setOutput] = useState('');
   const [running, setRunning] = useState(false);
+  // 下拉候选：本区域的 Application Profile（值=ARN）+ SYSTEM_DEFINED Profile（值=profile ID）。
+  // 只是候选，输入框仍可自由填写任意 Model ID / ARN。
+  const [appOptions, setAppOptions] = useState<ProfileOption[]>([]);
+  const [systemOptions, setSystemOptions] = useState<ProfileOption[]>([]);
+  const [optionsLoading, setOptionsLoading] = useState(false);
+  const [optionsError, setOptionsError] = useState('');
+  // 切账户/区域时旧请求可能晚到，按序号丢弃过期结果，避免把别的区域的 ARN 塞进下拉
+  const loadSeq = useRef(0);
+
+  const loadOptions = async (acct: string, rgn: string) => {
+    const seq = ++loadSeq.current;
+    setAppOptions([]); setSystemOptions([]); setOptionsError('');
+    // 之前的请求在过期检查处直接返回、不会复位 loading，这里必须显式关掉
+    if (!acct) { setOptionsLoading(false); return; }
+    setOptionsLoading(true);
+    const [appRes, sysRes] = await Promise.allSettled([
+      api.bedrockListProfiles(acct, [rgn]),
+      api.bedrockListModels(acct, rgn),
+    ]);
+    if (seq !== loadSeq.current) return;
+    const errs: string[] = [];
+    if (appRes.status === 'fulfilled' && appRes.value.success) {
+      const rows = (appRes.value.data?.rows || []) as any[];
+      setAppOptions(rows
+        .filter(r => r.arn)
+        .sort((a, b) => String(a.name || '').localeCompare(String(b.name || '')))
+        .map(r => ({
+          value: r.arn,
+          label: profileOptionLabel(r.name || r.arn, r.arn),
+          searchText: `${r.name || ''} ${r.backendModels || ''} ${r.arn}`.toLowerCase(),
+        })));
+      for (const e of appRes.value.data?.errors || []) errs.push(`Application Profiles：${e.message}`);
+    } else {
+      errs.push(`Application Profiles：${appRes.status === 'fulfilled' ? appRes.value.error || '加载失败' : appRes.reason?.message || '加载失败'}`);
+    }
+    if (sysRes.status === 'fulfilled' && sysRes.value.success) {
+      const models = (sysRes.value.data || []) as any[];
+      setSystemOptions(models
+        .filter(m => m.modelId)
+        .sort((a, b) => String(a.provider).localeCompare(String(b.provider)) || String(a.name).localeCompare(String(b.name)))
+        .map(m => ({
+          value: m.modelId,
+          label: profileOptionLabel(`${m.name || m.modelId}${m.provider ? ` · ${m.provider}` : ''}`, m.modelId),
+          searchText: `${m.name || ''} ${m.provider || ''} ${m.scope || ''} ${m.modelId}`.toLowerCase(),
+        })));
+    } else {
+      errs.push(`系统 Profiles：${sysRes.status === 'fulfilled' ? sysRes.value.error || '加载失败' : sysRes.reason?.message || '加载失败'}`);
+    }
+    setOptionsError(errs.join('；'));
+    setOptionsLoading(false);
+  };
+
+  useEffect(() => { void loadOptions(accountId, region); }, [accountId, region]);
+
+  const selectedFromList = !!modelId && [...appOptions, ...systemOptions].some(o => o.value === modelId);
+
+  // 换区域时，如果当前值是从旧区域下拉选来的，就清空（ARN/区域前缀 profile 跨区调用必然失败）；
+  // 手动输入的值保留，由使用者自行决定
+  const onRegionChange = (next: string) => {
+    if (selectedFromList) setModelId('');
+    setRegion(next);
+  };
+
+  const profileOptions = [
+    ...(appOptions.length ? [{ label: `Application Profiles（${appOptions.length}）`, options: appOptions }] : []),
+    ...(systemOptions.length ? [{ label: `系统 Profiles（${systemOptions.length}）`, options: systemOptions }] : []),
+  ];
 
   const run = async () => {
     if (!accountId) { message.warning('请先选择账户'); return; }
@@ -435,12 +515,32 @@ const InvokeTab: React.FC<{ accountId: string }> = ({ accountId }) => {
   return (
     <div style={{ paddingTop: 12, maxWidth: 900 }}>
       <Space wrap style={{ marginBottom: 8 }}>
-        <Select size="small" style={{ width: 190 }} value={region} onChange={setRegion}
+        <Select size="small" style={{ width: 190 }} value={region} onChange={onRegionChange}
           showSearch optionFilterProp="label" options={REGION_OPTS} />
-        <Input size="small" placeholder="Model ID 或 Inference Profile ARN" style={{ width: 460 }}
-          value={modelId} onChange={e => setModelId(e.target.value)} />
+        {/* AutoComplete：下拉选本区域 Profile，也可直接手动输入任意 Model ID / ARN */}
+        {/* 不用自定义 Input 子节点：antd AutoComplete 包自定义 Input 时 allowClear 需挂在子节点上，容易清不干净 */}
+        <AutoComplete size="small" style={{ width: 460 }} value={modelId} onChange={v => setModelId(v ?? '')}
+          options={profileOptions} popupMatchSelectWidth={560} allowClear
+          placeholder="选择本区域 Profile，或手动输入 Model ID / Inference Profile ARN"
+          filterOption={(input, option) => {
+            const kw = input.trim().toLowerCase();
+            // 已选中某个候选时输入框里是完整 ARN/ID，再展开要能看到全部候选去换别的，而不是只剩自己
+            if (!kw || selectedFromList) return true;
+            return !!(option as any)?.searchText?.includes(kw);
+          }}
+          notFoundContent={optionsLoading
+            ? <span><LoadingOutlined /> 正在加载本区域 Profiles…</span>
+            : accountId ? '本区域没有匹配的 Profile，可直接输入' : '请先选择账户'} />
+        <Tooltip title="重新加载本区域 Profiles">
+          <Button size="small" icon={<ReloadOutlined />} loading={optionsLoading}
+            disabled={!accountId} onClick={() => loadOptions(accountId, region)} />
+        </Tooltip>
         <InputNumber size="small" min={1} max={4096} value={maxTokens} onChange={v => setMaxTokens(v || 1024)} addonBefore="maxTokens" style={{ width: 180 }} />
       </Space>
+      {optionsError && (
+        <Alert type="warning" showIcon style={{ marginBottom: 8 }}
+          message={`部分候选加载失败（仍可手动输入）：${optionsError}`} />
+      )}
       <Input.TextArea rows={3} value={prompt} onChange={e => setPrompt(e.target.value)} placeholder="Prompt" style={{ marginBottom: 8 }} />
       <Button type="primary" size="small" icon={<ThunderboltOutlined />} loading={running} onClick={run}>发送测试</Button>
       {output && (
