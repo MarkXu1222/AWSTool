@@ -33,7 +33,7 @@ import {
 import path from 'path';
 import fs from 'fs';
 import { db } from './db';
-import { assumeSupportRoleStrict, assumeToAccount } from './aws-service';
+import { assumeSupportRoleStrict, assumeToAccount, getTempAdminCredentials } from './aws-service';
 
 const CONFIG_PATH = path.join(__dirname, '../../config.json');
 let config: any = {};
@@ -1849,6 +1849,47 @@ export interface StackSetTargetStatus {
   status?: string;
 }
 
+const RE_INDEX_STACKSETS = [RE_AGGREGATOR_STACKSET, RE_LOCAL_STACKSET, RE_SCOPED_LOCAL_STACKSET];
+
+/**
+ * 成员账户在接入前自己建过 Resource Explorer 索引时，StackSet 实例会以
+ * AlreadyExists 失败。CloudFormation 把这类实例的 Status 标成 OUTDATED、
+ * DetailedStatus 标成 FAILED —— effectiveStackInstanceStatus 优先返回 OUTDATED，
+ * 所以两种状态都必须识别，否则会被当成真实失败反复 UpdateStackInstances 直到超时。
+ */
+export function isExistingIndexConflict(stackSetName: string, status?: string, reason?: string): boolean {
+  return RE_INDEX_STACKSETS.includes(stackSetName)
+    && ['FAILED', 'OUTDATED'].includes(status || '')
+    && /AlreadyExists|index already exists/i.test(reason || '');
+}
+
+/**
+ * ready   — 已有索引满足扫描要求，可替代 StackSet 实例
+ * upgrade — 聚合区已有 ACTIVE 的 LOCAL 索引，需升级为 AGGREGATOR
+ * pending — 索引在变更中，或本地索引尚未开始向聚合区复制，等待下一轮
+ * invalid — 不可用（类型冲突、读取失败等），按失败处理
+ */
+export type ExistingIndexVerdict = 'ready' | 'upgrade' | 'pending' | 'invalid';
+
+export function classifyExistingIndex(
+  stackSetName: string,
+  aggregatorRegion: string,
+  index: { Type?: string; State?: string; ReplicatingTo?: string[] } | null | undefined,
+): ExistingIndexVerdict {
+  if (!index || !RE_INDEX_STACKSETS.includes(stackSetName)) return 'invalid';
+  if (index.State !== 'ACTIVE') {
+    return ['CREATING', 'UPDATING'].includes(index.State || '') ? 'pending' : 'invalid';
+  }
+  if (stackSetName === RE_AGGREGATOR_STACKSET) {
+    if (index.Type === 'AGGREGATOR') return 'ready';
+    return index.Type === 'LOCAL' ? 'upgrade' : 'invalid';
+  }
+  // 本地区域若已是 AGGREGATOR，说明该账户的聚合区不在平台约定区域，单账户只能有一个聚合索引，需人工处理。
+  if (index.Type !== 'LOCAL') return 'invalid';
+  // 聚合区索引升级后 AWS 会自动开始复制，复制建立前先等待，不判失败。
+  return (index.ReplicatingTo || []).includes(aggregatorRegion) ? 'ready' : 'pending';
+}
+
 export interface OnboardingStackSetStatus extends ReIndexStackSetStatus {
   requiredRegions: string[];
   rootRequiredRegions: string[];
@@ -1860,6 +1901,10 @@ export interface OnboardingStackSetStatus extends ReIndexStackSetStatus {
   failedInstanceCount: number;
   missingTargets: StackSetTargetStatus[];
   failedTargets: StackSetTargetStatus[];
+  /** 聚合区已有 LOCAL 索引、需升级为 AGGREGATOR 的目标（仅聚合索引 StackSet 会出现） */
+  indexUpgradeTargets: StackSetTargetStatus[];
+  /** 已有索引与平台约定冲突且无法自动处理的目标；修复逻辑不会重试它们 */
+  indexConflictTargets: StackSetTargetStatus[];
   permissionModel?: string;
   autoDeploymentEnabled: boolean;
   rootTargeted: boolean;
@@ -1871,6 +1916,8 @@ export interface OnboardingStackSetsStatus {
   payerAccountId: string;
   memberAccountCount: number;
   complete: boolean;
+  /** 需人工处理的已有索引冲突（AWS 拒绝重复创建，自动重试无效） */
+  indexConflicts: Array<StackSetTargetStatus & { stackSetName: string }>;
   failed: boolean;
   stackSets: OnboardingStackSetStatus[];
 }
@@ -1972,6 +2019,8 @@ export async function getOnboardingStackSetStatus(
       failedInstanceCount: 0,
       missingTargets: [],
       failedTargets: [],
+      indexUpgradeTargets: [],
+      indexConflictTargets: [],
       autoDeploymentEnabled: false,
       rootTargeted: false,
       configurationValid: false,
@@ -2070,7 +2119,8 @@ export async function getOnboardingStackSetStatus(
       return credentials;
     }
 
-    async function hasActiveExistingLocalIndex(accountId: string, region: string): Promise<boolean> {
+    // 只读校验走成员账户的 support-quota（ReadOnlyAccess 含 resource-explorer-2:GetIndex）。
+    async function classifyTargetIndex(accountId: string, region: string): Promise<ExistingIndexVerdict> {
       let client: ResourceExplorer2Client | undefined;
       let timeout: NodeJS.Timeout | undefined;
       try {
@@ -2079,12 +2129,10 @@ export async function getOnboardingStackSetStatus(
         const controller = new AbortController();
         timeout = setTimeout(() => controller.abort(), 15_000);
         const index = await client.send(new GetIndexCommand({}), { abortSignal: controller.signal });
-        return index.State === 'ACTIVE'
-          && index.Type === 'LOCAL'
-          && (index.ReplicatingTo || []).includes(aggregatorRegion);
+        return classifyExistingIndex(definition.name, aggregatorRegion, index);
       } catch (error) {
         console.warn(`[MAP Onboarding] 已有索引校验失败 ${accountId}/${region}: ${awsErrorDetail(error)}`);
-        return false;
+        return 'invalid';
       } finally {
         if (timeout) clearTimeout(timeout);
         client?.destroy();
@@ -2107,11 +2155,11 @@ export async function getOnboardingStackSetStatus(
       } else if (['CURRENT', 'SUCCEEDED'].includes(status)) {
         // 仅真正完成的 ACTIVE 目标计为成功。
       } else if (['FAILED', 'CANCELLED', 'INOPERABLE', 'OUTDATED', 'SKIPPED_SUSPENDED_ACCOUNT'].includes(status)) {
-        const indexAlreadyExists = [RE_LOCAL_STACKSET, RE_SCOPED_LOCAL_STACKSET].includes(definition.name)
-          && status === 'FAILED'
-          && /AlreadyExists|index already exists/i.test(target?.reason || '');
-        if (indexAlreadyExists) existingIndexCandidates.push({ accountId, region, status });
-        else entry.failedTargets.push({ accountId, region, status });
+        if (isExistingIndexConflict(definition.name, status, target?.reason)) {
+          existingIndexCandidates.push({ accountId, region, status });
+        } else {
+          entry.failedTargets.push({ accountId, region, status });
+        }
       } else {
         entry.pendingInstanceCount++;
       }
@@ -2126,17 +2174,23 @@ export async function getOnboardingStackSetStatus(
         const batch = existingIndexCandidates.slice(index, index + verificationConcurrency);
         const verified = await Promise.all(batch.map(async target => ({
           target,
-          active: await hasActiveExistingLocalIndex(target.accountId, target.region),
+          verdict: await classifyTargetIndex(target.accountId, target.region),
         })));
-        for (const result of verified) {
-          if (result.active) {
-            const status = result.target.status || 'FAILED';
-            entry.statusCounts[status] = Math.max(0, (entry.statusCounts[status] || 0) - 1);
+        for (const { target, verdict } of verified) {
+          const status = target.status || 'FAILED';
+          if (verdict === 'ready') {
+            if (status !== 'MISSING') entry.statusCounts[status] = Math.max(0, (entry.statusCounts[status] || 0) - 1);
             entry.statusCounts.ACTIVE_EXISTING_INDEX = (entry.statusCounts.ACTIVE_EXISTING_INDEX || 0) + 1;
-          } else if (result.target.status === 'MISSING') {
-            entry.missingTargets.push({ accountId: result.target.accountId, region: result.target.region });
+          } else if (verdict === 'upgrade') {
+            entry.indexUpgradeTargets.push(target);
+            entry.pendingInstanceCount++;
+          } else if (verdict === 'pending') {
+            entry.pendingInstanceCount++;
+          } else if (status === 'MISSING') {
+            entry.missingTargets.push({ accountId: target.accountId, region: target.region });
           } else {
-            entry.failedTargets.push(result.target);
+            // 已有索引不可用：不能放进 failedTargets，否则修复逻辑会重试同一实例、注定再次 AlreadyExists。
+            entry.indexConflictTargets.push(target);
           }
         }
       }
@@ -2158,6 +2212,7 @@ export async function getOnboardingStackSetStatus(
         && entry.missingInstanceCount === 0
         && entry.pendingInstanceCount === 0
         && entry.failedInstanceCount === 0
+        && entry.indexConflictTargets.length === 0
         && !operationActive
       );
     stackSets.push(entry);
@@ -2167,6 +2222,7 @@ export async function getOnboardingStackSetStatus(
     payerAccountId,
     memberAccountCount: memberAccounts.length,
     complete: stackSets.every(item => item.complete),
+    indexConflicts: stackSets.flatMap(item => item.indexConflictTargets.map(target => ({ ...target, stackSetName: item.name }))),
     failed: stackSets.some(item => item.requiredRegions.length > 0 && (
       (!item.exists && item.name === AUTO_TAGGER_STACKSET_NAME)
       || (item.exists && (
@@ -2208,6 +2264,30 @@ export async function repairOnboardingStackSetCoverage(
   for (const stackSet of status.stackSets) {
     if (stackSet.complete) continue;
     if (stackSet.requiredRegions.length === 0 && stackSet.extraRootRegions.length === 0) continue;
+
+    // 成员账户自建的 LOCAL 索引占住了聚合区：StackSet 无法再建 AGGREGATOR（AlreadyExists），
+    // 原地升级是无损操作，升级后该账户其它区域的本地索引会自动开始向它复制。
+    const upgradeTarget = stackSet.indexUpgradeTargets[0];
+    if (upgradeTarget) {
+      const memberCredentials = await getTempAdminCredentials(upgradeTarget.accountId);
+      const re = new ResourceExplorer2Client({ region: upgradeTarget.region, credentials: memberCredentials });
+      try {
+        const index = await re.send(new GetIndexCommand({}));
+        if (classifyExistingIndex(stackSet.name, aggregatorRegion, index) !== 'upgrade') {
+          return { submitted: false, detail: `${upgradeTarget.accountId} 的 ${upgradeTarget.region} 索引状态已变化，下一轮重新核验` };
+        }
+        await re.send(new UpdateIndexTypeCommand({ Arn: index.Arn!, Type: 'AGGREGATOR' }));
+      } finally {
+        re.destroy();
+      }
+      return {
+        submitted: true,
+        stackSetName: stackSet.name,
+        detail: `已将成员账户 ${upgradeTarget.accountId} 在 ${upgradeTarget.region} 的已有 LOCAL 索引升级为 AGGREGATOR`
+          + `（剩余 ${stackSet.indexUpgradeTargets.length - 1} 个待升级）`,
+      };
+    }
+
     if (!stackSet.exists) {
       const definition = stackSet.name === RE_AGGREGATOR_STACKSET
         ? {

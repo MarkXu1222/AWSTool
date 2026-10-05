@@ -93,7 +93,10 @@ function provisionSummary(result: tagCompliance.ProvisionResult): string {
 function stackSetSummary(result: tagCompliance.OnboardingStackSetsStatus): string {
   return result.stackSets.map(stackSet => {
     const operation = stackSet.latestOperation?.status ? `, 操作 ${stackSet.latestOperation.status}` : '';
-    return `${stackSet.name}: ${stackSet.instanceCount}/${stackSet.expectedInstanceCount}, 缺少 ${stackSet.missingInstanceCount}, 进行中 ${stackSet.pendingInstanceCount}, 失败 ${stackSet.failedInstanceCount}${operation}`;
+    const existing = stackSet.statusCounts.ACTIVE_EXISTING_INDEX ? `, 复用已有索引 ${stackSet.statusCounts.ACTIVE_EXISTING_INDEX}` : '';
+    const upgrades = stackSet.indexUpgradeTargets.length ? `, 待升级聚合索引 ${stackSet.indexUpgradeTargets.length}` : '';
+    const conflicts = stackSet.indexConflictTargets.length ? `, 索引冲突 ${stackSet.indexConflictTargets.length}` : '';
+    return `${stackSet.name}: ${stackSet.instanceCount}/${stackSet.expectedInstanceCount}, 缺少 ${stackSet.missingInstanceCount}, 进行中 ${stackSet.pendingInstanceCount}, 失败 ${stackSet.failedInstanceCount}${existing}${upgrades}${conflicts}${operation}`;
   }).join('；');
 }
 
@@ -331,6 +334,23 @@ async function runWaitStackSets(job: TagOnboardingJob): Promise<void> {
   );
   const detail = stackSetSummary(result);
   if (result.failed) throw new PermanentOnboardingError(`StackSet 配置无效或不存在：${detail}`);
+  if (result.indexConflicts.length > 0) {
+    // AWS 每个区域只允许一个索引，重试 StackSet 必然再次 AlreadyExists，直接给出可执行的人工步骤。
+    const lines = result.indexConflicts.map(target => `${target.accountId} / ${target.region}（${target.stackSetName}）`);
+    const reason = `${result.indexConflicts.length} 个成员账户×区域已有不符合要求的 Resource Explorer 索引，StackSet 无法覆盖：${lines.join('；')}`;
+    throw new PermanentOnboardingError(reason, {
+      code: 'EXISTING_INDEX_CONFLICT',
+      reason,
+      resolutionSteps: [
+        '在上述账户的对应区域打开 Resource Explorer → Settings，查看已有索引的类型与状态。',
+        '聚合区以外的区域若是 AGGREGATOR 索引，改为 LOCAL；索引状态异常（非 ACTIVE）的先删除后等待 StackSet 重建。',
+        '处理完成后返回本页面点击“从失败阶段重试”。',
+      ],
+      automaticRetry: false,
+      manualRetryAllowed: true,
+      affectedRegions: [...new Set(result.indexConflicts.map(target => target.region))].sort(),
+    });
+  }
   if (!result.complete) {
     // deadline 不因 repair 重置；持续失败/缺失最多等待 90 分钟，之后进入 failed 供人工处理。
     if (phaseTimedOut(job, 90 * 60_000)) {

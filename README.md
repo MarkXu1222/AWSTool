@@ -1065,6 +1065,25 @@ MAP 主标签 `map-migrated` 是固定纪律（key 不可改，每个组织只�
 
 因此 API 返回提交成功只表示任务已入队；运维验收必须看到最终 `completed`，并检查阶段产物和回读结果。
 
+#### 成员账户已有 Resource Explorer 索引（0.45.1）
+
+AWS 每个账户每个区域只允许一个索引。成员账户在接入前自建过索引时，StackSet 实例会以
+`AlreadyExists` 失败，CloudFormation 把它们标成 `Status=OUTDATED`（`DetailedStatus=FAILED`）。
+旧逻辑只认 `FAILED`、且不覆盖聚合索引 StackSet，结果每 3 分钟重试一次直到 90 分钟超时，
+组织始终写不进 `orgs.json`，一个 tag 都打不上（koreawallpaper 实际踩过，15 个实例）。
+
+`wait_stacksets` 现在对 `AlreadyExists` 的实例（三个索引 StackSet、FAILED/OUTDATED 均识别）
+用 support-quota 只读核验已有索引，按 `classifyExistingIndex()` 分流：
+
+| 已有索引 | 处理 |
+|---|---|
+| 聚合区 AGGREGATOR / 本地区 LOCAL 且已向聚合区复制 | 视为覆盖，计入 `ACTIVE_EXISTING_INDEX` |
+| 聚合区是 LOCAL | 自动原地升级为 AGGREGATOR（payer 管理员链，每轮一个账户，无损） |
+| 变更中，或本地索引尚未开始复制 | 等待下一轮 |
+| 本地区被占成 AGGREGATOR、状态异常、读不到 | 立即失败 `EXISTING_INDEX_CONFLICT`，列出账户×区域与人工步骤，不再重试 |
+
+回归测试：`tests/tag-onboarding-existing-index.test.ts`。
+
 ### 根用户凭证状态与敏感操作
 
 账户页「根用户」tab 会读取状态，并提供四类敏感操作。敏感操作均受 `root_access` 实时门禁控制并写入审计；状态接口 `GET /root-credentials/:accountId` 当前不经过 `requireRootAccess`。
