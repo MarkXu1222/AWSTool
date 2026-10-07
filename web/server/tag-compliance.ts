@@ -12,6 +12,7 @@
  */
 import { STSClient, AssumeRoleCommand } from '@aws-sdk/client-sts';
 import { EC2Client, DescribeRegionsCommand } from '@aws-sdk/client-ec2';
+import { AccountClient, GetRegionOptStatusCommand, EnableRegionCommand } from '@aws-sdk/client-account';
 import { SFNClient, StartExecutionCommand, ListExecutionsCommand } from '@aws-sdk/client-sfn';
 import { S3Client, GetObjectCommand, PutObjectCommand, ListObjectsV2Command } from '@aws-sdk/client-s3';
 import { SNSClient, ListSubscriptionsByTopicCommand, SubscribeCommand, UnsubscribeCommand } from '@aws-sdk/client-sns';
@@ -1750,6 +1751,54 @@ async function getRegionAvailability(payerAccountId: string): Promise<RegionAvai
 /** 只返回 payer 管理账户已启用或无需 opt-in 的商业区域。 */
 export async function getEnabledRegions(payerAccountId: string): Promise<string[]> {
   return (await getRegionAvailability(payerAccountId)).enabledRegions;
+}
+
+export type PayerRegionEnableOutcome = 'enabled' | 'enabling' | 'submitted' | 'failed';
+
+export interface PayerRegionEnableResult {
+  region: string;
+  outcome: PayerRegionEnableOutcome;
+  detail?: string;
+}
+
+/**
+ * 在 payer 管理账户内启用指定的可选区域（成员账户已启用、payer 未启用的区域）。
+ * StackSets 要求管理账户先启用全部目标区域；这一步原本需要人工去控制台点。
+ * 开启是账户级、不可在启用中途取消的变更，只对调用方明确传入的区域执行；已启用/启用中的跳过。
+ */
+export async function enablePayerRegions(payerAccountId: string, regions: string[]): Promise<PayerRegionEnableResult[]> {
+  const creds = await assumePayer(payerAccountId);
+  if (!creds) throw new Error('该 payer 不在平台配置（config.payers）中，无法启用区域');
+  const client = new AccountClient({ region: 'us-east-1', credentials: creds });
+  const results: PayerRegionEnableResult[] = [];
+  try {
+    for (const region of [...new Set(regions)].sort()) {
+      if (!REGION_RE.test(region)) {
+        results.push({ region, outcome: 'failed', detail: '区域名称不合法' });
+        continue;
+      }
+      try {
+        const current = await client.send(new GetRegionOptStatusCommand({ RegionName: region }));
+        const status = current.RegionOptStatus;
+        if (status === 'ENABLED' || status === 'ENABLED_BY_DEFAULT') {
+          results.push({ region, outcome: 'enabled' });
+        } else if (status === 'ENABLING') {
+          results.push({ region, outcome: 'enabling' });
+        } else if (status === 'DISABLING') {
+          // 停用中的区域不能立即重新启用，下一轮再试。
+          results.push({ region, outcome: 'enabling', detail: '区域正在停用，等待结束后再启用' });
+        } else {
+          await client.send(new EnableRegionCommand({ RegionName: region }));
+          results.push({ region, outcome: 'submitted' });
+        }
+      } catch (error) {
+        results.push({ region, outcome: 'failed', detail: awsErrorDetail(error) });
+      }
+    }
+  } finally {
+    client.destroy();
+  }
+  return results;
 }
 
 /** 返回新账户默认启用、可安全用于 StackSet AutoDeployment 的区域。 */

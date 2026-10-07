@@ -1,4 +1,5 @@
 import {
+  db,
   createOrReuseTagOnboardingJob,
   getLatestTagOnboardingJob,
   getTagOnboardingJob,
@@ -244,28 +245,15 @@ async function runWaitManagementIndex(job: TagOnboardingJob): Promise<void> {
   advance(job, 'deploy_re_indexes', '管理账户聚合索引和 OrgView 已就绪');
 }
 
-async function runDeployReIndexes(job: TagOnboardingJob): Promise<void> {
-  const [payerEnabledRegions, defaultRegions, memberEnabledRegions] = await Promise.all([
-    tagCompliance.getEnabledRegions(job.payerAccountId),
-    tagCompliance.getDefaultRegions(job.payerAccountId),
-    tagCompliance.getMemberEnabledRegions(job.payerAccountId),
-  ]);
-  const aggregatorRegion = 'us-east-1';
-  if (!payerEnabledRegions.includes(aggregatorRegion)) {
-    const reason = `payer 管理账户 ${job.payerAccountId} 未启用聚合区域 ${aggregatorRegion}，无法创建 Resource Explorer 聚合索引。`;
-    throw new PermanentOnboardingError(reason, {
-      code: 'AGGREGATOR_REGION_NOT_ENABLED',
-      reason,
-      resolutionSteps: [
-        `在 payer 管理账户中启用 ${aggregatorRegion}。`,
-        '等待区域状态变为 ENABLED 后，返回本页面点击“从失败阶段重试”。',
-      ],
-      automaticRetry: false,
-      manualRetryAllowed: true,
-      affectedRegions: [aggregatorRegion],
-    });
-  }
-
+/**
+ * payer 管理账户还缺哪些区域：聚合区（必须）+ 成员账户已启用而 payer 未启用的区域。
+ * StackSets 要求管理账户先启用全部目标区域，所以这些区域必须先在 payer 开通。
+ */
+export function findPayerMissingRegions(
+  aggregatorRegion: string,
+  payerEnabledRegions: string[],
+  memberEnabledRegions: Record<string, string[]>,
+): { regions: string[]; affectedAccountsByRegion: Record<string, string[]> } {
   const payerRegionSet = new Set(payerEnabledRegions);
   const affectedAccountsByRegion: Record<string, string[]> = {};
   for (const [accountId, regions] of Object.entries(memberEnabledRegions)) {
@@ -274,25 +262,60 @@ async function runDeployReIndexes(job: TagOnboardingJob): Promise<void> {
       (affectedAccountsByRegion[region] ||= []).push(accountId);
     }
   }
-  const memberOnlyRegions = Object.keys(affectedAccountsByRegion).sort();
-  if (memberOnlyRegions.length > 0) {
-    for (const accounts of Object.values(affectedAccountsByRegion)) accounts.sort();
-    const affectedAccountCount = new Set(Object.values(affectedAccountsByRegion).flat()).size;
-    const regionList = memberOnlyRegions.join(', ');
-    const reason = `检测到 ${memberOnlyRegions.length} 个成员区域尚未在 payer 管理账户启用（涉及 ${affectedAccountCount} 个成员账户）：${regionList}。CloudFormation StackSets 要求管理账户先启用所有目标区域，因此无法下发 Resource Explorer 索引。`;
-    throw new PermanentOnboardingError(reason, {
-      code: 'PAYER_REGIONS_NOT_ENABLED',
-      reason,
-      resolutionSteps: [
-        `在 payer 管理账户 ${job.payerAccountId} 的 AWS Account > Regions 中启用：${regionList}。`,
-        '等待所有区域状态从 ENABLING 变为 ENABLED；区域尚在启用中时不要重试。',
-        '返回本页面点击“从失败阶段重试”，系统会重新扫描区域并继续补齐 StackSet。',
-      ],
-      automaticRetry: false,
-      manualRetryAllowed: true,
-      affectedRegions: memberOnlyRegions,
-      affectedAccountsByRegion,
-    });
+  for (const accounts of Object.values(affectedAccountsByRegion)) accounts.sort();
+  const regions = new Set(Object.keys(affectedAccountsByRegion));
+  if (!payerRegionSet.has(aggregatorRegion)) regions.add(aggregatorRegion);
+  return { regions: [...regions].sort(), affectedAccountsByRegion };
+}
+
+// 区域开通通常几分钟，偶尔更久；超时后才转为人工处理。
+const PAYER_REGION_ENABLE_TIMEOUT_MS = 60 * 60_000;
+
+async function runDeployReIndexes(job: TagOnboardingJob): Promise<void> {
+  const [payerEnabledRegions, defaultRegions, memberEnabledRegions] = await Promise.all([
+    tagCompliance.getEnabledRegions(job.payerAccountId),
+    tagCompliance.getDefaultRegions(job.payerAccountId),
+    tagCompliance.getMemberEnabledRegions(job.payerAccountId),
+  ]);
+  const aggregatorRegion = 'us-east-1';
+
+  const missing = findPayerMissingRegions(aggregatorRegion, payerEnabledRegions, memberEnabledRegions);
+  if (missing.regions.length > 0) {
+    // 以前这里直接失败让人去控制台点；payer role/tool 有 account:EnableRegion，平台自己开通后等待生效。
+    const results = await tagCompliance.enablePayerRegions(job.payerAccountId, missing.regions);
+    const failed = results.filter(item => item.outcome === 'failed');
+    const regionList = missing.regions.join(', ');
+    if (failed.length > 0 || phaseTimedOut(job, PAYER_REGION_ENABLE_TIMEOUT_MS)) {
+      const affectedAccountCount = new Set(Object.values(missing.affectedAccountsByRegion).flat()).size;
+      const failedDetail = failed.map(item => `${item.region}: ${item.detail || '未知错误'}`).join('；');
+      const reason = failed.length > 0
+        ? `平台自动开通 payer 管理账户 ${job.payerAccountId} 的区域失败（涉及 ${affectedAccountCount} 个成员账户）：${failedDetail}`
+        : `payer 管理账户 ${job.payerAccountId} 的区域在 60 分钟内仍未启用完成：${regionList}`;
+      throw new PermanentOnboardingError(reason, {
+        code: 'PAYER_REGIONS_NOT_ENABLED',
+        reason,
+        resolutionSteps: [
+          `在 payer 管理账户 ${job.payerAccountId} 的 AWS Account > Regions 中确认以下区域的状态：${regionList}。`,
+          '如有区域启用失败，手动启用并等待状态变为 ENABLED。',
+          '返回本页面点击“从失败阶段重试”。',
+        ],
+        automaticRetry: false,
+        manualRetryAllowed: true,
+        affectedRegions: missing.regions,
+        affectedAccountsByRegion: missing.affectedAccountsByRegion,
+      });
+    }
+    const submitted = results.filter(item => item.outcome === 'submitted').map(item => item.region);
+    const progress = results.map(item => `${item.region}(${item.outcome === 'submitted' ? '已提交开通' : item.outcome === 'enabled' ? '已启用，等待生效' : '启用中'})`).join(', ');
+    console.log(`[MAP Onboarding] payer ${job.payerAccountId} 自动开通区域: ${progress}`);
+    if (submitted.length > 0) {
+      db.addAuditLog(null, 'REGION_ENABLE',
+        `MAP 全自动接入自动开通 payer ${job.payerAccountId} 区域: ${submitted.join(', ')}（任务 ${job.id}）`,
+        job.requestedBy || 'system');
+    }
+    // 开通是异步的；等 payer 真正可用后（DescribeRegions 显示 opted-in）再继续下发。
+    waitForRetry(job, `正在自动开通 payer 管理账户区域，开通完成后自动继续：${progress}`, 60_000);
+    return;
   }
 
   const memberLocalRegions = new Set<string>();

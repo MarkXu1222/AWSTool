@@ -1028,7 +1028,7 @@ const AutomatedAddOrgModal: React.FC<{
 
                   {job.failure?.manualRetryAllowed !== false && (
                     <Button danger size="small" loading={retrying} onClick={handleRetry}>
-                      {job.failure?.code === 'PAYER_REGIONS_NOT_ENABLED' ? '区域启用后从失败阶段重试' : '从失败阶段重试'}
+                      {job.failure?.code === 'PAYER_REGIONS_NOT_ENABLED' ? '从失败阶段重试（自动开通区域）' : '从失败阶段重试'}
                     </Button>
                   )}
                 </div>

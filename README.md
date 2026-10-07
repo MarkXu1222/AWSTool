@@ -1084,6 +1084,20 @@ AWS 每个账户每个区域只允许一个索引。成员账户在接入前自�
 
 回归测试：`tests/tag-onboarding-existing-index.test.ts`。
 
+#### payer 缺区域时自动开通（0.46.0）
+
+StackSets 要求 payer 管理账户先启用全部目标区域。以前 `deploy_re_indexes` 发现缺区域就直接
+失败（`PAYER_REGIONS_NOT_ENABLED` / `AGGREGATOR_REGION_NOT_ENABLED`），要人去控制台逐个开通再回来重试。
+
+现在由 `findPayerMissingRegions()` 算出缺口（聚合区 + 成员已启用而 payer 未启用的区域），
+用 payer `role/tool`（`account:EnableRegion`）自动开通，每分钟复查一次，生效后自动继续下发索引：
+
+- **只开 payer 自身缺的区域**，不改任何成员账户的区域设置；开通写 `REGION_ENABLE` 审计
+- 开通失败，或 60 分钟仍未生效 → 失败 `PAYER_REGIONS_NOT_ENABLED`，列出区域与受影响成员；重试会再次自动开通
+- 可选区域开通后 AWS 不支持中途取消，属账户级不可轻易回退的变更 —— 开的都是成员账户已经在用的区域
+
+回归测试：`tests/tag-onboarding-payer-regions.test.ts`。
+
 ### 根用户凭证状态与敏感操作
 
 账户页「根用户」tab 会读取状态，并提供四类敏感操作。敏感操作均受 `root_access` 实时门禁控制并写入审计；状态接口 `GET /root-credentials/:accountId` 当前不经过 `requireRootAccess`。
