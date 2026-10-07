@@ -26,12 +26,12 @@ export function exportToJSON(data: any, filename: string) {
 
 // Region display names
 const REGION_NAMES: Record<string, string> = {
-  'us-east-1': '弗吉尼亚', 'us-east-2': '俄亥俄', 'us-west-1': '加州', 'us-west-2': '俄勒冈',
+  'us-east-1': '美国·弗吉尼亚', 'us-east-2': '美国·俄亥俄', 'us-west-1': '美国·加州', 'us-west-2': '美国·俄勒冈',
   'eu-west-1': '爱尔兰', 'eu-west-2': '伦敦', 'eu-west-3': '巴黎', 'eu-north-1': '斯德哥尔摩', 'eu-central-1': '法兰克福',
   'ap-southeast-1': '新加坡', 'ap-southeast-2': '悉尼', 'ap-southeast-3': '雅加达', 'ap-southeast-4': '墨尔本', 'ap-southeast-5': '马来西亚',
   'ap-northeast-1': '东京', 'ap-northeast-2': '首尔', 'ap-northeast-3': '大阪',
   'ap-south-1': '孟买', 'ap-south-2': '海得拉巴', 'ap-east-1': '香港', 'ap-east-2': '台北',
-  'sa-east-1': '圣保罗', 'ca-central-1': '加拿大', 'ca-west-1': '卡尔加里',
+  'sa-east-1': '巴西·圣保罗', 'ca-central-1': '加拿大', 'ca-west-1': '加拿大·卡尔加里',
   'af-south-1': '开普敦', 'me-south-1': '巴林', 'me-central-1': '阿联酋',
   'eu-south-1': '米兰', 'eu-south-2': '西班牙', 'eu-central-2': '苏黎世',
   'il-central-1': '特拉维夫', 'ap-southeast-6': '新西兰', 'ap-southeast-7': '泰国', 'mx-central-1': '墨西哥',

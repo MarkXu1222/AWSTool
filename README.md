@@ -1343,7 +1343,7 @@ Nginx 反代 + Let's Encrypt（`markxu.co`，自动续期），80 强制跳 443�
 - MAP 打标是每日定时扫描（01:20 UTC），新建资源最长要等 24 小时才被打标。真正的根治是 EventBridge 事件驱动实时打标 + 定时扫描兜底，改动较大待评估
 - payer 账户资源是否计入 MAP 报销基数尚未与 AWS 侧确认（账单桶 / CUR 桶属运维基础设施而非迁移工作负载）
 - **`listBedrockQuotas()` 对配额数量大的账户会静默丢数据**。单区域硬超时 15 秒（`BEDROCK_REGION_TIMEOUT_MS`），而大客户账户 Bedrock 配额可达 1000+ 条需翻 27 页，必然超时。超时区域虽会进 `errors` 并在页面顶部告警，但**已拉到的残缺数据仍照常渲染**，表现为部分模型 TPM/TPD 显示 `-`，极易被当成「没有该配额」。实测 `668602396329` us-east-1 即触发。交付表导出风险更大（截断会被写成 TPM=0）。待办：超时改为可配置/自适应，且超时区域的残缺行不应参与渲染与导出
-- `Bedrock.tsx`、`Quotas.tsx`、`Cleanup.tsx` 各自维护一份区域表。前两者已对齐为 30 个，但仍是三份拷贝，AWS 开新区时要改多处；建议抽到 `client/src/constants/regions.ts` 做单一数据源
+- 区域下拉已抽到 `client/src/constants/regions.ts`（0.46.1，34 个商业区全覆盖），配额 / 批量提额 / Bedrock 共用；label 写「国家·城市」，否则搜「巴西」「美国」搜不到（曾被误报为区域缺失）。`tests/regions.test.ts` 对照 AWS 全集锁定。`Cleanup.tsx`、`utils/export.ts` 仍各有一份区域表，AWS 开新区时要同步
 
 ---
 

@@ -99,45 +99,9 @@ const SERVICES = [
   { label: 'ECR', value: 'ecr' },
 ];
 
-export const REGIONS = [
-  { label: '全部区域', value: '' },
-  // 默认区域
-  { label: 'us-east-1 (弗吉尼亚)', value: 'us-east-1' },
-  { label: 'us-east-2 (俄亥俄)', value: 'us-east-2' },
-  { label: 'us-west-1 (加州)', value: 'us-west-1' },
-  { label: 'us-west-2 (俄勒冈)', value: 'us-west-2' },
-  { label: 'eu-west-1 (爱尔兰)', value: 'eu-west-1' },
-  { label: 'eu-west-2 (伦敦)', value: 'eu-west-2' },
-  { label: 'eu-west-3 (巴黎)', value: 'eu-west-3' },
-  { label: 'eu-north-1 (斯德哥尔摩)', value: 'eu-north-1' },
-  { label: 'eu-central-1 (法兰克福)', value: 'eu-central-1' },
-  { label: 'ap-southeast-1 (新加坡)', value: 'ap-southeast-1' },
-  { label: 'ap-southeast-2 (悉尼)', value: 'ap-southeast-2' },
-  { label: 'ap-northeast-1 (东京)', value: 'ap-northeast-1' },
-  { label: 'ap-northeast-2 (首尔)', value: 'ap-northeast-2' },
-  { label: 'ap-northeast-3 (大阪)', value: 'ap-northeast-3' },
-  { label: 'ap-south-1 (孟买)', value: 'ap-south-1' },
-  { label: 'sa-east-1 (圣保罗)', value: 'sa-east-1' },
-  { label: 'ca-central-1 (加拿大)', value: 'ca-central-1' },
-  // Opt-in 区域
-  { label: 'af-south-1 (开普敦)', value: 'af-south-1' },
-  { label: 'ap-east-1 (香港)', value: 'ap-east-1' },
-  { label: 'ap-east-2 (台北)', value: 'ap-east-2' },
-  { label: 'ap-south-2 (海得拉巴)', value: 'ap-south-2' },
-  { label: 'ap-southeast-3 (雅加达)', value: 'ap-southeast-3' },
-  { label: 'ap-southeast-4 (墨尔本)', value: 'ap-southeast-4' },
-  { label: 'ap-southeast-5 (马来西亚)', value: 'ap-southeast-5' },
-  { label: 'ap-southeast-6 (新西兰)', value: 'ap-southeast-6' },
-  { label: 'ap-southeast-7 (泰国)', value: 'ap-southeast-7' },
-  { label: 'ca-west-1 (卡尔加里)', value: 'ca-west-1' },
-  { label: 'eu-central-2 (苏黎世)', value: 'eu-central-2' },
-  { label: 'eu-south-1 (米兰)', value: 'eu-south-1' },
-  { label: 'eu-south-2 (西班牙)', value: 'eu-south-2' },
-  { label: 'il-central-1 (特拉维夫)', value: 'il-central-1' },
-  { label: 'me-central-1 (阿联酋)', value: 'me-central-1' },
-  { label: 'me-south-1 (巴林)', value: 'me-south-1' },
-  { label: 'mx-central-1 (墨西哥)', value: 'mx-central-1' },
-];
+// 区域列表移到 constants/regions.ts（单一数据源）；这里转出，保持 BulkQuota 等现有 import 不变
+export { REGIONS } from '../constants/regions';
+import { REGIONS } from '../constants/regions';
 
 // Bedrock 配额查询区域；未开通或暂不支持 Bedrock 的区域会作为部分失败返回
 const BEDROCK_REGIONS = [

@@ -10,6 +10,7 @@ import {
 } from 'antd';
 import { ReloadOutlined, PlusOutlined, DeleteOutlined, TagsOutlined, ThunderboltOutlined, DownloadOutlined, UserAddOutlined, CopyOutlined, LoadingOutlined } from '@ant-design/icons';
 import { api } from '../api';
+import { REGIONS } from '../constants/regions';
 
 /**
  * 复制到剪贴板。navigator.clipboard 在非 HTTPS / 旧 WebView 下可能不存在，
@@ -46,22 +47,10 @@ const BEDROCK_REGIONS = [
   'ap-southeast-5', 'ap-southeast-6', 'ap-southeast-7',
   'af-south-1', 'sa-east-1', 'mx-central-1',
 ];
-// 中文别名，下拉里直接看得懂是哪个地区（搜索时中英文都能命中）
-const REGION_LABEL: Record<string, string> = {
-  'us-east-1': '弗吉尼亚', 'us-east-2': '俄亥俄', 'us-west-1': '加州', 'us-west-2': '俄勒冈',
-  'ca-central-1': '加拿大', 'ca-west-1': '卡尔加里',
-  'eu-central-1': '法兰克福', 'eu-central-2': '苏黎世', 'eu-north-1': '斯德哥尔摩',
-  'eu-south-1': '米兰', 'eu-south-2': '西班牙',
-  'eu-west-1': '爱尔兰', 'eu-west-2': '伦敦', 'eu-west-3': '巴黎',
-  'ap-east-2': '台北', 'ap-northeast-1': '东京', 'ap-northeast-2': '首尔', 'ap-northeast-3': '大阪',
-  'ap-south-1': '孟买', 'ap-south-2': '海得拉巴',
-  'ap-southeast-1': '新加坡', 'ap-southeast-2': '悉尼', 'ap-southeast-3': '雅加达',
-  'ap-southeast-4': '墨尔本', 'ap-southeast-5': '马来西亚', 'ap-southeast-6': '新西兰',
-  'ap-southeast-7': '泰国',
-  'af-south-1': '开普敦', 'sa-east-1': '圣保罗', 'mx-central-1': '墨西哥',
-};
+// 中文名复用配额页的 REGIONS（含国家/地区 + 城市），搜「巴西」「美国」也能命中，避免两份列表漂移
+const REGION_LABEL = new Map(REGIONS.filter(r => r.value).map(r => [r.value, r.label]));
 const REGION_OPTS = BEDROCK_REGIONS.map(r => ({
-  label: REGION_LABEL[r] ? `${r} (${REGION_LABEL[r]})` : r,
+  label: REGION_LABEL.get(r) || r,
   value: r,
 }));
 // 后端 /profiles 单次最多 12 个区域，「全选」按钮据此取前 12 个高频区域，
