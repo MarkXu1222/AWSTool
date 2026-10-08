@@ -887,9 +887,18 @@ EBS、S3、ALB、CloudFront、CloudWatch、CloudTrail。后三个是固定小额
 EBS 单价高近 4 倍，调节范围更大。S3 改为按算力等比放大（日志/制品量
 本来就跟规模走）。
 
-CSV 19 列严格对齐现有台账，`PO ID` 就是商机 ID。服务器留存带时间戳快照
+CSV 前 18 列严格对齐现有台账，`PO ID` 就是商机 ID；第 19 列「AWS批准金额」
+（0.47.1 追加，新列只能加在末尾）。服务器留存带时间戳快照
 （`data/poc-cash/`）+ `poc-cash-latest.csv`，同时浏览器下载一份 ——
-留存是为了回溯 PO 号、到账金额是何时被 AWS 回填的。
+留存是为了回溯 PO 号、批准金额是何时被 AWS 回填的。
+
+**AWS 批准金额（0.47.1）**：进展表与 CSV 的「AWS 批准额」取
+`CashRequest.ApprovedAmount`。⚠️ 实测 2026-09 之后批准的件（如
+`benappl-kqowjcmd6dzs1e`，APPROVED + 已有 PO）**只回填 `RequestedAmount`，
+没有 `ApprovedAmount`**，所以 `approvedOf()` 在 `Status=APPROVED` 时退回申请额，
+前端加 `*` 并用 tooltip 注明；未批准的件一律留空，绝不拿申请额冒充。
+此前该值被放在「到账金额」列 —— 批准≠到账，到账信息在事后 Cash Claim 的
+`Invoice` 里，Funding 申请拿不到，故 CSV「到账金额」改为留空人工补。
 
 **商机阶段检查（0.36.0，Tab 名 0.37.4 起加「商机」前缀）**：提交后商机被
 AWS 锁定，用这个 Tab 确认审到哪一步了，并在允许时推进阶段。

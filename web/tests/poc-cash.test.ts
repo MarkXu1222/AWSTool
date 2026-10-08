@@ -367,7 +367,10 @@ test('CSV 列顺序必须与现有台账一致', async () => {
   assert.equal(header.split(',')[1], '项目桶');
   assert.equal(header.split(',')[3], 'PO ID');
   assert.equal(header.split(',')[8], 'Fund Request ID');
-  assert.equal(header.split(',').length, 18);
+  // 前 18 列对齐原台账，新增的「AWS批准金额」只能追加在末尾
+  assert.equal(header.split(',').length, 19);
+  assert.equal(header.split(',')[15], '到账金额');
+  assert.equal(header.split(',')[18], 'AWS批准金额');
 
   const cells = row.split(',');
   // 数据列数必须等于表头列数。曾因金额用 toLocaleString 加千分位，
@@ -381,6 +384,41 @@ test('CSV 列顺序必须与现有台账一致', async () => {
   // AWS 未回填的字段留空，不编造
   assert.equal(cells[13], '', 'PO 号未回填应为空');
   assert.ok(csv.startsWith('\uFEFF'), '需要 BOM，否则 Excel 中文乱码');
+});
+
+test('CSV：批准金额进「AWS批准金额」列，不再冒充到账金额', async () => {
+  const { buildCsv } = await import('../server/poc-cash-funding');
+  const csv = buildCsv([{
+    applicationId: 'benappl-ok', status: 'APPROVED', stage: 'FULFILLMENT',
+    purchaseOrder: 'ML-17982745', approvedAmount: '42114.96',
+  }], {});
+  const cells = csv.replace(/^\uFEFF/, '').split('\r\n')[1].split(',');
+  assert.equal(cells.length, 19);
+  assert.equal(cells[13], 'ML-17982745');
+  assert.equal(cells[15], '', '到账金额 Funding 申请里拿不到，必须留空人工补');
+  assert.equal(cells[18], '42114.96', '批准额裸数字，不加千分位');
+});
+
+test('批准金额：优先 ApprovedAmount，已批准件才退回申请额', async () => {
+  const { approvedOf } = await import('../server/poc-cash-funding');
+  // 老样本 benappl-2ytlqygp12lfp7：两个字段都有
+  assert.deepEqual(approvedOf('APPROVED', {
+    ApprovedAmount: { Amount: '42114.96', Currency: 'MYR' },
+    RequestedAmount: { Amount: '42114.96', Currency: 'MYR' },
+  }), { amount: '42114.96', currency: 'MYR', fromRequest: false });
+  // 新样本 benappl-kqowjcmd6dzs1e：APPROVED + 有 PO，但 AWS 只回填了 RequestedAmount
+  assert.deepEqual(approvedOf('APPROVED', {
+    PurchaseOrderNumber: 'ML-XQ96TZASV2',
+    RequestedAmount: { Amount: '24267.00', Currency: 'MYR' },
+  }), { amount: '24267.00', currency: 'MYR', fromRequest: true });
+  // 未批准的件绝不能把申请额当批准额
+  for (const s of ['ACTION_REQUIRED', 'IN_REVIEW', 'PENDING_SUBMISSION', 'REJECTED']) {
+    assert.equal(approvedOf(s, {
+      RequestedAmount: { Amount: '34518.51', Currency: 'MYR' },
+    }).amount, null, `${s} 不应有批准金额`);
+  }
+  assert.equal(approvedOf('APPROVED', {}).amount, null);
+  assert.equal(approvedOf(undefined, undefined).amount, null);
 });
 
 test('项目桶查不到时留空，不回退到别的命名', async () => {

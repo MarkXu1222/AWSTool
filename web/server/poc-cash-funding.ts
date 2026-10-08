@@ -352,16 +352,51 @@ export interface PocRow {
   arrUsd?: string; calculatorUrl?: string;
   requestMyr?: number | null;
   purchaseOrder?: string | null;     // AWS 审批后回填
-  approvedAmount?: string | null;    // AWS 审批后回填
+  /** AWS 批准金额，审批后回填 —— 是批准额度，不等于到账金额 */
+  approvedAmount?: string | null;
+  approvedCurrency?: string | null;
+  /**
+   * true = AWS 没回填 ApprovedAmount，按申请额展示。
+   * 实测 2026-09 后批准的件（如 benappl-kqowjcmd6dzs1e，APPROVED 且已有 PO）
+   * 只有 RequestedAmount 没有 ApprovedAmount，只认 ApprovedAmount 会让
+   * 已批准的行全是空的。
+   */
+  approvedFromRequest?: boolean;
   invoice?: string | null;           // AWS 打款环节回填
   createdAt?: string; updatedAt?: string;
 }
 
 const OPP_FROM_ARN = /catalog\/AWS\/opportunity\/(O\d+)/;
 
+/**
+ * AWS 批准金额。优先 ApprovedAmount；没有时只在 Status=APPROVED 下退回
+ * RequestedAmount（批准即按申请额批），并打标让前端注明来源。
+ * 未批准的件绝不拿申请额冒充批准额。
+ */
+export function approvedOf(status: string | undefined, cash: any): {
+  amount: string | null; currency: string | null; fromRequest: boolean;
+} {
+  if (cash?.ApprovedAmount?.Amount) {
+    return {
+      amount: String(cash.ApprovedAmount.Amount),
+      currency: cash.ApprovedAmount.Currency ?? null,
+      fromRequest: false,
+    };
+  }
+  if (status === 'APPROVED' && cash?.RequestedAmount?.Amount) {
+    return {
+      amount: String(cash.RequestedAmount.Amount),
+      currency: cash.RequestedAmount.Currency ?? null,
+      fromRequest: true,
+    };
+  }
+  return { amount: null, currency: null, fromRequest: false };
+}
+
 function toRow(r: any): PocRow {
   const d = r.BenefitApplicationDetails || {};
   const cash = d.CashRequest || {};
+  const approved = approvedOf(r.Status, cash);
   const total = Number(cash.TotalCostOfActivity?.Amount || 0);
   const partner = Number(cash.PartnerContribution?.Amount || 0);
   const oppArn = (r.AssociatedResources || [])
@@ -383,7 +418,9 @@ function toRow(r: any): PocRow {
     // 申请额 = Total − Partner（AWS 后台就是这么倒推的）
     requestMyr: total ? +(total - partner).toFixed(2) : null,
     purchaseOrder: cash.PurchaseOrderNumber ?? null,
-    approvedAmount: cash.ApprovedAmount?.Amount ?? null,
+    approvedAmount: approved.amount,
+    approvedCurrency: approved.currency,
+    approvedFromRequest: approved.fromRequest,
     invoice: d.Invoice?.Description ?? null,
     createdAt: r.CreatedAt ? new Date(r.CreatedAt).toISOString() : undefined,
     updatedAt: r.UpdatedAt ? new Date(r.UpdatedAt).toISOString() : undefined,
@@ -447,13 +484,14 @@ export async function getPocApplication(applicationId: string): Promise<PocRow> 
 }
 
 // ===== CSV 台账 =====
-// 列顺序严格对齐 ~/Downloads/Poc Cash - Poc Cash.csv，不要「顺手调整」，
-// 否则粘回原表会错位。
+// 前 18 列严格对齐 ~/Downloads/Poc Cash - Poc Cash.csv，不要「顺手调整」，
+// 否则粘回原表会错位。新增列只能**追加在末尾**。
 const CSV_HEADERS = [
   'Account ID', '项目桶', 'PO名称', 'PO ID', 'PO阶段', 'PO MRR（USD）',
   'pricing calculator（ARR USD）', 'calculator link', 'Fund Request ID',
   'Start Date', 'End Date', 'POC阶段', '申请金额', 'Purchse Order',
   'invoice', '到账金额', '到账日期', '负责人',
+  'AWS批准金额',
 ];
 
 /** POC 阶段的中文表述（对齐台账里的用法） */
@@ -503,9 +541,12 @@ export function buildCsv(rows: PocRow[], ctx: CsvContext = {}): string {
       r.requestMyr != null ? String(r.requestMyr) : '',
       r.purchaseOrder,                       // AWS 审批后回填
       r.invoice,                             // AWS 打款环节回填
-      r.approvedAmount,                      // 到账金额
-      '',                                    // 到账日期：API 无此字段，人工补
+      // 到账金额 / 到账日期：Funding 申请里没有到账信息（在事后 Cash Claim
+      // 的 Invoice 里），人工补。此前把批准额填在这里，批准≠到账，会误导对账。
+      '',
+      '',
       ctx.owner || '',
+      r.approvedAmount ?? '',                // AWS 批准金额（裸数字，同上不加千分位）
     ].map(csvEscape).join(','));
   }
   // BOM：Excel / 表格软件打开中文表头不乱码

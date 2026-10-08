@@ -72,7 +72,11 @@ interface PocRow {
   activityName?: string; startDate?: string; endDate?: string;
   arrUsd?: string; calculatorUrl?: string;
   requestMyr?: number | null;
-  purchaseOrder?: string | null; approvedAmount?: string | null;
+  purchaseOrder?: string | null;
+  /** AWS 批准金额（审批后回填，不等于到账） */
+  approvedAmount?: string | null; approvedCurrency?: string | null;
+  /** true = AWS 未回填 ApprovedAmount，按已批准件的申请额展示 */
+  approvedFromRequest?: boolean;
   createdAt?: string;
 }
 
@@ -782,15 +786,15 @@ const PocCashPage: React.FC = () => {
         <Button icon={<DownloadOutlined />} onClick={doExport} loading={exporting}
           disabled={!pocRows.length}>导出 CSV 台账</Button>
         <Text type="secondary">
-          共 {pocRows.length} 条 · 服务器留存带时间戳快照 · PO 号与到账金额由 AWS 审批后回填
+          共 {pocRows.length} 条 · 服务器留存带时间戳快照 · PO 号与 AWS 批准金额由 AWS 审批后回填
         </Text>
       </Space>
-      {/* 列宽按实测内容宽度分配，合计 1334 < 常见内容区宽度，
+      {/* 列宽按实测内容宽度分配，合计 1358 < 常见内容区宽度，
           正常屏下不触发横向滚动 —— 一旦滚动，右侧 fixed 的「操作」列会压住
           「周期」，日期被截成半截（改版前就是这个毛病）。
           调宽任何一列时记得同步下面的 scroll.x。 */}
       <Table<PocRow> rowKey="applicationId" size="small" loading={pocLoading}
-        dataSource={pocRows} scroll={{ x: 1334 }} pagination={{ pageSize: 20 }}
+        dataSource={pocRows} scroll={{ x: 1358 }} pagination={{ pageSize: 20 }}
         columns={[
           // 状态不设 fixed：列本身较宽，固定后会盖住相邻的 ID 列（实测截图里
           // Fund Request ID 被压掉了一半）。首列放 ID 更利于对账。
@@ -853,8 +857,23 @@ const PocCashPage: React.FC = () => {
               : <Text type="secondary" style={{ fontSize: 12 }}>待 AWS 回填</Text>,
           },
           {
-            title: '到账金额', dataIndex: 'approvedAmount', width: 104, align: 'right',
-            render: (v: string | null) => v || <Text type="secondary">—</Text>,
+            // 原「到账金额」列显示的其实是 ApprovedAmount —— 批准≠到账，
+            // 到账信息在事后 Cash Claim 里，Funding 申请拿不到，故改为如实标注。
+            title: 'AWS 批准额 (MYR)', dataIndex: 'approvedAmount', width: 128, align: 'right',
+            render: (v: string | null, r) => {
+              if (!v) {
+                return <Text type="secondary" style={{ fontSize: 12 }}>
+                  {r.status === 'APPROVED' ? '待 AWS 回填' : '—'}</Text>;
+              }
+              const text = `${Number(v).toLocaleString(undefined,
+                { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+                + `${r.approvedCurrency && r.approvedCurrency !== 'MYR' ? ` ${r.approvedCurrency}` : ''}`;
+              return r.approvedFromRequest
+                ? <Tooltip title="AWS 未单独回填批准额，按已批准申请的申请额显示">
+                    <Text style={{ whiteSpace: 'nowrap' }}>{text}*</Text>
+                  </Tooltip>
+                : <Text style={{ whiteSpace: 'nowrap' }}>{text}</Text>;
+            },
           },
           {
             title: '周期', width: 172,
