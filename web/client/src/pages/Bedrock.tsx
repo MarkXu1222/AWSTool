@@ -969,7 +969,7 @@ const DeliveryTab: React.FC<{ accountId: string }> = ({ accountId }) => {
             { value: 'global', label: '仅 global 版（6 条/区）' },
             { value: 'full', label: '全量版（12 条/区）' },
           ]} />
-        <Tooltip title="李浩版五列格式：Profile Name / ARN / TPM / TPD / Region。按所选变体筛选核心 6 模型并固定排序（老模型 haiku/fable/opus-4-1/4-5/sonnet-4/4-5 一律剔除）；服务端实时查 Service Quotas 匹配 TPM/TPD（约 10-30s），提额未生效如实写 0">
+        <Tooltip title="李浩版五列格式：Profile Name / ARN / TPM / TPD / Region。按所选变体筛选核心 9 模型并固定排序（含 Sonnet/Opus/Haiku 5.5；老模型 haiku-4-5/fable/opus-4-1/4-5/sonnet-4/4-5 一律剔除）；服务端实时查 Service Quotas 匹配 TPM/TPD（约 10-30s），提额未生效如实写 0">
           <Button size="small" icon={<DownloadOutlined />} loading={exporting}
             disabled={!rows.length || !iamUser.trim() || !iamPassword} onClick={() => doExport(true)}>交付表格-带TPM版</Button>
         </Tooltip>

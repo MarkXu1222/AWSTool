@@ -494,6 +494,8 @@ Profiles 列表的 ARN 列完整展示（不截断、等宽字体），每行带
 
 v2 按 `variant` 筛选核心 6 模型并固定排序：`global`（每区 6 条，默认）或 `full`（每区 12 条，us+global）。老模型（haiku / fable / opus-4-1 / 4-5 / sonnet-4 / 4-5）一律剔除。用**白名单**而非黑名单 —— AWS 随时上新模型，黑名单会漏。
 
+**交付白名单（0.47.0 起 9 个核心模型）**：原 6 个 + Sonnet 5.5 / Opus 5.5 / Haiku 5.5。原有行顺序不变，5.5 追加在后（global 变体每区最多 9 条，全量版最多 18 条）；账户里没有的型号自动跳过并在下载提示里列出。**AWS 上新模型不会自动进表**，要加到 `bedrock-delivery.ts` 的 `VARIANT_*_ORDER`。Haiku 5.5 进表、Haiku 4.5 仍剔除，见 `tests/bedrock-delivery-55.test.ts`。
+
 筛选必须在 `prepareDelivery()` **之前**执行：后者对每一行强校验 `map-migrated` tag，老模型往往没打 tag 会直接让整个导出失败，而它们本就不该进交付表。
 
 **Profile 名归一化回退（0.34.2）**：清单是精确字符串白名单，但不少账户的 Profile 用控制台默认命名。实测 `703844615335`（HDL Account 7）6 个核心模型全都在，名字却是 `Global Anthropic Claude Opus 4.6`，与清单的 `sef-global-claude-opus-4-6-v1` 一条都对不上，导出直接报「账户中找不到任何交付清单内的 Profile」。
@@ -522,7 +524,11 @@ v2 按 `variant` 筛选核心 6 模型并固定排序：`global`（每区 6 条�
 
 回退只认清单内的模型，`Fable 5` / `Haiku 4.5` / `Sonnet 4.5` 等非清单型号不会被误纳入。连带修了一处：经回退命中的行原本会同时计入 `dropped`，导致审计日志「剔除 N 种老模型」虚高。
 
-**TPD 口径（2026-09 变更）**：AWS 新增账户级总配额 `Cross-Model Account-Level Tokens Per Day`（`L-E3F10727`，scope 标记为 `Account-Level`），同时**较新的 Claude 型号不再有独立 TPD**（实测 Opus 4.7 只剩 TPM）。取值优先级：
+**TPD 口径（2026-09 变更）**：AWS 新增账户级总配额 `L-E3F10727`（scope 标记为 `Account-Level`），同时**较新的 Claude 型号不再有独立 TPD**（实测 Opus 4.7 只剩 TPM）。
+
+> ⚠️ **2026-10 AWS 改名**：`Cross-Model Account-Level Tokens Per Day` → `Cross-Model Max Tokens Per Day`（QuotaCode 不变）。旧逻辑按名称里的 `account-level` 识别，改名后整个回填失效：配额页新型号 TPD 显示 `-`、交付表 TPD 写 0。0.47.0 起**按 QuotaCode 识别**，名称（以 `Cross-Model` 开头）只作兜底，见 `isBedrockAccountLevelQuota()`。
+
+取值优先级：
 
 1. 模型自己的 TPD —— 仍大量存在且各不相同（Nova 2 Lite 11.52B、Claude 3.5 Sonnet 2.88B、Claude Opus 4.1 360M……）
 2. 回退到**同区域**的账户级 TPD，并置 `tpdShared=true`

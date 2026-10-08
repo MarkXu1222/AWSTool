@@ -728,8 +728,8 @@ const BEDROCK_QUOTA_SCOPES = ['Global Cross-Region', 'Cross-Region', 'On-Demand'
 // 模型名 → 规范 provider。按关键词匹配（含模型家族别名），避免出现 "GPT-5.4"/"Stable" 这类
 // 由“取首个单词”产生的伪 provider，也避免 MiniMax/Minimax 大小写重复项。
 const BEDROCK_PROVIDER_HINTS: Array<[string, string]> = [
-  // 账户级总配额跨所有厂商，归到服务级而不是某个 provider
-  ['cross-model account-level', 'Bedrock (服务级)'],
+  // 账户级总配额跨所有厂商，归到服务级而不是某个 provider（主判定在调用处按 QuotaCode）
+  ['cross-model', 'Bedrock (服务级)'],
   ['guardrail', 'Bedrock (服务级)'],
   ['anthropic', 'Anthropic'], ['claude', 'Anthropic'],
   ['nova', 'Amazon'], ['titan', 'Amazon'], ['amazon', 'Amazon'],
@@ -765,17 +765,27 @@ function inferBedrockProvider(...values: string[]): string {
 const BEDROCK_METRIC_PHRASE = /\s*(?:tokens per minute|requests per minute|tokens per day)\s*/i;
 
 /**
- * 账户级跨模型总配额（AWS 2026 新增），配额名不带 "for <模型>"：
- *   "Cross-Model Account-Level Tokens Per Day"   L-E3F10727
+ * 账户级跨模型总配额（AWS 2026 新增），配额名不带 "for <模型>"。
  * 它约束的是整个账户所有模型的合计用量，与逐模型配额是两个维度，
  * 交付/提额时都要单独看，所以这里保留完整名称、不按普通模型行解析。
+ *
+ * ⚠️ 必须按 QuotaCode 识别，名称只作兜底：AWS 已改过一次名
+ *   2026-09 "Cross-Model Account-Level Tokens Per Day"
+ *   2026-10 "Cross-Model Max Tokens Per Day"            （同一个 L-E3F10727）
+ * 旧正则只认 "account-level"，改名后它落进 scope=Other，账户级 TPD 回填整体失效：
+ * 配额页新 Claude 型号 TPD 显示「-」，交付表 TPD 写成 0。
  */
-const BEDROCK_ACCOUNT_LEVEL_RE = /cross-model\s+account-level/i;
+export const BEDROCK_ACCOUNT_LEVEL_TPD_CODE = 'L-E3F10727';
+const BEDROCK_ACCOUNT_LEVEL_RE = /^\s*cross-model\b/i;
+
+export function isBedrockAccountLevelQuota(quotaName: string, quotaCode?: string): boolean {
+  return quotaCode === BEDROCK_ACCOUNT_LEVEL_TPD_CODE || BEDROCK_ACCOUNT_LEVEL_RE.test(quotaName);
+}
 
 /** 从配额名里提取模型名："... tokens per minute for <模型名>" */
-function extractBedrockModelName(quotaName: string): string {
+function extractBedrockModelName(quotaName: string, quotaCode?: string): string {
   // 账户级总配额没有模型维度，保留原名（去掉指标短语会丢语义）
-  if (BEDROCK_ACCOUNT_LEVEL_RE.test(quotaName)) return quotaName.trim();
+  if (isBedrockAccountLevelQuota(quotaName, quotaCode)) return quotaName.trim();
 
   const m = /(?:tokens per minute|requests per minute|tokens per day)\s+for\s+(.+)/i.exec(quotaName);
   let model: string;
@@ -802,16 +812,15 @@ function extractBedrockModelName(quotaName: string): string {
 }
 
 /** 判定指标类型与推理范围。注意 scope 判定顺序：global cross-region 必须先于 cross-region */
-function classifyBedrockQuota(quotaName: string): { metric: 'TPM' | 'RPM' | 'TPD' | null; scope: string } {
+export function classifyBedrockQuota(quotaName: string, quotaCode?: string): { metric: 'TPM' | 'RPM' | 'TPD' | null; scope: string } {
   const nl = quotaName.toLowerCase();
   let metric: 'TPM' | 'RPM' | 'TPD' | null = null;
   if (nl.includes('tokens per minute')) metric = 'TPM';
   else if (nl.includes('requests per minute')) metric = 'RPM';
   else if (nl.includes('tokens per day')) metric = 'TPD';
 
-  // 账户级总配额优先判定：它名字里带 "cross-model"，若落到下面的
-  // cross-region 分支会被误归类，而它其实不限定任何推理范围。
-  if (BEDROCK_ACCOUNT_LEVEL_RE.test(quotaName)) return { metric, scope: 'Account-Level' };
+  // 账户级总配额优先判定：它不限定任何推理范围，落到下面的分支会被归成 Other。
+  if (isBedrockAccountLevelQuota(quotaName, quotaCode)) return { metric, scope: 'Account-Level' };
 
   let scope = 'Other';
   if (nl.includes('global cross-region')) scope = 'Global Cross-Region';
@@ -853,10 +862,11 @@ export async function listBedrockQuotas(accountId: string, regions?: string[]) {
           // 只看按需推理配额，排除批量/预置/微调
           if (/batch|provisioned|customization|fine-tun/.test(nl)) continue;
 
-          const { metric, scope } = classifyBedrockQuota(name);
+          const { metric, scope } = classifyBedrockQuota(name, q.QuotaCode);
           if (!metric) continue;
-          const model = extractBedrockModelName(name);
-          const provider = inferBedrockProvider(model, name);
+          const model = extractBedrockModelName(name, q.QuotaCode);
+          // 账户级总配额跨所有厂商，固定归到服务级（名称已改过一次，不靠关键词猜）
+          const provider = scope === 'Account-Level' ? 'Bedrock (服务级)' : inferBedrockProvider(model, name);
           const key = `${region}|${provider}|${model}|${scope}`;
           let row = rowMap.get(key);
           if (!row) {

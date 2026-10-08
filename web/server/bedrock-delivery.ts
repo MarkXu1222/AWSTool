@@ -153,8 +153,10 @@ export interface DeliveryProfileRowV2 extends DeliveryProfileRow {
 
 /**
  * 交付变体（规范第四节「模型清单（两种交付变体）」）：
- *   full   = 变体 A：核心 6 模型的 us + global 版，每区 12 条
- *   global = 变体 B：只要 global 版，每区 6 条（李浩近期主要要求）
+ *   full   = 变体 A：核心 9 模型的 us + global 版，每区最多 18 条
+ *   global = 变体 B：只要 global 版，每区最多 9 条（李浩近期主要要求）
+ * 核心模型 = 原 6 个 + 2026-10 新增 Sonnet 5.5 / Opus 5.5 / Haiku 5.5。
+ * 新模型要进交付表必须加到这里（白名单），AWS 上新不会自动出现。
  */
 export type DeliveryVariant = 'full' | 'global';
 
@@ -176,6 +178,13 @@ const VARIANT_FULL_ORDER = [
   'sef-us-claude-opus-5',
   'sef-global-claude-sonnet-5',
   'sef-global-claude-opus-5',
+  // 2026-10 新增 5.5 系列：前 12 行历史顺序不动，追加在后，us/global 交错延续原规律
+  'sef-us-claude-sonnet-5-5',
+  'sef-us-claude-opus-5-5',
+  'sef-us-claude-haiku-5-5',
+  'sef-global-claude-sonnet-5-5',
+  'sef-global-claude-opus-5-5',
+  'sef-global-claude-haiku-5-5',
 ];
 
 /** 变体 B 的顺序，与 filter_global_only.py 的 KEEP 一致（干净的模型序） */
@@ -186,6 +195,10 @@ const VARIANT_GLOBAL_ORDER = [
   'sef-global-claude-opus-4-8',
   'sef-global-claude-sonnet-5',
   'sef-global-claude-opus-5',
+  // 2026-10 新增 5.5 系列（账户里没有的会自动跳过并记入 missing）
+  'sef-global-claude-sonnet-5-5',
+  'sef-global-claude-opus-5-5',
+  'sef-global-claude-haiku-5-5',
 ];
 
 export function deliveryOrderFor(variant: DeliveryVariant): string[] {
@@ -236,9 +249,10 @@ export function normalizeProfileName(s: string): string {
 }
 
 /**
- * 按变体筛选 + 排序。规范要求交付表只含核心 6 模型，且顺序固定；
+ * 按变体筛选 + 排序。规范要求交付表只含核心 9 模型（原 6 个 + 5.5 系列 3 个），且顺序固定；
  * 账户里的老模型（3-haiku / opus-4-1 / opus-4-5 / sonnet-4 / sonnet-4-5 /
  * haiku-4-5 / fable-5 / fable-5-1）一律不出现在交付表中。
+ * 注意 haiku-5-5 在白名单而 haiku-4-5 不在：两者归一化后不同（haiku-5-5 ≠ haiku-4-5），测试锁定。
  *
  * 采用**白名单**而非黑名单：AWS 随时会上新模型，黑名单会漏，
  * 白名单能保证交付表内容完全可预期。

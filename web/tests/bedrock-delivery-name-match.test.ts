@@ -36,6 +36,13 @@ const CONSOLE_STYLE = [
 const asRows = (names: string[], region = 'us-east-1') =>
   names.map(name => ({ name, region }));
 
+/** 2026-10 白名单新增的 5.5 系列（global 变体）；老样本里没有，会记入 missing */
+const MISSING_55_GLOBAL = [
+  'sef-global-claude-sonnet-5-5',
+  'sef-global-claude-opus-5-5',
+  'sef-global-claude-haiku-5-5',
+];
+
 test('规范命名走精确匹配，顺序与清单一致', () => {
   const names = [
     'sef-global-claude-opus-5',
@@ -56,7 +63,8 @@ test('规范命名走精确匹配，顺序与清单一致', () => {
     'sef-global-claude-opus-5',
   ]);
   assert.deepEqual(dropped, []);
-  assert.equal(missingByRegion.size, 0);
+  // 2026-10 白名单新增 5.5 系列；这份老账户样本没有，应如实记入 missing 而不是报错
+  assert.deepEqual(missingByRegion.get('us-east-1'), MISSING_55_GLOBAL);
 });
 
 test('控制台默认命名经回退全部命中（复现 703844615335）', () => {
@@ -71,7 +79,7 @@ test('控制台默认命名经回退全部命中（复现 703844615335）', () =
     'Global Anthropic Claude Sonnet 5',
     'Global Anthropic Claude Opus 5',
   ]);
-  assert.equal(missingByRegion.size, 0);
+  assert.deepEqual(missingByRegion.get('us-east-1'), MISSING_55_GLOBAL);
 });
 
 test('非清单模型不会被回退误纳入', () => {
@@ -125,7 +133,8 @@ test('缺失型号仍如实记入 missingByRegion', () => {
   );
   assert.equal(kept.length, 2);
   const missing = missingByRegion.get('us-east-1') ?? [];
-  assert.equal(missing.length, 4);
+  // 原 6 个里缺 4 个 + 5.5 系列 3 个
+  assert.equal(missing.length, 7);
   assert.equal(missing.includes('sef-global-claude-sonnet-5'), true);
 });
 
@@ -135,7 +144,9 @@ test('多区域各自独立匹配', () => {
   assert.equal(kept.length, 12);
   assert.equal(kept.filter(r => r.region === 'us-east-1').length, 6);
   assert.equal(kept.filter(r => r.region === 'us-west-2').length, 6);
-  assert.equal(missingByRegion.size, 0);
+  // 两个区各自只缺 5.5 系列
+  assert.deepEqual(missingByRegion.get('us-east-1'), MISSING_55_GLOBAL);
+  assert.deepEqual(missingByRegion.get('us-west-2'), MISSING_55_GLOBAL);
 });
 
 /** 账户 106360388618（Elodie）的真实 Profile 名：Self- 前缀 + 日期戳 + :0 后缀 */
