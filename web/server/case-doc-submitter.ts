@@ -66,6 +66,7 @@ export interface CaseDocParams {
   companyKey?: string;
   serviceCode: string;
   quotaName: string;
+  quotaCode?: string;         // 有则文档按代码识别型号（Mac 专用主机）
   region: string;
   requestedValue: number;
   currentValue?: number;
@@ -287,6 +288,7 @@ async function runJob(job: CaseDocJob, params: CaseDocParams): Promise<void> {
       companyKey: params.companyKey,
       serviceCode: params.serviceCode,
       quotaName: params.quotaName,
+      quotaCode: params.quotaCode,
       region: params.region,
       requestedValue: params.requestedValue,
       currentValue: params.currentValue,

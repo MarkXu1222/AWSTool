@@ -3,6 +3,7 @@ import { Card, Table, Tag, Button, Space, message, Select, InputNumber, Alert, R
 import { ReloadOutlined, ThunderboltOutlined, SearchOutlined, DownloadOutlined } from '@ant-design/icons';
 import { api } from '../api';
 import { QUOTA_PRESETS, REGIONS } from './Quotas';
+import { presetUnitLabel, presetModelText, validateQuotaTarget } from '../constants/quota-presets';
 import { exportToCSV } from '../utils/export';
 
 // 可选区域（去掉「全部区域」这个空值选项，批量提额必须指定具体区域）
@@ -75,7 +76,12 @@ const BulkQuotaPage: React.FC = () => {
   const targetAccounts = accounts.filter(a => scope === 'all' ? true : scope === 'payer' ? a.isPayer : !a.isPayer);
   const totalRequests = targetAccounts.length * regions.length;
   const preset = presetIdx != null ? QUOTA_PRESETS[presetIdx] : null;
-  const canSubmit = !!payer && regions.length > 0 && !!preset && !!target && target > 0 && totalRequests > 0;
+  // 批量时各账户当前值不同，「大于当前配额」由后端逐账户判断（已达标的跳过）；
+  // 这里只校验目标值本身（正数、整数型必须是整数）
+  const targetError = preset && target != null ? validateQuotaTarget(preset, target) : null;
+  const canSubmit = !!payer && regions.length > 0 && !!preset && !!target && target > 0
+    && !targetError && totalRequests > 0;
+  const unitText = presetUnitLabel(preset);
 
   const handleSubmit = async () => {
     if (!canSubmit || !preset || !target) return;
@@ -83,7 +89,7 @@ const BulkQuotaPage: React.FC = () => {
     try {
       const r = await api.bulkQuotaSubmit({
         payerAccountId: payer, regions, serviceCode: preset.serviceCode,
-        quotaName: preset.quotaName, desiredValue: target, scope,
+        quotaName: preset.quotaName, quotaCode: preset.quotaCode, desiredValue: target, scope,
       });
       if (r.success) {
         setJobId(r.data.jobId);
@@ -150,12 +156,15 @@ const BulkQuotaPage: React.FC = () => {
             showSearch optionFilterProp="label"
             onChange={idx => setPresetIdx(idx)}
             options={QUOTA_PRESETS.map((p, i) => ({ label: p.label, value: i }))} />
-          <span style={{ fontSize: 12, color: 'rgba(0,0,0,0.65)' }}>期望值</span>
+          <Tooltip title="申请后的总配额，不是在当前值上再加。例如填 2 = 总配额 2">
+            <span style={{ fontSize: 12, color: 'rgba(0,0,0,0.65)' }}>目标总配额</span>
+          </Tooltip>
           <InputNumber size="small" style={{ width: 140 }} value={target ?? undefined} min={1}
+            precision={preset?.integerOnly ? 0 : undefined}
             onChange={v => setTarget(v as number)} placeholder="直接填数字" />
-          {preset?.unit && <span style={{ fontSize: 12, color: 'rgba(0,0,0,0.45)' }}>{preset.unit}</span>}
+          {unitText && <span style={{ fontSize: 12, color: 'rgba(0,0,0,0.45)' }}>{unitText}</span>}
           <Popconfirm title="确认批量提交提额请求？"
-            description={`将检查 ${SCOPE_LABEL[scope]}（${targetAccounts.length} 个账户）× ${regions.length} 个区域，共 ${totalRequests} 个目标，把「${preset?.label || ''}」提升至 ${target ?? ''}。已达标的会自动跳过，其余提交提额请求（不可撤销）。`}
+            description={`将检查 ${SCOPE_LABEL[scope]}（${targetAccounts.length} 个账户）× ${regions.length} 个区域，共 ${totalRequests} 个目标，把「${preset?.label || ''}」${preset?.quotaCode ? `（${preset.quotaCode}）` : ''}的总配额提升至 ${target ?? ''}${unitText ? ` ${unitText}` : ''}。已达标的会自动跳过，其余提交提额请求（不可撤销）。`}
             okText="确认提交" cancelText="取消" onConfirm={handleSubmit} disabled={!canSubmit}>
             <Button size="small" type="primary" danger icon={<ThunderboltOutlined />} loading={submitting} disabled={!canSubmit}>
               批量提交{totalRequests > 0 ? `（${totalRequests}）` : ''}
@@ -163,6 +172,16 @@ const BulkQuotaPage: React.FC = () => {
           </Popconfirm>
         </div>
 
+        {preset?.quotaCode && (
+          <div style={{ marginTop: 10, fontSize: 12 }}>
+            配额：{preset.quotaName} <code>{preset.quotaCode}</code>
+            {preset.mac && <> · 型号 <Tag style={{ margin: 0 }}>{presetModelText(preset)}</Tag></>}
+            <span style={{ color: 'rgba(0,0,0,0.45)' }}> · 按配额代码查询与提交，查不到不会替换成其他型号</span>
+          </div>
+        )}
+        {targetError && (
+          <div style={{ marginTop: 6, fontSize: 12, color: '#cf1322' }}>{targetError}</div>
+        )}
         <div style={{ marginTop: 10, fontSize: 12, color: 'rgba(0,0,0,0.45)' }}>
           提交后逐账户读取该区域的当前配额值：<strong>已达到或超过目标值的自动跳过</strong>，不可调整的、该区域没有此配额的也会跳过，只对确实需要提升的账户发起请求。
         </div>

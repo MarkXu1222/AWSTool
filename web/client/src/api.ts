@@ -417,8 +417,9 @@ export const api = {
   // 批量 payer 提额（需独立的批量提额权限）
   bulkQuotaPayers: () => request('/aws/bulk-quota/payers'),
   bulkQuotaAccounts: (payerAccountId: string) => request(`/aws/bulk-quota/accounts/${payerAccountId}`),
-  // 只需传配额名 + 目标值，QuotaCode 由后端解析；已达标账户后端会自动跳过
-  bulkQuotaSubmit: (body: { payerAccountId: string; regions: string[]; serviceCode: string; quotaName: string; desiredValue: number; scope: string }) =>
+  // 传配额名 + 目标值；预设带 quotaCode 时一并传，后端只按代码查询/提交（不做名称模糊匹配）。
+  // 已达标账户后端会自动跳过
+  bulkQuotaSubmit: (body: { payerAccountId: string; regions: string[]; serviceCode: string; quotaName: string; quotaCode?: string; desiredValue: number; scope: string }) =>
     request('/aws/bulk-quota/submit', { method: 'POST', body: JSON.stringify(body) }),
   bulkQuotaJob: (jobId: string) => request(`/aws/bulk-quota/job/${jobId}`),
 
@@ -507,7 +508,7 @@ export const api = {
     request('/poc-cash/opportunities', { method: 'POST', body: JSON.stringify(body) }),
 
   // 一键提交提额文档到 Support Case（后台 job：生成 PDF → 联邦登录 → Reply → 传附件 → Submit）
-  caseDocSubmit: (params: { accountId: string; accountName?: string; caseId: string; companyKey?: string; serviceCode: string; quotaName: string; region: string; requestedValue: number; currentValue?: number; message?: string }) =>
+  caseDocSubmit: (params: { accountId: string; accountName?: string; caseId: string; companyKey?: string; serviceCode: string; quotaName: string; quotaCode?: string; region: string; requestedValue: number; currentValue?: number; message?: string }) =>
     request('/aws/quotas/case-doc-submit', { method: 'POST', body: JSON.stringify(params) }),
   caseDocJob: (jobId: string) => request(`/aws/quotas/case-doc-submit/${encodeURIComponent(jobId)}`),
   // 查询账户能否自动识别所属公司（生成文档/一键提交前预检，识别不到则前端弹公司选择器）
@@ -637,7 +638,7 @@ export const api = {
     }
   },
   // Generate quota increase PDF document — downloads the file
-  generateQuotaDoc: async (params: { accountId?: string; accountName?: string; companyKey?: string; serviceCode: string; quotaName: string; region: string; requestedValue: number; currentValue?: number }) => {
+  generateQuotaDoc: async (params: { accountId?: string; accountName?: string; companyKey?: string; serviceCode: string; quotaName: string; quotaCode?: string; region: string; requestedValue: number; currentValue?: number }) => {
     const token = getToken();
     const res = await fetch(`${BASE}/aws/quotas/generate-doc`, {
       method: 'POST',

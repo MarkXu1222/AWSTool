@@ -18,32 +18,12 @@ const renderStatus = (s: string) => {
   return <Tag icon={m.icon} color={m.color} style={{ fontSize: 10, margin: 0 }}>{s}</Tag>;
 };
 
-// 手动生成文档时可选的常用配额类型（组合了 serviceCode + quotaName，classifyQuota 会据此推断类别 + 单位）
-export const QUOTA_PRESETS = [
-  { label: 'EC2 Standard vCPU (A/C/D/H/I/M/R/T/Z)', serviceCode: 'ec2', quotaName: 'Running On-Demand Standard (A, C, D, H, I, M, R, T, Z) instances', unit: 'vCPUs' },
-  { label: 'EC2 P vCPU (GPU: p3/p4/p5)', serviceCode: 'ec2', quotaName: 'Running On-Demand P instances', unit: 'vCPUs' },
-  { label: 'EC2 G/VT vCPU (GPU)', serviceCode: 'ec2', quotaName: 'Running On-Demand G and VT instances', unit: 'vCPUs' },
-  { label: 'EC2 Inf vCPU (Inferentia 推理)', serviceCode: 'ec2', quotaName: 'Running On-Demand Inf instances', unit: 'vCPUs' },
-  { label: 'EC2 Trn vCPU (Trainium 训练)', serviceCode: 'ec2', quotaName: 'Running On-Demand Trn instances', unit: 'vCPUs' },
-  { label: 'EC2 F vCPU (FPGA)', serviceCode: 'ec2', quotaName: 'Running On-Demand F instances', unit: 'vCPUs' },
-  { label: 'EC2 X vCPU (高内存 X1/X2)', serviceCode: 'ec2', quotaName: 'Running On-Demand X instances', unit: 'vCPUs' },
-  { label: 'EC2 High Memory vCPU', serviceCode: 'ec2', quotaName: 'Running On-Demand High Memory instances', unit: 'vCPUs' },
-  { label: 'EC2 Elastic IPs (EIP)', serviceCode: 'ec2', quotaName: 'EC2-VPC Elastic IPs', unit: 'EIPs' },
-  { label: 'EC2 Mac Dedicated Hosts (mac.m2)', serviceCode: 'ec2', quotaName: 'Running Dedicated mac.m2 Hosts', unit: 'Hosts' },
-  { label: 'EC2 Mac Dedicated Hosts (mac.m4)', serviceCode: 'ec2', quotaName: 'Running Dedicated mac.m4 Hosts', unit: 'Hosts' },
-  // 注意：AWS 实际配额名就叫 "Instances"（L-4259AF9B），不是 "Lightsail Instances"
-  { label: 'Lightsail Instances', serviceCode: 'lightsail', quotaName: 'Instances', unit: 'Instances' },
-  { label: 'WorkSpaces 数量 (WorkSpaces 上限)', serviceCode: 'workspaces', quotaName: 'WorkSpaces', unit: 'WorkSpaces' },
-  { label: 'WorkSpaces Images (镜像)', serviceCode: 'workspaces', quotaName: 'Images', unit: 'Images' },
-  // AWS 已把 Fargate 配额改为按 vCPU 计（原 "Fargate On-Demand resource count" 已不存在）
-  { label: 'Fargate On-Demand vCPU', serviceCode: 'fargate', quotaName: 'Fargate On-Demand vCPU resource count', unit: 'vCPUs' },
-  // 区域级 gp3 卷总容量（L-7A658B76）。必须用完整官方名：同服务下还有 gp2/io1/io2/st1/sc1 等同构名称，
-  // 精确匹配才能保证解析到 gp3 而不是别的卷类型
-  { label: 'EBS gp3 存储容量 (TiB)', serviceCode: 'ebs', quotaName: 'Storage for General Purpose SSD (gp3) volumes, in TiB', unit: 'TiB' },
-  { label: 'Route 53 Domains', serviceCode: 'route53', quotaName: 'Domain count limit', unit: 'Domains' },
-  { label: 'Global Accelerator - Standard Accelerators', serviceCode: 'globalaccelerator', quotaName: 'Standard accelerators per AWS account', unit: 'Accelerators' },
-  { label: 'Global Accelerator - Custom Routing Accelerators', serviceCode: 'globalaccelerator', quotaName: 'Custom routing accelerators per AWS account', unit: 'Accelerators' },
-];
+// 常用配额预设移到 constants/quota-presets.ts（单一数据源，Mac 项带 quotaCode）；
+// 这里转出，保持 BulkQuota 等现有 import 不变
+export { QUOTA_PRESETS } from '../constants/quota-presets';
+import {
+  QUOTA_PRESETS, presetUnitLabel, presetModelText, validateQuotaTarget,
+} from '../constants/quota-presets';
 
 const SERVICES = [
   { label: '全部服务', value: '' },
@@ -248,6 +228,9 @@ const QuotasPage: React.FC = () => {
     try {
       const values = await docForm.validateFields();
       const preset = QUOTA_PRESETS[values.presetIndex ?? 0];
+      if (preset.integerOnly && !Number.isInteger(Number(values.requestedValue))) {
+        message.warning('申请数量必须是整数'); return;
+      }
       setDocGenerating(true);
       const hide = message.loading('正在生成文档...', 0);
       try {
@@ -255,6 +238,7 @@ const QuotasPage: React.FC = () => {
           companyKey: values.companyKey,
           serviceCode: preset.serviceCode,
           quotaName: preset.quotaName,
+          quotaCode: preset.quotaCode,
           region: values.region,
           requestedValue: Number(values.requestedValue),
         });
@@ -283,7 +267,9 @@ const QuotasPage: React.FC = () => {
     setQuickOpen(true);
   };
 
-  // 选中预设后：调 listServiceQuotas 按 quotaName 解析出真实配额（QuotaCode + 当前值）
+  // 选中预设后：调 listServiceQuotas 解析出真实配额（QuotaCode + 当前值）。
+  // 预设带 quotaCode 的（Mac 专用主机）**只按代码匹配**：同服务下 mac2 / mac2-m2 /
+  // mac-m4 / mac-m4pro 等名称高度相似，名称模糊匹配会静默落到别的型号上。
   const resolveQuick = async (presetIdx?: number, region?: string) => {
     if (presetIdx == null || !selectedAccount) return;
     const preset = QUOTA_PRESETS[presetIdx];
@@ -296,19 +282,25 @@ const QuotasPage: React.FC = () => {
       if (res.success) {
         const list = res.data || [];
         const nameLc = preset.quotaName.toLowerCase();
-        // 精确 → 忽略大小写 → 互相包含（AWS 偶有改名/带服务前缀，模糊兜底避免死匹配）
-        const q = list.find((x: any) => x.QuotaName === preset.quotaName)
-          || list.find((x: any) => (x.QuotaName || '').toLowerCase() === nameLc)
-          || list.find((x: any) => {
-            const n = (x.QuotaName || '').toLowerCase();
-            return n && (n.includes(nameLc) || nameLc.includes(n));
-          });
+        const q = preset.quotaCode
+          ? list.find((x: any) => x.QuotaCode === preset.quotaCode)
+          // 精确 → 忽略大小写 → 互相包含（AWS 偶有改名/带服务前缀，模糊兜底避免死匹配）
+          : list.find((x: any) => x.QuotaName === preset.quotaName)
+            || list.find((x: any) => (x.QuotaName || '').toLowerCase() === nameLc)
+            || list.find((x: any) => {
+              const n = (x.QuotaName || '').toLowerCase();
+              return n && (n.includes(nameLc) || nameLc.includes(n));
+            });
         if (q) {
           setQuickQuota(q);
           const base = (q.Value && q.Value !== Infinity) ? q.Value : 0;
-          setQuickTarget(base > 0 ? base * 2 : 256);
+          // 整数型（主机台数）默认 +1 台；vCPU 等沿用翻倍 / 256
+          setQuickTarget(preset.integerOnly
+            ? Math.floor(base) + 1
+            : (base > 0 ? base * 2 : 256));
         } else {
           setQuickNotFound(true);
+          setQuickTarget(null);
         }
       } else { message.error(res.error || '查询失败'); }
     } catch (e: any) { message.error(e.message); }
@@ -317,9 +309,32 @@ const QuotasPage: React.FC = () => {
 
   const handleQuickIncrease = async () => {
     if (!quickQuota) return;
-    if (!quickTarget || (quickQuota.Value != null && quickQuota.Value !== Infinity && quickTarget <= quickQuota.Value)) {
-      message.warning('期望值需大于当前值'); return;
+    const quickPreset = quickPresetIdx != null ? QUOTA_PRESETS[quickPresetIdx] : null;
+    // 绑定代码的预设：提交前再核一次，防止解析结果与所选型号不一致
+    if (quickPreset?.quotaCode && quickQuota.QuotaCode !== quickPreset.quotaCode) {
+      message.error(`配额代码不一致（应为 ${quickPreset.quotaCode}，实际 ${quickQuota.QuotaCode}），已取消提交`);
+      return;
     }
+    const current = (quickQuota.Value != null && quickQuota.Value !== Infinity) ? Number(quickQuota.Value) : null;
+    const err = validateQuotaTarget(quickPreset, quickTarget, current);
+    if (err) { message.warning(err); return; }
+    if (!quickTarget) return;
+    // 提交前确认：型号、当前配额、目标总配额一目了然（提交后不可撤销）
+    const unitText = presetUnitLabel(quickPreset);
+    const ok = await new Promise<boolean>(resolve => Modal.confirm({
+      title: '确认提交配额申请？',
+      content: (
+        <div style={{ fontSize: 13, lineHeight: 1.9 }}>
+          <div>{quickQuota.QuotaName} <code>{quickQuota.QuotaCode}</code></div>
+          {quickPreset?.mac && <div>型号：{presetModelText(quickPreset)}</div>}
+          <div>区域：{quickRegion}</div>
+          <div>当前配额 {current ?? '—'} → 目标总配额 <strong>{quickTarget}</strong>{unitText ? ` ${unitText}` : ''}</div>
+        </div>
+      ),
+      okText: '提交', cancelText: '取消',
+      onOk: () => resolve(true), onCancel: () => resolve(false),
+    }));
+    if (!ok) return;
     setQuickSubmitting(true);
     try {
       const res = await api.requestQuotaIncrease(selectedAccount, quickQuota.ServiceCode, quickQuota.QuotaCode, quickTarget, quickQuota.QuotaName, quickRegion);
@@ -335,6 +350,7 @@ const QuotasPage: React.FC = () => {
             case_id: caseId,
             service_code: quickQuota.ServiceCode,
             quota_name: quickQuota.QuotaName,
+            quota_code: quickQuota.QuotaCode,
             region: quickRegion,
             desired_value: quickTarget,
             current_value: (quickQuota.Value != null && quickQuota.Value !== Infinity) ? quickQuota.Value : undefined,
@@ -468,6 +484,7 @@ const QuotasPage: React.FC = () => {
             companyKey,
             serviceCode: record.service_code,
             quotaName: record.quota_name,
+            quotaCode: record.quota_code,
             region: record.region || 'us-east-1',
             requestedValue: record.desired_value,
             currentValue: record.current_value,
@@ -509,6 +526,9 @@ const QuotasPage: React.FC = () => {
     if (quickPresetIdx == null) { message.warning('请先选择配额类型'); return; }
     if (!quickTarget) { message.warning('请输入申请数量'); return; }
     const preset = QUOTA_PRESETS[quickPresetIdx];
+    if (preset.integerOnly && !Number.isInteger(quickTarget)) {
+      message.warning('目标总配额必须是整数'); return;
+    }
     const acct = accounts.find(a => a.Id === selectedAccount);
     setQuickDocLoading(true);
     await runGenerateDoc({
@@ -516,6 +536,7 @@ const QuotasPage: React.FC = () => {
       accountName: acct?.Name,
       serviceCode: preset.serviceCode,
       quotaName: preset.quotaName,
+      quotaCode: preset.quotaCode,
       region: quickRegion,
       requestedValue: Number(quickTarget),
       currentValue: (quickQuota?.Value != null && quickQuota.Value !== Infinity) ? quickQuota.Value : undefined,
@@ -827,6 +848,7 @@ const QuotasPage: React.FC = () => {
                     accountName: accounts.find(a => a.Id === record.account_id)?.Name,
                     serviceCode: record.service_code,
                     quotaName: record.quota_name,
+                    quotaCode: record.quota_code,
                     region: record.region || 'us-east-1',
                     requestedValue: record.desired_value,
                     currentValue: record.current_value,
@@ -1167,29 +1189,63 @@ const QuotasPage: React.FC = () => {
           </div>
 
           {quickResolving && <div style={{ fontSize: 12, color: 'rgba(0,0,0,0.45)' }}>正在查询当前配额...</div>}
-          {!quickResolving && quickQuota && (
-            <div style={{ background: '#f6ffed', border: '1px solid #b7eb8f', borderRadius: 6, padding: '8px 12px' }}>
-              <div style={{ fontSize: 13, marginBottom: 4 }}>{quickQuota.QuotaName}</div>
-              <div>
-                当前值: <Tag color="blue">{quickQuota.Value === Infinity ? '∞' : quickQuota.Value}{quickQuota.Unit && quickQuota.Unit !== 'None' ? ` ${quickQuota.Unit}` : ''}</Tag>
-                {quickQuota.Adjustable ? <Tag color="success" style={{ margin: 0 }}>可调</Tag> : <Tag style={{ margin: 0 }}>不可调</Tag>}
+          {!quickResolving && quickQuota && (() => {
+            const qp = quickPresetIdx != null ? QUOTA_PRESETS[quickPresetIdx] : null;
+            const unitText = qp?.unitLabel
+              || (quickQuota.Unit && quickQuota.Unit !== 'None' ? quickQuota.Unit : '');
+            return (
+              <div style={{ background: '#f6ffed', border: '1px solid #b7eb8f', borderRadius: 6, padding: '8px 12px' }}>
+                <div style={{ fontSize: 13, marginBottom: 4 }}>
+                  {quickQuota.QuotaName} <code style={{ fontSize: 11 }}>{quickQuota.QuotaCode}</code>
+                </div>
+                {qp?.mac && (
+                  <div style={{ fontSize: 12, marginBottom: 4 }}>
+                    型号：<Tag style={{ margin: 0 }}>{presetModelText(qp)}</Tag>
+                  </div>
+                )}
+                <div>
+                  当前配额: <Tag color="blue">{quickQuota.Value === Infinity ? '∞' : quickQuota.Value}{unitText ? ` ${unitText}` : ''}</Tag>
+                  {quickQuota.Adjustable ? <Tag color="success" style={{ margin: 0 }}>可调</Tag> : <Tag style={{ margin: 0 }}>不可调</Tag>}
+                </div>
+                {quickTarget != null && (
+                  <div style={{ marginTop: 4 }}>
+                    目标总配额: <Tag color="orange">{quickTarget}{unitText ? ` ${unitText}` : ''}</Tag>
+                  </div>
+                )}
               </div>
-            </div>
-          )}
-          {!quickResolving && quickNotFound && (
-            <div style={{ background: '#fff7e6', border: '1px solid #ffd591', borderRadius: 6, padding: '8px 12px', fontSize: 12, color: '#d46b08' }}>
-              该区域未找到此配额（可能此服务在该区域不可用，或需换个区域）。仍可下载申请文档。
-            </div>
-          )}
+            );
+          })()}
+          {!quickResolving && quickNotFound && (() => {
+            const qp = quickPresetIdx != null ? QUOTA_PRESETS[quickPresetIdx] : null;
+            return qp?.quotaCode ? (
+              // 绑定代码的预设查不到时不能换成别的型号：明确告知，禁止一键提额
+              <div style={{ background: '#fff2f0', border: '1px solid #ffccc7', borderRadius: 6, padding: '8px 12px', fontSize: 12, color: '#cf1322' }}>
+                该账户在 {quickRegion} 查不到配额 <code>{qp.quotaCode}</code>（{qp.quotaName}
+                {qp.mac ? `，${presetModelText(qp)}` : ''}）。该型号可能未在此区域提供，请换区域；不会替换成其他型号。
+              </div>
+            ) : (
+              <div style={{ background: '#fff7e6', border: '1px solid #ffd591', borderRadius: 6, padding: '8px 12px', fontSize: 12, color: '#d46b08' }}>
+                该区域未找到此配额（可能此服务在该区域不可用，或需换个区域）。仍可下载申请文档。
+              </div>
+            );
+          })()}
 
           <div>
-            <div style={{ fontSize: 12, color: 'rgba(0,0,0,0.65)', marginBottom: 4 }}>期望值 / 申请数量</div>
+            <div style={{ fontSize: 12, color: 'rgba(0,0,0,0.65)', marginBottom: 4 }}>
+              目标总配额（申请后的总量，不是增量）
+              {quickPresetIdx != null && presetUnitLabel(QUOTA_PRESETS[quickPresetIdx])
+                ? ` · 单位：${presetUnitLabel(QUOTA_PRESETS[quickPresetIdx])}` : ''}
+            </div>
             <InputNumber style={{ width: '100%' }} min={1} value={quickTarget ?? undefined}
-              onChange={(v) => setQuickTarget(v as number)} placeholder="输入目标数字" />
+              precision={quickPresetIdx != null && QUOTA_PRESETS[quickPresetIdx].integerOnly ? 0 : undefined}
+              onChange={(v) => setQuickTarget(v as number)} placeholder="输入目标总配额" />
           </div>
 
           <Space style={{ justifyContent: 'flex-end', width: '100%' }}>
-            <Button icon={<FilePdfOutlined />} loading={quickDocLoading} onClick={handleQuickDoc} disabled={quickPresetIdx == null}>下载申请文档</Button>
+            <Button icon={<FilePdfOutlined />} loading={quickDocLoading} onClick={handleQuickDoc}
+              disabled={quickPresetIdx == null
+                // 绑定代码的型号查不到时，文档也不生成：该区域根本没有这个配额
+                || (quickNotFound && !!QUOTA_PRESETS[quickPresetIdx].quotaCode)}>下载申请文档</Button>
             <Button type="primary" icon={<ThunderboltOutlined />} loading={quickSubmitting} onClick={handleQuickIncrease} disabled={!quickQuota || !quickQuota.Adjustable}>一键提额</Button>
           </Space>
         </Space>

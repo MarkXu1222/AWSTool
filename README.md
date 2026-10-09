@@ -472,8 +472,18 @@ HTML 模板 + Puppeteer 渲染。公司背景库在 `doc-templates.ts`（12 家�
 - **多区域查询**：覆盖 34 个 AWS 区域（含 opt-in），并发查询，8 秒超时跳过未开通区域
 - **流式同步（SSE）**：全量同步用 Server-Sent Events 实时推进度，边查边出
 - **Bedrock 配额**：按区域查 TPM/RPM/TPD，多区域并发；按 Provider、推理范围（Global Cross-Region / Cross-Region / On-Demand / Latency-Optimized）筛选
-- **批量提额**：按 payer 组织 × 多区域批量提交，只传配额名 + 目标值，QuotaCode 后端解析，已达标账户自动跳过；job 模式（submit → jobId → 轮询）
-- **配额预设 `QUOTA_PRESETS`**（`Quotas.tsx`，快速提额 / 批量提额 / 手动生成文档三处共用）：EC2 各 vCPU 族、EIP、Mac 主机、Lightsail、WorkSpaces、Fargate、**EBS gp3 存储容量（`ebs` / `L-7A658B76`，单位 TiB，0.44.4 起）**、Route 53 域名、Global Accelerator。EBS 各卷类型配额名同构（`Storage for … (gp2|gp3|io1|io2|st1|sc1) volumes, in TiB`），预设必须写完整官方名，靠精确匹配命中，不能写缩略名
+- **批量提额**：按 payer 组织 × 多区域批量提交，传配额名 + 目标值（预设带 `quotaCode` 时一并传，后端只认代码），否则 QuotaCode 后端按名称解析；已达标账户自动跳过；job 模式（submit → jobId → 轮询）
+- **配额预设 `QUOTA_PRESETS`**（0.48.1 起在 `client/src/constants/quota-presets.ts`，`Quotas.tsx` 转出；快速提额 / 批量提额 / 手动生成文档三处共用）：EC2 各 vCPU 族、EIP、Mac 专用主机、Lightsail、WorkSpaces、Fargate、**EBS gp3 存储容量（`ebs` / `L-7A658B76`，单位 TiB，0.44.4 起）**、Route 53 域名、Global Accelerator。EBS 各卷类型配额名同构（`Storage for … (gp2|gp3|io1|io2|st1|sc1) volumes, in TiB`），预设必须写完整官方名，靠精确匹配命中，不能写缩略名
+- **Mac 专用主机绑定配额代码（0.48.1）**：
+
+  | 显示名 | 实例类型 | AWS 官方配额名 | 配额代码 |
+  |---|---|---|---|
+  | Mac M1 专用主机 | `mac2.metal` | Running Dedicated mac2 Hosts | `L-5D8DADF5` |
+  | Mac M2 专用主机 | `mac2-m2.metal` | Running Dedicated mac2-m2 Hosts | `L-B90B5B66` |
+  | Mac M4 专用主机 | `mac-m4.metal` | Running Dedicated mac-m4 Hosts | `L-2CBA8B92` |
+
+  预设带 `quotaCode` 时，快速提额**只按代码**匹配、批量提额后端用 `GetServiceQuota` 按代码确认，**不做名称模糊匹配**；查不到就明确报错，不会替换成其他型号。⚠️ 同服务下有 mac2-m2pro / mac2-m1ultra / mac-m4pro / mac-m4max / mac-m3ultra / mac1 等同构名称，旧预设写的 `mac.m2` / `mac.m4` 根本不存在，按名称 includes 会静默落到相似型号上。申请值为**目标总配额**（「申请到 2 台」= 总配额 2），必须是整数且大于当前配额；前后端都校验整数（`isIntegerOnlyQuota`）。
+  文档生成（`doc-generator.ts` `classifyQuota`）按配额代码或完整官方名识别型号（`server/mac-quotas.ts`），保留官方名称并补「芯片, 实例类型」；识别不到的原样保留名称，**不再默认 M2**。前后端两份映射由 `tests/mac-quotas.test.ts` 锁定一致
 
 ### Bedrock 工具
 

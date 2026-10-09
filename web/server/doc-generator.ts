@@ -7,6 +7,7 @@ import path from 'path';
 import puppeteer from 'puppeteer-core';
 import { COMPANY_PROFILES, ACCOUNT_TO_COMPANY, PAYER_TO_COMPANY, companyFromPayer, getRegionDisplay, CompanyProfile } from './doc-templates';
 import { db } from './db';
+import { findMacHostQuota, isMacHostQuotaName } from './mac-quotas';
 
 const ARCH_DIR = path.join(__dirname, '../../doc-templates/architectures');
 
@@ -48,15 +49,36 @@ export interface DocParams {
   companyKey?: string;       // 可覆盖默认映射；手动生成模式下必填
   serviceCode: string;       // ec2 / lightsail ...
   quotaName: string;         // 原始 quota 名
+  quotaCode?: string;        // 有则优先按代码识别（Mac 专用主机型号）
   region: string;
   requestedValue: number;    // 申请值
   currentValue?: number;
 }
 
-// 判断配额类别 + 文档用的 Service/QuotaName/单位
-function classifyQuota(serviceCode: string, quotaName: string) {
+// 判断配额类别 + 文档用的 Service/QuotaName/单位。
+// modelNote：型号补充说明（芯片 + 实例类型），仅在能**确定**型号时给出。
+export function classifyQuota(serviceCode: string, quotaName: string, quotaCode?: string): {
+  service: string; officialName: string; unit: string;
+  category: 'other' | 'lightsail' | 'eip' | 'mac' | 'workspace' | 'fargate' | 'vcpu';
+  modelNote?: string;
+} {
   const q = (quotaName || '').toLowerCase();
   const s = (serviceCode || '').toLowerCase();
+
+  // Mac 专用主机必须最先判断，且只按配额代码 / 完整官方名称识别型号。
+  // 早期按 includes('m4') / includes('m1') 猜、猜不到就默认 mac.m2：
+  // 「Running Dedicated mac2 Hosts」（实为 M1）会被写成 M2，「mac-m4pro」会被写成 M4。
+  // 现在：识别到 → 保留官方名并补芯片与实例类型；识别不到 → 原样保留名称，不猜型号。
+  const mac = findMacHostQuota(quotaCode, quotaName);
+  if (mac) {
+    return {
+      service: 'Amazon EC2', officialName: mac.quotaName, unit: 'Hosts', category: 'mac',
+      modelNote: `${mac.chip}, ${mac.instanceType}`,
+    };
+  }
+  if (isMacHostQuotaName(quotaName)) {
+    return { service: 'Amazon EC2', officialName: quotaName.trim(), unit: 'Hosts', category: 'mac' };
+  }
 
   if (s.includes('globalaccelerator') || q.includes('accelerator')) {
     // 兼容 Standard / Custom Routing 两种
@@ -70,9 +92,9 @@ function classifyQuota(serviceCode: string, quotaName: string) {
   if (q.includes('elastic ip') || q.includes('eip')) {
     return { service: 'Amazon EC2', officialName: 'EC2-VPC Elastic IPs', unit: 'EIPs', category: 'eip' as const };
   }
-  if (q.includes('dedicated host') || q.includes('mac')) {
-    const macType = q.includes('m4') ? 'mac.m4' : q.includes('m1') ? 'mac1' : 'mac.m2';
-    return { service: 'Amazon EC2', officialName: `EC2 Dedicated Hosts ${macType} (Dedicated Host Limit)`, unit: 'Hosts', category: 'mac' as const };
+  // 其他专用主机（非 Mac，或名称不规范的 Mac）：保留原名称，不推断型号
+  if (q.includes('dedicated') && q.includes('host')) {
+    return { service: 'Amazon EC2', officialName: quotaName.trim(), unit: 'Hosts', category: 'mac' as const };
   }
   if (s.includes('workspace') || q.includes('workspace')) {
     // WorkSpaces 本身(数量) 与 Images(镜像) 区分处理
@@ -105,6 +127,13 @@ function classifyQuota(serviceCode: string, quotaName: string) {
   return { service: 'Amazon EC2', officialName: 'All Standard (A, C, D, H, I, M, R, T, Z) instances', unit: 'vCPUs', category: 'vcpu' as const };
 }
 
+// 未识别的配额会原样输出用户传入的名称，进 HTML 前转义
+function escapeHtml(s: string): string {
+  return String(s).replace(/[&<>"']/g, c => (
+    { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' } as Record<string, string>
+  )[c]);
+}
+
 // 动态拆解资源
 function buildResourceBreakdown(profile: CompanyProfile, total: number, unit: string) {
   const comps = profile.resourceComponents;
@@ -135,7 +164,9 @@ function archImageDataUri(profile: CompanyProfile): string | null {
 
 // 生成 HTML
 function buildHTML(params: DocParams, profile: CompanyProfile): string {
-  const cls = classifyQuota(params.serviceCode, params.quotaName);
+  const cls = classifyQuota(params.serviceCode, params.quotaName, params.quotaCode);
+  // 官方配额名 + 型号补充（如 "Running Dedicated mac2 Hosts (Apple M1, mac2.metal)"）
+  const quotaLabel = cls.modelNote ? `${cls.officialName} (${cls.modelNote})` : cls.officialName;
   const regionDisp = getRegionDisplay(params.region);
   const projected = Math.round(params.requestedValue * 1.5);
   const archUri = archImageDataUri(profile);
@@ -185,7 +216,7 @@ function buildHTML(params: DocParams, profile: CompanyProfile): string {
 <body>
   <h1>Project Summary</h1>
   <p>${profile.summary}</p>
-  <p>To ensure a smooth migration process and meet our operational requirements, it is necessary to increase the <span class="label">${cls.officialName}</span> quota in the AWS <span class="label">${regionDisp}</span> region. The current business demand is for <span class="label">${params.requestedValue} ${cls.unit}</span> to support our large-scale operations and platform growth after the migration is completed.</p>
+  <p>To ensure a smooth migration process and meet our operational requirements, it is necessary to increase the <span class="label">${escapeHtml(quotaLabel)}</span> quota in the AWS <span class="label">${regionDisp}</span> region. The current business demand is for <span class="label">${params.requestedValue} ${cls.unit}</span> to support our large-scale operations and platform growth after the migration is completed.</p>
 
   <h2>Workload Description</h2>
   <h3>Migration Background</h3>
@@ -205,7 +236,7 @@ function buildHTML(params: DocParams, profile: CompanyProfile): string {
     <tbody>
       <tr>
         <td>${cls.service}</td>
-        <td>${cls.officialName}</td>
+        <td>${escapeHtml(cls.officialName)}${cls.modelNote ? `<br/><span style="color:#555">${escapeHtml(cls.modelNote)}</span>` : ''}</td>
         <td>${regionDisp}</td>
         <td style="text-align:center"><strong>${params.requestedValue}</strong></td>
         <td style="text-align:center">${projected}</td>

@@ -2,6 +2,7 @@ import { Router, Request, Response } from 'express';
 import * as aws from '../aws-service';
 import { db, BillingExportJob, TagOnboardingConflictError } from '../db';
 import { generateQuotaDoc, getCompanyForAccount } from '../doc-generator';
+import { isIntegerOnlyQuota } from '../mac-quotas';
 import { submitCaseDoc, getCaseDocJob } from '../case-doc-submitter';
 import { COMPANY_PROFILES } from '../doc-templates';
 import {
@@ -833,7 +834,7 @@ awsRouter.get('/console-url/:accountId', async (req: Request, res: Response) => 
 // Generate quota increase document (PDF)
 awsRouter.post('/quotas/generate-doc', async (req: Request, res: Response) => {
   try {
-    const { accountId, accountName, companyKey, serviceCode, quotaName, region, requestedValue, currentValue } = req.body;
+    const { accountId, accountName, companyKey, serviceCode, quotaName, quotaCode, region, requestedValue, currentValue } = req.body;
     // 必需：quotaName + region + requestedValue，且 accountId / companyKey 至少一个
     if (!quotaName || !region || !requestedValue) {
       return res.status(400).json({ error: '缺少必要参数（quotaName / region / requestedValue）' });
@@ -843,7 +844,8 @@ awsRouter.post('/quotas/generate-doc', async (req: Request, res: Response) => {
     }
     const pdf = await generateQuotaDoc({
       accountId, accountName, companyKey, serviceCode,
-      quotaName, region, requestedValue: Number(requestedValue),
+      quotaName, quotaCode: quotaCode ? String(quotaCode) : undefined,
+      region, requestedValue: Number(requestedValue),
       currentValue: currentValue != null ? Number(currentValue) : undefined,
     });
     const company = companyKey || (accountId ? getCompanyForAccount(accountId)?.key : null) || 'doc';
@@ -861,7 +863,7 @@ awsRouter.post('/quotas/generate-doc', async (req: Request, res: Response) => {
 awsRouter.post('/quotas/case-doc-submit', requireAdmin, async (req: Request, res: Response) => {
   try {
     const user = (req as any).user;
-    const { accountId, accountName, caseId, companyKey, serviceCode, quotaName, region, requestedValue, currentValue, message } = req.body;
+    const { accountId, accountName, caseId, companyKey, serviceCode, quotaName, quotaCode, region, requestedValue, currentValue, message } = req.body;
     if (!accountId || !caseId || !quotaName || !region || !requestedValue) {
       return res.status(400).json({ error: '缺少必要参数（accountId / caseId / quotaName / region / requestedValue）' });
     }
@@ -872,6 +874,7 @@ awsRouter.post('/quotas/case-doc-submit', requireAdmin, async (req: Request, res
       companyKey,
       serviceCode,
       quotaName,
+      quotaCode: quotaCode ? String(quotaCode) : undefined,
       region,
       requestedValue: Number(requestedValue),
       currentValue: currentValue != null ? Number(currentValue) : undefined,
@@ -1134,7 +1137,7 @@ awsRouter.get('/bulk-quota/accounts/:payerAccountId', requireBulkQuotaAccess, as
 // 提交批量提额任务（QuotaCode 由服务端按配额名解析，前端只需选类型 + 填数字）
 awsRouter.post('/bulk-quota/submit', requireBulkQuotaAccess, async (req: Request, res: Response) => {
   try {
-    const { payerAccountId, regions, serviceCode, quotaName, desiredValue, scope } = req.body || {};
+    const { payerAccountId, regions, serviceCode, quotaName, quotaCode: reqQuotaCode, desiredValue, scope } = req.body || {};
     if (!/^\d{12}$/.test(String(payerAccountId || ''))) return res.status(400).json({ error: '无效的 payer 账户 ID' });
     const regionList: string[] = Array.isArray(regions)
       ? [...new Set(regions.map((r: any) => String(r).trim()).filter((r: string) => /^[a-z]{2}(-[a-z]+)+-\d$/.test(r)))]
@@ -1143,20 +1146,42 @@ awsRouter.post('/bulk-quota/submit', requireBulkQuotaAccess, async (req: Request
     if (!serviceCode || !quotaName) return res.status(400).json({ error: '缺少 serviceCode / quotaName' });
     const target = Number(desiredValue);
     if (!isFinite(target) || target <= 0) return res.status(400).json({ error: '期望值必须为正数' });
+    const pinnedCode = reqQuotaCode ? String(reqQuotaCode).trim() : '';
+    if (pinnedCode && !/^L-[A-Z0-9]{8}$/.test(pinnedCode)) {
+      return res.status(400).json({ error: `无效的配额代码：${pinnedCode}` });
+    }
+    // Mac 专用主机按台数计，只能是整数
+    if (isIntegerOnlyQuota(pinnedCode, String(quotaName)) && !Number.isInteger(target)) {
+      return res.status(400).json({ error: '目标总配额必须是整数（专用主机按台计）' });
+    }
     const mode = scope === 'payer' ? 'payer' : scope === 'members' ? 'members' : 'all';
 
-    // 服务端解析 QuotaCode（前端只需选配额类型 + 填数字）。
-    // QuotaCode 跨账户一致，先用 payer 解析；某区域拿不到就换下一个选中的区域再试。
+    // 前端带了 quotaCode（如 Mac 专用主机）就**只认代码**：用 GetServiceQuota 按代码确认存在，
+    // 不做名称模糊匹配 —— mac2 / mac2-m2 / mac-m4 / mac-m4pro 名称高度相似，
+    // 按名称 includes 会静默解析成别的型号。
+    // 没带代码的老预设仍由服务端按配额名解析。QuotaCode 跨账户一致，先用 payer 解析；
+    // 某区域拿不到就换下一个选中的区域再试。
     let quotaCode = '';
     let resolvedName = String(quotaName);
     for (const r of regionList) {
       try {
-        const hit = await aws.resolveQuotaCodeByName(String(payerAccountId), serviceCode, String(quotaName), r);
-        if (hit?.quotaCode) { quotaCode = hit.quotaCode; resolvedName = hit.quotaName || resolvedName; break; }
+        if (pinnedCode) {
+          const cur = await aws.getServiceQuotaValue(String(payerAccountId), serviceCode, pinnedCode, r);
+          if (cur && !(cur as any).regionNotEnabled) {
+            quotaCode = pinnedCode; resolvedName = cur.quotaName || resolvedName; break;
+          }
+        } else {
+          const hit = await aws.resolveQuotaCodeByName(String(payerAccountId), serviceCode, String(quotaName), r);
+          if (hit?.quotaCode) { quotaCode = hit.quotaCode; resolvedName = hit.quotaName || resolvedName; break; }
+        }
       } catch { /* 换下一个区域再试 */ }
     }
     if (!quotaCode) {
-      return res.status(400).json({ error: `在所选区域内均未找到配额「${quotaName}」（${serviceCode}），请确认该服务在这些区域可用` });
+      return res.status(400).json({
+        error: pinnedCode
+          ? `在所选区域内均查不到配额 ${pinnedCode}（${quotaName}），该型号可能未在这些区域提供；不会替换成其他型号`
+          : `在所选区域内均未找到配额「${quotaName}」（${serviceCode}），请确认该服务在这些区域可用`,
+      });
     }
 
     const { payerName, accounts } = await aws.listOrgAccountsForPayer(String(payerAccountId));
@@ -1291,6 +1316,11 @@ awsRouter.post('/quotas/increase', requireAdmin, async (req: Request, res: Respo
   try {
     const { accountId, serviceCode, quotaCode, desiredValue, quotaName, region } = req.body;
     const targetRegion = region || aws.DEFAULT_REGION;
+    const desired = Number(desiredValue);
+    if (!isFinite(desired) || desired <= 0) return res.status(400).json({ error: '目标总配额必须为正数' });
+    if (isIntegerOnlyQuota(quotaCode, quotaName) && !Number.isInteger(desired)) {
+      return res.status(400).json({ error: '目标总配额必须是整数（专用主机按台计）' });
+    }
     const result = await aws.requestQuotaIncrease(accountId, serviceCode, quotaCode, desiredValue, targetRegion);
     const user = (req as any).user;
 
