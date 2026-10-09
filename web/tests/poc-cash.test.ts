@@ -395,8 +395,153 @@ test('CSV：批准金额进「AWS批准金额」列，不再冒充到账金额',
   const cells = csv.replace(/^\uFEFF/, '').split('\r\n')[1].split(',');
   assert.equal(cells.length, 19);
   assert.equal(cells[13], 'ML-17982745');
-  assert.equal(cells[15], '', '到账金额 Funding 申请里拿不到，必须留空人工补');
-  assert.equal(cells[18], '42114.96', '批准额裸数字，不加千分位');
+  assert.equal(cells[15], '', '没有请款付款时到账金额留空');
+  assert.equal(cells[18], '42114', '批准额与控制台一致截掉小数，裸数字不加千分位');
+});
+
+test('金额与控制台一致：截掉小数而不是四舍五入', async () => {
+  const { consoleAmount } = await import('../server/poc-cash-funding');
+  // 截图实例：API 38133.58 → 控制台 38,133；14272.80 → 14,272
+  assert.equal(consoleAmount('38133.58'), 38133);
+  assert.equal(consoleAmount('14272.80'), 14272);
+  assert.equal(consoleAmount('42114.96'), 42114, '.96 也不进位');
+  assert.equal(consoleAmount(null), null);
+  assert.equal(consoleAmount(''), null);
+  assert.equal(consoleAmount('abc'), null);
+});
+
+// ===== 端到端进度：预批 → Cash Claim → 付款 =====
+
+const claim = (o: Partial<import('../server/poc-cash-funding').ClaimInfo>) => ({
+  applicationId: 'benappl-c', claimAmount: '38133', claimCurrency: 'MYR',
+  invoiceRef: null, scheduledPaymentDate: null, ...o,
+});
+
+test('预批阶段的进度', async () => {
+  const { computeProgress } = await import('../server/poc-cash-funding');
+  assert.equal(computeProgress({ status: 'PENDING_SUBMISSION' }, []).label, '预批待提交');
+  const r = computeProgress({ status: 'IN_REVIEW', stage: 'BUSINESS_APPROVAL' }, []);
+  assert.equal(r.label, '预批审核中');
+  assert.equal(r.detail, '业务审批');
+  assert.equal(computeProgress({ status: 'ACTION_REQUIRED' }, []).label, '预批需补充');
+  assert.equal(computeProgress({ status: 'CANCELED' }, []).done, true);
+});
+
+test('预批通过不等于完成：没请款就是「待请款」', async () => {
+  const { computeProgress } = await import('../server/poc-cash-funding');
+  const r = computeProgress({ status: 'APPROVED', stage: 'FULFILLMENT' }, [],
+    { claimDeadline: '2026-11-15' });
+  assert.equal(r.phase, 'claim_todo');
+  assert.equal(r.done, false);
+  assert.match(r.detail || '', /2026-11-15/);
+});
+
+test('请款查询失败不能误报成待请款', async () => {
+  const { computeProgress } = await import('../server/poc-cash-funding');
+  const r = computeProgress({ status: 'APPROVED' }, null);
+  assert.equal(r.phase, 'claim_unknown');
+  assert.notEqual(r.label, '待请款');
+});
+
+test('请款审核中（截图 benappl-jorjl6nhgirw11 的请款 benappl-bhqa091m22dsz5）', async () => {
+  const { computeProgress } = await import('../server/poc-cash-funding');
+  const r = computeProgress({ status: 'APPROVED', stage: 'FULFILLMENT' },
+    [claim({ status: 'IN_REVIEW', stage: 'Invoice', claimAmount: '38133' })]);
+  assert.equal(r.phase, 'claim_review');
+  assert.equal(r.label, '请款审核中');
+  assert.equal(r.detail, '发票审核 · 请款 38,133');
+  assert.equal(r.done, false);
+});
+
+test('请款批准后：付款分配 FULFILLED 才算完成', async () => {
+  const { computeProgress } = await import('../server/poc-cash-funding');
+  const fund = { status: 'APPROVED', stage: 'FULFILLMENT' };
+  const done = computeProgress(fund, [claim({
+    status: 'APPROVED', stage: 'Disbursement', invoiceRef: 'I26080056',
+    scheduledPaymentDate: '2026-09-23', disbursed: true,
+  })]);
+  assert.equal(done.phase, 'completed');
+  assert.equal(done.done, true);
+
+  // 已批准但付款分配未完成 → 待付款
+  const pending = computeProgress(fund, [claim({
+    status: 'APPROVED', stage: 'Disbursement', scheduledPaymentDate: '2099-01-01',
+    disbursed: false,
+  })]);
+  assert.equal(pending.phase, 'payment_pending');
+  assert.match(pending.detail || '', /2099-01-01/);
+
+  // 分配没查到时按付款日兜底
+  assert.equal(computeProgress(fund, [claim({
+    status: 'APPROVED', scheduledPaymentDate: '2020-01-01', disbursed: null,
+  })]).phase, 'completed');
+  assert.equal(computeProgress(fund, [claim({
+    status: 'APPROVED', scheduledPaymentDate: null, disbursed: null,
+  })]).phase, 'payment_pending');
+});
+
+test('多笔请款取走得最远的一笔，并提示笔数', async () => {
+  const { computeProgress, primaryClaim } = await import('../server/poc-cash-funding');
+  // 实测 benappl-tbmp7pm35egal0：一笔 IN_REVIEW + 一笔 PENDING_SUBMISSION
+  const claims = [
+    claim({ applicationId: 'a', status: 'PENDING_SUBMISSION', createdAt: '2026-10-07' }),
+    claim({ applicationId: 'b', status: 'IN_REVIEW', stage: 'Invoice', createdAt: '2026-10-01' }),
+  ];
+  assert.equal(primaryClaim(claims)!.applicationId, 'b');
+  const r = computeProgress({ status: 'APPROVED' }, claims);
+  assert.equal(r.phase, 'claim_review');
+  assert.match(r.detail || '', /共 2 笔请款/);
+});
+
+test('Credits 型 POC 无请款环节', async () => {
+  const { computeProgress } = await import('../server/poc-cash-funding');
+  const r = computeProgress({ status: 'APPROVED', fulfillmentTypes: ['CREDITS'] }, []);
+  assert.equal(r.phase, 'completed');
+});
+
+test('请款解析：Get 的对象与 List 的字符串两种 ClaimAmount', async () => {
+  const { toClaim } = await import('../server/poc-cash-funding');
+  const full = toClaim({
+    Id: 'benappl-igcgvkk1272typ', Status: 'APPROVED', Stage: 'Disbursement',
+    BenefitApplicationDetails: {
+      ClaimAmount: { Amount: '32714', Currency: 'MYR' },
+      Invoice: {
+        Description: 'https://finopscentral-na.amazon.com/payeecentral/invoices/details/284566252#/',
+        ScheduledPaymentDate: '2026-07-30T00:00:00+00:00',
+      },
+    },
+  }, true);
+  assert.equal(full.claimAmount, '32714');
+  assert.equal(full.scheduledPaymentDate, '2026-07-30');
+  assert.equal(full.disbursed, true);
+  const summary = toClaim({ Id: 'x', BenefitApplicationDetails: {
+    ClaimAmount: '{CurrencyCode=MYR, Amount=15882}' } });
+  assert.equal(summary.claimAmount, '15882');
+  assert.equal(summary.claimCurrency, 'MYR');
+});
+
+test('CSV：请款付款后带出发票号、到账金额与日期，POC阶段用端到端进度', async () => {
+  const { buildCsv, attachClaims } = await import('../server/poc-cash-funding');
+  const row = attachClaims({
+    applicationId: 'benappl-4m204qusfzqj11', status: 'APPROVED', stage: 'FULFILLMENT',
+    approvedAmount: '12440.50',
+  }, [claim({
+    status: 'APPROVED', stage: 'Disbursement', claimAmount: '12440',
+    invoiceRef: 'I26080056', scheduledPaymentDate: '2026-09-23', disbursed: true,
+  })]);
+  const cells = buildCsv([row], {}).replace(/^\uFEFF/, '').split('\r\n')[1].split(',');
+  assert.equal(cells.length, 19);
+  assert.equal(cells[11], '已完成');
+  assert.equal(cells[14], 'I26080056');
+  assert.equal(cells[15], '12440');
+  assert.equal(cells[16], '2026-09-23');
+  assert.equal(cells[18], '12440');
+
+  const inReview = attachClaims({ applicationId: 'x', status: 'APPROVED' },
+    [claim({ status: 'IN_REVIEW', stage: 'Invoice' })]);
+  const c2 = buildCsv([inReview], {}).replace(/^\uFEFF/, '').split('\r\n')[1].split(',');
+  assert.equal(c2[11], '请款审核中（发票审核）');
+  assert.equal(c2[15], '', '未付款不能填到账金额');
 });
 
 test('批准金额：优先 ApprovedAmount，已批准件才退回申请额', async () => {

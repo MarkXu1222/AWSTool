@@ -895,10 +895,36 @@ CSV 前 18 列严格对齐现有台账，`PO ID` 就是商机 ID；第 19 列「
 **AWS 批准金额（0.47.1）**：进展表与 CSV 的「AWS 批准额」取
 `CashRequest.ApprovedAmount`。⚠️ 实测 2026-09 之后批准的件（如
 `benappl-kqowjcmd6dzs1e`，APPROVED + 已有 PO）**只回填 `RequestedAmount`，
-没有 `ApprovedAmount`**，所以 `approvedOf()` 在 `Status=APPROVED` 时退回申请额，
-前端加 `*` 并用 tooltip 注明；未批准的件一律留空，绝不拿申请额冒充。
-此前该值被放在「到账金额」列 —— 批准≠到账，到账信息在事后 Cash Claim 的
-`Invoice` 里，Funding 申请拿不到，故 CSV「到账金额」改为留空人工补。
+没有 `ApprovedAmount`**，所以 `approvedOf()` 在 `Status=APPROVED` 时退回申请额；
+未批准的件一律留空，绝不拿申请额冒充。
+
+**金额与控制台一致（0.48.0）**：Partner Central 控制台对金额**直接截掉小数**
+（API `38133.58` 显示 `38,133`，`14272.80` 显示 `14,272` —— 不是四舍五入）。
+进展表与 CSV 统一用 `consoleAmount()`（`Math.trunc`），表格悬停可看 API 原值。
+
+**端到端进度：预批 → Cash Claim → 付款（0.48.0）**。POC 的完整流程到请款
+付款才结束，只看预批（Funding）的 APPROVED 会把「还没请款」「请款审核中」
+都显示成已批准。进展表的「进度」列由 `computeProgress()` 推导：
+
+| 进度 | 判定 |
+|---|---|
+| 预批待提交 / 审核中（带审批环节）/ 需补充 / 已取消 | 预批的 Status/Stage |
+| 待请款（带请款截止日） | 预批 APPROVED 且名下无请款；截止日 = 预批分配的 `ExpiresAt` |
+| 请款待提交 / 请款审核中（发票审核）/ 请款需补充 / 请款被拒 | 主请款的 Status/Stage |
+| 请款已批准·待付款 | 请款 APPROVED 但付款分配未 FULFILLED |
+| 已完成 | 请款的 Disbursement 分配 `FULFILLED`（查不到时按 `Invoice.ScheduledPaymentDate` 已过）；Credits 型预批批准即完成 |
+
+⚠️ **Cash Claim 不直接挂预批**，而是挂在预批批准后生成的**分配**上：
+`Claim.AssociatedResources → benalloc（BenefitId=ben-un8hh6qdrxqx50）→ BenefitApplicationId = 预批`。
+实测 Webby 51 笔请款 100% 可经此链路对上。一笔预批可有多笔请款（如
+`benappl-tbmp7pm35egal0`），取走得最远的一笔为主并提示笔数。
+
+⚠️ `ListBenefitAllocations` 的 `BenefitIdentifiers` **最多只能传 1 个**，传 2 个报
+`ValidationException`，所以按 Funding / Cash Claim 分两次查。
+
+请款关联查询失败时进度显示「请款状态查询失败」，**不能**当成「没有请款」
+误报成待请款。CSV 的「POC阶段」用同一套进度；「invoice」「到账金额」「到账日期」
+取主请款的 `Invoice`（发票号 / 请款额 / 付款日），未付款留空。
 
 **商机阶段检查（0.36.0，Tab 名 0.37.4 起加「商机」前缀）**：提交后商机被
 AWS 锁定，用这个 Tab 确认审到哪一步了，并在允许时推进阶段。

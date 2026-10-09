@@ -17,6 +17,7 @@ import {
   AssociateBenefitApplicationResourceCommand,
   GetBenefitApplicationCommand,
   ListBenefitApplicationsCommand,
+  ListBenefitAllocationsCommand,
 } from '@aws-sdk/client-partnercentral-benefits';
 import { randomUUID } from 'crypto';
 import { GetOpportunityCommand } from '@aws-sdk/client-partnercentral-selling';
@@ -362,8 +363,197 @@ export interface PocRow {
    * 已批准的行全是空的。
    */
   approvedFromRequest?: boolean;
-  invoice?: string | null;           // AWS 打款环节回填
+  /** 主 Cash Claim 的 Invoice（发票号或 PayeeCentral 链接），请款审批后回填 */
+  invoice?: string | null;
   createdAt?: string; updatedAt?: string;
+  /** 该 POC 名下的 Cash Claim（事后请款）。null = 请款信息查询失败（≠ 没有请款） */
+  claims?: ClaimInfo[] | null;
+  /** 端到端进度：预批 → 请款 → 付款，Cash Claim 付款才算 POC 结束 */
+  progress?: PocProgress;
+  fulfillmentTypes?: string[];
+  /** 请款截止日 = 预批分配的 ExpiresAt（YYYY-MM-DD） */
+  claimDeadline?: string | null;
+  /** 已付款时的到账金额 / 日期（取主请款的 Invoice），未付款为 null */
+  paidAmount?: string | null;
+  paidDate?: string | null;
+}
+
+/** 一笔 Cash Claim（ben-8j7y5dohajcl16）的摘要 */
+export interface ClaimInfo {
+  applicationId: string;
+  status?: string;
+  stage?: string;
+  claimAmount: string | null;
+  claimCurrency: string | null;
+  /** Invoice.Description：发票号（如 I26080056）或 PayeeCentral 链接 */
+  invoiceRef: string | null;
+  /** Invoice.ScheduledPaymentDate（YYYY-MM-DD），AWS 排定的付款日 */
+  scheduledPaymentDate: string | null;
+  createdAt?: string;
+  /** 该请款的 Disbursement 分配是否 FULFILLED（=已付款）。null = 未查到 */
+  disbursed?: boolean | null;
+}
+
+export type PocPhase =
+  | 'fund_draft' | 'fund_review' | 'fund_action' | 'fund_rejected' | 'canceled'
+  | 'claim_unknown' | 'claim_todo' | 'claim_draft' | 'claim_review' | 'claim_action'
+  | 'claim_rejected' | 'payment_pending' | 'completed' | 'unknown';
+
+export interface PocProgress {
+  phase: PocPhase;
+  /** 主标签，如「请款审核中」 */
+  label: string;
+  /** 次要说明，如审批环节、请款额、付款日 */
+  detail?: string;
+  /** 整个 POC 流程是否已结束（请款已付款） */
+  done: boolean;
+}
+
+/** 预批审批环节（Funding 的 Stage）→ 中文，对齐控制台「资金申请进度」 */
+const FUND_STAGE_LABEL: Record<string, string> = {
+  TECHNICAL_APPROVAL: '技术审批', BUSINESS_APPROVAL: '业务审批',
+  FINANCE_APPROVAL: '财务审批', PRE_APPROVAL: '预先审批', FULFILLMENT: '现金申领',
+};
+/** 请款环节（Cash Claim 的 Stage）→ 中文 */
+const CLAIM_STAGE_LABEL: Record<string, string> = {
+  Invoice: '发票审核', Disbursement: '付款',
+};
+
+/** 多笔请款时取「走得最远」的那笔作为主请款；同级取最新 */
+const CLAIM_RANK: Record<string, number> = {
+  APPROVED: 5, IN_REVIEW: 4, ACTION_REQUIRED: 3, PENDING_SUBMISSION: 2,
+  REJECTED: 1, CANCELED: 0,
+};
+
+export function primaryClaim(claims: ClaimInfo[]): ClaimInfo | null {
+  if (!claims.length) return null;
+  return [...claims].sort((a, b) =>
+    (CLAIM_RANK[b.status || ''] ?? -1) - (CLAIM_RANK[a.status || ''] ?? -1)
+    || String(b.createdAt || '').localeCompare(String(a.createdAt || '')))[0];
+}
+
+/** 金额与控制台一致：直接截掉小数（控制台 38133.58 显示 38,133，14272.80 显示 14,272） */
+export function consoleAmount(v: string | number | null | undefined): number | null {
+  if (v === null || v === undefined || v === '') return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? Math.trunc(n) : null;
+}
+
+/**
+ * POC 端到端进度。完整流程：预批（Funding）→ 请款（Cash Claim）→ 付款，
+ * 只看 Funding 的 APPROVED 会把「还没请款」「请款审核中」都显示成已批准。
+ *
+ * @param claims null 表示请款信息没查到 —— 不能当成「没有请款」，否则会把
+ *               已在请款的 POC 误报成「待请款」。
+ */
+export function computeProgress(
+  fund: { status?: string; stage?: string; fulfillmentTypes?: string[] },
+  claims: ClaimInfo[] | null,
+  opts: { claimDeadline?: string | null } = {},
+): PocProgress {
+  const fs = fund.status;
+  const stageText = fund.stage ? (FUND_STAGE_LABEL[fund.stage] || fund.stage) : undefined;
+  if (fs === 'PENDING_SUBMISSION') return { phase: 'fund_draft', label: '预批待提交', done: false };
+  if (fs === 'IN_REVIEW') {
+    return { phase: 'fund_review', label: '预批审核中', detail: stageText, done: false };
+  }
+  if (fs === 'ACTION_REQUIRED') return { phase: 'fund_action', label: '预批需补充', done: false };
+  if (fs === 'REJECTED') return { phase: 'fund_rejected', label: '预批被拒', done: true };
+  if (fs === 'CANCELED') return { phase: 'canceled', label: '已取消', done: true };
+  if (fs !== 'APPROVED') return { phase: 'unknown', label: fs || '未知', done: false };
+
+  // Credits 型 POC 没有请款环节，批准即发放
+  if ((fund.fulfillmentTypes || []).includes('CREDITS')
+    && !(fund.fulfillmentTypes || []).includes('CASH')) {
+    return { phase: 'completed', label: '已完成', detail: 'Credits 型，无需请款', done: true };
+  }
+
+  if (claims === null) {
+    return { phase: 'claim_unknown', label: '预批已通过', detail: '请款状态查询失败', done: false };
+  }
+  const c = primaryClaim(claims);
+  const more = claims.length > 1 ? `共 ${claims.length} 笔请款` : undefined;
+  const join = (...xs: (string | undefined)[]) => xs.filter(Boolean).join(' · ') || undefined;
+
+  if (!c) {
+    return {
+      phase: 'claim_todo', label: '待请款',
+      detail: opts.claimDeadline ? `请款截止 ${opts.claimDeadline}` : undefined,
+      done: false,
+    };
+  }
+  const amt = consoleAmount(c.claimAmount);
+  const amtText = amt !== null ? `请款 ${amt.toLocaleString('en-US')}` : undefined;
+  switch (c.status) {
+    case 'PENDING_SUBMISSION':
+      return { phase: 'claim_draft', label: '请款待提交', detail: more, done: false };
+    case 'IN_REVIEW':
+      return {
+        phase: 'claim_review', label: '请款审核中',
+        detail: join(c.stage ? CLAIM_STAGE_LABEL[c.stage] || c.stage : undefined, amtText, more),
+        done: false,
+      };
+    case 'ACTION_REQUIRED':
+      return { phase: 'claim_action', label: '请款需补充', detail: join(amtText, more), done: false };
+    case 'REJECTED':
+      return { phase: 'claim_rejected', label: '请款被拒', detail: more, done: false };
+    case 'CANCELED':
+      return {
+        phase: 'claim_todo', label: '待请款', detail: join('上一笔请款已取消', more), done: false,
+      };
+    case 'APPROVED': {
+      // 付款完成的权威信号：该请款的 Disbursement 分配变为 FULFILLED。
+      // 分配没查到时退回按排定付款日判断。
+      const today = new Date().toISOString().slice(0, 10);
+      const paid = c.disbursed === true
+        || (c.disbursed == null && !!c.scheduledPaymentDate && c.scheduledPaymentDate <= today);
+      if (paid) {
+        return {
+          phase: 'completed', label: '已完成',
+          detail: join(c.scheduledPaymentDate ? `${c.scheduledPaymentDate} 付款` : '已付款', more),
+          done: true,
+        };
+      }
+      return {
+        phase: 'payment_pending', label: '请款已批准·待付款',
+        detail: join(c.scheduledPaymentDate ? `排定 ${c.scheduledPaymentDate} 付款` : undefined, more),
+        done: false,
+      };
+    }
+    default:
+      return { phase: 'unknown', label: c.status || '未知', detail: more, done: false };
+  }
+}
+
+function isoDate(v: any): string | null {
+  if (!v) return null;
+  const d = new Date(v);
+  return Number.isNaN(d.getTime()) ? null : d.toISOString().slice(0, 10);
+}
+
+/** GetBenefitApplication（Cash Claim）→ ClaimInfo */
+export function toClaim(r: any, disbursed?: boolean | null): ClaimInfo {
+  const d = r.BenefitApplicationDetails || {};
+  // ClaimAmount 在 Get 里是对象；List 的精简版里是 "{Amount=32714, Currency=MYR}" 字符串
+  let amount: string | null = null; let currency: string | null = null;
+  if (d.ClaimAmount && typeof d.ClaimAmount === 'object') {
+    amount = d.ClaimAmount.Amount != null ? String(d.ClaimAmount.Amount) : null;
+    currency = d.ClaimAmount.Currency ?? d.ClaimAmount.CurrencyCode ?? null;
+  } else if (typeof d.ClaimAmount === 'string') {
+    amount = /Amount=([\d.]+)/.exec(d.ClaimAmount)?.[1] ?? null;
+    currency = /Currency(?:Code)?=(\w+)/.exec(d.ClaimAmount)?.[1] ?? null;
+  }
+  return {
+    applicationId: r.Id,
+    status: r.Status,
+    stage: r.Stage,
+    claimAmount: amount,
+    claimCurrency: currency,
+    invoiceRef: d.Invoice?.Description ?? null,
+    scheduledPaymentDate: isoDate(d.Invoice?.ScheduledPaymentDate),
+    createdAt: r.CreatedAt ? new Date(r.CreatedAt).toISOString() : undefined,
+    disbursed: disbursed ?? null,
+  };
 }
 
 const OPP_FROM_ARN = /catalog\/AWS\/opportunity\/(O\d+)/;
@@ -424,7 +614,93 @@ function toRow(r: any): PocRow {
     invoice: d.Invoice?.Description ?? null,
     createdAt: r.CreatedAt ? new Date(r.CreatedAt).toISOString() : undefined,
     updatedAt: r.UpdatedAt ? new Date(r.UpdatedAt).toISOString() : undefined,
+    fulfillmentTypes: r.FulfillmentTypes || [],
   };
+}
+
+/** 把请款信息并到预批行上，算出端到端进度 */
+export function attachClaims(
+  row: PocRow, claims: ClaimInfo[] | null, claimDeadline?: string | null,
+): PocRow {
+  const progress = computeProgress(
+    { status: row.status, stage: row.stage, fulfillmentTypes: row.fulfillmentTypes },
+    claims, { claimDeadline });
+  const main = claims ? primaryClaim(claims) : null;
+  const paid = progress.phase === 'completed' && main;
+  return {
+    ...row,
+    claims,
+    claimDeadline: claimDeadline ?? null,
+    progress,
+    // Funding 本身没有 Invoice；发票号在请款上
+    invoice: main?.invoiceRef ?? row.invoice ?? null,
+    paidAmount: paid ? main!.claimAmount : null,
+    paidDate: paid ? main!.scheduledPaymentDate : null,
+  };
+}
+
+async function listAll<T>(
+  fetchPage: (token?: string) => Promise<{ items?: T[]; next?: string }>,
+): Promise<T[]> {
+  const out: T[] = [];
+  let token: string | undefined;
+  do {
+    const r = await fetchPage(token);
+    out.push(...(r.items || []));
+    token = r.next;
+  } while (token);
+  return out;
+}
+
+/**
+ * 预批 → 请款 的关联。Cash Claim 不直接挂预批申请，而是挂在预批批准后生成的
+ * **分配**（benefit-allocation）上：
+ *   Claim.AssociatedResources → benalloc-x（BenefitId=Funding）→ BenefitApplicationId=预批
+ * 实测 Webby 51 笔请款全部可经此链路找到对应预批，一笔预批可有多笔请款。
+ * 付款完成则看请款自己的 Disbursement 分配（BenefitId=Cash Claim）是否 FULFILLED。
+ */
+async function loadClaimIndex(ben: any, allApps: any[]) {
+  // ⚠️ BenefitIdentifiers 实测最多只能传 1 个（传 2 个报 ValidationException：
+  // "Member must have length less than or equal to 1"），所以按 benefit 分两次查
+  const listFor = (benefitId: string) => listAll<any>(async (token) => {
+    const r: any = await ben.send(new ListBenefitAllocationsCommand({
+      Catalog: CATALOG, MaxResults: 100, NextToken: token,
+      BenefitIdentifiers: [benefitId],
+    }));
+    return { items: r.BenefitAllocationSummaries, next: r.NextToken };
+  });
+  const allocs: any[] = (await Promise.all([
+    listFor(BENEFIT_POC_FUNDING), listFor(BENEFIT_POC_CASH_CLAIM),
+  ])).flat();
+
+  const fundAllocByArn = new Map<string, any>();
+  const deadlineByFund = new Map<string, string | null>();
+  const disbursedByClaim = new Map<string, boolean>();
+  for (const a of allocs) {
+    if (!a.BenefitApplicationId) continue;   // 「Access to Funding Benefit」等通用分配
+    if (a.BenefitId === BENEFIT_POC_FUNDING) {
+      fundAllocByArn.set(a.Arn, a);
+      if (a.ExpiresAt) deadlineByFund.set(a.BenefitApplicationId, isoDate(a.ExpiresAt));
+    } else if (a.BenefitId === BENEFIT_POC_CASH_CLAIM) {
+      disbursedByClaim.set(a.BenefitApplicationId,
+        disbursedByClaim.get(a.BenefitApplicationId) || a.Status === 'FULFILLED');
+    }
+  }
+
+  // 请款 → 预批
+  const claimsByFund = new Map<string, any[]>();
+  for (const c of allApps) {
+    if (c.BenefitId !== BENEFIT_POC_CASH_CLAIM) continue;
+    for (const arn of c.AssociatedResources || []) {
+      const fa = fundAllocByArn.get(arn);
+      if (!fa) continue;
+      const list = claimsByFund.get(fa.BenefitApplicationId) || [];
+      list.push(c);
+      claimsByFund.set(fa.BenefitApplicationId, list);
+      break;
+    }
+  }
+  return { claimsByFund, deadlineByFund, disbursedByClaim };
 }
 
 /**
@@ -456,23 +732,56 @@ export async function listPocApplications(opts: { includeMigrated?: boolean } = 
   // 没有 CashRequest / AwsAccountId / AwsCalculatorUrls —— 直接用会让金额、
   // 项目桶、计算器链接全是空的。必须逐条 Get 补全。
   // 并发限 6，避免对 Partner Central 打太猛。
-  const rows: PocRow[] = [];
-  for (let i = 0; i < kept.length; i += 6) {
-    const batch = await Promise.all(kept.slice(i, i + 6).map(async (a) => {
-      try {
-        const full: any = await ben.send(new GetBenefitApplicationCommand({
-          Catalog: CATALOG, Identifier: a.Id,
-        }));
-        return toRow(full);
-      } catch {
-        return toRow(a);   // 单条失败时退回精简版，不让整表挂掉
-      }
-    }));
-    rows.push(...batch);
+  // 请款（Cash Claim）关联。查询失败不拖垮整表：claims 置 null，
+  // 进度显示「请款状态查询失败」而不是误报「待请款」。
+  let idx: Awaited<ReturnType<typeof loadClaimIndex>> | null = null;
+  try {
+    idx = await loadClaimIndex(ben, out);
+  } catch (e: any) {
+    console.error('[poc-cash] 加载 Cash Claim 关联失败:', e?.message);
   }
 
-  return rows.sort((a, b) =>
-    String(b.createdAt || '').localeCompare(String(a.createdAt || '')));
+  // 台账内预批名下的请款逐条 Get（金额、Invoice、付款日在 List 精简版里不全），
+  // 与预批的 Get 合并成同一个并发 6 的队列
+  const claimSummaries = kept.flatMap(a => idx?.claimsByFund.get(a.Id) || []);
+  const claimDetail = new Map<string, ClaimInfo>();
+  const fetchClaim = async (c: any) => {
+    const disbursed = idx?.disbursedByClaim.get(c.Id) ?? null;
+    try {
+      const full: any = await ben.send(new GetBenefitApplicationCommand({
+        Catalog: CATALOG, Identifier: c.Id,
+      }));
+      claimDetail.set(c.Id, toClaim(full, disbursed));
+    } catch {
+      claimDetail.set(c.Id, toClaim(c, disbursed));
+    }
+  };
+
+  const rows: PocRow[] = [];
+  const fetchFund = async (a: any) => {
+    try {
+      const full: any = await ben.send(new GetBenefitApplicationCommand({
+        Catalog: CATALOG, Identifier: a.Id,
+      }));
+      return toRow(full);
+    } catch {
+      return toRow(a);   // 单条失败时退回精简版，不让整表挂掉
+    }
+  };
+  const tasks: (() => Promise<void>)[] = [
+    ...kept.map(a => async () => { rows.push(await fetchFund(a)); }),
+    ...claimSummaries.map(c => async () => { await fetchClaim(c); }),
+  ];
+  for (let i = 0; i < tasks.length; i += 6) {
+    await Promise.all(tasks.slice(i, i + 6).map(t => t()));
+  }
+
+  return rows
+    .map(r => attachClaims(r,
+      idx ? (idx.claimsByFund.get(r.applicationId) || [])
+        .map(c => claimDetail.get(c.Id)!).filter(Boolean) : null,
+      idx?.deadlineByFund.get(r.applicationId) ?? null))
+    .sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')));
 }
 
 export async function getPocApplication(applicationId: string): Promise<PocRow> {
@@ -494,16 +803,16 @@ const CSV_HEADERS = [
   'AWS批准金额',
 ];
 
-/** POC 阶段的中文表述（对齐台账里的用法） */
-function pocStageLabel(status?: string, stage?: string): string {
-  if (!status) return '';
-  if (status === 'PENDING_SUBMISSION') return '待提交';
-  if (status === 'IN_REVIEW') return `审核中${stage ? `（${stage}）` : ''}`;
-  if (status === 'ACTION_REQUIRED') return '需补充';
-  if (status === 'APPROVED') return stage === 'Disbursement' ? '已批准-待打款' : '已批准';
-  if (status === 'REJECTED') return '已拒绝';
-  if (status === 'CANCELED') return '已取消';
-  return status;
+/** POC 阶段：端到端进度（含请款），如「请款审核中（发票审核）」 */
+function pocStageLabel(r: PocRow): string {
+  const p = r.progress || computeProgress(
+    { status: r.status, stage: r.stage, fulfillmentTypes: r.fulfillmentTypes },
+    r.claims === undefined ? null : r.claims);
+  if (!r.status) return '';
+  // CSV 里只带审批环节，金额/笔数等细节由其他列表达
+  const stageHint = p.phase === 'fund_review' || p.phase === 'claim_review'
+    ? p.detail?.split(' · ')[0] : undefined;
+  return stageHint ? `${p.label}（${stageHint}）` : p.label;
 }
 
 function csvEscape(v: any): string {
@@ -537,16 +846,16 @@ export function buildCsv(rows: PocRow[], ctx: CsvContext = {}): string {
       r.applicationId,                       // Fund Request ID
       r.startDate,
       r.endDate,
-      pocStageLabel(r.status, r.stage),
+      pocStageLabel(r),
       r.requestMyr != null ? String(r.requestMyr) : '',
       r.purchaseOrder,                       // AWS 审批后回填
-      r.invoice,                             // AWS 打款环节回填
-      // 到账金额 / 到账日期：Funding 申请里没有到账信息（在事后 Cash Claim
-      // 的 Invoice 里），人工补。此前把批准额填在这里，批准≠到账，会误导对账。
-      '',
-      '',
+      r.invoice,                             // 请款的发票号 / PayeeCentral 链接
+      // 到账金额 / 日期：请款付款完成才有（取请款的 Invoice），未付款留空
+      r.paidAmount != null ? String(consoleAmount(r.paidAmount)) : '',
+      r.paidDate || '',
       ctx.owner || '',
-      r.approvedAmount ?? '',                // AWS 批准金额（裸数字，同上不加千分位）
+      // AWS 批准金额：与控制台一致截掉小数（裸数字，同上不加千分位）
+      r.approvedAmount != null ? String(consoleAmount(r.approvedAmount)) : '',
     ].map(csvEscape).join(','));
   }
   // BOM：Excel / 表格软件打开中文表头不乱码

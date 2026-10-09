@@ -78,7 +78,50 @@ interface PocRow {
   /** true = AWS 未回填 ApprovedAmount，按已批准件的申请额展示 */
   approvedFromRequest?: boolean;
   createdAt?: string;
+  /** 名下的 Cash Claim；null = 请款状态查询失败 */
+  claims?: ClaimInfo[] | null;
+  /** 端到端进度（预批 → 请款 → 付款） */
+  progress?: { phase: string; label: string; detail?: string; done: boolean };
+  claimDeadline?: string | null;
 }
+
+interface ClaimInfo {
+  applicationId: string; status?: string; stage?: string;
+  claimAmount: string | null; claimCurrency: string | null;
+  invoiceRef: string | null; scheduledPaymentDate: string | null;
+  disbursed?: boolean | null;
+}
+
+/** 金额与 Partner Central 控制台一致：直接截掉小数（38133.58 → 38,133） */
+const consoleAmount = (v: string | number | null | undefined) => {
+  const n = Number(v);
+  return v === null || v === undefined || v === '' || !Number.isFinite(n)
+    ? null : Math.trunc(n).toLocaleString('en-US');
+};
+
+/** 端到端进度 → 颜色。只有付款完成才算绿色 */
+const PHASE_COLOR: Record<string, string> = {
+  completed: 'success',
+  fund_draft: 'default', claim_draft: 'default', claim_todo: 'warning',
+  fund_review: 'processing', claim_review: 'processing', payment_pending: 'cyan',
+  fund_action: 'warning', claim_action: 'warning', claim_unknown: 'default',
+  fund_rejected: 'error', claim_rejected: 'error', canceled: 'default',
+};
+
+/** 进度筛选分组 */
+const PHASE_GROUPS: { text: string; value: string; phases: string[] }[] = [
+  { text: '预批中', value: 'fund', phases: ['fund_draft', 'fund_review', 'fund_action'] },
+  { text: '待请款', value: 'claim_todo', phases: ['claim_todo', 'claim_unknown'] },
+  { text: '请款中', value: 'claim', phases: ['claim_draft', 'claim_review', 'claim_action', 'claim_rejected'] },
+  { text: '待付款', value: 'payment', phases: ['payment_pending'] },
+  { text: '已完成', value: 'done', phases: ['completed'] },
+  { text: '已取消/被拒', value: 'closed', phases: ['canceled', 'fund_rejected'] },
+];
+
+const CLAIM_STATUS_LABEL: Record<string, string> = {
+  PENDING_SUBMISSION: '待提交', IN_REVIEW: '审核中', ACTION_REQUIRED: '需补充',
+  APPROVED: '已批准', REJECTED: '已拒绝', CANCELED: '已取消',
+};
 
 /** POC 申请状态 → 颜色。只有 APPROVED 是终态成功。 */
 const pocColor = (s?: string) =>
@@ -786,15 +829,23 @@ const PocCashPage: React.FC = () => {
         <Button icon={<DownloadOutlined />} onClick={doExport} loading={exporting}
           disabled={!pocRows.length}>导出 CSV 台账</Button>
         <Text type="secondary">
-          共 {pocRows.length} 条 · 服务器留存带时间戳快照 · PO 号与 AWS 批准金额由 AWS 审批后回填
+          共 {pocRows.length} 条 · 进度含 Cash Claim，请款付款后才算完成 · 金额与控制台一致不含小数
         </Text>
       </Space>
-      {/* 列宽按实测内容宽度分配，合计 1358 < 常见内容区宽度，
+      {pocRows.length > 0 && (
+        <Space size={[6, 6]} wrap style={{ marginBottom: 12 }}>
+          {PHASE_GROUPS.map(g => {
+            const n = pocRows.filter(r => g.phases.includes(r.progress?.phase || '')).length;
+            return n ? <Tag key={g.value}>{g.text} {n}</Tag> : null;
+          })}
+        </Space>
+      )}
+      {/* 列宽按实测内容宽度分配，合计 1402 < 常见内容区宽度，
           正常屏下不触发横向滚动 —— 一旦滚动，右侧 fixed 的「操作」列会压住
           「周期」，日期被截成半截（改版前就是这个毛病）。
           调宽任何一列时记得同步下面的 scroll.x。 */}
       <Table<PocRow> rowKey="applicationId" size="small" loading={pocLoading}
-        dataSource={pocRows} scroll={{ x: 1358 }} pagination={{ pageSize: 20 }}
+        dataSource={pocRows} scroll={{ x: 1402 }} pagination={{ pageSize: 20 }}
         columns={[
           // 状态不设 fixed：列本身较宽，固定后会盖住相邻的 ID 列（实测截图里
           // Fund Request ID 被压掉了一半）。首列放 ID 更利于对账。
@@ -805,21 +856,50 @@ const PocCashPage: React.FC = () => {
             ),
           },
           {
-            // Tag 只放中文状态，AWS 的阶段枚举（BUSINESS_APPROVAL 等）降为下方
-            // 次要行：塞进同一个 Tag 会折行撑出一个两行高的大色块，
-            // 视觉权重盖过真正的主键 Fund Request ID。
-            title: '状态', dataIndex: 'status', width: 132,
-            render: (s: string, r) => (
-              <>
-                <Tag color={pocColor(s)} style={{ marginInlineEnd: 0 }}>
-                  {POC_LABEL[s] || s}
-                </Tag>
-                {r.stage && (
-                  <Text type="secondary" style={{ fontSize: 11, display: 'block', marginTop: 2 }}
-                    ellipsis={{ tooltip: r.stage }}>{r.stage}</Text>
-                )}
-              </>
-            ),
+            // 端到端进度：预批 → 请款（Cash Claim）→ 付款，请款付款才算 POC 结束。
+            // Tag 只放主状态，环节/金额/付款日降为下方次要行（塞进 Tag 会折行
+            // 撑成大色块，盖过主键 Fund Request ID）。悬停看预批与每笔请款明细。
+            title: '进度', key: 'progress', width: 176,
+            filters: PHASE_GROUPS.map(g => ({ text: g.text, value: g.value })),
+            onFilter: (v, r) => !!PHASE_GROUPS.find(g => g.value === v)
+              ?.phases.includes(r.progress?.phase || ''),
+            render: (_: any, r) => {
+              const p = r.progress;
+              const tip = (
+                <div style={{ lineHeight: 1.8, fontSize: 12 }}>
+                  <div>预批：{POC_LABEL[r.status || ''] || r.status || '—'}
+                    {r.stage ? `（${r.stage}）` : ''}</div>
+                  {r.claims === null && <div>请款：状态查询失败，请刷新</div>}
+                  {r.claims?.length === 0 && r.status === 'APPROVED' && (
+                    <div>请款：未提交{r.claimDeadline ? `，截止 ${r.claimDeadline}` : ''}</div>
+                  )}
+                  {(r.claims || []).map(c => (
+                    <div key={c.applicationId}>
+                      请款 {c.applicationId}：{CLAIM_STATUS_LABEL[c.status || ''] || c.status}
+                      {c.stage ? `（${c.stage}）` : ''}
+                      {c.claimAmount ? ` · ${consoleAmount(c.claimAmount)} ${c.claimCurrency || ''}` : ''}
+                      {c.invoiceRef && !c.invoiceRef.startsWith('http') ? ` · 发票 ${c.invoiceRef}` : ''}
+                      {c.scheduledPaymentDate ? ` · 付款日 ${c.scheduledPaymentDate}` : ''}
+                    </div>
+                  ))}
+                </div>
+              );
+              return (
+                // Tooltip 只接受单个子节点，Tag + 次要行包一层
+                <Tooltip title={tip}>
+                  <div>
+                    <Tag color={p ? PHASE_COLOR[p.phase] || 'default' : pocColor(r.status)}
+                      style={{ marginInlineEnd: 0 }}>
+                      {p?.label || POC_LABEL[r.status || ''] || r.status}
+                    </Tag>
+                    {p?.detail && (
+                      <Text type="secondary" style={{ fontSize: 11, display: 'block', marginTop: 2 }}
+                        ellipsis>{p.detail}</Text>
+                    )}
+                  </div>
+                </Tooltip>
+              );
+            },
           },
           {
             title: '项目桶', dataIndex: 'bucket', width: 128, ellipsis: true,
@@ -848,7 +928,8 @@ const PocCashPage: React.FC = () => {
           },
           {
             title: '申请额 (MYR)', dataIndex: 'requestMyr', width: 116, align: 'right',
-            render: (v: number | null) => v != null ? v.toLocaleString() : '—',
+            // 与控制台一致截掉小数
+            render: (v: number | null) => consoleAmount(v) ?? '—',
           },
           {
             title: 'PO 号', dataIndex: 'purchaseOrder', width: 120, ellipsis: true,
@@ -860,19 +941,20 @@ const PocCashPage: React.FC = () => {
             // 原「到账金额」列显示的其实是 ApprovedAmount —— 批准≠到账，
             // 到账信息在事后 Cash Claim 里，Funding 申请拿不到，故改为如实标注。
             title: 'AWS 批准额 (MYR)', dataIndex: 'approvedAmount', width: 128, align: 'right',
+            // 与 Partner Central 控制台一致：直接截掉小数（控制台 38133.58 显示
+            // 38,133，不是四舍五入）。悬停看 API 原值。
             render: (v: string | null, r) => {
               if (!v) {
                 return <Text type="secondary" style={{ fontSize: 12 }}>
                   {r.status === 'APPROVED' ? '待 AWS 回填' : '—'}</Text>;
               }
-              const text = `${Number(v).toLocaleString(undefined,
-                { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+              const text = `${consoleAmount(v)}`
                 + `${r.approvedCurrency && r.approvedCurrency !== 'MYR' ? ` ${r.approvedCurrency}` : ''}`;
-              return r.approvedFromRequest
-                ? <Tooltip title="AWS 未单独回填批准额，按已批准申请的申请额显示">
-                    <Text style={{ whiteSpace: 'nowrap' }}>{text}*</Text>
-                  </Tooltip>
-                : <Text style={{ whiteSpace: 'nowrap' }}>{text}</Text>;
+              return (
+                <Tooltip title={`API 原值 ${v} ${r.approvedCurrency || ''}`.trim()}>
+                  <Text style={{ whiteSpace: 'nowrap' }}>{text}</Text>
+                </Tooltip>
+              );
             },
           },
           {
