@@ -19,7 +19,7 @@ import path from 'path';
 import { randomUUID } from 'crypto';
 import puppeteer, { Browser, Page } from 'puppeteer-core';
 import { getConsoleSigninUrl } from './aws-service';
-import { generateQuotaDoc, getCompanyForAccount } from './doc-generator';
+import { generateQuotaDoc, docFileCompanyPart } from './doc-generator';
 
 const STEP_TIMEOUT_MS = 30_000;
 const TOTAL_TIMEOUT_MS = 180_000;
@@ -64,6 +64,8 @@ export interface CaseDocParams {
   accountName?: string;
   caseId: string;             // Support Case displayId
   companyKey?: string;
+  companyName?: string;       // 行业模式：自家公司名（非 yanhuang payer）
+  industryKey?: string;       // 行业模式：手选行业类型
   serviceCode: string;
   quotaName: string;
   quotaCode?: string;         // 有则文档按代码识别型号（Mac 专用主机）
@@ -286,6 +288,8 @@ async function runJob(job: CaseDocJob, params: CaseDocParams): Promise<void> {
       accountId: params.accountId,
       accountName: params.accountName,
       companyKey: params.companyKey,
+      companyName: params.companyName,
+      industryKey: params.industryKey,
       serviceCode: params.serviceCode,
       quotaName: params.quotaName,
       quotaCode: params.quotaCode,
@@ -293,7 +297,7 @@ async function runJob(job: CaseDocJob, params: CaseDocParams): Promise<void> {
       requestedValue: params.requestedValue,
       currentValue: params.currentValue,
     });
-    const company = params.companyKey || getCompanyForAccount(params.accountId)?.key || 'doc';
+    const company = docFileCompanyPart(params);
     const pdfName = `${company}-${params.quotaName.replace(/[^a-zA-Z0-9]/g, '_').slice(0, 30)}-${params.requestedValue}-${params.region}.pdf`;
     pdfPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'case-doc-')), pdfName);
     fs.writeFileSync(pdfPath, pdf);

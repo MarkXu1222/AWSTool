@@ -1,5 +1,5 @@
-import React, { useState, useEffect } from 'react';
-import { Card, Table, Tag, Button, Space, message, Input, Select, Tabs, Modal, Form, InputNumber, Tooltip } from 'antd';
+import React, { useState, useEffect, useRef } from 'react';
+import { Card, Table, Tag, Button, Space, message, Input, Select, Tabs, Modal, Form, InputNumber, Tooltip, Radio } from 'antd';
 import { ReloadOutlined, SearchOutlined, DownloadOutlined, FileTextOutlined, FilePdfOutlined, CheckCircleOutlined, CheckCircleFilled, ClockCircleOutlined, CloseCircleOutlined, MinusCircleOutlined, ThunderboltOutlined, CloudUploadOutlined } from '@ant-design/icons';
 import { api } from '../api';
 import { exportToCSV, exportQuotaPivotTable, exportQuotaRecords } from '../utils/export';
@@ -138,6 +138,26 @@ function writeDocCompanyMemo(key: string, companyKey: string) {
   } catch { /* 隐私模式/配额满，记不住不影响主流程 */ }
 }
 
+// 非 yanhuang payer：文档用「自家公司名 + 手选行业」生成。公司名默认 payer 名，可在弹窗里改；
+// 按 payer 记住上次填写的公司名与行业，下次预填（仍需人确认）。
+type DocIdentity = { companyKey?: string; companyName?: string; industryKey?: string };
+const DOC_IDENTITY_MEMO_KEY = 'quotaDocIdentityMemo';
+const isYanhuangPayerName = (payer?: string) => /^yan-?huang/i.test(String(payer || '').trim());
+
+function readDocIdentityMemo(): Record<string, { companyName: string; industryKey: string }> {
+  try {
+    const raw = JSON.parse(localStorage.getItem(DOC_IDENTITY_MEMO_KEY) || '{}');
+    return raw && typeof raw === 'object' ? raw : {};
+  } catch { return {}; }
+}
+
+function writeDocIdentityMemo(key: string, v: { companyName: string; industryKey: string }) {
+  if (!key || !v.companyName || !v.industryKey) return;
+  try {
+    localStorage.setItem(DOC_IDENTITY_MEMO_KEY, JSON.stringify({ ...readDocIdentityMemo(), [key]: v }));
+  } catch { /* 记不住不影响主流程 */ }
+}
+
 const QuotasPage: React.FC = () => {
   const [accounts, setAccounts] = useState<any[]>([]);
   // 独立会话打开控制台仅 admin 可用
@@ -168,6 +188,7 @@ const QuotasPage: React.FC = () => {
   const [docModalOpen, setDocModalOpen] = useState(false);
   const [docForm] = Form.useForm();
   const [companies, setCompanies] = useState<{ key: string; displayName: string; industry: string }[]>([]);
+  const [industries, setIndustries] = useState<{ key: string; label: string; industry: string }[]>([]);
   const [docGenerating, setDocGenerating] = useState(false);
 
   // 快速提额（搜索框旁）相关状态
@@ -188,6 +209,12 @@ const QuotasPage: React.FC = () => {
   const [pickerLoading, setPickerLoading] = useState(false);
   // 本次预选是否来自上次的记忆（用于弹窗里给出提示）
   const [pickerFromMemo, setPickerFromMemo] = useState(false);
+  // 非 yanhuang payer：「公司名 + 行业」确认弹窗
+  const [identityOpen, setIdentityOpen] = useState(false);
+  const [identityForm] = Form.useForm();
+  const [identityTarget, setIdentityTarget] = useState<{ accountId?: string; accountName?: string; payer?: string | null; quotaName?: string; region?: string; requestedValue?: number } | null>(null);
+  const [identityFromMemo, setIdentityFromMemo] = useState(false);
+  const identityResolver = useRef<((v: DocIdentity | undefined) => void) | null>(null);
 
   // Bedrock 配额相关状态
   const [bedrockRegions, setBedrockRegions] = useState<string[]>(['us-east-1']);
@@ -200,7 +227,7 @@ const QuotasPage: React.FC = () => {
   // 提额弹窗的区域覆盖：Bedrock 行的区域可能与顶部筛选的区域不同
   const [incRegionOverride, setIncRegionOverride] = useState<string | null>(null);
 
-  useEffect(() => { loadAccounts(); loadDbRecords(); loadCompanies(); }, []);
+  useEffect(() => { loadAccounts(); loadDbRecords(); loadCompanies(); loadIndustries(); }, []);
   // 取当前用户角色，用于独立会话打开控制台的门控
   useEffect(() => { api.me().then(r => setIsAdmin(r.role === 'admin')).catch(() => {}); }, []);
 
@@ -212,11 +239,23 @@ const QuotasPage: React.FC = () => {
       if (res.success) setCompanies(res.data);
     } catch {}
   };
+  const loadIndustries = async () => {
+    try {
+      const res = await api.listIndustries();
+      if (res.success) setIndustries(res.data);
+    } catch {}
+  };
 
-  // 手动生成申请文档 —— 不依赖已有提额记录
+  // 手动生成申请文档 —— 不依赖已有提额记录。
+  // 默认「自家公司 + 行业」；当前选中账户属于非 yanhuang payer 时，公司名预填 payer 名（或上次填写）
   const openDocModal = () => {
     docForm.resetFields();
+    const payer: string | undefined = accounts.find(a => a.Id === selectedAccount)?._payer;
+    const memo = payer && !isYanhuangPayerName(payer) ? readDocIdentityMemo()[payer] : undefined;
     docForm.setFieldsValue({
+      docMode: payer && isYanhuangPayerName(payer) ? 'company' : 'industry',
+      companyName: memo?.companyName || (payer && !isYanhuangPayerName(payer) ? payer : ''),
+      industryKey: memo?.industryKey && industries.some(i => i.key === memo.industryKey) ? memo.industryKey : undefined,
       presetIndex: 0,
       region: selectedRegion || 'us-east-1',
       requestedValue: 256,
@@ -234,8 +273,12 @@ const QuotasPage: React.FC = () => {
       setDocGenerating(true);
       const hide = message.loading('正在生成文档...', 0);
       try {
+        const industryMode = values.docMode !== 'company';
+        const identity: DocIdentity = industryMode
+          ? { companyName: String(values.companyName || '').trim(), industryKey: values.industryKey }
+          : { companyKey: values.companyKey };
         await api.generateQuotaDoc({
-          companyKey: values.companyKey,
+          ...identity,
           serviceCode: preset.serviceCode,
           quotaName: preset.quotaName,
           quotaCode: preset.quotaCode,
@@ -244,6 +287,11 @@ const QuotasPage: React.FC = () => {
         });
         hide();
         message.success('文档已生成');
+        // 行业模式：按当前账户的 payer 记住这次的公司名 + 行业
+        const payer: string | undefined = accounts.find(a => a.Id === selectedAccount)?._payer;
+        if (industryMode && payer && !isYanhuangPayerName(payer)) {
+          writeDocIdentityMemo(payer, { companyName: identity.companyName!, industryKey: identity.industryKey! });
+        }
         setDocModalOpen(false);
       } catch (err: any) {
         hide();
@@ -375,8 +423,54 @@ const QuotasPage: React.FC = () => {
     return accounts.find(a => a.Id === accountId)?._payer || accountId;
   };
 
-  // 生成文档；若账户无法识别公司，则弹出公司列表让用户挑选后用 companyKey 重试
-  const runGenerateDoc = async (params: any): Promise<boolean> => {
+  // 非 yanhuang payer 的「公司名 + 行业」确认弹窗（Promise 化：确认 resolve 身份，取消 resolve undefined）
+  const askIndustryIdentity = (target: { accountId?: string; accountName?: string; payer?: string | null; quotaName?: string; region?: string; requestedValue?: number }): Promise<DocIdentity | undefined> => {
+    const memo = target.payer ? readDocIdentityMemo()[target.payer] : undefined;
+    identityForm.setFieldsValue({
+      companyName: memo?.companyName || target.payer || '',
+      industryKey: memo?.industryKey && industries.some(i => i.key === memo.industryKey) ? memo.industryKey : undefined,
+    });
+    setIdentityFromMemo(!!memo);
+    setIdentityTarget(target);
+    setIdentityOpen(true);
+    return new Promise(resolve => { identityResolver.current = resolve; });
+  };
+
+  const closeIdentity = (v: DocIdentity | undefined) => {
+    setIdentityOpen(false);
+    const r = identityResolver.current;
+    identityResolver.current = null;
+    r?.(v);
+  };
+
+  const handleIdentityOk = async () => {
+    try {
+      const v = await identityForm.validateFields();
+      const identity = { companyName: String(v.companyName || '').trim(), industryKey: v.industryKey as string };
+      if (identityTarget?.payer) writeDocIdentityMemo(identityTarget.payer, identity);
+      closeIdentity(identity);
+    } catch { /* 校验失败，留在弹窗 */ }
+  };
+
+  // 账户 → 文档身份：yanhuang 系返回 {}（沿用专属公司模板 / 公司挑选）；其它 payer 弹「公司名 + 行业」
+  // 返回 undefined 表示用户取消
+  const resolveDocIdentity = async (params: { accountId?: string; accountName?: string; quotaName?: string; region?: string; requestedValue?: number }): Promise<DocIdentity | undefined> => {
+    if (!params.accountId) return {};
+    const ctx = await api.getDocContext(params.accountId).catch(() => null);
+    const payer: string | null = ctx?.data?.payer ?? accounts.find(a => a.Id === params.accountId)?._payer ?? null;
+    const isYanhuang: boolean = ctx?.success ? !!ctx.data.isYanhuang : isYanhuangPayerName(payer || '');
+    if (isYanhuang) return {};
+    return askIndustryIdentity({ ...params, payer });
+  };
+
+  // 生成文档：非 yanhuang 先确认「公司名 + 行业」；yanhuang 识别不到公司时弹出公司列表挑选后用 companyKey 重试
+  const runGenerateDoc = async (rawParams: any): Promise<boolean> => {
+    let params = rawParams;
+    if (!params.companyKey && !params.industryKey) {
+      const identity = await resolveDocIdentity(params);
+      if (!identity) return false; // 用户取消
+      params = { ...params, ...identity };
+    }
     const hide = message.loading('正在生成文档...', 0);
     try {
       await api.generateQuotaDoc(params);
@@ -386,7 +480,7 @@ const QuotasPage: React.FC = () => {
       hide();
       const msg = e?.message || '';
       // 已经带了 companyKey 还失败，说明是模板/渲染类问题，不能再弹挑选（否则会覆盖用户刚选的值）
-      if (!params.companyKey && /无法识别账户|所属公司|account cache/i.test(msg)) {
+      if (!params.companyKey && !params.industryKey && /无法识别账户|所属公司|account cache/i.test(msg)) {
         setPendingDocParams(params);
         // 预选上次为该 payer 选过的公司；公司模板可能已删除，校验后再用
         const remembered = readDocCompanyMemo()[docMemoKey(params.accountId)] || '';
@@ -404,7 +498,15 @@ const QuotasPage: React.FC = () => {
   // 一键提交文档到 Support Case：先预检公司归属（识别不到先弹公司选择器），
   // 确认后提交后台 job 并轮询进度直到完成/失败
   const handleCaseDocSubmit = async (record: any) => {
-    // 预检：账户能否识别公司；识别不到时先让用户选（与生成文档同一套选择器与记忆逻辑）
+    // 非 yanhuang payer：先确认「公司名 + 行业」
+    const identity = await resolveDocIdentity({
+      accountId: record.account_id,
+      accountName: accounts.find(a => a.Id === record.account_id)?.Name,
+      quotaName: record.quota_name, region: record.region, requestedValue: record.desired_value,
+    });
+    if (!identity) return; // 用户取消
+    if (identity.industryKey) { confirmCaseDocSubmit(record, identity); return; }
+    // yanhuang 预检：账户能否识别公司；识别不到时先让用户选（与生成文档同一套选择器与记忆逻辑）
     let companyKey: string | undefined;
     try {
       const cr = await api.getAccountCompany(record.account_id);
@@ -419,7 +521,7 @@ const QuotasPage: React.FC = () => {
       if (!picked) return;
       companyKey = picked;
     }
-    confirmCaseDocSubmit(record, companyKey);
+    confirmCaseDocSubmit(record, { companyKey });
   };
 
   // 弹出公司选择器（Promise 化，选定 resolve companyKey，取消 resolve undefined）
@@ -462,12 +564,15 @@ const QuotasPage: React.FC = () => {
     });
   };
 
-  const confirmCaseDocSubmit = (record: any, companyKey?: string) => {
+  const confirmCaseDocSubmit = (record: any, identity: DocIdentity) => {
     Modal.confirm({
       title: '一键提交提额文档到 Case',
       content: (
         <div style={{ fontSize: 13 }}>
           <p style={{ marginBottom: 8 }}>将自动执行：生成文档 → 打开 Case <code>{record.case_id}</code> → Reply → 填写 use cases → 上传 PDF → 等待上传 → Submit。</p>
+          {identity.industryKey ? (
+            <p style={{ marginBottom: 8 }}>文档公司：<strong>{identity.companyName}</strong> · 行业：{industries.find(i => i.key === identity.industryKey)?.label || identity.industryKey}</p>
+          ) : null}
           <p style={{ color: '#8a94a6', margin: 0 }}>账户 {record.account_id} · {record.quota_name} → {record.desired_value}（{record.region || 'us-east-1'}）。提交后会真实回帖到该 Case，请确认无误。</p>
         </div>
       ),
@@ -481,7 +586,7 @@ const QuotasPage: React.FC = () => {
             accountId: record.account_id,
             accountName: accounts.find(a => a.Id === record.account_id)?.Name,
             caseId: record.case_id,
-            companyKey,
+            ...identity,
             serviceCode: record.service_code,
             quotaName: record.quota_name,
             quotaCode: record.quota_code,
@@ -1115,19 +1220,40 @@ const QuotasPage: React.FC = () => {
         width={560}
       >
         <p style={{ color: 'rgba(0,0,0,0.55)', fontSize: 12, marginTop: 0 }}>
-          直接根据"项目 + 服务 + 区域 + 数量"生成一份英文 Project Summary PDF，无需已有提额记录。
+          直接根据"公司 + 服务 + 区域 + 数量"生成一份英文提额用例 PDF，无需已有提额记录。
         </p>
         <Form form={docForm} layout="vertical">
-          <Form.Item name="companyKey" label="项目 (公司)" rules={[{ required: true, message: '请选择项目' }]}>
-            <Select
-              placeholder="选择项目"
-              showSearch
-              optionFilterProp="label"
-              options={companies.map(c => ({
-                label: `${c.displayName} — ${c.industry}`,
-                value: c.key,
-              }))}
-            />
+          <Form.Item name="docMode" label="文档公司来源">
+            <Radio.Group optionType="button" buttonStyle="solid" size="small">
+              <Radio.Button value="industry">自家公司 + 行业类型</Radio.Button>
+              <Radio.Button value="company">yanhuang 专属公司模板</Radio.Button>
+            </Radio.Group>
+          </Form.Item>
+          <Form.Item noStyle shouldUpdate={(a, b) => a.docMode !== b.docMode}>
+            {({ getFieldValue }) => getFieldValue('docMode') === 'company' ? (
+              <Form.Item name="companyKey" label="项目 (公司)" rules={[{ required: true, message: '请选择项目' }]}>
+                <Select
+                  placeholder="选择项目"
+                  showSearch
+                  optionFilterProp="label"
+                  options={companies.map(c => ({
+                    label: `${c.displayName} — ${c.industry}`,
+                    value: c.key,
+                  }))}
+                />
+              </Form.Item>
+            ) : (
+              <>
+                <Form.Item name="companyName" label="公司名（文档中显示）" extra="选中账户属于非 yanhuang payer 时默认填 payer 名"
+                  rules={[{ required: true, whitespace: true, message: '请填写公司名' }, { max: 120, message: '最长 120 个字符' }]}>
+                  <Input placeholder="例如 Example Sdn Bhd" maxLength={120} />
+                </Form.Item>
+                <Form.Item name="industryKey" label="行业类型" rules={[{ required: true, message: '请选择行业类型' }]}>
+                  <Select placeholder="选择行业类型"
+                    options={industries.map(i => ({ label: `${i.label} — ${i.industry}`, value: i.key }))} />
+                </Form.Item>
+              </>
+            )}
           </Form.Item>
           <Form.Item name="presetIndex" label="配额类型" rules={[{ required: true, message: '请选择配额类型' }]}>
             <Select
@@ -1249,6 +1375,51 @@ const QuotasPage: React.FC = () => {
             <Button type="primary" icon={<ThunderboltOutlined />} loading={quickSubmitting} onClick={handleQuickIncrease} disabled={!quickQuota || !quickQuota.Adjustable}>一键提额</Button>
           </Space>
         </Space>
+      </Modal>
+
+      {/* 非 yanhuang payer：确认文档用的公司名 + 行业类型 */}
+      <Modal
+        title={<span><FilePdfOutlined style={{ marginRight: 6 }} />确认文档公司与行业</span>}
+        open={identityOpen}
+        onOk={handleIdentityOk}
+        onCancel={() => closeIdentity(undefined)}
+        okText="继续"
+        cancelText="取消"
+        width={500}
+        forceRender
+      >
+        <p style={{ color: 'rgba(0,0,0,0.55)', fontSize: 12, marginTop: 0 }}>
+          账户
+          {identityTarget?.accountName ? <> <Tag color="blue" style={{ margin: '0 2px' }}>{identityTarget.accountName}</Tag></> : null}
+          <code style={{ margin: '0 2px' }}>{identityTarget?.accountId || ''}</code>
+          {identityTarget?.payer ? <>属于 <Tag style={{ margin: '0 2px' }}>{identityTarget.payer}</Tag></> : null}
+          ，文档将以下面的公司名生成，内容按所选行业模板填充（不会使用其他公司的资料）。
+        </p>
+        {identityTarget?.quotaName ? (
+          <p style={{ color: 'rgba(0,0,0,0.45)', fontSize: 12, marginTop: -6 }}>
+            {identityTarget.quotaName} · {identityTarget.region || 'us-east-1'} · 申请 {identityTarget.requestedValue}
+          </p>
+        ) : null}
+        <Form form={identityForm} layout="vertical">
+          <Form.Item name="companyName" label="公司名（文档中显示）" extra="默认是 payer 名，可改成完整的公司法定名称"
+            rules={[{ required: true, whitespace: true, message: '请填写公司名' }, { max: 120, message: '最长 120 个字符' }]}>
+            <Input placeholder="例如 Example Sdn Bhd" maxLength={120} />
+          </Form.Item>
+          <Form.Item name="industryKey" label="行业类型" rules={[{ required: true, message: '请选择行业类型' }]}>
+            <Select placeholder="选择行业类型"
+              options={industries.map(i => ({ label: `${i.label} — ${i.industry}`, value: i.key }))} />
+          </Form.Item>
+        </Form>
+        {identityFromMemo ? (
+          <div style={{ background: '#f6ffed', border: '1px solid #b7eb8f', borderRadius: 6, padding: '6px 10px', fontSize: 12, color: '#389e0d' }}>
+            已预填上次为 <code>{identityTarget?.payer}</code> 填写的公司名和行业，确认无误即可继续。
+          </div>
+        ) : null}
+        {industries.length === 0 ? (
+          <div style={{ marginTop: 8, background: '#fff7e6', border: '1px solid #ffd591', borderRadius: 6, padding: '6px 10px', fontSize: 12, color: '#d46b08' }}>
+            行业列表未加载成功，<a onClick={loadIndustries}>点此重新加载</a>。
+          </div>
+        ) : null}
       </Modal>
 
       {/* 账户无法识别公司时，挑选公司后重试生成文档 */}

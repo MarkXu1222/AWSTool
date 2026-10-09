@@ -138,7 +138,9 @@ AWS/
     │   ├── restricted-accounts.ts  # ★敏感权限客户：账户级权限收窄 + ExternalId（StackSet 下发必须排除）
     │   # —— 提额文档 ——
     │   ├── doc-generator.ts        # 生成提额申请 PDF（puppeteer）
-    │   ├── doc-templates.ts        # ★公司模板 + 账户→公司 / payer→公司 映射 + 区域显示名
+    │   ├── doc-templates.ts        # ★公司模板 + 账户→公司 / payer→公司 映射 + 区域显示名（仅 yanhuang 系）
+    │   ├── doc-industries.ts       # ★行业模板：非 yanhuang payer 用「自家公司名 + 行业」生成文档
+    │   ├── doc-arch-svg.ts         # 通用多 AZ 架构图（内联 SVG，行业模式使用）
     │   ├── case-doc-submitter.ts   # ★一键提交提额文档到 Support Case（生成 PDF → 联邦登录 → Reply → 传附件 → Submit）
     │   # —— 账单导出 ——
     │   ├── billing-export-jobs.ts  # 账单导出持久化 job、全局队列、永久历史、重复下载与重启恢复
@@ -396,7 +398,7 @@ admin 恒有，其他角色必须显式授予，且**都不受 `allowed_pages` �
 
 `encryptionKey` 是新密文的 current key；轮换时必须先把旧值移入 `encryptionKeyPrevious`，再替换 current key。历史项最多 8 个且只用于解密。服务启动会先认证并原子重加密在线 MFA、ExternalId 和永久 Root 凭证到 current key；DB 迁移审计同次写入，Root 使用可重试 marker 加一条有界 `system` 汇总审计。新 Root 密码写为带 16 位 key ID 的 `gcm2`，旧 `gcm1` 会依次尝试 current + historical key。首次从旧版 JWT-secret CBC 配置 dedicated key 时，启动迁移也会把 `jwtSecret` 作为仅限 legacy 字段的候选。在线迁移完成后，仍须等待包含旧密文的 7 天本地备份和异机快照完成轮替及恢复验证，才能删除历史 key。keyring 必须与 `data/root-email-jobs.json` 分开受控备份。
 
-`payers[].name` 格式为 `yanhuang编号-公司名`，用于提额文档与通知匹配公司。
+`payers[].name` 格式为 `yanhuang编号-公司名`，用于提额文档与通知匹配公司。非 yanhuang payer 的名字会作为提额文档「公司名」的默认值（弹窗里可改）。
 
 ### `data/db.json`（gitignore，运行时数据库）
 
@@ -447,11 +449,20 @@ payer 只读会话的有效权限是 `role/tool` identity policy 与 `ReadOnlyAc
 
 HTML 模板 + Puppeteer 渲染。公司背景库在 `doc-templates.ts`（12 家公司，从历史 SOW 总结），架构图在 `doc-templates/architectures/`。
 
-公司解析顺序：账户缓存的 `_payer` → `PAYER_TO_COMPANY` → `ACCOUNT_TO_COMPANY`。**截至 2026-08-27 的 44 个配置 payer 中，只有 11 个有内置映射**，其余识别不出时前端弹出公司挑选，选过的按 payer 记在 localStorage，下次自动预选但仍需确认（刻意不静默套用，避免悄悄用错公司）。
+**两种模式（按 payer 区分）**：
+
+- **yanhuang 系 payer**（`^yan-?huang`，含 `yan-huang21`）→ 专属公司模板。公司解析顺序：账户缓存的 `_payer` → `PAYER_TO_COMPANY` → `ACCOUNT_TO_COMPANY`；识别不出时前端弹出公司挑选，选过的按 payer 记在 localStorage（`quotaDocCompanyMemo`），下次预选但仍需确认。
+- **其它所有 payer**（GDEX、Freightly、SK1、海底捞……）→ **自家公司名 + 手选行业类型**（`server/doc-industries.ts`）。生成文档 / 一键提交 Case 前弹「确认文档公司与行业」：公司名默认 payer 名、可改成完整法定名称；行业从 `INDUSTRY_TEMPLATES` 选（物流、电商、游戏、金融科技、AI、SaaS、视频、通用）。按 payer 记在 localStorage（`quotaDocIdentityMemo`），下次预填仍需确认。**行业文案只以 `{C}`（公司名）为主语，不得出现任何 yanhuang 客户名**；架构图用 `doc-arch-svg.ts` 画的通用多 AZ 图，不嵌任何公司专属图片 —— `tests/doc-industries.test.ts` 锁定这两条。
+
+判定入口是 `GET /api/aws/quotas/doc-context/:accountId`（返回 `payer` / `isYanhuang` / 识别到的公司）；行业列表 `GET /api/aws/quotas/industries`。`generate-doc` 与 `case-doc-submit` 都接受 `companyName + industryKey`，两者同时给出时优先于 `companyKey` / 账户映射；`case-doc-submit` 在入队前就校验，避免后台 job 跑到一半才报错。手动「生成申请文档」弹窗顶部可切换两种模式，选中账户属于非 yanhuang payer 时默认行业模式并预填 payer 名。
+
+新增行业：在 `INDUSTRY_TEMPLATES` 加一项（`resourceComponents` 权重之和必须为 1，文案用 `{C}` 代替公司名），无需改前端。
 
 `companyFromPayer` 的后缀兜底做的是「公司部分完全相等」比较，不能用 `endsWith` —— 单字符后缀会命中短名 key（`webby-2` → `malatrading`），静默生成挂着别家公司资料的文档。
 
 动态生成：申请值自动拆解成资源组件表（合计=申请值）；配额类型自动识别 AWS 官方名称（vCPU/EIP/Lightsail/Mac/WorkSpaces 等）；预测值约申请值的 1.5 倍。
+
+文档结构（两种模式相同）：标题 + 概要信息表（公司 / 行业 / 账户 / 区域 / 配额 / 申请值 / 当前环境）→ Project Summary → Workload Description（迁移背景、核心业务、技术架构、运维要求）→ Initial Resource Need（资源拆解）→ **Justification**（按配额类别给出申请量依据：vCPU 的多 AZ 冗余与滚动发布余量、Mac 主机 24 小时最短占用、EIP 的 NAT / 白名单用途等）→ **Capacity Plan**（当前配额 → 上线 → 第 1 月 → 第 2 月，第 2 月 = Projected）→ Quota Request Details → Architecture Overview → **Operations, Security & Cost Governance** → Contact。
 
 ### 一键提交提额文档到 Support Case（case-doc-submitter.ts）
 

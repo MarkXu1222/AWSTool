@@ -1,7 +1,8 @@
 import { Router, Request, Response } from 'express';
 import * as aws from '../aws-service';
 import { db, BillingExportJob, TagOnboardingConflictError } from '../db';
-import { generateQuotaDoc, getCompanyForAccount } from '../doc-generator';
+import { generateQuotaDoc, getCompanyForAccount, getDocContext, resolveDocProfile, docFileCompanyPart } from '../doc-generator';
+import { INDUSTRY_TEMPLATES, DEFAULT_INDUSTRY } from '../doc-industries';
 import { isIntegerOnlyQuota } from '../mac-quotas';
 import { submitCaseDoc, getCaseDocJob } from '../case-doc-submitter';
 import { COMPANY_PROFILES } from '../doc-templates';
@@ -834,21 +835,25 @@ awsRouter.get('/console-url/:accountId', async (req: Request, res: Response) => 
 // Generate quota increase document (PDF)
 awsRouter.post('/quotas/generate-doc', async (req: Request, res: Response) => {
   try {
-    const { accountId, accountName, companyKey, serviceCode, quotaName, quotaCode, region, requestedValue, currentValue } = req.body;
-    // 必需：quotaName + region + requestedValue，且 accountId / companyKey 至少一个
+    const { accountId, accountName, companyKey, companyName, industryKey, serviceCode, quotaName, quotaCode, region, requestedValue, currentValue } = req.body;
+    // 必需：quotaName + region + requestedValue，且 accountId / companyKey / (companyName+industryKey) 至少一种
     if (!quotaName || !region || !requestedValue) {
       return res.status(400).json({ error: '缺少必要参数（quotaName / region / requestedValue）' });
     }
-    if (!accountId && !companyKey) {
-      return res.status(400).json({ error: '需要指定 accountId 或 companyKey' });
+    if (!accountId && !companyKey && !industryKey) {
+      return res.status(400).json({ error: '需要指定 accountId、companyKey 或 公司名+行业类型' });
     }
-    const pdf = await generateQuotaDoc({
-      accountId, accountName, companyKey, serviceCode,
+    const docParams = {
+      accountId, accountName, companyKey,
+      companyName: companyName != null ? String(companyName) : undefined,
+      industryKey: industryKey ? String(industryKey) : undefined,
+      serviceCode,
       quotaName, quotaCode: quotaCode ? String(quotaCode) : undefined,
       region, requestedValue: Number(requestedValue),
       currentValue: currentValue != null ? Number(currentValue) : undefined,
-    });
-    const company = companyKey || (accountId ? getCompanyForAccount(accountId)?.key : null) || 'doc';
+    };
+    const pdf = await generateQuotaDoc(docParams);
+    const company = docFileCompanyPart(docParams);
     const filename = `${company}-${(quotaName || 'quota').replace(/[^a-zA-Z0-9]/g, '_').slice(0, 30)}-${requestedValue}-${region}.pdf`;
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
@@ -863,15 +868,23 @@ awsRouter.post('/quotas/generate-doc', async (req: Request, res: Response) => {
 awsRouter.post('/quotas/case-doc-submit', requireAdmin, async (req: Request, res: Response) => {
   try {
     const user = (req as any).user;
-    const { accountId, accountName, caseId, companyKey, serviceCode, quotaName, quotaCode, region, requestedValue, currentValue, message } = req.body;
+    const { accountId, accountName, caseId, companyKey, companyName, industryKey, serviceCode, quotaName, quotaCode, region, requestedValue, currentValue, message } = req.body;
     if (!accountId || !caseId || !quotaName || !region || !requestedValue) {
       return res.status(400).json({ error: '缺少必要参数（accountId / caseId / quotaName / region / requestedValue）' });
+    }
+    // 行业模式参数在入队前就校验（后台 job 里才报错，用户要等很久才看到）
+    if (industryKey || companyName) {
+      try {
+        resolveDocProfile({ companyName, industryKey, serviceCode, quotaName, region, requestedValue: Number(requestedValue) });
+      } catch (err: any) { return res.status(400).json({ error: err.message }); }
     }
     const job = submitCaseDoc({
       accountId: String(accountId),
       accountName,
       caseId: String(caseId),
       companyKey,
+      companyName: companyName != null ? String(companyName) : undefined,
+      industryKey: industryKey ? String(industryKey) : undefined,
       serviceCode,
       quotaName,
       quotaCode: quotaCode ? String(quotaCode) : undefined,
@@ -910,6 +923,30 @@ awsRouter.get('/quotas/company/:accountId', async (req: Request, res: Response) 
     const company = getCompanyForAccount(String(req.params.accountId));
     res.json({ success: true, data: company });
   } catch (e: any) { res.status(500).json({ error: e.message }); }
+});
+
+// 文档上下文：payer 名 / 是否 yanhuang / 识别到的专属公司（前端据此选择「专属模板」或「公司名 + 行业」）
+awsRouter.get('/quotas/doc-context/:accountId', async (req: Request, res: Response) => {
+  try {
+    const ctx = getDocContext(String(req.params.accountId));
+    res.json({
+      success: true,
+      data: {
+        payer: ctx.payer,
+        isYanhuang: ctx.isYanhuang,
+        company: ctx.company ? { key: ctx.company.key, displayName: ctx.company.displayName, industry: ctx.company.industry } : null,
+      },
+    });
+  } catch (e: any) { res.status(500).json({ error: e.message }); }
+});
+
+// 行业类型列表（非 yanhuang payer 生成文档时手选）
+awsRouter.get('/quotas/industries', async (_req: Request, res: Response) => {
+  res.json({
+    success: true,
+    data: INDUSTRY_TEMPLATES.map(t => ({ key: t.key, label: t.label, industry: t.industry })),
+    defaultKey: DEFAULT_INDUSTRY,
+  });
 });
 
 // Billing PDF 后台 job：提交/状态/取消/下载均为短请求，下载产物保留固定 TTL。
