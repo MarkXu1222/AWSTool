@@ -3,7 +3,8 @@
  *
  * 为什么不能复用 COMPANY_PROFILES：那是 yanhuang 各家公司的真实背景（从历史 SOW 总结），
  * 套到别的组织上等于拿别家公司的资料去提额。这里的文案全部以传入的公司名为主语，
- * 不出现任何具体客户名；也没有公司专属架构图，由 doc-generator 画通用架构图。
+ * 不出现任何具体客户名。架构图复用之前的图（按行业挑最接近的一张），
+ * 这些图均已人工确认不含任何公司名。
  */
 import type { CompanyProfile } from './doc-templates';
 
@@ -18,6 +19,8 @@ export interface IndustryTemplate {
   coreBusiness: string;
   technicalArchitecture: string;
   resourceComponents: CompanyProfile['resourceComponents'];
+  /** 复用 doc-templates/architectures/ 里的已有架构图（已确认图中无公司名） */
+  archImage: string;
 }
 
 export const INDUSTRY_TEMPLATES: IndustryTemplate[] = [
@@ -29,7 +32,8 @@ export const INDUSTRY_TEMPLATES: IndustryTemplate[] = [
     summary: `{C} is a technology-driven logistics and supply chain company providing parcel delivery, freight forwarding, warehousing and last-mile fulfilment services for merchants and enterprises across Southeast Asia. Its digital platform connects shippers, carriers, warehouses and end customers, covering order intake, shipment booking, route planning, real-time tracking, proof of delivery and billing. Shopping festivals and year-end peaks drive sharp, short-term spikes in shipment volume, API calls and tracking queries.`,
     migrationBackground: `{C}'s core logistics systems currently run in a self-managed data center with limited elastic capacity. To support business growth and absorb seasonal peaks without over-provisioning hardware, {C} is migrating its shipment management, tracking and routing services to AWS. During the cut-over both environments run in parallel so that live shipments are never interrupted, which temporarily increases the compute demand on AWS.`,
     coreBusiness: `Shipment booking and order management, real-time parcel tracking, route optimization and dispatch, warehouse management (WMS), carrier and merchant API integration, electronic proof of delivery, and billing / reconciliation.`,
-    technicalArchitecture: `A multi-AZ VPC with public subnets for load balancers and NAT gateways, private subnets for containerized microservices on EC2 Auto Scaling groups, and isolated database subnets for Amazon RDS with a Multi-AZ standby. Tracking events flow through a message queue into stream processors; Amazon S3 stores shipping labels, documents and proof-of-delivery images.`,
+    technicalArchitecture: `A multi-AZ VPC on Amazon EKS hosts the web and application services in private subnets, fronted by AWS WAF, Amazon CloudFront and load balancers. Parcel scan events and device / notification traffic flow through Amazon MSK (Kafka) into the application tier; transactional data is stored in PostgreSQL / MySQL with an Amazon ElastiCache (Redis) layer. Change data is captured with Flink CDC into Amazon EMR and an Amazon S3 data lake, feeding Amazon Redshift, OpenSearch and Amazon SageMaker for reporting, search and ETA / route models.`,
+    archImage: 'taosource.png',
     resourceComponents: [
       { name: 'Shipment & Order Services', useType: 'Core services', purpose: 'Booking, order intake and shipment lifecycle management.', weight: 0.24 },
       { name: 'Tracking & Event Processing', useType: 'Real-time processing', purpose: 'Ingest scan events and serve real-time tracking queries.', weight: 0.20 },
@@ -47,7 +51,8 @@ export const INDUSTRY_TEMPLATES: IndustryTemplate[] = [
     summary: `{C} operates an online retail and e-commerce platform serving consumers and merchants through web, mobile app and social commerce channels. The platform covers product catalog, search and recommendation, cart and checkout, payment, order fulfilment, customer service and marketing campaigns. Flash sales and seasonal promotions generate traffic peaks many times higher than the daily baseline, which requires elastic and highly available infrastructure.`,
     migrationBackground: `{C}'s platform currently runs on another cloud provider. To improve availability, serve regional customers with lower latency and adopt AWS managed services, {C} is migrating its storefront, order and payment systems to AWS. Both environments run in parallel during the transition to guarantee uninterrupted sales.`,
     coreBusiness: `Product catalog and search, personalized recommendation, cart and checkout, payment integration, order and inventory management, promotion engine, customer service, and sales analytics.`,
-    technicalArchitecture: `Stateless web and API tiers run on EC2 Auto Scaling groups behind Application Load Balancers across two Availability Zones. Amazon RDS (Multi-AZ) stores transactional data, an in-memory cache absorbs read traffic, and Amazon S3 with Amazon CloudFront serves product images and static assets.`,
+    technicalArchitecture: `Traffic enters through Amazon Route 53, AWS Global Accelerator, Amazon CloudFront, AWS Shield and AWS WAF, then reaches load balancers in a dual-AZ VPC. Mall services (storefront, order, payment, inventory, promotion) run as microservices on Amazon EKS, communicating through Kafka and a message queue. Amazon Aurora stores transactional data, MongoDB holds catalog documents, Amazon ElastiCache (Redis) absorbs read traffic, Amazon EMR processes behavioural data, and Prometheus / Grafana with a log hub provide observability.`,
+    archImage: 'malatrading.png',
     resourceComponents: [
       { name: 'Storefront Web & API Tier', useType: 'Core services', purpose: 'Serve web/app traffic and product browsing.', weight: 0.26 },
       { name: 'Order & Payment Services', useType: 'Transaction processing', purpose: 'Checkout, payment callbacks and order lifecycle.', weight: 0.20 },
@@ -65,7 +70,8 @@ export const INDUSTRY_TEMPLATES: IndustryTemplate[] = [
     summary: `{C} develops and operates online games for mobile and PC players. Its live services include game servers, matchmaking, player accounts, in-game store and payments, leaderboards, chat and anti-cheat. Game launches, version updates and in-game events cause sudden spikes in concurrent players, so game server capacity must be provisioned in advance to avoid queueing, lag and player churn.`,
     migrationBackground: `{C} currently hosts its game servers in a traditional data center. To support upcoming title launches and expand into new regions with low latency, {C} is moving its game backend and supporting services to AWS, keeping the existing environment online until every region has been switched over.`,
     coreBusiness: `Real-time game servers, matchmaking, player account and profile services, in-game store and payment, leaderboards and social features, telemetry and anti-cheat analytics.`,
-    technicalArchitecture: `Dedicated game server fleets run on EC2 in private subnets across two Availability Zones, with load balancers fronting login and lobby services. Player data is stored in Amazon RDS (Multi-AZ) and an in-memory cache, and gameplay telemetry is streamed to Amazon S3 for analytics.`,
+    technicalArchitecture: `Players connect from PC and mobile through Amazon Route 53, AWS WAF and Amazon CloudFront, with static assets in Amazon S3 under lifecycle tiering to S3 Intelligent-Tiering and Glacier. A dual-AZ VPC runs game login, game server, payment and business services on Amazon EKS behind an ingress load balancer. Player data is stored in Amazon RDS for MySQL (master / standby), Amazon ElastiCache for Redis and Amazon DynamoDB, with Amazon OpenSearch for logs and search. A game operation system streams events via Amazon Kinesis and Managed Service for Apache Flink into Amazon EMR, Aurora and Amazon QuickSight.`,
+    archImage: 'osstable.png',
     resourceComponents: [
       { name: 'Game Server Fleet', useType: 'Core services', purpose: 'Host real-time game sessions for concurrent players.', weight: 0.34 },
       { name: 'Matchmaking & Lobby', useType: 'Core platform', purpose: 'Player matching, room allocation and lobby services.', weight: 0.16 },
@@ -83,7 +89,8 @@ export const INDUSTRY_TEMPLATES: IndustryTemplate[] = [
     summary: `{C} is a financial technology company offering digital payment, e-wallet and merchant acquiring services. Its platform processes payment authorization, fund transfers, settlement, reconciliation and risk control for consumers and merchants, with strict requirements on availability, latency, data integrity and regulatory compliance. Transaction volume rises sharply at month-end, payday and during promotional campaigns.`,
     migrationBackground: `{C}'s transaction platform currently runs in a private data center. To improve resilience, shorten time-to-market for new products and meet growing transaction volume, {C} is migrating its payment, ledger and risk services to AWS. A parallel-run period with full reconciliation between both environments is required before the final cut-over.`,
     coreBusiness: `Payment gateway and authorization, e-wallet and fund transfer, merchant onboarding (KYC/KYB), settlement and reconciliation, real-time fraud and risk scoring, and regulatory reporting.`,
-    technicalArchitecture: `Workloads are isolated in private subnets across multiple Availability Zones with no direct internet exposure; ingress passes through load balancers and a web application firewall. Ledger and transaction data are stored in Amazon RDS (Multi-AZ) with encryption at rest via AWS KMS, and audit logs are retained in Amazon S3.`,
+    technicalArchitecture: `Ingress passes through Amazon Route 53, AWS WAF and Amazon CloudFront to an ELB in a dual-AZ VPC with no direct exposure of application subnets. Transaction anti-fraud, risk control, decision management and back-wash systems run on Amazon EKS in an Auto Scaling group. Data tiers include Amazon RDS for MySQL / Aurora MySQL, Amazon ElastiCache (Redis / Memcached), Amazon MSK and Amazon OpenSearch. Events flow through Amazon Kinesis into Amazon EMR and a risk-control data repository for analysis, with AWS Backup snapshots, GuardDuty, CloudTrail and IAM for security and audit.`,
+    archImage: 'buminiaga.jpeg',
     resourceComponents: [
       { name: 'Payment Gateway & Authorization', useType: 'Core services', purpose: 'Low-latency payment authorization and routing.', weight: 0.24 },
       { name: 'Ledger & Settlement', useType: 'Transaction processing', purpose: 'Double-entry ledger, settlement and reconciliation.', weight: 0.20 },
@@ -101,7 +108,8 @@ export const INDUSTRY_TEMPLATES: IndustryTemplate[] = [
     summary: `{C} builds AI and data products for enterprise customers, including large-language-model applications, computer vision, intelligent document processing and predictive analytics. Its platform covers data ingestion and labeling, model training and fine-tuning, model evaluation, and low-latency online inference served through APIs. Training jobs and customer onboarding create bursty, compute-heavy demand that must be scheduled reliably.`,
     migrationBackground: `{C}'s training and inference workloads are currently spread across rented GPU servers and another cloud, which limits capacity and makes scheduling unpredictable. {C} is consolidating its data pipelines, training clusters and inference services on AWS to obtain stable accelerator capacity and a unified security and data governance model.`,
     coreBusiness: `Data ingestion and preprocessing, data labeling, distributed model training and fine-tuning, model evaluation and registry, real-time and batch inference APIs, and usage analytics.`,
-    technicalArchitecture: `Training clusters run on accelerated EC2 instances in private subnets with high-throughput access to datasets in Amazon S3. Inference services run on auto-scaling instance groups behind load balancers across two Availability Zones, while metadata and job state are stored in Amazon RDS.`,
+    technicalArchitecture: `Data from external platforms enters via Amazon API Gateway into Amazon EKS clusters that run data collection, data processing and an inference cluster across multiple Availability Zones. Processed data lands in an Amazon S3 data lake and training / model storage; a dedicated EKS node group with GPU (P5) and Spot instances on Deep Learning AMIs performs model training and fine-tuning, pushing models back for serving. Customer-facing applications run on EKS behind an ALB with Amazon Aurora and Amazon ElastiCache (Redis); Amazon DynamoDB, Amazon MSK (Kafka) and ClickHouse support events, streaming and analytics.`,
+    archImage: 'zyronix.png',
     resourceComponents: [
       { name: 'Model Training Cluster', useType: 'Compute-intensive', purpose: 'Distributed training and fine-tuning jobs.', weight: 0.30 },
       { name: 'Online Inference Services', useType: 'Core services', purpose: 'Low-latency model serving behind APIs.', weight: 0.24 },
@@ -119,7 +127,8 @@ export const INDUSTRY_TEMPLATES: IndustryTemplate[] = [
     summary: `{C} provides cloud-based business software to small and medium-sized enterprises, covering workflow automation, CRM, HR and finance modules delivered through web and mobile clients. As a multi-tenant SaaS provider, {C} must keep every tenant isolated, highly available and responsive while onboarding new customers continuously, so compute capacity grows with the number of tenants and their usage.`,
     migrationBackground: `{C}'s SaaS platform currently runs on another cloud provider. To serve customers in more regions, meet enterprise security requirements and reduce operational overhead, {C} is migrating its application tier, background workers and databases to AWS, running both environments in parallel while tenants are moved in batches.`,
     coreBusiness: `Multi-tenant web application, REST/GraphQL APIs, background job processing, reporting and dashboards, file storage and document generation, notifications, and third-party integrations.`,
-    technicalArchitecture: `Containerized application services run on EC2 Auto Scaling groups in private subnets behind Application Load Balancers across two Availability Zones. Tenant data is stored in Amazon RDS (Multi-AZ), background jobs are coordinated through a message queue, and Amazon S3 stores uploaded files and generated reports.`,
+    technicalArchitecture: `Customers reach the platform through Amazon CloudFront, Amazon Route 53, AWS WAF and AWS Shield. In a dual-AZ VPC, web UI and application services run on Auto Scaling compute behind an ELB ingress, decoupled with RocketMQ and Amazon MSK (Kafka). Tenant data is stored in Amazon Aurora with Amazon ElastiCache (Redis); Amazon EMR, Amazon Redshift, Amazon SageMaker and an Amazon S3 data lake provide reporting and analytics. A cross-region disaster-recovery copy is maintained in a second AWS Region.`,
+    archImage: 'taiping.png',
     resourceComponents: [
       { name: 'Web Application Tier', useType: 'Core services', purpose: 'Serve tenant web and mobile traffic.', weight: 0.26 },
       { name: 'API Services', useType: 'Core platform', purpose: 'Public and internal APIs for integrations.', weight: 0.18 },
@@ -137,7 +146,8 @@ export const INDUSTRY_TEMPLATES: IndustryTemplate[] = [
     summary: `{C} operates a digital media platform offering video-on-demand, live streaming and short-video content to audiences on mobile, web and smart TV. The platform handles content upload, transcoding, packaging, delivery, recommendation and monetization. Live events and popular releases produce sharp concurrency peaks that require large amounts of transcoding and streaming capacity at short notice.`,
     migrationBackground: `{C} currently runs its transcoding and origin servers in a data center with fixed capacity, which cannot absorb event-driven peaks. {C} is migrating its media processing pipeline, origin services and content management system to AWS to scale elastically and reach audiences in more regions.`,
     coreBusiness: `Content ingest and transcoding, live stream processing, origin and content delivery, user accounts and subscriptions, recommendation, advertising, and viewing analytics.`,
-    technicalArchitecture: `Transcoding workers run on auto-scaling EC2 fleets in private subnets, reading and writing media in Amazon S3. Origin servers sit behind load balancers and are fronted by Amazon CloudFront. User and subscription data are stored in Amazon RDS (Multi-AZ) across two Availability Zones.`,
+    technicalArchitecture: `Viewers reach the platform through Amazon CloudFront, Amazon Route 53, AWS WAF and AWS Shield, with origin and API services in a dual-AZ VPC behind an ELB ingress on Auto Scaling compute. Transcoding and processing jobs are decoupled through RocketMQ and Amazon MSK (Kafka); user and subscription data are stored in Amazon Aurora with Amazon ElastiCache (Redis); media files and analytics data live in an Amazon S3 data lake processed by Amazon EMR and Amazon Redshift. A cross-region disaster-recovery copy is maintained in a second AWS Region.`,
+    archImage: 'taiping.png',
     resourceComponents: [
       { name: 'Transcoding Workers', useType: 'Compute-intensive', purpose: 'Transcode and package video into multiple bitrates.', weight: 0.30 },
       { name: 'Live Stream Processing', useType: 'Real-time processing', purpose: 'Ingest and process live streams.', weight: 0.20 },
@@ -155,7 +165,8 @@ export const INDUSTRY_TEMPLATES: IndustryTemplate[] = [
     summary: `{C} is a technology company that builds and operates internet services for business and consumer customers. Its platform consists of customer-facing web and mobile applications, backend APIs, data processing pipelines and internal operation systems. Continued user growth and new product launches require the platform to scale reliably while maintaining high availability.`,
     migrationBackground: `{C}'s workloads currently run in a self-managed environment. To gain elastic capacity, improve availability and accelerate product delivery, {C} is migrating its application and data services to AWS, running both environments in parallel during the transition to avoid service interruption.`,
     coreBusiness: `Customer-facing web and mobile applications, backend APIs, data processing and analytics, user and account management, and internal operation systems.`,
-    technicalArchitecture: `A multi-AZ VPC with public subnets for load balancers and NAT gateways and private subnets for application servers on EC2 Auto Scaling groups. Databases run on Amazon RDS (Multi-AZ), and Amazon S3 stores static assets, backups and logs.`,
+    technicalArchitecture: `Users reach the platform through Amazon CloudFront, Amazon Route 53, AWS WAF and AWS Shield. In a dual-AZ VPC, web and application services run on Auto Scaling compute behind an ELB ingress and are decoupled with RocketMQ and Amazon MSK (Kafka). Amazon Aurora and Amazon ElastiCache (Redis) serve as the data tier, Amazon EMR, Amazon Redshift and an Amazon S3 data lake support analytics, and a cross-region disaster-recovery copy is maintained in a second AWS Region.`,
+    archImage: 'taiping.png',
     resourceComponents: [
       { name: 'Application Services', useType: 'Core services', purpose: 'Customer-facing web and mobile backends.', weight: 0.28 },
       { name: 'API & Integration Layer', useType: 'Integration', purpose: 'Public APIs and partner integrations.', weight: 0.18 },
@@ -188,7 +199,7 @@ function escapeHtml(s: string): string {
 /**
  * 公司名 + 行业 → 文档用的 CompanyProfile。
  * 文案里的 {C} 替换成**已转义**的公司名（buildHTML 直接插入 profile 文案）；
- * archImage 为空 → doc-generator 使用通用架构图。
+ * 架构图复用行业对应的已有图（INDUSTRY_TEMPLATES[].archImage）。
  */
 export function buildIndustryProfile(companyName: string, industryKey: string): CompanyProfile {
   const name = normalizeCompanyName(companyName);
@@ -205,7 +216,7 @@ export function buildIndustryProfile(companyName: string, industryKey: string): 
     coreBusiness: fill(t.coreBusiness),
     technicalArchitecture: fill(t.technicalArchitecture),
     sourceCloud: t.sourceCloud,
-    archImage: '',
+    archImage: t.archImage,
     resourceComponents: t.resourceComponents,
   };
 }

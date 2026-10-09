@@ -140,7 +140,6 @@ AWS/
     │   ├── doc-generator.ts        # 生成提额申请 PDF（puppeteer）
     │   ├── doc-templates.ts        # ★公司模板 + 账户→公司 / payer→公司 映射 + 区域显示名（仅 yanhuang 系）
     │   ├── doc-industries.ts       # ★行业模板：非 yanhuang payer 用「自家公司名 + 行业」生成文档
-    │   ├── doc-arch-svg.ts         # 通用多 AZ 架构图（内联 SVG，行业模式使用）
     │   ├── case-doc-submitter.ts   # ★一键提交提额文档到 Support Case（生成 PDF → 联邦登录 → Reply → 传附件 → Submit）
     │   # —— 账单导出 ——
     │   ├── billing-export-jobs.ts  # 账单导出持久化 job、全局队列、永久历史、重复下载与重启恢复
@@ -452,7 +451,7 @@ HTML 模板 + Puppeteer 渲染。公司背景库在 `doc-templates.ts`（12 家�
 **两种模式（按 payer 区分）**：
 
 - **yanhuang 系 payer**（`^yan-?huang`，含 `yan-huang21`）→ 专属公司模板。公司解析顺序：账户缓存的 `_payer` → `PAYER_TO_COMPANY` → `ACCOUNT_TO_COMPANY`；识别不出时前端弹出公司挑选，选过的按 payer 记在 localStorage（`quotaDocCompanyMemo`），下次预选但仍需确认。
-- **其它所有 payer**（GDEX、Freightly、SK1、海底捞……）→ **自家公司名 + 手选行业类型**（`server/doc-industries.ts`）。生成文档 / 一键提交 Case 前弹「确认文档公司与行业」：公司名默认 payer 名、可改成完整法定名称；行业从 `INDUSTRY_TEMPLATES` 选（物流、电商、游戏、金融科技、AI、SaaS、视频、通用）。按 payer 记在 localStorage（`quotaDocIdentityMemo`），下次预填仍需确认。**行业文案只以 `{C}`（公司名）为主语，不得出现任何 yanhuang 客户名**；架构图用 `doc-arch-svg.ts` 画的通用多 AZ 图，不嵌任何公司专属图片 —— `tests/doc-industries.test.ts` 锁定这两条。
+- **其它所有 payer**（GDEX、Freightly、SK1、海底捞……）→ **自家公司名 + 手选行业类型**（`server/doc-industries.ts`）。生成文档 / 一键提交 Case 前弹「确认文档公司与行业」：公司名默认 payer 名、可改成完整法定名称；行业从 `INDUSTRY_TEMPLATES` 选（物流、电商、游戏、金融科技、AI、SaaS、视频、通用）。按 payer 记在 localStorage（`quotaDocIdentityMemo`），下次预填仍需确认。**行业文案只以 `{C}`（公司名）为主语，不得出现任何 yanhuang 客户名**；架构图**复用 `doc-templates/architectures/` 里之前的图**（已逐张确认图中无公司名），按行业挑最接近的：物流→taosource、电商→malatrading、游戏→osstable、金融科技→buminiaga、AI→zyronix、SaaS/视频/通用→taiping；行业文案的 Technical Architecture 段与所用图一致。图片缺失时回退 taiping.png，不自绘 —— `tests/doc-industries.test.ts` 锁定这些规则。
 
 判定入口是 `GET /api/aws/quotas/doc-context/:accountId`（返回 `payer` / `isYanhuang` / 识别到的公司）；行业列表 `GET /api/aws/quotas/industries`。`generate-doc` 与 `case-doc-submit` 都接受 `companyName + industryKey`，两者同时给出时优先于 `companyKey` / 账户映射；`case-doc-submit` 在入队前就校验，避免后台 job 跑到一半才报错。手动「生成申请文档」弹窗顶部可切换两种模式，选中账户属于非 yanhuang payer 时默认行业模式并预填 payer 名。
 

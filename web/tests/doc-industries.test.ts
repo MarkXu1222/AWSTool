@@ -3,10 +3,13 @@
  *
  * 规则：yanhuang 系 payer 继续用 COMPANY_PROFILES 里各家公司的专属资料；
  * 其它 payer（GDEX、Freightly 等）一律用自家公司名 + 手选行业生成，
- * 文档里**不能**出现任何 yanhuang 客户的公司名或专属架构图 —— 否则等于拿别家公司的资料去提额。
+ * 文档里**不能**出现任何 yanhuang 客户的公司名 —— 否则等于拿别家公司的资料去提额。
+ * 架构图复用之前的图（图中已确认无公司名），不自己画。
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
 import {
   INDUSTRY_TEMPLATES, buildIndustryProfile, isYanhuangPayer, normalizeCompanyName, getIndustry,
 } from '../server/doc-industries';
@@ -30,6 +33,8 @@ test('行业模板：key 唯一、权重之和为 1、文案以 {C} 为主语且
     assert.ok(t.summary.includes('{C}'), `${t.key} summary 缺少 {C}`);
     const text = [t.summary, t.migrationBackground, t.coreBusiness, t.technicalArchitecture].join(' ').toLowerCase();
     for (const n of clientNames) assert.ok(!text.includes(n), `${t.key} 文案含专属客户名 ${n}`);
+    assert.ok(t.archImage, `${t.key} 缺少架构图`);
+    assert.ok(fs.existsSync(path.join(__dirname, '../../doc-templates/architectures', t.archImage)), `${t.key} 架构图文件不存在 ${t.archImage}`);
   }
   assert.ok(getIndustry('general'), '必须有通用兜底行业');
 });
@@ -39,7 +44,7 @@ test('公司名替换且 HTML 转义，空公司名 / 未知行业报错', () =>
   assert.equal(p.displayName, 'A&B <Logistics> Sdn Bhd');
   assert.ok(p.summary.startsWith('A&amp;B &lt;Logistics&gt; Sdn Bhd is'));
   assert.ok(!p.summary.includes('{C}'));
-  assert.equal(p.archImage, '');
+  assert.equal(p.archImage, 'taosource.png');
   assert.throws(() => buildIndustryProfile('   ', 'logistics'), /公司名/);
   assert.throws(() => buildIndustryProfile('GDEX', 'nope'), /未知的行业/);
   assert.equal(normalizeCompanyName('a\n\tb'), 'a b');
@@ -53,13 +58,13 @@ test('resolveDocProfile：行业模式优先于 companyKey，缺一项报错', (
   assert.equal(resolveDocProfile({ ...base, companyKey: 'skymora' }).key, 'skymora');
 });
 
-test('行业模式 HTML：用自家公司名、通用架构图、包含新增章节、不出现其它公司', () => {
+test('行业模式 HTML：用自家公司名、之前的架构图、包含新增章节、不出现其它公司', () => {
   const params = { ...base, accountId: '123456789012', companyName: 'Freightly', industryKey: 'logistics', currentValue: 64 };
   const html = buildHTML(params, resolveDocProfile(params));
   assert.ok(html.includes('Freightly is a technology-driven logistics'));
-  assert.ok(html.includes('<svg'), '应使用通用架构图');
+  assert.ok(html.includes('<img class="arch-img" src="data:image/png;base64,'), '应嵌入之前的架构图');
+  assert.ok(!html.includes('<svg'), '不再使用自绘 SVG');
   assert.ok(!html.includes('架构图缺失'));
-  assert.ok(!html.includes('data:image/'), '不能嵌入任何公司专属架构图');
   for (const h of ['Justification for the Requested Value', 'Capacity Plan', 'Operations, Security &amp; Cost Governance', 'Initial Resource Need']) {
     assert.ok(html.includes(h), `缺少章节 ${h}`);
   }
@@ -78,4 +83,11 @@ test('下载文件名：行业模式取公司名的字母数字部分', () => {
   assert.equal(docFileCompanyPart({ ...base, companyName: 'GDEX Berhad (HQ)', industryKey: 'logistics' }), 'GDEX_Berhad_HQ');
   assert.equal(docFileCompanyPart({ ...base, companyName: '海底捞', industryKey: 'general' }), 'doc');
   assert.equal(docFileCompanyPart({ ...base, companyKey: 'skymora' }), 'skymora');
+});
+
+test('架构图文件缺失时回退到之前的通用图，不自绘', () => {
+  const p = { ...buildIndustryProfile('GDEX', 'general'), archImage: 'not-exist.png' };
+  const html = buildHTML({ ...base, companyName: 'GDEX', industryKey: 'general' }, p);
+  assert.ok(html.includes('data:image/png;base64,'));
+  assert.ok(!html.includes('<svg'));
 });

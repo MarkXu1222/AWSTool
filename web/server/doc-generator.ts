@@ -9,7 +9,6 @@ import { COMPANY_PROFILES, ACCOUNT_TO_COMPANY, PAYER_TO_COMPANY, companyFromPaye
 import { db } from './db';
 import { findMacHostQuota, isMacHostQuotaName } from './mac-quotas';
 import { buildIndustryProfile, normalizeCompanyName, isYanhuangPayer } from './doc-industries';
-import { genericArchitectureSvg } from './doc-arch-svg';
 
 const ARCH_DIR = path.join(__dirname, '../../doc-templates/architectures');
 
@@ -158,9 +157,13 @@ function buildResourceBreakdown(profile: CompanyProfile, total: number, unit: st
   return rows;
 }
 
-// 架构图 base64
+// 图片缺失时的兜底：之前的通用微服务架构图（图中无公司名）
+const FALLBACK_ARCH_IMAGE = 'taiping.png';
+
+// 架构图 base64：只用 doc-templates/architectures/ 里已有的图，不自己画
 function archImageDataUri(profile: CompanyProfile): string | null {
-  const p = path.join(ARCH_DIR, profile.archImage);
+  let p = path.join(ARCH_DIR, profile.archImage || FALLBACK_ARCH_IMAGE);
+  if (!fs.existsSync(p)) p = path.join(ARCH_DIR, FALLBACK_ARCH_IMAGE);
   if (!fs.existsSync(p)) return null;
   const ext = path.extname(p).slice(1) || 'png';
   const mime = ext === 'jpeg' || ext === 'jpg' ? 'image/jpeg' : 'image/png';
@@ -227,16 +230,9 @@ export function buildHTML(params: DocParams, profile: CompanyProfile): string {
   const quotaLabel = cls.modelNote ? `${cls.officialName} (${cls.modelNote})` : cls.officialName;
   const regionDisp = getRegionDisplay(params.region);
   const projected = Math.round(params.requestedValue * 1.5);
-  // 有公司专属架构图用图片；没有（行业模式 / 图片缺失）用通用 SVG，不再出现「架构图缺失」
-  const archUri = profile.archImage ? archImageDataUri(profile) : null;
-  const computeLabel = cls.category === 'mac' ? 'EC2 Mac Dedicated Hosts'
-    : cls.category === 'fargate' ? 'ECS on AWS Fargate'
-    : cls.category === 'workspace' ? 'Amazon WorkSpaces'
-    : cls.category === 'lightsail' ? 'Amazon Lightsail'
-    : 'EC2 Auto Scaling Group';
-  const archHtml = archUri
-    ? `<img class="arch-img" src="${archUri}" />`
-    : `<div class="arch-svg">${genericArchitectureSvg(regionDisp, computeLabel)}</div>`;
+  // 架构图一律用之前的图：专属模板用各自的图，行业模板用行业对应的图，缺失时回退 taiping.png
+  const archUri = archImageDataUri(profile);
+  const archHtml = archUri ? `<img class="arch-img" src="${archUri}" />` : '';
   const companyName = escapeHtml(profile.displayName);
   const today = new Date().toISOString().slice(0, 10);
   const rationale = categoryRationale(cls.category, cls.unit, params.requestedValue)
@@ -284,7 +280,6 @@ export function buildHTML(params: DocParams, profile: CompanyProfile): string {
   .total-row { background: #fff3e0 !important; }
   .quota-table th { background: #ff9900; color: #232f3e; }
   .arch-img { width: 100%; max-width: 100%; margin: 12px 0; border: 1px solid #e0e0e0; }
-  .arch-svg { margin: 12px 0; border: 1px solid #e0e0e0; padding: 6px; page-break-inside: avoid; }
   .label { font-weight: 600; color: #232f3e; }
   .meta { width: 100%; border-collapse: collapse; margin: 8px 0 14px; font-size: 10.5px; }
   .meta td { padding: 5px 8px; border: 1px solid #e3e6ea; }
