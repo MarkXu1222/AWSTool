@@ -25,7 +25,7 @@ const KNOWN_DEPARTURES: Record<string, { payer: string; departedAt?: string; act
   '911167918243': { payer: 'yanhuang5-global', departedAt: '2026-07-25T11:31:19Z', actor: 'ADFS-Admin/zzawsmanage@aws.com' },
   '509399618054': { payer: 'yanhuang5-global', departedAt: '2026-07-23T18:27:56Z', actor: 'ADFS-Admin/zzawsmanage@aws.com', note: '平台基础身份所在账户，移出后作为独立账户运行' },
   '842675992497': { payer: 'yanhuang5-global', departedAt: '2026-07-23T18:09:14Z', actor: 'ADFS-Admin/zzawsmanage@aws.com' },
-  '250531684043': { payer: 'webby02', departedAt: '2026-08-05T14:53:16Z', actor: 'user/webby-admin' },
+  '250531684043': { payer: 'Freightly', departedAt: '2026-08-05T14:53:16Z', actor: 'user/webby-admin' },
   '251335054976': { payer: 'yanhuang3-taoVolt', note: 'CloudTrail 仅见 2026-06-26 三次移出尝试均报 ConstraintViolationException，最终离开方式不明' },
   '312605973834': { payer: 'yanhuang3-taoVolt', note: 'CloudTrail 仅见 2026-06-12 移出尝试报 ConstraintViolationException，最终离开方式不明' },
 };

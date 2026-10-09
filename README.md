@@ -1090,7 +1090,7 @@ MAP 主标签 `map-migrated` 是固定纪律（key 不可改，每个组织只�
 > `tests/tag-compliance-policy.test.ts` 会断言 Action 数量与关键 Action 存在，
 > 防止模板被重排后正则失配、静默生成空策略。
 
-变更前后实测（webby02 / FFCloud / nexstack 三个组织）：`found=142 tagged=81 failed=59` → `found=73 tagged=71 failed=1`。
+变更前后实测（Freightly（原 webby02）/ FFCloud / nexstack 三个组织）：`found=142 tagged=81 failed=59` → `found=73 tagged=71 failed=1`。
 
 > **MAP 计费口径提醒**：payer 管理账户内多为账单桶、CUR 桶等运维基础设施，
 > 并非客户迁移的工作负载。是否计入 MAP 报销基数需与 AWS 侧确认；
