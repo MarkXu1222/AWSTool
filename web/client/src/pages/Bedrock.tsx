@@ -1005,7 +1005,10 @@ const BedrockPage: React.FC = () => {
     accounts.forEach(a => { const p = a._payer || 'other'; if (!grouped[p]) grouped[p] = []; grouped[p].push(a); });
     return Object.entries(grouped).map(([payer, accts]) => ({
       label: payer,
-      options: accts.map(a => ({ label: `${a.Name} (${a.Id})`, value: a.Id })),
+      options: accts.map(a => ({
+        label: `${a.Name} (${a.Id})`, value: a.Id, email: a.Email || '',
+        searchText: `${a.Name || ''} ${a.Id} ${a.Email || ''}`.toLowerCase(),
+      })),
     }));
   })();
 
@@ -1020,7 +1023,19 @@ const BedrockPage: React.FC = () => {
 
       <div className="filter-bar">
         <Select placeholder="选择账户" style={{ width: 260 }} value={selectedAccount || undefined}
-          onChange={setSelectedAccount} showSearch optionFilterProp="label" size="small" options={accountOptions} />
+          onChange={setSelectedAccount} showSearch size="small" popupMatchSelectWidth={360}
+          // 名称 / ID / 邮箱都可搜；分组标题没有 searchText，只要有关键词就交给子项判断
+          filterOption={(input, option: any) => {
+            const kw = input.trim().toLowerCase();
+            return !kw || String(option?.searchText ?? '').includes(kw);
+          }}
+          optionRender={(opt) => (
+            <div>
+              <div>{opt.label}</div>
+              {opt.data.email && <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>{opt.data.email}</div>}
+            </div>
+          )}
+          options={accountOptions} />
         {!selectedAccount && <span style={{ fontSize: 12, color: '#d46b08' }}>所有操作走 Admin 凭证，请先选择账户</span>}
       </div>
 
