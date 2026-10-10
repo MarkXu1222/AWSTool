@@ -1002,11 +1002,25 @@ const QuotasPage: React.FC = () => {
       {/* 筛选卡片区 */}
       <div className="filter-bar">
         <Select placeholder="选择账户" style={{ width: 220 }} value={selectedAccount || undefined} onChange={setSelectedAccount}
-          showSearch optionFilterProp="label" size="small"
+          showSearch size="small" popupMatchSelectWidth={360}
+          // 名称 / ID / 邮箱都可搜；分组标题没有 searchText，只要有关键词就交给子项判断
+          filterOption={(input, option: any) => {
+            const kw = input.trim().toLowerCase();
+            return !kw || String(option?.searchText ?? '').includes(kw);
+          }}
+          optionRender={(opt) => (
+            <div>
+              <div>{opt.label}</div>
+              {opt.data.email && <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>{opt.data.email}</div>}
+            </div>
+          )}
           options={(() => {
             const grouped: Record<string, any[]> = {};
             accounts.forEach(a => { const p = a._payer || 'other'; if (!grouped[p]) grouped[p] = []; grouped[p].push(a); });
-            return Object.entries(grouped).map(([payer, accts]) => ({ label: payer, options: accts.map(a => ({ label: `${a.Name} (${a.Id})`, value: a.Id })) }));
+            return Object.entries(grouped).map(([payer, accts]) => ({ label: payer, options: accts.map(a => ({
+              label: `${a.Name} (${a.Id})`, value: a.Id, email: a.Email || '',
+              searchText: `${a.Name || ''} ${a.Id} ${a.Email || ''}`.toLowerCase(),
+            })) }));
           })()} />
         <Select style={{ width: 180 }} value={selectedService} onChange={setSelectedService} showSearch optionFilterProp="label" options={SERVICES} size="small" />
         <Select style={{ width: 220 }} value={selectedRegion} onChange={setSelectedRegion} options={REGIONS} size="small" showSearch optionFilterProp="label" />
