@@ -1236,7 +1236,7 @@ StackSets 要求 payer 管理账户先启用全部目标区域。以前 `deploy_
 
 `getExcludedAccountIds()` **刻意不按 state 过滤**：只要账户被标记过（记录未删）就一律排除。`state=failed` 表示收窄执行失败，但账户很可能已从组织级 StackSet 摘除，若因 failed 漏掉排除，下次全量下发就会把宽权限重新盖回客户账户，直接违反对客户的承诺。取消标记走 `unmarkRestricted()`，它会删除记录。
 
-复验（`verifyRestricted`）要同时满足三条，缺一即判失败：带 ExternalId 能 AssumeRole、**不带 ExternalId 必须被拒**（否则条件没生效）、`iam:GetRole` 必须被拒（否则收窄没生效）。IAM 最终一致，改完信任策略要轮询重试（6 次 × 5 秒）。
+复验（`verifyRestricted`）要同时满足三条，缺一即判失败：带 ExternalId 能 AssumeRole、**不带 ExternalId 必须被拒**（否则条件没生效）、`iam:GetRole` 必须被拒（否则收窄没生效）。IAM 最终一致，每一项都要轮询重试（`VERIFY_MAX_ATTEMPTS` 36 次 × 5 秒，约 3 分钟，生效即返回）；删除 admin-console 后的「必须被拒」复验同样适用。原先 6 次 × 5 秒（30 秒）不够：2026-10-10 生产 4 个账户在 30 秒内不带 ExternalId 仍被放行，被误判为 failed，几分钟后复测全部被拒。重跑收窄是幂等的：已存在的 `support_policy_backup` 不会被覆盖，角色上已有 `SupportQuotaRestricted` 时备份记为默认策略，ExternalId 沿用原值。
 
 **重复标记幂等**：ExternalId 不变、`marked_at` 保留首次时间、已有备份不覆盖。已 `applied` 的 INVITED 账户删除 admin-console 后再标记会拿不到管理员凭证 —— 此时尚未改动任何 IAM，记录**保持 `applied`**，只写 `last_error`，不降级为 failed。
 

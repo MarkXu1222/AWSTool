@@ -208,6 +208,14 @@ async function assumePayer(payerName: string) {
 }
 
 /**
+ * IAM 最终一致：信任策略 / 角色删除 / 策略变更的全局生效实测可超过 30 秒
+ * （2026-10-10 生产 4 个账户在 30 秒窗口内不带 ExternalId 仍被放行，数分钟后复测全部被拒）。
+ * 每项复验最长轮询约 3 分钟，生效即返回，不会拖慢正常情况。
+ */
+const VERIFY_POLL_MS = 5000;
+const VERIFY_MAX_ATTEMPTS = 36;
+
+/**
  * 用 payer 管理员凭证二级跳进成员账户拿 admin。
  * 改 IAM 需要写权限，support-quota 自身（只读）改不了自己。
  */
@@ -298,14 +306,14 @@ async function removeAdmin(cf: CloudFormationClient, rootId: string, accountId: 
 
   // 删除完成仍需复验；IAM 传播延迟时短暂重试，网络错误不能被当作撤权成功。
   const sts = new STSClient({ region: REGION, credentials: BASE_CREDENTIALS });
-  for (let i = 0; i < 6; i++) {
+  for (let i = 0; i < VERIFY_MAX_ATTEMPTS; i++) {
     try {
       await sts.send(new AssumeRoleCommand({
         RoleArn: `arn:aws:iam::${accountId}:role/${ADMIN_ROLE}`,
         RoleSessionName: 'verify-admin-removed', DurationSeconds: 900,
       }));
     } catch (e) { if (isDenied(e)) return; throw e; }
-    await new Promise(r => setTimeout(r, 5000));
+    await new Promise(r => setTimeout(r, VERIFY_POLL_MS));
   }
   throw new Error(`收窄未完成：仍可 AssumeRole ${ADMIN_ROLE}`);
 }
@@ -317,8 +325,8 @@ async function verifyRestricted(accountId: string, externalId: string): Promise<
 
   // IAM 是最终一致的，信任策略刚改需要等一会儿
   let creds: any = null;
-  for (let i = 0; i < 6 && !creds; i++) {
-    await new Promise(r => setTimeout(r, 5000));
+  for (let i = 0; i < VERIFY_MAX_ATTEMPTS && !creds; i++) {
+    await new Promise(r => setTimeout(r, VERIFY_POLL_MS));
     try {
       const r = await sts.send(new AssumeRoleCommand({
         RoleArn: roleArn, RoleSessionName: 'verify-restricted', DurationSeconds: 900, ExternalId: externalId,
@@ -330,12 +338,12 @@ async function verifyRestricted(accountId: string, externalId: string): Promise<
 
   // 不带 ExternalId 必须被拒，否则条件没生效。
   // 旧信任策略（无条件）在 IAM 传播完成前仍可能放行 —— 上面带 ExternalId 的成功也可能是旧策略放行的，
-  // 因此这里同样要轮询，不能一次放行就判失败（2026-10 生产曾因此把已收窄的 4 个账户误判为 failed）。
+  // 因此这里同样要轮询，不能一次放行就判失败（2026-10 生产曾因此把已收窄的 4 个账户误判为 failed，见 VERIFY_MAX_ATTEMPTS）。
   let externalIdEnforced = false;
-  for (let i = 0; i < 6 && !externalIdEnforced; i++) {
+  for (let i = 0; i < VERIFY_MAX_ATTEMPTS && !externalIdEnforced; i++) {
     try {
       await sts.send(new AssumeRoleCommand({ RoleArn: roleArn, RoleSessionName: 'verify-noext', DurationSeconds: 900 }));
-      await new Promise(r => setTimeout(r, 5000));
+      await new Promise(r => setTimeout(r, VERIFY_POLL_MS));
     } catch (e) {
       if (!isDenied(e)) throw e;
       externalIdEnforced = true;
@@ -350,10 +358,10 @@ async function verifyRestricted(accountId: string, externalId: string): Promise<
       accessKeyId: creds.AccessKeyId, secretAccessKey: creds.SecretAccessKey, sessionToken: creds.SessionToken,
     },
   });
-  for (let i = 0; i < 6; i++) {
+  for (let i = 0; i < VERIFY_MAX_ATTEMPTS; i++) {
     try {
       await iam.send(new GetRoleCommand({ RoleName: SUPPORT_ROLE }));
-      await new Promise(r => setTimeout(r, 5000));
+      await new Promise(r => setTimeout(r, VERIFY_POLL_MS));
     } catch (e) {
       if (!isDenied(e)) throw e;
       return { ok: true };

@@ -210,6 +210,14 @@ test('verification tolerates IAM trust-policy propagation instead of reporting a
   assert.equal(f.records[0].state, 'applied');
 });
 
+test('verification waits beyond 30 seconds for slow trust-policy propagation', async t => {
+  // 2026-10-10 生产：4 个账户不带 ExternalId 在 30 秒（6 次轮询）内仍被放行，数分钟后才被拒
+  const f = await fixture(t, { trustLag: 20 }), result = await f.restricted.markRestricted([target]);
+  assert.equal(result.results[0].ok, true, result.results[0].error);
+  assert.equal(f.records[0].state, 'applied');
+  assert.equal(f.roles.has('admin-console'), false);
+});
+
 test('ExternalId that never takes effect is still reported as a failure', async t => {
   const f = await fixture(t, { trustLag: 100 }), result = await f.restricted.markRestricted([target]);
   assert.equal(result.results[0].ok, false);
