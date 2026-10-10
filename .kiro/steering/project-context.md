@@ -189,7 +189,7 @@ Bedrock 配额特意用 `/api/bedrock` 独立前缀，就是为了躲开 `/quota
 | `case-doc-submitter.ts` | 文件名回显 ≠ 上传完成；成功判定只认 Reply textarea 收起（用页面文案判断会假成功） |
 | `index.ts` 的 CORS | 拒绝必须 `callback(null, false)`，**绝不 throw** —— throw 会被 Express 当 500，导致带 `crossorigin` 的静态资源失败、整站白屏 |
 | 任何 CSV 导出 | 数字不加千分位，`toLocaleString()` 的逗号会让下游 `split(',')` 串位 |
-| `restricted-accounts.ts` | `getExcludedAccountIds()` 刻意不按 state 过滤；取消标记的顺序不能反（先装回权限，再删受限 StackSet） |
+| `restricted-accounts.ts` | `getExcludedAccountIds()` 刻意不按 state 过滤；收窄会**删除 admin-console**、OAAR 保留（Admin 凭证 ≤1h），INVITED 账户收窄后只剩 support-quota；取消标记顺序不能反（先补回 admin-console 并按备份恢复 support 权限，最后删记录）。`tests/restricted-admin-access.test.ts` 锁死 |
 | POC Cash IAM 策略 | action 前缀是 `partnercentral:`，**不是** `partnercentral-selling:`，写错整个策略静默失效 |
 | 批量 Root 改密 | 提交边界语义复杂，`password_unknown` 绝不自动重试。改动前必读 `web/ROOT_EMAIL.md` |
 

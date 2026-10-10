@@ -23,7 +23,7 @@ import {
 } from '@aws-sdk/client-cloudformation';
 import { db } from './db';
 import { notifyAccountRoleIssues } from './notify';
-import { isRestricted } from './restricted-accounts';
+import { getExcludedAccountIds, getExternalId } from './restricted-accounts';
 
 // ===== 配置 =====
 let CONFIG: any = {};
@@ -62,7 +62,8 @@ function parseAdminRoleExcludedAccounts(value: unknown): Set<string> {
 }
 
 const ADMIN_ROLE_EXCLUDED_ACCOUNT_IDS = parseAdminRoleExcludedAccounts(CONFIG.adminRoleExcludedAccounts);
-const isAdminRoleExcluded = (accountId: string) => ADMIN_ROLE_EXCLUDED_ACCOUNT_IDS.has(accountId);
+const isAdminRoleExcluded = (accountId: string) => ADMIN_ROLE_EXCLUDED_ACCOUNT_IDS.has(accountId)
+  || getExcludedAccountIds().includes(accountId);
 
 // StackSet 名称与角色的对应关系（与已部署的组织级 StackSet 保持一致）
 const STACKSET_FOR: Record<'support' | 'admin', string> = {
@@ -107,10 +108,12 @@ async function pool<T>(items: T[], n: number, fn: (x: T) => Promise<any>) {
 /** 尝试 AssumeRole，成功返回 true。仅用于探测角色是否存在且信任本平台。 */
 async function canAssume(accountId: string, roleName: string): Promise<boolean> {
   try {
+    const externalId = roleName === SUPPORT_ROLE ? getExternalId(accountId) : undefined;
     await stsClient(BASE_CREDENTIALS).send(new AssumeRoleCommand({
       RoleArn: `arn:aws:iam::${accountId}:role/${roleName}`,
       RoleSessionName: 'awstool-roleprobe',
       DurationSeconds: 900,
+      ...(externalId ? { ExternalId: externalId } : {}),
     }));
     return true;
   } catch {
@@ -283,9 +286,8 @@ export async function syncAccountRoles(opts: SyncOptions = {}): Promise<SyncResu
     for (const p of needFix) {
       const payer = p.acct._payer;
       if (!payer) continue;
-      // 敏感权限客户账户的角色由独立受限 StackSet 管理，
-      // 走组织级 StackSet 补齐会把宽权限盖回去，直接跳过
-      if (isRestricted(p.acct.Id)) continue;
+      // 所有收窄记录（包括失败）均禁止用组织级 StackSet 补回宽权限。
+      if (getExcludedAccountIds().includes(p.acct.Id)) continue;
       const rec = knownMap.get(p.acct.Id);
       // 超过尝试上限的不再补（全量复检会重置机会）
       if (!opts.full && (rec?.attempts || 0) >= MAX_ATTEMPTS) continue;

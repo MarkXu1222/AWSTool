@@ -411,7 +411,7 @@ admin 恒有，其他角色必须显式授予，且**都不受 `allowed_pages` �
 - `account_roles` — 各账户 `support-quota` / `admin-console` 可用性与自愈状态（`ok` / `partial` / `pending` / `unreachable` + 尝试次数）
 - `tag_onboarding_jobs` — MAP 全自动接入任务、阶段产物、重试与恢复状态
 - `billing_export_jobs` — 账单导出队列、进度、结果、取消/中断状态与下载元数据
-- `restricted_accounts` — 敏感权限客户账户（加密的 `external_id_enc`、state、last_error）。**同时是 `setup-org-stacksets.ts` 的 StackSet 排除名单来源**
+- `restricted_accounts` — 敏感权限客户账户（加密的 `external_id_enc`、state、last_error、可选 `support_policy_backup` 原策略备份）。**同时是 `setup-org-stacksets.ts` 的 StackSet 排除名单来源**
 - `departed_accounts` — 已移出组织的账户记录（含 `rejoined_at` 轨迹）
 
 这些键**按需创建**：本地开发库通常只有 `users` / `quota_requests` / `audit_log` / `accounts_cache` / `region_data` 几个，缺少 `account_roles`、`billing_export_jobs`、`restricted_accounts` 等属正常现象。**判断 schema 一律以 `db.ts` 代码为准，不要拿本地 `db.json` 当权威** —— 本地库的账户数也远少于生产。
@@ -1215,25 +1215,40 @@ StackSets 要求 payer 管理账户先启用全部目标区域。以前 `deploy_
 
 默认下发的 `support-quota` 附带 `ReadOnlyAccess` 托管策略（2900+ action），有客户会审出来并要求收窄。`restricted-accounts.ts` 把收窄**精确到账户级**：同组织其他账户不受影响，平台自己的 StackSet 也不会把宽权限再盖回来。
 
-收窄后保留的权限只够查配额与区域状态：`servicequotas:Get*/List*`、`account:GetRegionOptStatus`、`account:ListRegions`、`sts:GetCallerIdentity`。信任策略额外要求 `sts:ExternalId`，**每账户一套 ExternalId**，一个泄露不牵连其它账户。
+三个平台角色的规则（0.51.0 起）：
 
-隔离手段三步：
+| 角色 | 受限账户上的规则 |
+|------|------------------|
+| `OrganizationAccountAccessRole`（OAAR） | **保留不动**。Admin 临时凭证（角色链，AWS 硬上限 **1 小时**）、Admin 控制台、区域开通都经 payer `role/tool` → OAAR 执行 |
+| `admin-console` | **删除**（StackSet 实例 `RetainStacks=false`；不在 StackSet 里的手工角色走 IAM 摘策略后 `DeleteRole`），删完复验 AssumeRole 必须被拒（只认 `AccessDenied`，网络错误不算成功）。自愈与组织脚本都不补回；若再次出现，`account-roles.ts` 把账户标为 `partial` 持续暴露 |
+| `support-quota` | 收窄为内联策略 `SupportQuotaRestricted`：`servicequotas:Get*/List*`（含提额进度）、`servicequotas:RequestServiceQuotaIncrease`、`support:*`（提额文档自动回帖与附件上传依赖 Support Center，AWS 未完整公开其 action）、`account:GetRegionOptStatus/ListRegions`、`sts:GetCallerIdentity`，加限定 `servicequotas.amazonaws.com` 的 `iam:CreateServiceLinkedRole`。信任策略要求 `sts:ExternalId`，**每账户一套** |
+
+**INVITED 账户**本来就没有 OAAR，删掉 admin-console 后平台**只剩 support-quota**：`isSupportOnlyRestricted()`（受限 + 账户缓存 `JoinedMethod === 'INVITED'`）为真时，Admin 临时凭证、Admin 控制台、区域开通直接 409 提示，不去尝试 AssumeRole。标记弹窗对选中的 INVITED 账户单独警示。
+
+隔离手段：
 
 1. 从组织级 StackSet `support-quota-role-orgwide` 移除该账户实例，`DeleteStackInstances` 带 **`RetainStacks=true`** —— 只脱离管理、不删账户内角色，过程中平台访问不中断
-2. 角色本身是**就地改造 IAM**（`UpdateAssumeRolePolicy` 加 ExternalId 条件 + `DetachRolePolicy` 摘掉 ReadOnlyAccess + 挂内联策略 `SupportQuotaRestricted`），不是靠 StackSet 部署。改 IAM 需要写权限，只读的 `support-quota` 改不了自己，所以要用 payer 二级跳拿成员账户 admin
-3. `AutoDeployment` 只在账户「加入 OU」时触发，已移除的实例不会被自动重建
+2. 角色本身是**就地改造 IAM**（首次修改前把原托管/内联策略备份到记录的 `support_policy_backup` → `DetachRolePolicy` 摘掉 ReadOnlyAccess + 挂 `SupportQuotaRestricted` → `UpdateAssumeRolePolicy` 加 ExternalId 条件），不是靠 StackSet 部署。改 IAM 需要写权限，所以用 payer 二级跳拿成员账户 OAAR（INVITED 账户用 admin-console）
+3. 复验通过后删除 `admin-console`
+4. `AutoDeployment` 只在账户「加入 OU」时触发，已移除的实例不会被自动重建
 
-⚠️ **最容易漏的一环**：手工跑 `scripts/setup-org-stacksets.ts` 会重新覆盖，因此该脚本必须读取 `data/db.json` 的 `restricted_accounts` 排除名单（已实现，见脚本第 59 行）。这也是 README 部署章节强调「必须在 EC2 权威数据环境执行、不能用空白或陈旧本地 DB」的原因。
+⚠️ **最容易漏的一环**：手工跑 `scripts/setup-org-stacksets.ts` 会重新覆盖，因此该脚本必须读取 `data/db.json` 的 `restricted_accounts` 排除名单（support 与 admin 两个 StackSet 都排除）。这也是 README 部署章节强调「必须在 EC2 权威数据环境执行、不能用空白或陈旧本地 DB」的原因。
 
 `getExcludedAccountIds()` **刻意不按 state 过滤**：只要账户被标记过（记录未删）就一律排除。`state=failed` 表示收窄执行失败，但账户很可能已从组织级 StackSet 摘除，若因 failed 漏掉排除，下次全量下发就会把宽权限重新盖回客户账户，直接违反对客户的承诺。取消标记走 `unmarkRestricted()`，它会删除记录。
 
 复验（`verifyRestricted`）要同时满足三条，缺一即判失败：带 ExternalId 能 AssumeRole、**不带 ExternalId 必须被拒**（否则条件没生效）、`iam:GetRole` 必须被拒（否则收窄没生效）。IAM 最终一致，改完信任策略要轮询重试（6 次 × 5 秒）。
 
-取消标记的**顺序不能反**：先装回默认权限（去掉 ExternalId 条件 + 删内联策略），再删受限 StackSet 让组织级 StackSet 重新托管。反过来会有一段时间完全无法访问该账户。
+**重复标记幂等**：ExternalId 不变、`marked_at` 保留首次时间、已有备份不覆盖。已 `applied` 的 INVITED 账户删除 admin-console 后再标记会拿不到管理员凭证 —— 此时尚未改动任何 IAM，记录**保持 `applied`**，只写 `last_error`，不降级为 failed。
 
-调用侧：`aws-service.ts` 在 AssumeRole 时对 `support-quota` 自动带上 `getExternalId(accountId)`（admin 类角色不受此约束）。受限账户会失去**账单成本分析、资源清理扫描、账户详情的 IAM 安全状态**，属预期取舍 —— 调用方应据 `isRestricted()` 给出明确提示，而不是抛裸 `AccessDenied`。ExternalId 加密存储（`external_id_enc`），列表接口不返回明文，只有严格 admin 可单独调 `/external-id` 取用于交付客户，并记 `ACCOUNT_EXTERNALID_VIEW` 审计。
+取消标记的**顺序不能反**：先经 payer StackSet 补回 `admin-console`（INVITED 账户只能靠它进入）→ 按 `support_policy_backup` 恢复 support 原托管/内联策略（旧记录无备份时用默认 ReadOnlyAccess + AWSSupportAccess + SupportQuotaPerms）→ 去掉 ExternalId 条件 → 删 `SupportQuotaRestricted` → 最后删记录。已知限制：恢复后的 support-quota 不回到组织级 StackSet 托管（同名角色已存在，StackSet 无法重建）。
 
-审计动作：`ACCOUNT_RESTRICT`、`ACCOUNT_UNRESTRICT`、`ACCOUNT_EXTERNALID_VIEW`。
+调用侧（`aws-service.ts`）：
+- AssumeRole `support-quota` 自动带上 `getExternalId(accountId)`；受限账户的 support 拒绝**不写入** `supportRoleUnavailable` 缓存（标记过程中信任策略切换的短暂拒绝不能把账户打入不可用直到重启）
+- `assumeToAccount()` 对受限账户在 support 失败时**直接报错，不回退 OAAR**（查询类功能不自动提权）
+- `getTempAdminCredentials()` / `assumeAdminViaOAAR()` 对受限账户跳过 admin-console 一级跳直接走 OAAR；`durationHours > 1` 返回 409
+- 区域开通（`routes/regions.ts` → `getTempAdminCredentials(id)`，1h）因此自动走 OAAR，路由不需要改；区域状态查询仍走 support-quota
+
+受限账户会失去**资源清理扫描、账户详情的 IAM 安全状态、超过 1 小时的 Admin 临时凭证**，属预期取舍 —— 调用方应据 `isRestricted()` 给出明确提示，而不是抛裸 `AccessDenied`。ExternalId 加密存储（`external_id_enc`），列表接口不返回明文，只有严格 admin 可单独调 `/external-id` 取用于交付客户，并记 `ACCOUNT_EXTERNALID_VIEW` 审计。
 
 ### 离场账户追踪
 
@@ -1335,7 +1350,7 @@ Nginx 反代 + Let's Encrypt（`markxu.co`，自动续期），80 强制跳 443�
 | 加 payer | 按下方「新增 payer 安全 Runbook」执行；角色、双 StackSet、生产配置和验收缺一不可，不能只改 `config.json` |
 | 新增公司模板 | `doc-templates.ts` 的 `COMPANY_PROFILES` 加资料 + `ACCOUNT_TO_COMPANY`/`PAYER_TO_COMPANY` 加映射 → 架构图放 `doc-templates/architectures/` |
 | 调同步频率 | `scheduler.ts` |
-| 客户要求收窄平台权限 | 账户页标记为「敏感权限客户」（`POST /accounts/restricted`）→ 收窄逻辑在 `restricted-accounts.ts`；改收窄范围要同步改 `RESTRICTED_POLICY_DOC` 与 `RESTRICTED_UNAVAILABLE` 提示 |
+| 客户要求收窄平台权限 | 账户页标记为「敏感权限客户」（`POST /accounts/restricted`）→ 收窄逻辑在 `restricted-accounts.ts`；改收窄范围要同步改 `RESTRICTED_POLICY_DOC` 与 `RESTRICTED_UNAVAILABLE` 提示，并跑 `tests/restricted-admin-access.test.ts` |
 
 ### 新增 payer 安全 Runbook
 

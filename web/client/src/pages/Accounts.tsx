@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { Card, Table, Tag, Button, Space, message, Input, Spin, Descriptions, Tabs, Badge, Dropdown, Switch, Tooltip, Modal, Select, Popconfirm } from 'antd';
-import { ReloadOutlined, SearchOutlined, SafetyOutlined, CheckCircleOutlined, CloseCircleOutlined, LeftOutlined, LoginOutlined, DownOutlined } from '@ant-design/icons';
+import { ReloadOutlined, SearchOutlined, SafetyOutlined, CheckCircleOutlined, CloseCircleOutlined, LeftOutlined, LoginOutlined, DownOutlined, WarningOutlined } from '@ant-design/icons';
 import { api } from '../api';
 import { exportToCSV } from '../utils/export';
 import RootCredentialsPanel from '../components/RootCredentialsPanel';
@@ -503,6 +503,9 @@ const AccountsPage: React.FC = () => {
   }
 
   // 敏感权限客户账户面板
+  // INVITED 账户没有 OAAR，收窄后平台只剩 support-quota，需单独警示
+  const invitedTargetCount = restrictTargets
+    .filter(id => accounts.some(a => a.Id === id && a.JoinedMethod === 'INVITED')).length;
   const renderRestrictModal = () => (
     <Modal
       title="敏感权限客户账户"
@@ -511,19 +514,27 @@ const AccountsPage: React.FC = () => {
       footer={null}
       width={880}
     >
-      <p style={{ color: 'rgba(0,0,0,0.55)', fontSize: 12, marginTop: 0 }}>
-        勾选后对该账户执行三件事：把它从组织级 StackSet 摘除（保留原角色，过程不断连）、
-        部署仅含 <code>servicequotas</code> / <code>account:GetRegionOptStatus</code> / <code>sts:GetCallerIdentity</code> 的受限角色、
-        信任策略加 <code>sts:ExternalId</code> 条件。**只影响该账户**，同组织其他账户不变。
+      <p style={{ color: 'var(--color-text-muted)', fontSize: 12, marginTop: 0 }}>
+        收窄 <code>support-quota</code>（仅保留配额查询、提额、提额进度、Support 工单和区域状态查询）并启用 <code>ExternalId</code>；
+        删除 <code>admin-console</code>；<code>OrganizationAccountAccessRole</code> 保留，
+        Admin 临时凭证（最长 1 小时）、Admin 控制台和区域开通经它执行。
+        只影响选中的账户，同组织其他账户不变。
       </p>
-      <div style={{ background: '#fff7e6', border: '1px solid #ffd591', borderRadius: 6, padding: '8px 12px', marginBottom: 12, fontSize: 12, color: '#d46b08' }}>
+      <div style={{ background: 'var(--color-warning-bg)', border: '1px solid var(--color-warning)', borderRadius: 6, padding: '8px 12px', marginBottom: 12, fontSize: 12, color: 'var(--color-text-secondary)' }}>
+        <WarningOutlined style={{ color: 'var(--color-warning)', marginRight: 6 }} aria-hidden />
         收窄后该账户以下功能将不可用：{restrictedUnavailable.join('；') || '—'}。
-        配额查询与提额、区域管理不受影响。
+        配额查询与提额、提额进度、Support 工单、区域管理不受影响（INVITED 账户除外）。
+        {invitedTargetCount > 0 && (
+          <div style={{ marginTop: 6, fontWeight: 600 }}>
+            已选 {invitedTargetCount} 个邀请加入的账户：它们没有 OrganizationAccountAccessRole，
+            收窄后平台只保留 support-quota，Admin 临时凭证、Admin 控制台、区域开通都将不可用。
+          </div>
+        )}
       </div>
 
       {isAdmin && (
         <div style={{ marginBottom: 12 }}>
-          <div style={{ fontSize: 12, color: 'rgba(0,0,0,0.65)', marginBottom: 4 }}>要标记的账户 ID（可多选，12 位数字）</div>
+          <div style={{ fontSize: 12, color: 'var(--color-text-secondary)', marginBottom: 4 }}>要标记的账户 ID（可多选，12 位数字）</div>
           <Select
             mode="tags"
             style={{ width: '100%' }}
@@ -534,7 +545,10 @@ const AccountsPage: React.FC = () => {
             options={accounts
               .filter(a => !a._isPayer && !restrictedMap[a.Id])
               .slice(0, 300)
-              .map(a => ({ label: `${a.Id} — ${a.Name} (${a._payer})`, value: a.Id }))}
+              .map(a => ({
+                label: `${a.Id} — ${a.Name} (${a._payer})${a.JoinedMethod === 'INVITED' ? ' · 邀请加入' : ''}`,
+                value: a.Id,
+              }))}
           />
           <Input
             style={{ marginTop: 8 }}

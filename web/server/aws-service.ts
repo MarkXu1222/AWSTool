@@ -39,7 +39,7 @@ import { LambdaClient, ListFunctionsCommand, GetFunctionConfigurationCommand, De
 import path from 'path';
 import fs from 'fs';
 import { db } from './db';
-import { getExternalId } from './restricted-accounts';
+import { getExternalId, isRestricted, isSupportOnlyRestricted } from './restricted-accounts';
 
 // Load shared config
 const CONFIG_PATH = path.join(__dirname, '../../config.json');
@@ -100,6 +100,12 @@ function parseAdminRoleExcludedAccounts(value: unknown): Set<string> {
 
 const ADMIN_ROLE_EXCLUDED_ACCOUNT_IDS = parseAdminRoleExcludedAccounts(config.adminRoleExcludedAccounts);
 const isAdminRoleExcluded = (accountId: string) => ADMIN_ROLE_EXCLUDED_ACCOUNT_IDS.has(accountId);
+/**
+ * 平台对该账户没有任何管理员入口：config 显式排除，或为受限的 INVITED 账户
+ * （admin-console 已删除且本来就没有 OAAR）。受限的 CREATED 账户仍可经 OAAR 取得 Admin。
+ */
+const isAdminUnavailable = (accountId: string, joinedMethod?: string) =>
+  isAdminRoleExcluded(accountId) || isSupportOnlyRestricted(accountId, joinedMethod);
 
 // Credential cache
 const adminCredsCache: Map<string, { creds: any; expiry: number }> = new Map();
@@ -177,7 +183,9 @@ function isPermanentSupportRoleFailure(error: unknown): boolean {
 
 async function tryAssumeSupportRole(accountId: string) {
   if (!SUPPORT_ROLE_NAME) return null;
-  if (supportRoleUnavailable.has(accountId)) return null;
+  // 受限账户在标记过程中信任策略会切换，短暂拒绝不能把它永久打入不可用（直到进程重启）
+  const restricted = isRestricted(accountId);
+  if (!restricted && supportRoleUnavailable.has(accountId)) return null;
   try {
     const roleArn = `arn:aws:iam::${accountId}:role/${SUPPORT_ROLE_NAME}`;
     // 敏感权限客户的账户，其角色信任策略要求 sts:ExternalId，不带会被拒
@@ -198,7 +206,7 @@ async function tryAssumeSupportRole(accountId: string) {
     };
   } catch (e) {
     // 仅缓存明确的角色/信任拒绝；超时、限流和网络错误必须允许后续重试。
-    if (isPermanentSupportRoleFailure(e)) supportRoleUnavailable.add(accountId);
+    if (!restricted && isPermanentSupportRoleFailure(e)) supportRoleUnavailable.add(accountId);
     return null;
   }
 }
@@ -245,6 +253,10 @@ async function assumeToAccount(accountId: string) {
   if (selfPayer) {
     console.log(`[assume] ${accountId} → payer role/tool (selfPayer)`);
     return await getAdminCredsForPayer(selfPayer.roleArn);
+  }
+
+  if (isRestricted(accountId)) {
+    throw new Error(`账户 ${accountId} 为敏感权限客户账户，support-quota 不可用时不回退管理员角色（请检查 ExternalId 与角色状态）`);
   }
 
   const roleArn = `arn:aws:iam::${accountId}:role/${CHILD_ROLE_NAME}`;
@@ -351,15 +363,25 @@ export async function getTempAdminCredentials(accountId: string, durationHours =
     }
   }
 
-  if (isAdminRoleExcluded(accountId)) {
+  if (isAdminUnavailable(accountId)) {
     throw new TempCredentialError('该账户已配置为仅保留 support-quota，不提供 Admin 临时凭证', 409);
+  }
+
+  // 敏感权限客户账户的 admin-console 已删除，只能经 OAAR 角色链签发（AWS 硬上限 1 小时）
+  const restricted = isRestricted(accountId);
+  if (restricted && durationHours > 1) {
+    throw new TempCredentialError(
+      '该账户为敏感权限客户账户，admin-console 已移除，Admin 临时凭证只能经 OrganizationAccountAccessRole 签发，最长 1 小时',
+      409,
+    );
   }
 
   let retryableFailure: any;
 
   // 情况 2：成员账户优先一级跳专用 admin-console。只有这条从长期 IAM 用户发起的直接链路支持 >1 小时。
   // INVITED 账户没有 OrganizationAccountAccessRole，也依赖这个由组织级 StackSet 下发的角色进入。
-  try {
+  // 受限账户跳过此步（角色已删除），直接进情况 3。
+  if (!restricted) try {
     const resp = await withAwsClient(
       new STSClient({ region: DEFAULT_REGION, credentials: BASE_CREDENTIALS }),
       sts => withAbortTimeout(AWS_REQUEST_TIMEOUT_MS, signal => sts.send(new AssumeRoleCommand({
@@ -642,7 +664,7 @@ export async function listAccounts() {
       do {
         const resp = await client.send(new ListAccountsCommand({ NextToken: nextToken }));
         for (const a of resp.Accounts || []) {
-          const adminRoleExcluded = Boolean(a.Id && isAdminRoleExcluded(a.Id));
+          const adminRoleExcluded = Boolean(a.Id && isAdminUnavailable(a.Id, a.JoinedMethod));
           allAccounts.push({
             ...a,
             _payer: payer.name,
@@ -1807,12 +1829,13 @@ async function assumeAdminViaOAAR(accountId: string) {
   if (selfPayer) {
     return await getAdminCredsForPayer(selfPayer.roleArn);
   }
-  if (isAdminRoleExcluded(accountId)) {
+  if (isAdminUnavailable(accountId)) {
     throw new Error(`账户 ${accountId} 已配置为仅保留 support-quota，Admin 控制台不可用`);
   }
 
-  // 优先一级跳专用 admin-console（INVITED 账户没有 OrganizationAccountAccessRole）
-  try {
+  // 优先一级跳专用 admin-console（INVITED 账户没有 OrganizationAccountAccessRole）；
+  // 受限账户的 admin-console 已删除，直接走 OAAR
+  if (!isRestricted(accountId)) try {
     const resp = await withAwsClient(
       new STSClient({ region: DEFAULT_REGION, credentials: BASE_CREDENTIALS }),
       sts => withAbortTimeout(AWS_REQUEST_TIMEOUT_MS, signal => sts.send(new AssumeRoleCommand({
@@ -1917,7 +1940,7 @@ export async function getConsoleSigninUrl(
 
   // admin-only 排除的成员账户必须显式走 support，禁止 auto 在 support 失败后回退 OAAR Admin。
   // payer 管理账户不属于成员 StackSet 范围，保持原有 role/tool 行为。
-  if (!selfPayer && isAdminRoleExcluded(accountId) && access !== 'support') {
+  if (!selfPayer && isAdminUnavailable(accountId) && access !== 'support') {
     throw new Error(`账户 ${accountId} 已配置为仅保留 support-quota，控制台仅允许只读模式`);
   }
 
