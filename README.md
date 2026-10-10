@@ -116,7 +116,7 @@ AWS/
 │   ├── setup_partner_central_role.py # ★APN 账户建 partner-central-tool role（dry-run/--execute/--verify）
 │   ├── partner_central.py / poc_*.py / create_*_opportunity.py  # POC Cash 相关
 │   └── calculator_api.py / find-p-quota.py / …
-├── tools/                          # 独立小工具：console-launcher、ocr-lab
+├── tools/                          # 独立小工具：console-launcher（网页下载版在 web/client/public/downloads/）、ocr-lab
 ├── electron/ + src/                # 桌面版（冻结）
 └── web/
     ├── server/                     # 后端（Express，tsx 直跑）
@@ -443,6 +443,15 @@ STS Federation。后端先取得目标账户临时凭证，再请求 `signin.aws
 | 成员账户 | `auto` | 按兼容回退链选择可用角色，供尚未完成专用角色部署的旧账户使用 |
 
 payer 只读会话的有效权限是 `role/tool` identity policy 与 `ReadOnlyAccess` session policy 的**交集**；session policy 只能收窄，不能增加权限。`admin` 控制台入口必须通过 `root_access` 实时门禁，并记录 `CONSOLE_ADMIN_LOGIN` 审计动作。排查实际会话类型时以 CloudTrail 的 `userIdentity.sessionContext.sessionIssuer`、session name 和请求错误为准，不要只看前端按钮文案。
+
+### 独立会话打开控制台（0.49.0 起对所有用户开放）
+
+同一浏览器只能持有一份 AWS 控制台会话。本地助手 `AWSConsoleLauncher.app` 注册 `awsconsole://`，收到调用后按账户 ID 用独立 `--user-data-dir` 启动 Chrome / Chromium / Edge，多个账户可同时保持登录。仅 macOS。
+
+- 前端：`client/src/utils/console-launch.tsx`。账户管理页「独立会话」开关对所有角色可见；账户页「控制台」和配额页 Case 列都会按该开关打开。这只是浏览器的打开方式，能否拿到登录链接仍由后端 `getConsoleUrl` 校验，不扩大任何权限。
+- 安装引导：网页无法探测本机是否注册了 scheme，因此「已安装」由用户点「我已安装」确认，存本浏览器 localStorage（`aws_console_launcher_installed`）。首次开启开关、或开关已开但未确认安装时点「控制台」，会弹出引导并**自动下载** `/downloads/aws-console-launcher-install.sh`，提示在终端运行 `bash ~/Downloads/aws-console-launcher-install.sh`。打开后的提示条有「用普通标签打开」「重新安装助手」两个退路。
+- 下载脚本是 `web/client/public/downloads/aws-console-launcher-install.sh`（由 Vite 原样拷入 `dist/client`，`express.static` 提供，无需登录，不含任何密钥），它**逐字内嵌** `tools/console-launcher/launch.sh` 和 `launcher.applescript`。改源文件必须同步下载版，`tests/console-launcher-bundle.test.ts` 会校验一致性。
+- `launch.sh` 只接受 12 位账户 ID 和 AWS 官方登录/控制台域名，其它网页无法借 scheme 打开任意站点。日志 `~/Library/Logs/aws-console-launcher.log`；卸载 `rm -rf ~/Applications/AWSConsoleLauncher.app`。
 
 ### 提额文档自动生成（PDF）
 

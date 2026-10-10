@@ -160,8 +160,6 @@ function writeDocIdentityMemo(key: string, v: { companyName: string; industryKey
 
 const QuotasPage: React.FC = () => {
   const [accounts, setAccounts] = useState<any[]>([]);
-  // 独立会话打开控制台仅 admin 可用
-  const [isAdmin, setIsAdmin] = useState(false);
   const [selectedAccount, setSelectedAccount] = useState('');
   const [selectedService, setSelectedService] = useState('ec2');
   const [selectedRegion, setSelectedRegion] = useState('us-east-1');
@@ -228,8 +226,6 @@ const QuotasPage: React.FC = () => {
   const [incRegionOverride, setIncRegionOverride] = useState<string | null>(null);
 
   useEffect(() => { loadAccounts(); loadDbRecords(); loadCompanies(); loadIndustries(); }, []);
-  // 取当前用户角色，用于独立会话打开控制台的门控
-  useEffect(() => { api.me().then(r => setIsAdmin(r.role === 'admin')).catch(() => {}); }, []);
 
   const loadAccounts = async () => { const res = await api.listAccounts(); if (res.success) setAccounts(res.data); };
   const loadDbRecords = async () => { const res = await api.listQuotaRequests(); if (res.success) setDbRecords(res.data); };
@@ -901,7 +897,7 @@ const QuotasPage: React.FC = () => {
               const res = await api.getConsoleUrl(record.account_id, { caseId: id });
               hide();
               if (res.success && res.url) {
-                openAwsConsole(res.url, record.account_id, isAdmin);
+                openAwsConsole(res.url, record.account_id);
               } else {
                 message.error(res.error || '生成链接失败');
               }

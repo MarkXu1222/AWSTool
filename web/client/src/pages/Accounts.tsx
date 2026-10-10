@@ -5,7 +5,7 @@ import { api } from '../api';
 import { exportToCSV } from '../utils/export';
 import RootCredentialsPanel from '../components/RootCredentialsPanel';
 import { hashColor, initials } from '../utils/color';
-import { openAwsConsole, isIsolatedEnabled, setIsolatedEnabled } from '../utils/console-launch';
+import { openAwsConsole, isIsolatedEnabled, setIsolatedEnabled, isLauncherInstalled, setLauncherInstalled, promptLauncherInstall } from '../utils/console-launch';
 
 // 账户彩色首字母头像
 const AccountAvatar: React.FC<{ name: string; id: string }> = ({ name, id }) => {
@@ -41,10 +41,16 @@ const AccountsPage: React.FC = () => {
   }, []);
   const [canRoot, setCanRoot] = useState(false);
   const [rootResetAccess, setRootResetAccess] = useState<'none' | 'view' | 'operate'>('none');
-  // 独立会话功能仅 admin 可见可用
+  // 权限检测等 admin 专属功能的门控
   const [isAdmin, setIsAdmin] = useState(false);
-  // 独立会话开关：开启后每个账户用独立浏览器 profile 打开，可同时登录多个账户
+  // 独立会话开关（所有用户可用）：开启后每个账户用独立浏览器 profile 打开，可同时登录多个账户
   const [isolated, setIsolated] = useState(isIsolatedEnabled());
+  // 首次开启需先装本地助手：未确认安装时弹安装引导，点「我已安装」才真正开启
+  const toggleIsolated = (on: boolean) => {
+    const apply = () => { setIsolated(on); setIsolatedEnabled(on); };
+    if (on && !isLauncherInstalled()) promptLauncherInstall({ onInstalled: apply });
+    else apply();
+  };
   // 账户角色自愈状态：accountId → 记录，用于在列表里标出平台无法访问的账户
   const [roleMap, setRoleMap] = useState<Record<string, any>>({});
   const [roleChecking, setRoleChecking] = useState(false);
@@ -213,7 +219,7 @@ const AccountsPage: React.FC = () => {
     }
   };
 
-  // 拉取当前用户的根用户凭证权限，决定是否展示根用户 tab 的敏感功能；同时取角色用于独立会话门控
+  // 拉取当前用户的根用户凭证权限，决定是否展示根用户 tab 的敏感功能；同时取角色用于 admin 专属功能门控
   useEffect(() => {
     api.me().then(r => {
       setCanRoot(!!r.rootAccess);
@@ -231,14 +237,15 @@ const AccountsPage: React.FC = () => {
       const res = await api.getConsoleUrl(accountId, access ? { access } : undefined);
       hide();
       if (res.success && res.url) {
-        const how = openAwsConsole(res.url, accountId, isAdmin);
+        const how = openAwsConsole(res.url, accountId);
         if (how === 'isolated') {
-          // 本地助手未安装时点击不会有反应，给一个退路
+          // 本地助手实际没装好时点击不会有反应，给两个退路
           message.info({
             content: (
               <span>
                 已用独立会话打开 {accountId}
                 <a style={{ marginLeft: 10 }} onClick={() => window.open(res.url, '_blank')}>没反应？用普通标签打开</a>
+                <a style={{ marginLeft: 10 }} onClick={() => { setLauncherInstalled(false); promptLauncherInstall({ onInstalled: () => {} }); }}>重新安装助手</a>
               </span>
             ),
             duration: 6,
@@ -1032,16 +1039,14 @@ const AccountsPage: React.FC = () => {
             onChange={e => setSearchText(e.target.value)} allowClear size="small" />
           <Space size={8}>
             <span className="stat-chip">共 <strong>{filtered.length}</strong> 条</span>
-            {isAdmin && (
-              <Tooltip title="开启后，点「控制台」会用该账户专属的独立浏览器会话打开，多个账户可同时保持登录，不用先注销。需先在本机安装本地助手：bash tools/console-launcher/install.sh">
-                <span className="hide-mobile" style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 12, color: '#666' }}>
-                  <Switch size="small" checked={isolated}
-                    aria-label="独立会话打开控制台"
-                    onChange={v => { setIsolated(v); setIsolatedEnabled(v); }} />
-                  独立会话
-                </span>
-              </Tooltip>
-            )}
+            <Tooltip title="开启后，点「控制台」会用该账户专属的独立浏览器会话打开，多个账户可同时保持登录，不用先注销。首次开启会下载本地助手安装脚本（仅 macOS）。">
+              <span className="hide-mobile" style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 12, color: 'var(--color-text-secondary)' }}>
+                <Switch size="small" checked={isolated}
+                  aria-label="独立会话打开控制台"
+                  onChange={toggleIsolated} />
+                独立会话
+              </span>
+            </Tooltip>
             {isAdmin && (
               <Tooltip title="查看账户权限检测结果。系统每 30 分钟自动检测新账户、每 24 小时全量复检，缺失会自动补齐。">
                 <Button size="small" className="hide-mobile" onClick={() => setRoleModalOpen(true)}>
