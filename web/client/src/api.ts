@@ -736,6 +736,9 @@ export const api = {
     request(`/aws/tag-compliance/re-indexes/status?payer=${encodeURIComponent(payer)}`),
   tagEnabledRegions: (payer: string) =>
     request(`/aws/tag-compliance/enabled-regions?payer=${encodeURIComponent(payer)}`),
+  // 每次进入页面上报一次，后端记一条「进入页面」审计
+  reportPageView: (page: string) =>
+    request('/aws/audit/page-view', { method: 'POST', body: JSON.stringify({ page }) }),
   exportAuditLog: async (format: 'csv' | 'json') => {
     const token = getToken();
     const res = await fetch(`${BASE}/aws/audit/export?format=${format}`, {

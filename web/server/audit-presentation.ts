@@ -15,7 +15,27 @@ interface TechnicalFields {
   duration_ms?: number;
 }
 
+// 前端每次进入页面上报一次（POST /api/aws/audit/page-view），只接受这里列出的 key。
+// 需与前端 MainLayout 的 navItems key 保持一致。
+export const PAGE_VIEW_LABELS: Readonly<Record<string, string>> = {
+  dashboard: '概览',
+  accounts: '账户管理',
+  quotas: '配额管理',
+  bulkquota: '批量提额',
+  rootreset: '批量设置 Root 密码',
+  bedrock: 'Bedrock 工具',
+  poccash: 'POC Cash',
+  regions: '区域管理',
+  billing: '账单导出',
+  cleanup: '资源清理',
+  tagcompliance: 'MAP 标签',
+  audit: '审计日志',
+  ops: '运维监控',
+  settings: '系统设置',
+};
+
 const explicitActions: Record<string, Omit<AuditDisplay, 'target' | 'result' | 'outcome'>> = {
+  PAGE_VIEW: { category: '页面访问', operation: '进入页面' },
   LOGIN: { category: '登录与安全', operation: '登录系统' },
   LOGOUT: { category: '登录与安全', operation: '退出登录' },
   MFA_SETUP: { category: '登录与安全', operation: '启用 MFA' },

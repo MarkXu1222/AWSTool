@@ -263,6 +263,11 @@ const MainLayout: React.FC<MainLayoutProps> = ({ onLogout }) => {
   // 切回时不重新请求/重建，明显更流畅。
   // 不保活的页面：ops（有 30s 轮询定时器，隐藏时会白轮询）、
   // settings/audit/cleanup 等低频页（重新加载反而保证数据新鲜）。
+  // 审计：每次进入页面（含刷新、前进/后退）上报一次；失败不提示、不影响使用
+  useEffect(() => {
+    api.reportPageView(currentPage).catch(() => {});
+  }, [currentPage]);
+
   const KEEP_ALIVE_PAGES = ['dashboard', 'accounts', 'quotas', 'regions', 'billing'];
   // 记录访问过的保活页，只挂载访问过的，避免登录后立刻全量请求
   const [visitedPages, setVisitedPages] = useState<string[]>([]);

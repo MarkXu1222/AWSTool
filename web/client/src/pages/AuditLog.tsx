@@ -81,6 +81,7 @@ const categoryColors: Record<string, string> = {
   登录与安全: 'green',
   用户管理: 'purple',
   审计日志: 'magenta',
+  页面访问: 'default',
   系统操作: 'default',
 };
 

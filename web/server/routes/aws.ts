@@ -14,7 +14,7 @@ import {
   submitBillingExport,
   toBillingExportJobView,
 } from '../billing-export-jobs';
-import { auditLogsToCsv, enrichAuditLog } from '../audit-presentation';
+import { auditLogsToCsv, enrichAuditLog, PAGE_VIEW_LABELS } from '../audit-presentation';
 import { syncAccountRoles, getAccountRolesSummary } from '../account-roles';
 import { getDepartedSummary, backfillDepartures } from '../account-lifecycle';
 import {
@@ -1856,6 +1856,26 @@ awsRouter.post('/resources/:accountId/delete', requireAdmin, async (req: Request
     res.setHeader('Cache-Control', 'no-store');
     res.json({ success: true, data: results });
   } catch (e: any) { res.status(500).json({ error: e.message }); }
+});
+
+// 用户每次进入一个页面，前端上报一次，记一条「进入页面」。
+// 页面打开时自动拉取的列表接口不再逐条记录（见 audit.ts shouldAuditRead）。
+awsRouter.post('/audit/page-view', (req: Request, res: Response) => {
+  const page = typeof req.body?.page === 'string' ? req.body.page : '';
+  if (!Object.prototype.hasOwnProperty.call(PAGE_VIEW_LABELS, page)) {
+    return res.status(400).json({ error: '未知页面' });
+  }
+  const user = (req as any).user;
+  try {
+    db.addAuditLog(user.userId, 'PAGE_VIEW', PAGE_VIEW_LABELS[page], user.username, req.ip, {
+      method: 'POST', path: '/api/aws/audit/page-view', status: 200, params: { body: { page } },
+    });
+  } catch (e: any) {
+    console.error(`[Audit] 页面访问写入失败: ${page}`, e?.message);
+    return res.status(500).json({ error: '审计写入失败' });
+  }
+  (res.locals as any).audited = true;
+  res.json({ success: true });
 });
 
 // Export full audit log (up to the 5,000 retained records)

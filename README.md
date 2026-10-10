@@ -125,7 +125,7 @@ AWS/
     │   ├── auth.ts                 # authRouter（登录/MFA/用户CRUD）+ authMiddleware + 页面权限模型（DEFAULT_PAGE_KEYS / ALL_PAGE_KEYS）
     │   ├── step-up-mfa.ts          # 敏感操作二次 TOTP 校验（Root 批次创建、单独重试等）
     │   ├── db.ts                   # ★数据层：db.json 读写、字段加密、每日备份
-    │   ├── audit.ts                # auditMiddleware：记录所有已认证 API 调用
+    │   ├── audit.ts                # auditMiddleware：记录写操作 + 带账户 ID 的读请求（页面自动拉取的列表不记，见「审计」）
     │   ├── audit-presentation.ts   # 审计日志展示增强 + CSV 导出
     │   ├── scheduler.ts            # 后台定时同步（账户 30min / 配额 4h / 区域 24h / 账户角色自愈）
     │   ├── ops-monitor.ts          # 运维监控：请求/系统指标进程内采集（24h 环形缓冲）+ 健康评分 + /api/ops 页面权限守卫
@@ -279,7 +279,7 @@ Admin 临时凭证时长默认 1 小时。数据库当前角色为 `admin` 的�
 | 根凭证 | `GET /root-credentials/:accountId`、`GET /temp-credentials/:accountId?durationHours=1`（rootAccess；仅 admin 可请求 2–12 小时）、`POST /root-credentials/:accountId/delete-mfa`(rootAccess)、`.../recover-password`(rootAccess)、`.../delete-access-key`(rootAccess)、`.../delete-key`(admin) |
 | 批量 Root 改密 | 批次：`GET/POST /root-email/batches`、`GET /root-email/batches/:id`、`POST .../:id/credentials-csv`、`POST .../:id/cancel`；单账户：`GET/POST /root-email/accounts/:accountId/jobs`、`POST /root-email/jobs/:id/cancel`、`.../retry`、`.../reset-link`、`.../manual-reset-link`、`.../manual-captcha`、`.../manual-captcha/answer`；其它：`GET /root-email/availability`、`GET /root-email/catalog`。全部经 `root_reset_access` 守卫（`root-reset-permissions.ts`），创建批次与单独重试另需 step-up TOTP（`step-up-mfa.ts`） |
 | 资源清理 | `GET /resources/:accountId/:region`（最近 7 天；Lambda 按最近修改；IAM/S3 为全局；失败服务通过 warnings 返回）、`POST /resources/:accountId/delete`（服务端重新读取时间并复验；EC2/EBS/Lambda 兼容 admin/partadmin，IAM 用户仅实时 strict admin 且级联清理依赖；S3 不可删除） |
-| 审计 | `GET /audit`、`GET /audit/export`（均 `requireAuditAccess`） |
+| 审计 | `GET /audit`、`GET /audit/export`（均 `requireAuditAccess`）；`POST /audit/page-view`（任何已登录用户，`page` 只接受已知页面 key，记一条 `PAGE_VIEW`「进入页面」）。**记录规则（看一次记一次，没看不记）**：写操作（POST/PUT/PATCH/DELETE）全记；GET 只在路径段或查询参数含 12 位账户 ID 时记（每次都记，不去重），外加 `/audit/export`；页面打开时自动拉取的列表/状态接口（`accounts`、`roles-status`、`restricted`、`apn-accounts`、`departed`、`dashboard/summary`、`quotas/stats` 等）和任务轮询不记，由前端 `MainLayout` 每次进入页面上报一次 `PAGE_VIEW` 代替；敏感读取由业务代码显式写审计。规则在 `audit.ts` 的 `shouldAuditRead()`，`tests/audit-middleware.test.ts` 锁定 |
 | 控制台 | `GET /console-url/:accountId` |
 | MAP 标签 | `GET /tag-compliance/status\|config\|executions\|report\|precheck\|notify-emails\|re-indexes/status`；`PUT /config`、`POST /scan`、`POST /notify-emails`、`DELETE /notify-emails`、`POST /re-indexes`、`POST /provision`（**写操作均 `requireStrictAdmin`**，partadmin 被拒）；`GET /tag-compliance/enabled-regions` 也挂 `requireStrictAdmin`；全自动接入：`POST /tag-compliance/onboarding`、`GET /tag-compliance/onboarding?payer=...`、`GET /tag-compliance/onboarding/:jobId`、`POST /tag-compliance/onboarding/:jobId/retry` |
 

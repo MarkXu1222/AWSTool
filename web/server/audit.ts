@@ -1,4 +1,4 @@
-// 统一 API 审计中间件：记录所有已鉴权用户的 API 调用
+// 统一 API 审计中间件：记录已鉴权用户的写操作，以及查看具体账户的读请求（规则见 shouldAuditRead）
 // 挂在 authMiddleware 之后（保证 req.user 存在），业务代码显式 addAuditLog 时
 // 只需设置 res.locals.audited = true，本中间件会自动跳过以避免重复记录。
 import { Request, Response, NextFunction } from 'express';
@@ -31,6 +31,27 @@ function maskSensitive(obj: any): any {
   return out;
 }
 
+// 读请求（GET/HEAD）的记录规则：「看一次记一次，没看就不记」。
+// 页面打开时自动拉取的列表/状态接口不带账户 ID，不记录 —— 用户进入页面由前端
+// 主动上报的 PAGE_VIEW 记一条；查看具体账户（路径段或查询参数中带 12 位账户 ID）
+// 每次都记；敏感读取（控制台链接、Root/临时凭证等）由业务代码显式写审计。
+const ACCOUNT_ID_SEGMENT = /(?:^|\/)\d{12}(?:\/|$)/;
+const ACCOUNT_ID_IN_VALUE = /(?:^|\D)\d{12}(?:\D|$)/;
+// 不带账户 ID 但仍需记录的读请求（完整路径）
+const AUDITED_READ_PATHS = new Set(['/api/aws/audit/export']);
+
+function queryHasAccountId(query: unknown): boolean {
+  if (typeof query === 'string') return ACCOUNT_ID_IN_VALUE.test(query);
+  if (Array.isArray(query)) return query.some(queryHasAccountId);
+  if (query && typeof query === 'object') return Object.values(query).some(queryHasAccountId);
+  return false;
+}
+
+export function shouldAuditRead(fullPath: string, query: unknown): boolean {
+  if (AUDITED_READ_PATHS.has(fullPath)) return true;
+  return ACCOUNT_ID_SEGMENT.test(fullPath) || queryHasAccountId(query);
+}
+
 function isNoise(method: string, path: string): boolean {
   if (NOISE_SUFFIXES.some(sfx => path.endsWith(sfx))) return true;
   // 账单 job 列表和状态每 2 秒轮询，不写审计；下载路径会显式记录。
@@ -42,6 +63,8 @@ export function auditMiddleware(req: Request, res: Response, next: NextFunction)
   // SSE 流不记（长连接，无意义）
   if (req.path.includes('sync-stream')) return next();
   if (isNoise(req.method, req.path)) return next();
+  if ((req.method === 'GET' || req.method === 'HEAD')
+    && !shouldAuditRead((req.baseUrl || '') + req.path, req.query)) return next();
 
   const start = Date.now();
 
