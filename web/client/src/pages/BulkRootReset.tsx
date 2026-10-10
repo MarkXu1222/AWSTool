@@ -57,6 +57,7 @@ const BulkRootResetPage: React.FC<{ canOperate?: boolean }> = ({ canOperate = fa
   const [manualLinkJob, setManualLinkJob] = useState<RootEmailJobView | null>(null);
   const [manualLinkTotpCode, setManualLinkTotpCode] = useState('');
   const [retryJob, setRetryJob] = useState<RootEmailJobView | null>(null);
+  const [retryMode, setRetryMode] = useState<'resend' | 'mailbox'>('resend');
   const [manualCaptchaJobId, setManualCaptchaJobId] = useState<string | null>(null);
   const [retryTotpCode, setRetryTotpCode] = useState('');
   const request = useRef<{ signature: string; id: string } | null>(null);
@@ -187,14 +188,15 @@ const BulkRootResetPage: React.FC<{ canOperate?: boolean }> = ({ canOperate = fa
     } catch (cause: any) { setError(cause.message); }
     finally { setManualLinkTotpCode(''); setBusy(false); }
   };
-  const openRetry = (job: RootEmailJobView) => {
+  const openRetry = (job: RootEmailJobView, mode: 'resend' | 'mailbox' = 'resend') => {
+    setRetryMode(mode);
     setRetryJob(job); setRetryTotpCode(''); setError('');
   };
   const retryFailedJob = async () => {
     if (!retryJob?.retryAvailable || !/^\d{6}$/.test(retryTotpCode)) return;
     setBusy(true); setError('');
     try {
-      const result = await api.retryRootEmailJob(retryJob.id, retryTotpCode);
+      const result = await api.retryRootEmailJob(retryJob.id, retryTotpCode, retryMode);
       if (!result.success) throw new Error(result.error || '重试失败');
       setRetryJob(null); setBatch(result.data); setBatchId(result.data.id);
       setRefresh(value => value + 1);
@@ -373,11 +375,17 @@ const BulkRootResetPage: React.FC<{ canOperate?: boolean }> = ({ canOperate = fa
                 if (job.manualCaptchaAvailable) return <Button type="link" size="small" onClick={() => setManualCaptchaJobId(job.id)}>
                   手工输入验证码
                 </Button>;
-                if (job.retryAvailable) return <Button size="small" danger icon={<RedoOutlined />} disabled={busy}
-                  onClick={() => openRetry(job)}>单独重试</Button>;
-                if (job.manualResetAvailable) return <Button size="small" danger disabled={busy} onClick={() => openManualLink(job)}>
-                  手工打开链接
-                </Button>;
+                if (job.manualResetAvailable || job.retryAvailable) return <Space direction="vertical" size={4}>
+                  {job.manualResetAvailable && <Button size="small" danger disabled={busy} onClick={() => openManualLink(job)}>
+                    手工打开链接
+                  </Button>}
+                  {job.mailRecheckAvailable && <Button size="small" icon={<SearchOutlined />} disabled={busy}
+                    onClick={() => openRetry(job, 'mailbox')}>重新查邮件</Button>}
+                  {job.retryAvailable && <Button size="small" danger icon={<RedoOutlined />} disabled={busy}
+                    onClick={() => openRetry(job, 'resend')}>重新发起重置</Button>}
+                </Space>;
+                if (job.status === 'password_unknown') return <Typography.Text type="warning">密码结果待核查，请勿重复提交</Typography.Text>;
+                if (job.retriedByJobId) return <Typography.Text type="secondary">已创建独立重试任务</Typography.Text>;
                 if (!job.autoSetPassword && job.status === 'link_ready') return <Button size="small" disabled={busy} onClick={async () => {
                   setBusy(true); setError('');
                   try { await showRootResetLink(job.id); } catch (cause: any) { setError(cause.message); } finally { setBusy(false); }
@@ -434,13 +442,16 @@ const BulkRootResetPage: React.FC<{ canOperate?: boolean }> = ({ canOperate = fa
       </Space>
     </Modal>
 
-    <Modal title="确认单独重试失败账户" open={!!retryJob} confirmLoading={busy}
-      okText="验证并创建重试任务" okButtonProps={{ danger: true, disabled: !/^\d{6}$/.test(retryTotpCode) }} cancelText="取消"
+    <Modal title={retryMode === 'mailbox' ? '重新查询恢复邮件' : '重新发起账户重置'} open={!!retryJob} confirmLoading={busy}
+      okText={retryMode === 'mailbox' ? '验证并重新查邮件' : '验证并重新发起'} okButtonProps={{ danger: true, disabled: !/^\d{6}$/.test(retryTotpCode) }} cancelText="取消"
       closable={!busy} maskClosable={false} onCancel={() => { if (!busy) { setRetryJob(null); setRetryTotpCode(''); } }}
       onOk={retryFailedJob}>
       <Space direction="vertical" size={12} style={{ width: '100%' }}>
-        <Alert type="warning" showIcon message="将重新发送恢复邮件并自动设置 Root 新密码"
-          description="系统已确认原任务没有跨过恢复邮件提交边界。重试会创建新的单账户批次，旧失败记录会永久保留；不确定或已提交的任务不会开放此操作。" />
+        <Alert type="warning" showIcon
+          message={retryMode === 'mailbox' ? '从头重新查询原请求之后的邮件，最多等待 10 分钟' : '重新发送恢复邮件并自动设置 Root 新密码'}
+          description={retryMode === 'mailbox'
+            ? '不重新发送邮件；找到有效邮件后会自动继续设置密码。将创建独立查询任务并保留旧记录。'
+            : '确认没有提交过新密码。将创建新的单账户批次；原恢复链接可能失效。若只是邮件延迟，建议先使用“重新查邮件”。'} />
         <Typography.Text>账户：<Typography.Text code>{retryJob?.accountId}</Typography.Text></Typography.Text>
         <Typography.Text>Root 邮箱：<Typography.Text code>{retryJob?.email}</Typography.Text></Typography.Text>
         <Typography.Text>输入当前 6 位 MFA 验证码：</Typography.Text>

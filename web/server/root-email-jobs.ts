@@ -3,7 +3,7 @@ import { randomUUID } from 'crypto';
 import { db } from './db';
 import { AwsRootEmailSession, AwsRootPasswordSession, MAX_ROOT_PASSWORD_BROWSER_ATTEMPTS,
   RootEmailBrowserAutomationError, RootPasswordAutomationError, runRootEmailOcr } from './root-email-browser';
-import { canRetryFailedRootEmailJob, canRetryRootEmailBrowser, type CredentialDownloadSlot, hasNewerRootEmailJob,
+import { canRetryFailedRootEmailJob, canRecheckRootEmailJob, type RootEmailRetryMode, canRetryRootEmailBrowser, type CredentialDownloadSlot, hasNewerRootEmailJob,
   LEGACY_ROOT_EMAIL_BROWSER_FAILURE, RootEmailError, RootEmailJob, RootEmailStore, isPendingEmailJob,
   manualRootResetFallbackExpiresAt, sendRootEmail, selectRootEmailBatchTargets, rootEmailCatalogAccounts, MAX_ROOT_EMAIL_BROWSER_ATTEMPTS,
   MAX_ROOT_PASSWORD_BATCH, MAX_ROOT_EMAIL_TASKS, ROOT_MANUAL_FALLBACK_TTL_MS } from './root-email-core';
@@ -168,6 +168,7 @@ function jobView(job: RootEmailJob, user: RootEmailUser) {
     autoSetPassword: autoSetPassword === true, credentialsAvailable: credentialAvailable(job), passwordSetAt,
     browserAttempts: browserAttempts || 0, failureStage, failureCategory, retryOfJobId, retriedByJobId,
     retryAvailable, retryAvailableAt: canRetryFailedRootEmailJob(job) ? retryAvailableAt : undefined,
+    mailRecheckAvailable: retryAvailable && canRecheckRootEmailJob(job),
     manualResetAvailable, manualResetExpiresAt: manualResetAvailable ? manualResetExpiresAt : undefined,
     canManage: canManageRootEmailJob(user, job) };
 }
@@ -293,8 +294,9 @@ export async function submitRootEmailBatch(payerAccountId: string, accountIds: u
   return { ...getRootEmailBatch(result.jobs[0].batchId!, user), reused: result.reused };
 }
 
-/** Retry one provably pre-submit failure as a new one-account batch; the old task remains immutable history. */
-export async function retryRootEmailJob(id: string, user: RootEmailUser, clientIp?: string) {
+/** Explicitly restart recovery or resume mailbox lookup in a new, independently auditable batch. */
+export async function retryRootEmailJob(id: string, user: RootEmailUser, clientIp?: string,
+  mode: RootEmailRetryMode = 'resend') {
   const currentStore = getStore();
   const source = currentStore.get(id);
   if (!source || !canViewRootEmailJob(user, source)) throw new RootEmailError('原任务不存在', 404);
@@ -303,7 +305,10 @@ export async function retryRootEmailJob(id: string, user: RootEmailUser, clientI
     throw new RootEmailError('无权重试此任务', 403);
   }
   if (!canRetryFailedRootEmailJob(source) || hasNewerRootEmailJob(currentStore.list(), source)) {
-    throw new RootEmailError('该任务不满足安全重试条件，可能已提交恢复请求、已重试或存在更新任务', 409);
+    throw new RootEmailError('该任务不满足安全重试条件，可能已提交新密码、已重试或存在更新任务', 409);
+  }
+  if (!['resend', 'mailbox'].includes(mode) || (mode === 'mailbox' && !canRecheckRootEmailJob(source))) {
+    throw new RootEmailError('该任务不能重新查询邮件', 409);
   }
   const remainingMs = 60_000 - (Date.now() - Date.parse(source.createdAt));
   if (remainingMs > 0) throw new RootEmailError(`为避免重复请求，请 ${Math.ceil(remainingMs / 1000)} 秒后重试`, 429);
@@ -315,16 +320,22 @@ export async function retryRootEmailJob(id: string, user: RootEmailUser, clientI
   if (!available.encryptionReady) throw new RootEmailError(available.encryptionDetail, 503);
   // Availability may await OCR/runtime checks; re-enter the live runner boundary before the synchronous create CAS.
   const readyStore = getStore();
+  const refreshedUser = db.getUser(user.username);
+  if (!refreshedUser || String(refreshedUser.id) !== String(user.id) || !canManageRootEmailJob(refreshedUser, source)) {
+    throw new RootEmailError('重试权限已变化', 403);
+  }
   const input = { accountId: source.accountId, email, createdBy: current.username,
     createdByUserId: String(current.id), createdFromIp: clientIp };
   authorize({ ...input, payerAccountId: source.payerAccountId, payerName: source.payerName });
   const meta = { batchId: randomUUID(), payerAccountId: source.payerAccountId!, payerName: source.payerName!,
     autoSetPassword: true as const };
-  const result = readyStore.createRetry(source.id, input, meta);
+  const result = readyStore.createRetry(source.id, input, meta, mode);
   auditAs(result.source, current, 'ROOT_EMAIL_JOB_RETRY',
-    `确认原任务未提交恢复请求；已创建重试任务 ${result.job.id}`, clientIp);
-  audit(result.job, 'ROOT_EMAIL_REQUEST', `由失败任务 ${source.id} 单独安全重试`, clientIp);
+    `用户确认${mode === 'mailbox' ? '重新查邮件，不重新发送' : '重新发起恢复邮件请求'}；未提交过新密码；新任务 ${result.job.id}`, clientIp);
+  audit(result.job, mode === 'mailbox' ? 'ROOT_EMAIL_MAIL_RECHECK' : 'ROOT_EMAIL_REQUEST',
+    `由失败任务 ${source.id} ${mode === 'mailbox' ? '重新查邮件' : '重新发起重置'}`, clientIp);
   tick();
+  if (mode === 'mailbox') tickMail();
   return { ...batchSummary([result.job], current), jobs: [jobView(result.job, current)] };
 }
 

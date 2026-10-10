@@ -388,9 +388,11 @@ awsRouter.post('/root-email/jobs/:id/manual-reset-link', async (req, res) => {
 });
 awsRouter.post('/root-email/jobs/:id/retry', async (req, res) => {
   try {
-    if (req.body?.confirmRetry !== true) throw new RootEmailError('请确认重新发送恢复邮件并自动设置 Root 新密码');
+    if (req.body?.confirmRetry !== true) throw new RootEmailError('请确认重试操作及找到邮件后自动设置 Root 新密码');
+    const mode = req.body?.mode ?? 'resend';
+    if (mode !== 'resend' && mode !== 'mailbox') throw new RootEmailError('无效的重试操作');
     verifyRootEmailStepUp(req, res, req.body?.totpCode);
-    const data = await retryRootEmailJob(String(req.params.id), res.locals.rootResetUser, req.ip);
+    const data = await retryRootEmailJob(String(req.params.id), res.locals.rootResetUser, req.ip, mode);
     res.locals.audited = true;
     res.status(202).json({ success: true, data });
   } catch (error) { rootEmailFailure(res, error); }

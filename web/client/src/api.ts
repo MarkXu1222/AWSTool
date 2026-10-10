@@ -33,6 +33,7 @@ export interface RootEmailJobView {
   retryOfJobId?: string;
   retriedByJobId?: string;
   retryAvailable: boolean;
+  mailRecheckAvailable?: boolean;
   retryAvailableAt?: string;
   manualResetAvailable: boolean;
   manualResetExpiresAt?: string;
@@ -783,8 +784,8 @@ export const api = {
   manualRootResetLink: (id: string, totpCode: string) => request(`/aws/root-email/jobs/${encodeURIComponent(id)}/manual-reset-link`, {
     method: 'POST', cache: 'no-store', body: JSON.stringify({ totpCode }),
   }),
-  retryRootEmailJob: (id: string, totpCode: string) => request(`/aws/root-email/jobs/${encodeURIComponent(id)}/retry`, {
-    method: 'POST', cache: 'no-store', body: JSON.stringify({ totpCode, confirmRetry: true }),
+  retryRootEmailJob: (id: string, totpCode: string, mode: 'resend' | 'mailbox' = 'resend') => request(`/aws/root-email/jobs/${encodeURIComponent(id)}/retry`, {
+    method: 'POST', cache: 'no-store', body: JSON.stringify({ totpCode, confirmRetry: true, mode }),
   }),
   rootEmailManualCaptcha: (id: string) => request(`/aws/root-email/jobs/${encodeURIComponent(id)}/manual-captcha`, {
     method: 'POST', cache: 'no-store',

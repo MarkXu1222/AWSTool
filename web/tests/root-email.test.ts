@@ -1016,3 +1016,57 @@ test('a post-submit result timeout stays unknown and never retries', async () =>
   assert.equal(result.error.stage, 'wait_result');
   assert.equal(result.error.category, 'timeout');
 });
+
+test('explicit operator retries cover mail failures and proven pre-password failures, never unknown or successful passwords', () => {
+  const base = { status: 'mail_failed' as const, autoSetPassword: true, batchId: randomUUID(),
+    payerAccountId: '999999999999', payerName: 'payer-a', detail: 'mail timeout', emailSubmitAttempted: true };
+  assert.equal(canRetryFailedRootEmailJob(base), true);
+  assert.equal(canRetryFailedRootEmailJob({ ...base, status: 'password_failed', passwordSubmitAttempted: false }), true);
+  for (const status of ['password_unknown', 'password_set', 'running', 'waiting_mail', 'setting_password'] as const) {
+    assert.equal(canRetryFailedRootEmailJob({ ...base, status, passwordSubmitAttempted: false }), false);
+  }
+  assert.equal(canRetryFailedRootEmailJob({ ...base, status: 'password_failed' }), false);
+  assert.equal(canRetryFailedRootEmailJob({ ...base, passwordSubmitAttempted: true }), false);
+  assert.equal(canRetryFailedRootEmailJob({ ...base, retriedByJobId: randomUUID() }), false);
+});
+
+test('mailbox retries rescan the original request window durably without resending recovery email', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'root-mail-retry-'));
+  try {
+    const file = path.join(dir, 'jobs.json'), store = new RootEmailStore(file);
+    const meta = { batchId: randomUUID(), payerAccountId: '999999999999', payerName: 'payer-a', autoSetPassword: true as const };
+    const [original] = store.createBatch([input], meta).jobs;
+    const requestedAt = new Date(Date.now() - 120_000).toISOString();
+    const source = store.update(original.id, { status: 'mail_failed', phase: 'done', emailSubmitAttempted: true,
+      requestedAt, mailCursor: 900, createdAt: requestedAt });
+    const result = store.createRetry(source.id, input, { ...meta, batchId: randomUUID() }, 'mailbox');
+    assert.equal(result.job.status, 'waiting_mail');
+    assert.equal(result.job.requestedAt, requestedAt);
+    assert.equal(result.job.mailCursor, 0);
+    assert.ok(Date.parse(result.job.mailDeadlineAt!) > Date.now());
+    assert.equal(result.job.emailSubmitAttempted, true);
+    const reloaded = new RootEmailStore(file);
+    assert.equal(reloaded.get(source.id)?.status, 'mail_failed');
+    assert.equal(reloaded.get(result.job.id)?.status, 'waiting_mail');
+    assert.throws(() => reloaded.createRetry(source.id, input, { ...meta, batchId: randomUUID() }, 'resend'));
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('resending a proven pre-password failure creates a clean request and does not reuse an old reset link', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'root-password-retry-'));
+  try {
+    const file = path.join(dir, 'jobs.json'), store = new RootEmailStore(file);
+    const meta = { batchId: randomUUID(), payerAccountId: '999999999999', payerName: 'payer-a', autoSetPassword: true as const };
+    const [original] = store.createBatch([input], meta).jobs;
+    store.update(original.id, { status: 'password_failed', phase: 'done', passwordSubmitAttempted: false,
+      createdAt: new Date(Date.now() - 120_000).toISOString(), mailKey: 'a'.repeat(64),
+      mailReceivedAt: new Date().toISOString() });
+    assert.throws(() => store.createRetry(original.id, input, { ...meta, batchId: randomUUID() }, 'mailbox'));
+    const result = store.createRetry(original.id, input, { ...meta, batchId: randomUUID() }, 'resend');
+    assert.equal(result.job.status, 'queued');
+    assert.equal(result.job.mailKey, undefined);
+    assert.equal(result.job.mailReceivedAt, undefined);
+    assert.equal(result.job.emailSubmitAttempted, false);
+    assert.equal(new RootEmailStore(file).get(result.job.id)?.retryOfJobId, original.id);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});

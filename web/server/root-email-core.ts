@@ -110,14 +110,26 @@ export function canRetryRootEmailBrowser(error: unknown, phase: RootEmailPhase,
 
 export const LEGACY_ROOT_EMAIL_BROWSER_FAILURE = 'AWS 页面未在预期时间完成加载，或页面结构已变化；请检查后重试';
 
-/** Only terminal automatic jobs that provably never crossed the recovery-email submit boundary may be retried. */
+/** Explicit operator retries may restart email recovery, but never repeat a possible password submission. */
 export function canRetryFailedRootEmailJob(job: Pick<RootEmailJob,
   'status' | 'autoSetPassword' | 'batchId' | 'payerAccountId' | 'payerName' | 'emailSubmitAttempted'
-    | 'detail' | 'retriedByJobId'>): boolean {
+    | 'detail' | 'retriedByJobId' | 'passwordSubmitAttempted' | 'passwordSetAt'>): boolean {
   const submitWasProvablyNotAttempted = job.emailSubmitAttempted === false
     || (job.emailSubmitAttempted === undefined && job.detail === LEGACY_ROOT_EMAIL_BROWSER_FAILURE);
-  return job.status === 'failed' && job.autoSetPassword === true && !!job.batchId
-    && !!job.payerAccountId && !!job.payerName && !job.retriedByJobId && submitWasProvablyNotAttempted;
+  const safeFailure = (job.status === 'failed' && submitWasProvablyNotAttempted)
+    || job.status === 'mail_failed'
+    || (job.status === 'password_failed' && job.passwordSubmitAttempted === false)
+    || (['cancelled', 'interrupted'].includes(job.status) && job.passwordSubmitAttempted === false);
+  return safeFailure && job.autoSetPassword === true && !!job.batchId
+    && !!job.payerAccountId && !!job.payerName && !job.retriedByJobId
+    && job.passwordSubmitAttempted !== true && !job.passwordSetAt;
+}
+
+export type RootEmailRetryMode = 'resend' | 'mailbox';
+/** A mailbox-only retry keeps the original request window and cannot enqueue an email browser. */
+export function canRecheckRootEmailJob(job: RootEmailJob): boolean {
+  return canRetryFailedRootEmailJob(job) && job.status === 'mail_failed'
+    && Number.isFinite(Date.parse(job.requestedAt || ''));
 }
 
 export const ROOT_MANUAL_FALLBACK_TTL_MS = 2 * 60 * 60_000;
@@ -256,7 +268,7 @@ export class RootEmailStore {
     const byId = new Map(jobs.map(job => [job.id, job]));
     if (byId.size !== jobs.length) throw new Error('恢复邮件任务 ID 重复，已拒绝覆盖');
     const validRetryPair = (source: RootEmailJob, child: RootEmailJob) => source.id !== child.id
-      && source.status === 'failed' && source.autoSetPassword === true && child.autoSetPassword === true
+      && canRetryFailedRootEmailJob({ ...source, retriedByJobId: undefined }) && child.autoSetPassword === true
       && source.accountId === child.accountId && source.email.toLowerCase() === child.email.toLowerCase()
       && source.payerAccountId === child.payerAccountId && source.payerName === child.payerName
       && source.batchId !== child.batchId && Date.parse(child.createdAt) > Date.parse(source.createdAt);
@@ -334,11 +346,15 @@ export class RootEmailStore {
     return structuredClone(job);
   }
   /** Create one new automatic batch while atomically sealing the terminal source job against duplicate retries. */
-  createRetry(sourceId: string, input: RootEmailInput, meta: RootEmailBatchMeta): { source: RootEmailJob; job: RootEmailJob } {
+  createRetry(sourceId: string, input: RootEmailInput, meta: RootEmailBatchMeta,
+    mode: RootEmailRetryMode = 'resend'): { source: RootEmailJob; job: RootEmailJob } {
     const source = this.jobs.find(job => job.id === sourceId);
     if (!source) throw new RootEmailError('原任务不存在', 404);
     if (!canRetryFailedRootEmailJob(source) || hasNewerRootEmailJob(this.jobs, source)) {
-      throw new RootEmailError('该任务不满足安全重试条件，可能已提交恢复请求、已重试或存在更新任务', 409);
+      throw new RootEmailError('该任务不满足安全重试条件，可能已提交新密码、已重试或存在更新任务', 409);
+    }
+    if (!['resend', 'mailbox'].includes(mode) || (mode === 'mailbox' && !canRecheckRootEmailJob(source))) {
+      throw new RootEmailError('该任务不能重新查询邮件', 409);
     }
     if (input.accountId !== source.accountId || input.email.toLowerCase() !== source.email.toLowerCase()
       || meta.payerAccountId !== source.payerAccountId || meta.payerName !== source.payerName
@@ -349,7 +365,11 @@ export class RootEmailStore {
     if (this.jobs.filter(isPendingEmailJob).length >= MAX_ROOT_EMAIL_TASKS) throw new RootEmailError('队列已满，请稍后重试', 429);
     const now = new Date().toISOString();
     const job: RootEmailJob = { ...this.makeJob(input), ...meta, retryOfJobId: source.id,
-      detail: '等待重试发送恢复邮件' };
+      detail: '用户确认重新发起恢复邮件请求',
+      ...(mode === 'mailbox' ? { status: 'waiting_mail' as const, phase: 'waiting_mail' as const,
+        requestedAt: source.requestedAt, sentAt: source.sentAt, emailSubmitAttempted: source.emailSubmitAttempted,
+        mailCursor: 0, mailNextCheckAt: now, mailDeadlineAt: new Date(Date.now() + 10 * 60_000).toISOString(),
+        detail: '用户要求重新查邮件；从头扫描原请求之后的邮件，最多等待 10 分钟，不重新发送' } : {}) };
     const next = this.jobs.map(current => current.id === source.id
       ? { ...current, retriedByJobId: job.id, updatedAt: now } : current);
     this.save([...next, job]);
