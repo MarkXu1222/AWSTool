@@ -39,6 +39,7 @@ const RegionsPage: React.FC = () => {
   const [selectedAccounts, setSelectedAccounts] = useState<string[]>([]);
   const [enabling, setEnabling] = useState(false);
   const [expandedRegion, setExpandedRegion] = useState<string | null>(null);
+  const [regionOrgFilter, setRegionOrgFilter] = useState<string[]>([]);
   const [searchText, setSearchText] = useState('');
   const [viewMode, setViewMode] = useState<'regions' | 'account'>('regions');
   const [selectedAccountRegions, setSelectedAccountRegions] = useState<string[]>([]);
@@ -305,6 +306,32 @@ const RegionsPage: React.FC = () => {
       });
   };
 
+  // 展开区域的未开通账户 + 组织筛选（空 payer 用哨兵值，便于在下拉里选中）
+  const NO_ORG = '__no_org__';
+  const orgKeyOf = (payer: string) => payer || NO_ORG;
+  const regionDisabledRows = expandedRegion ? getDisabledForRegion(expandedRegion) : [];
+  const filterRowsByOrg = (orgs: string[]) =>
+    orgs.length === 0 ? regionDisabledRows : regionDisabledRows.filter(r => orgs.includes(orgKeyOf(r.payer)));
+  const visibleDisabledRows = filterRowsByOrg(regionOrgFilter);
+  const regionOrgOptions = (() => {
+    const counts = new Map<string, number>();
+    regionDisabledRows.forEach(r => counts.set(orgKeyOf(r.payer), (counts.get(orgKeyOf(r.payer)) || 0) + 1));
+    return [...counts.entries()]
+      .sort(([a], [b]) => (a === NO_ORG ? 1 : b === NO_ORG ? -1 : a.localeCompare(b)))
+      .map(([key, n]) => ({ value: key, label: `${key === NO_ORG ? '(未知组织)' : key} (${n})` }));
+  })();
+  const handleRegionOrgFilterChange = (orgs: string[]) => {
+    setRegionOrgFilter(orgs);
+    // 去掉已不在筛选结果中的勾选，保证「批量启用 (N)」只作用于可见账户
+    const visibleIds = new Set(filterRowsByOrg(orgs).map(r => r.accountId));
+    setSelectedAccounts(prev => prev.filter(id => visibleIds.has(id)));
+  };
+  const toggleExpandedRegion = (region: string) => {
+    setExpandedRegion(expandedRegion === region ? null : region);
+    setRegionOrgFilter([]);
+    setSelectedAccounts([]);
+  };
+
   // Get disabled regions for a specific account
   const getAccountRegionStatus = (accountId: string) => {
     const rd = regionData.find(r => r.account_id === accountId);
@@ -368,7 +395,7 @@ const RegionsPage: React.FC = () => {
                 { title: '未开通', dataIndex: 'disabled', width: 80, align: 'center', render: (n: number) => n > 0 ? <Tag color="red">{n}</Tag> : <span style={{ color: '#b6bdca' }}>0</span> },
                 { title: '开通率', key: 'rate', width: 120, render: (_: any, r: any) => r.total > 0 ? <Progress percent={Math.round((r.enabled / r.total) * 100)} size="small" strokeColor="#52c41a" /> : '-' },
                 { title: '操作', key: 'action', width: 100, fixed: 'right' as const, render: (_: any, r: any) => r.disabled > 0 ? (
-                  <Button size="small" type="link" onClick={() => setExpandedRegion(expandedRegion === r.region ? null : r.region)}>
+                  <Button size="small" type="link" onClick={() => toggleExpandedRegion(r.region)}>
                     {expandedRegion === r.region ? '收起' : `查看 (${r.disabled})`}
                   </Button>
                 ) : unscannedAccountCount > 0
@@ -390,11 +417,19 @@ const RegionsPage: React.FC = () => {
                   </Popconfirm>
                 ) : null
               }>
-              <Space style={{ marginBottom: 8 }}>
-                <Button size="small" onClick={() => setSelectedAccounts(getDisabledForRegion(expandedRegion).map(d => d.accountId))}>全选</Button>
+              <Space style={{ marginBottom: 8 }} wrap>
+                <Button size="small" onClick={() => setSelectedAccounts(visibleDisabledRows.map(d => d.accountId))}>全选</Button>
                 <Button size="small" onClick={() => setSelectedAccounts([])}>取消</Button>
+                <Select mode="multiple" allowClear size="small" placeholder="按组织筛选" style={{ minWidth: 240 }}
+                  maxTagCount="responsive" optionFilterProp="label" options={regionOrgOptions}
+                  value={regionOrgFilter} onChange={handleRegionOrgFilterChange} />
+                {regionOrgFilter.length > 0 && (
+                  <span style={{ color: 'var(--color-text-muted)', fontSize: 12 }}>
+                    显示 {visibleDisabledRows.length} / {regionDisabledRows.length}
+                  </span>
+                )}
               </Space>
-              <Table size="small" dataSource={getDisabledForRegion(expandedRegion)} rowKey="accountId" pagination={{ pageSize: 20, size: 'small' }}
+              <Table size="small" dataSource={visibleDisabledRows} rowKey="accountId" pagination={{ pageSize: 20, size: 'small' }}
                 columns={[
                   { title: '', width: 35, render: (_: any, r: any) => (
                     <Checkbox checked={selectedAccounts.includes(r.accountId)}
