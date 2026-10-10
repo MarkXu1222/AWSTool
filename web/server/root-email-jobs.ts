@@ -590,6 +590,7 @@ async function executePassword(job: RootEmailJob, controller: AbortController) {
   // Three pre-submit browser attempts may each need time to load; no retry is allowed after the submit boundary.
   const deadline = setTimeout(() => controller.abort(), 300_000);
   let session: AwsRootPasswordSession | undefined;
+  let passwordBrowserAttempts = 1;
   const ensureStatus = (status: RootEmailJob['status']) => {
     controller.signal.throwIfAborted();
     if (stopping) throw new RootEmailError('任务执行器已停止，已取消后续密码操作');
@@ -630,7 +631,10 @@ async function executePassword(job: RootEmailJob, controller: AbortController) {
           audit(retrying, 'ROOT_PASSWORD_SET_RETRY');
           return true;
         },
-        beforeNextAttempt() { ensureStatus('setting_password'); },
+        beforeNextAttempt(nextAttempt) {
+          ensureStatus('setting_password');
+          passwordBrowserAttempts = nextAttempt;
+        },
       },
     );
     session = attempt.session;
@@ -647,7 +651,7 @@ async function executePassword(job: RootEmailJob, controller: AbortController) {
     const outcome = error instanceof RootPasswordAutomationError ? error.outcome : 'failed';
     const cancelled = controller.signal.aborted && outcome === 'failed' && !stopping;
     const status: RootEmailJob['status'] = outcome === 'unknown' ? 'password_unknown' : cancelled ? 'cancelled' : 'password_failed';
-    const detail = outcome === 'unknown'
+    let detail = outcome === 'unknown'
       ? error instanceof RootPasswordAutomationError ? error.message
         : '新密码提交后未收到 AWS 明确结果；临时密码已销毁，系统不会自动重试'
       : cancelled ? '自动密码设置已在提交前停止；临时密码已销毁'
@@ -655,6 +659,9 @@ async function executePassword(job: RootEmailJob, controller: AbortController) {
         ? error.message : '自动密码设置失败，未确认修改；临时密码已销毁';
     const allowManualFallback = status === 'password_failed' && latest.passwordSubmitAttempted === false
       && error instanceof RootPasswordAutomationError && error.retryable;
+    if (allowManualFallback) {
+      detail = `密码页面已尝试 ${passwordBrowserAttempts}/${MAX_ROOT_PASSWORD_BROWSER_ATTEMPTS} 次；${detail}。未提交新密码，可点击「手工打开链接」继续`;
+    }
     const failed = currentStore.updateIfStatus(job.id, [latest.status], { status, phase: 'done', encryptedPassword: undefined,
       credentialDestroyedAt: new Date().toISOString(), mailKey: undefined, detail,
       ...(allowManualFallback ? manualFallback('password_not_submitted')

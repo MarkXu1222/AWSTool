@@ -969,3 +969,50 @@ test('root email DOM reads have per-call deadlines and react to cancellation', a
   setTimeout(() => controller.abort(), 10);
   await assert.rejects(waiting);
 });
+
+test('a password form timeout retries the original link up to three attempts before manual fallback', async () => {
+  const { AwsRootPasswordSession, RootPasswordAutomationError } = await import('../server/root-email-browser');
+  let attempts = 0;
+  const result = await AwsRootPasswordSession.runWithSafeRetry(() => {
+    const session = new AwsRootPasswordSession(new AbortController().signal, () => {});
+    return {
+      async setPassword() {
+        attempts++;
+        // Exercise the actual form-wait deadline, without loading AWS or submitting a password.
+        await (session as any).waitFor('ready', 0);
+      },
+      close: () => session.close(),
+    };
+  }, 'https://signin.aws.amazon.com/resetpassword', 'test-only-password', {
+    beforeRetry: () => true, beforeNextAttempt() {},
+  });
+  assert.equal(attempts, 3);
+  assert.equal(result.kind, 'failed');
+  if (result.kind !== 'failed') return;
+  assert.ok(result.error instanceof RootPasswordAutomationError);
+  assert.equal(result.error.stage, 'wait_form');
+  assert.equal(result.error.category, 'timeout');
+  assert.equal(result.error.outcome, 'failed');
+  assert.equal(result.error.retryable, true); // Existing job handler offers the manual-link fallback.
+});
+
+test('a post-submit result timeout stays unknown and never retries', async () => {
+  const { AwsRootPasswordSession, RootPasswordAutomationError } = await import('../server/root-email-browser');
+  let attempts = 0;
+  const result = await AwsRootPasswordSession.runWithSafeRetry(() => {
+    const session = new AwsRootPasswordSession(new AbortController().signal, () => {});
+    (session as any).submitted = true;
+    return { async setPassword() { attempts++; await (session as any).waitFor('success', 0); },
+      close: () => session.close() };
+  }, 'https://signin.aws.amazon.com/resetpassword', 'test-only-password', {
+    beforeRetry() { assert.fail('Post-submit timeout must not retry'); }, beforeNextAttempt() {},
+  });
+  assert.equal(attempts, 1);
+  assert.equal(result.kind, 'failed');
+  if (result.kind !== 'failed') return;
+  assert.ok(result.error instanceof RootPasswordAutomationError);
+  assert.equal(result.error.outcome, 'unknown');
+  assert.equal(result.error.retryable, false);
+  assert.equal(result.error.stage, 'wait_result');
+  assert.equal(result.error.category, 'timeout');
+});

@@ -850,12 +850,15 @@ export class AwsRootPasswordSession {
       if (state === expected) return;
       if (state === 'changed') throw new RootPasswordAutomationError('AWS 密码页面结构与安全选择器不一致，已停止', this.submitted ? 'unknown' : 'failed');
       if (state === 'rejected') throw new RootPasswordAutomationError(
-        this.submitted ? 'AWS 拒绝了新密码或重置链接，密码未确认设置' : 'AWS 重置链接无效、过期或已使用', 'failed');
+        this.submitted ? 'AWS 拒绝了新密码或重置链接，密码未确认设置' : 'AWS 重置链接无效、过期或已使用，请重新申请恢复邮件', 'failed');
       await this.pause(500);
     }
     throw new RootPasswordAutomationError(
       this.submitted ? '提交新密码后未收到明确结果，状态未知；系统不会自动重试' : 'AWS 密码设置页面未在预期时间就绪',
-      this.submitted ? 'unknown' : 'failed');
+      this.submitted ? 'unknown' : 'failed', {
+        stage: this.submitted ? 'wait_result' : 'wait_form',
+        category: 'timeout', retryable: !this.submitted,
+      });
   }
 
   async setPassword(resetUrl: string, password: string): Promise<void> {
