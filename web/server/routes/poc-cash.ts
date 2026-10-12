@@ -11,6 +11,7 @@ import path from 'path';
 import { db } from '../db';
 import * as poc from '../poc-cash';
 import * as fund from '../poc-cash-funding';
+import { createUniqueCalculator } from '../poc-calculator';
 
 // CSV 快照目录。与账单导出同级，纳入同一套磁盘监控。
 const POC_CSV_DIR = path.join(__dirname, '../../../data/poc-cash');
@@ -37,19 +38,6 @@ function listPocCsvFiles() {
   } catch {
     return [];
   }
-}
-
-/** 生成定价计算器链接。calculator.aws 的后端是未公开端点，
- *  失败不应让整个 POC 创建挂掉 —— 抛出明确错误由调用方决定。 */
-async function makeCalculator(name: string, region: string, mrrUsd: number) {
-  const { buildPocEstimate, saveEstimate, shareUrl, verifyEstimate } =
-    await import('../pricing-calculator');
-  const est = await buildPocEstimate(name, region, mrrUsd);
-  const key = await saveEstimate(est);
-  const v = await verifyEstimate(key, est.totalCost.monthly,
-    Object.keys(est.services).length);
-  if (!v.ok) throw new Error(`计算器读回校验失败：${v.problems.join('；')}`);
-  return shareUrl(key);
 }
 
 export const pocCashRouter = Router();
@@ -200,6 +188,7 @@ pocCashRouter.post('/funding', async (req: Request, res: Response) => {
     }
     const desc = String(b.description || '').trim();
     if (desc.length < 50) throw new Error('业务描述至少 50 字');
+    const user = (req as any).user;
 
     const result = await fund.createPocApplication({
       opportunityId: String(b.opportunityId),
@@ -214,14 +203,15 @@ pocCashRouter.post('/funding', async (req: Request, res: Response) => {
       budgetYear: Number(b.budgetYear) || undefined,
       calculatorUrl: b.calculatorUrl ? String(b.calculatorUrl) : undefined,
       calcRegion: b.calcRegion ? String(b.calcRegion) : undefined,
+      createdBy: user?.username || 'unknown',
       submit: b.submit !== false,
       force: !!b.force,
-    }, makeCalculator);
+    }, createUniqueCalculator);
 
-    const user = (req as any).user;
     db.addAuditLog(user?.userId, 'POC_FUNDING_CREATE',
       `${result.applicationId} | ${result.name} | 商机 ${result.opportunityId}`
       + ` | ${result.amounts.pocUsd} USD | ${result.submitted ? '已提交' : '未提交'}`
+      + ` | 计算器 ${result.calculator.total ?? '手填'} USD`
       + `${result.warnings.length ? ` | 警告 ${result.warnings.length} 条` : ''}`,
       user?.username, req.ip);
     (res.locals as any).audited = true;
