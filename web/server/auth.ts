@@ -87,7 +87,7 @@ const JWT_SECRET = config.web?.jwtSecret || process.env.JWT_SECRET || (() => {
   console.warn('⚠️  No JWT_SECRET configured. Using auto-generated secret (sessions will reset on restart).');
   return generated;
 })();
-const TOKEN_EXPIRY = '2h';
+const TOKEN_EXPIRY = '8h';
 const ADMIN_PASSWORD = config.web?.adminPassword || process.env.ADMIN_PASSWORD || 'admin123';
 
 export const authRouter = Router();

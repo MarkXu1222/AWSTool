@@ -35,7 +35,7 @@ AWS 多账户管理平台。跨组织管理成员账户：配额提升、账单 
 - 前端：React 18 + Vite 6 + Ant Design 5 + recharts，TypeScript
 - 前端路由：**无 react-router**，`MainLayout` 用 `useState(currentPage)` 切页 + 原生 `pushState`/`popstate` 同步 URL
 - 存储：`data/db.json`（自研 JSON 文件存储，非数据库）+ 独立的 `data/root-email-jobs.json`
-- 认证：JWT（2h 过期）+ 强制 TOTP MFA（otplib），bcrypt 存密码，敏感操作另有 step-up TOTP
+- 认证：JWT（8h 过期）+ 强制 TOTP MFA（otplib），bcrypt 存密码，敏感操作另有 step-up TOTP
 - AWS：`@aws-sdk/*` v3；跨账户 STS AssumeRole；根特权走 `sts:AssumeRoot`
 - 文档/导出：`puppeteer-core` + 系统 Chrome（提额 PDF、账单 PDF、Root 改密自动化）
 - 通知：飞书 webhook

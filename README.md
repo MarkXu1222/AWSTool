@@ -57,7 +57,7 @@
 - **后端**：Node.js + Express 4 + TypeScript，用 `tsx` 直接运行 `.ts`，**不编译**（改 `.ts` 后 `pm2 restart` 即生效）
 - **前端**：React 18 + Vite 6 + Ant Design 5 + recharts + TypeScript。**无 react-router**，`MainLayout` 用 `useState(currentPage)` 切页，另以原生 `pushState`/`popstate` 做 URL 同步（`/billing` 等路径可刷新/直链/前进后退）；按稳定性分三包（vendor/charts/业务代码，并行加载非路由懒加载）+ hash 资源 immutable 缓存一年，运维监控页 `React.lazy` 懒加载；dashboard/accounts/quotas/regions/billing 五个高频页 keep-alive（`display:none` 保活，切回不重新请求）
 - **存储**：`data/db.json`，自研 JSON 文件存储 + 内存缓存 + 每日备份（非数据库）
-- **认证**：JWT（2h 过期）+ 强制 TOTP MFA（otplib），密码 bcrypt，MFA secret AES-256-CBC 加密落盘
+- **认证**：JWT（8h 过期）+ 强制 TOTP MFA（otplib），密码 bcrypt，MFA secret AES-256-CBC 加密落盘
 - **AWS**：`@aws-sdk/*` v3，跨账户 STS AssumeRole
 - **文档/导出**：`puppeteer-core` + 系统 Chrome（提额 PDF、账单 PDF）
 - **通知**：飞书 webhook
@@ -1405,7 +1405,7 @@ Nginx 反代 + Let's Encrypt（`markxu.co`，自动续期），80 强制跳 443�
 - 启动时自动备份 db.json 到 `data/backups/`，保留 7 天
 - MFA secret AES-256-CBC 加密存储，密码 bcrypt
 - 平台长期凭证只在服务端；具备 `root_access` 的用户可显式请求 1 小时 Admin 临时凭证，只有数据库当前角色为 admin 才可选择 2–12 小时。长时请求仅走成员账户 `admin-console` 直接一级跳；所有签发均实时鉴权、记录实际时长/到期时间且不落盘
-- 密码 + TOTP MFA（window=2，150 秒容差），JWT 2 小时过期
+- 密码 + TOTP MFA（window=2，150 秒容差），JWT 8 小时过期（固定时长，从登录起算，不滑动续期）
 - 登录限流 5 次/15 分钟；API 限流读写分离：GET 300 次/分钟（监控轮询 + 多标签页），写操作 100 次/分钟
 - 未匹配的 `/api/*` 一律返回 404 JSON（不掉进 SPA fallback 返回 200 + index.html，避免鼓励扫描器探测）
 - Helmet 安全头 + CORS 白名单（未列入的来源用 `callback(null, false)` 优雅拒绝，**绝不 throw** —— 抛错会被 Express 当 500，导致带 `crossorigin` 的静态资源请求失败、整站白屏）
