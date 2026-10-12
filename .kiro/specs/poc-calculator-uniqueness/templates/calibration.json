@@ -1,7 +1,7 @@
 {
  "region": "ap-southeast-5",
  "measuredAt": "2026-10-12",
- "source": "calculator.aws「Update estimate」引擎重算实测，3 轮",
+ "source": "calculator.aws「Update estimate」引擎重算实测，4 轮（第 4 轮拆分 EFS 读写、S3 PUT/GET、RDS 备份/按节点存储、WAF 规则/托管组）",
  "tolerancePerServiceUsd": 0.02,
  "cases": [
   {
@@ -1006,6 +1006,256 @@
     "requests": 1000000
    },
    "engineMonthlyUsd": 13
+  },
+  {
+   "service": "efs",
+   "params": {
+    "storageGb": 100,
+    "readGb": 100,
+    "writeGb": 0
+   },
+   "engineMonthlyUsd": 36
+  },
+  {
+   "service": "efs",
+   "params": {
+    "storageGb": 100,
+    "readGb": 0,
+    "writeGb": 100
+   },
+   "engineMonthlyUsd": 38.7
+  },
+  {
+   "service": "efs",
+   "params": {
+    "storageGb": 100,
+    "readGb": 300,
+    "writeGb": 0
+   },
+   "engineMonthlyUsd": 43.2
+  },
+  {
+   "service": "efs",
+   "params": {
+    "storageGb": 100,
+    "readGb": 0,
+    "writeGb": 300
+   },
+   "engineMonthlyUsd": 51.3
+  },
+  {
+   "service": "efs",
+   "params": {
+    "storageGb": 600,
+    "readGb": 50,
+    "writeGb": 35
+   },
+   "engineMonthlyUsd": 198.4
+  },
+  {
+   "service": "efs",
+   "params": {
+    "storageGb": 100,
+    "readGb": 0,
+    "writeGb": 0
+   },
+   "engineMonthlyUsd": 32.4
+  },
+  {
+   "service": "s3",
+   "params": {
+    "gb": 100,
+    "putRequests": 1000000,
+    "getRequests": 0
+   },
+   "engineMonthlyUsd": 6.75
+  },
+  {
+   "service": "s3",
+   "params": {
+    "gb": 100,
+    "putRequests": 0,
+    "getRequests": 10000000
+   },
+   "engineMonthlyUsd": 5.85
+  },
+  {
+   "service": "s3",
+   "params": {
+    "gb": 100,
+    "putRequests": 300000,
+    "getRequests": 7000000
+   },
+   "engineMonthlyUsd": 6.12
+  },
+  {
+   "service": "s3",
+   "params": {
+    "gb": 1519,
+    "putRequests": 230000,
+    "getRequests": 4600000
+   },
+   "engineMonthlyUsd": 36.87
+  },
+  {
+   "service": "rds-mysql",
+   "params": {
+    "instanceType": "db.m6g.large",
+    "nodes": 1,
+    "deployment": "Single-AZ",
+    "storageGb": 100,
+    "backupGb": 0
+   },
+   "engineMonthlyUsd": 149.64
+  },
+  {
+   "service": "rds-mysql",
+   "params": {
+    "instanceType": "db.m6g.large",
+    "nodes": 1,
+    "deployment": "Single-AZ",
+    "storageGb": 100,
+    "backupGb": 400
+   },
+   "engineMonthlyUsd": 184.04
+  },
+  {
+   "service": "rds-mysql",
+   "params": {
+    "instanceType": "db.m6g.large",
+    "nodes": 2,
+    "deployment": "Single-AZ",
+    "storageGb": 300,
+    "backupGb": 0
+   },
+   "engineMonthlyUsd": 348.88
+  },
+  {
+   "service": "rds-mysql",
+   "params": {
+    "instanceType": "db.m6g.large",
+    "nodes": 2,
+    "deployment": "Multi-AZ",
+    "storageGb": 300,
+    "backupGb": 250
+   },
+   "engineMonthlyUsd": 719.26
+  },
+  {
+   "service": "rds-mysql",
+   "params": {
+    "instanceType": "db.m6g.large",
+    "nodes": 1,
+    "deployment": "Multi-AZ",
+    "storageGb": 50,
+    "backupGb": 1000
+   },
+   "engineMonthlyUsd": 372.88
+  },
+  {
+   "service": "rds-postgresql",
+   "params": {
+    "instanceType": "db.m6g.large",
+    "nodes": 1,
+    "deployment": "Single-AZ",
+    "storageGb": 100,
+    "backupGb": 0
+   },
+   "engineMonthlyUsd": 149.64
+  },
+  {
+   "service": "rds-postgresql",
+   "params": {
+    "instanceType": "db.m6g.large",
+    "nodes": 1,
+    "deployment": "Single-AZ",
+    "storageGb": 100,
+    "backupGb": 400
+   },
+   "engineMonthlyUsd": 184.04
+  },
+  {
+   "service": "rds-postgresql",
+   "params": {
+    "instanceType": "db.m6g.large",
+    "nodes": 2,
+    "deployment": "Single-AZ",
+    "storageGb": 300,
+    "backupGb": 0
+   },
+   "engineMonthlyUsd": 348.88
+  },
+  {
+   "service": "rds-postgresql",
+   "params": {
+    "instanceType": "db.m6g.large",
+    "nodes": 2,
+    "deployment": "Multi-AZ",
+    "storageGb": 300,
+    "backupGb": 250
+   },
+   "engineMonthlyUsd": 719.26
+  },
+  {
+   "service": "rds-postgresql",
+   "params": {
+    "instanceType": "db.m6g.large",
+    "nodes": 1,
+    "deployment": "Multi-AZ",
+    "storageGb": 50,
+    "backupGb": 1000
+   },
+   "engineMonthlyUsd": 372.88
+  },
+  {
+   "service": "waf",
+   "params": {
+    "webAcls": 1,
+    "rulesPerAcl": 10,
+    "managedGroupsPerAcl": 0,
+    "requestsMillions": 0
+   },
+   "engineMonthlyUsd": 15
+  },
+  {
+   "service": "waf",
+   "params": {
+    "webAcls": 1,
+    "rulesPerAcl": 0,
+    "managedGroupsPerAcl": 4,
+    "requestsMillions": 0
+   },
+   "engineMonthlyUsd": 9
+  },
+  {
+   "service": "waf",
+   "params": {
+    "webAcls": 2,
+    "rulesPerAcl": 7,
+    "managedGroupsPerAcl": 3,
+    "requestsMillions": 0
+   },
+   "engineMonthlyUsd": 30
+  },
+  {
+   "service": "waf",
+   "params": {
+    "webAcls": 1,
+    "rulesPerAcl": 0,
+    "managedGroupsPerAcl": 0,
+    "requestsMillions": 100
+   },
+   "engineMonthlyUsd": 65
+  },
+  {
+   "service": "waf",
+   "params": {
+    "webAcls": 2,
+    "rulesPerAcl": 12,
+    "managedGroupsPerAcl": 1,
+    "requestsMillions": 37
+   },
+   "engineMonthlyUsd": 58.2
   }
  ]
 }

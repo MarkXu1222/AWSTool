@@ -10,8 +10,8 @@ const calibration = JSON.parse(readFileSync(path.join(__dirname,
     cases: { service: ServiceKind; params: ServiceItem['params']; engineMonthlyUsd: number }[];
   };
 
-test('112 个 Update estimate 标定月费误差不超过 0.02 USD', () => {
-  assert.equal(calibration.cases.length, 112);
+test('137 个 Update estimate 标定月费误差不超过 0.02 USD', () => {
+  assert.equal(calibration.cases.length, 137);
   for (const c of calibration.cases) {
     const item = { kind: c.service, params: c.params } as ServiceItem;
     const actual = monthlyCost(item);

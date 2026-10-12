@@ -48,7 +48,9 @@ export const UNIT = {
   r53Zone: 0.5, r53PerMillion: 0.4,
   secret: 0.4, secretPer10k: 0.05,
   backupEbsGbMonth: 0.07089,
-  efsGbMonth: 0.324, efsReadGb: 0.033, efsWriteGb: 0.066,
+  // 读写单价须分开实测：早期标定样本读写量恒相等，只能测出两者之和 0.099，
+  // 按 0.033/0.066 拆分在读写不等时偏差 0.04（第 4 轮引擎实测纠正）
+  efsGbMonth: 0.324, efsReadGb: 0.036, efsWriteGb: 0.063,
   ecrGbMonth: 0.10,
   kmsKey: 1, kmsPer10k: 0.03,
   sqsPerMillion: 0.34,
