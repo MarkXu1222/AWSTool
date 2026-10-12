@@ -1,7 +1,7 @@
 {
  "region": "ap-southeast-5",
  "measuredAt": "2026-10-12",
- "source": "calculator.aws「Update estimate」引擎重算实测，4 轮（第 4 轮拆分 EFS 读写、S3 PUT/GET、RDS 备份/按节点存储、WAF 规则/托管组）",
+ "source": "calculator.aws「Update estimate」引擎重算实测，6 轮（第 4 轮拆分同比例参数；第 5 轮 RDS 机型×部署全矩阵与 Aurora；第 6 轮 PostgreSQL gp3 跨 400GB）",
  "tolerancePerServiceUsd": 0.02,
  "cases": [
   {
@@ -1256,6 +1256,496 @@
     "requestsMillions": 37
    },
    "engineMonthlyUsd": 58.2
+  },
+  {
+   "service": "rds-mysql",
+   "params": {
+    "instanceType": "db.t4g.large",
+    "nodes": 1,
+    "deployment": "Single-AZ",
+    "storageGb": 0,
+    "backupGb": 0
+   },
+   "engineMonthlyUsd": 133.59
+  },
+  {
+   "service": "rds-mysql",
+   "params": {
+    "instanceType": "db.t4g.large",
+    "nodes": 1,
+    "deployment": "Multi-AZ",
+    "storageGb": 0,
+    "backupGb": 0
+   },
+   "engineMonthlyUsd": 267.18
+  },
+  {
+   "service": "rds-mysql",
+   "params": {
+    "instanceType": "db.m6g.large",
+    "nodes": 1,
+    "deployment": "Single-AZ",
+    "storageGb": 0,
+    "backupGb": 0
+   },
+   "engineMonthlyUsd": 137.24
+  },
+  {
+   "service": "rds-mysql",
+   "params": {
+    "instanceType": "db.m6g.large",
+    "nodes": 1,
+    "deployment": "Multi-AZ",
+    "storageGb": 0,
+    "backupGb": 0
+   },
+   "engineMonthlyUsd": 274.48
+  },
+  {
+   "service": "rds-mysql",
+   "params": {
+    "instanceType": "db.m6g.xlarge",
+    "nodes": 1,
+    "deployment": "Single-AZ",
+    "storageGb": 0,
+    "backupGb": 0
+   },
+   "engineMonthlyUsd": 274.48
+  },
+  {
+   "service": "rds-mysql",
+   "params": {
+    "instanceType": "db.m6g.xlarge",
+    "nodes": 1,
+    "deployment": "Multi-AZ",
+    "storageGb": 0,
+    "backupGb": 0
+   },
+   "engineMonthlyUsd": 548.96
+  },
+  {
+   "service": "rds-mysql",
+   "params": {
+    "instanceType": "db.m7g.large",
+    "nodes": 1,
+    "deployment": "Single-AZ",
+    "storageGb": 0,
+    "backupGb": 0
+   },
+   "engineMonthlyUsd": 145.27
+  },
+  {
+   "service": "rds-mysql",
+   "params": {
+    "instanceType": "db.m7g.large",
+    "nodes": 1,
+    "deployment": "Multi-AZ",
+    "storageGb": 0,
+    "backupGb": 0
+   },
+   "engineMonthlyUsd": 290.54
+  },
+  {
+   "service": "rds-mysql",
+   "params": {
+    "instanceType": "db.m7g.xlarge",
+    "nodes": 1,
+    "deployment": "Single-AZ",
+    "storageGb": 0,
+    "backupGb": 0
+   },
+   "engineMonthlyUsd": 290.54
+  },
+  {
+   "service": "rds-mysql",
+   "params": {
+    "instanceType": "db.m7g.xlarge",
+    "nodes": 1,
+    "deployment": "Multi-AZ",
+    "storageGb": 0,
+    "backupGb": 0
+   },
+   "engineMonthlyUsd": 581.08
+  },
+  {
+   "service": "rds-mysql",
+   "params": {
+    "instanceType": "db.r6g.large",
+    "nodes": 1,
+    "deployment": "Single-AZ",
+    "storageGb": 0,
+    "backupGb": 0
+   },
+   "engineMonthlyUsd": 167.9
+  },
+  {
+   "service": "rds-mysql",
+   "params": {
+    "instanceType": "db.r6g.large",
+    "nodes": 1,
+    "deployment": "Multi-AZ",
+    "storageGb": 0,
+    "backupGb": 0
+   },
+   "engineMonthlyUsd": 335.8
+  },
+  {
+   "service": "rds-mysql",
+   "params": {
+    "instanceType": "db.r6g.xlarge",
+    "nodes": 1,
+    "deployment": "Single-AZ",
+    "storageGb": 0,
+    "backupGb": 0
+   },
+   "engineMonthlyUsd": 335.8
+  },
+  {
+   "service": "rds-mysql",
+   "params": {
+    "instanceType": "db.r6g.xlarge",
+    "nodes": 1,
+    "deployment": "Multi-AZ",
+    "storageGb": 0,
+    "backupGb": 0
+   },
+   "engineMonthlyUsd": 671.6
+  },
+  {
+   "service": "rds-mysql",
+   "params": {
+    "instanceType": "db.r7g.large",
+    "nodes": 1,
+    "deployment": "Single-AZ",
+    "storageGb": 0,
+    "backupGb": 0
+   },
+   "engineMonthlyUsd": 178.12
+  },
+  {
+   "service": "rds-mysql",
+   "params": {
+    "instanceType": "db.r7g.large",
+    "nodes": 1,
+    "deployment": "Multi-AZ",
+    "storageGb": 0,
+    "backupGb": 0
+   },
+   "engineMonthlyUsd": 356.24
+  },
+  {
+   "service": "rds-postgresql",
+   "params": {
+    "instanceType": "db.t4g.large",
+    "nodes": 1,
+    "deployment": "Single-AZ",
+    "storageGb": 0,
+    "backupGb": 0
+   },
+   "engineMonthlyUsd": 133.59
+  },
+  {
+   "service": "rds-postgresql",
+   "params": {
+    "instanceType": "db.t4g.large",
+    "nodes": 1,
+    "deployment": "Multi-AZ",
+    "storageGb": 0,
+    "backupGb": 0
+   },
+   "engineMonthlyUsd": 267.18
+  },
+  {
+   "service": "rds-postgresql",
+   "params": {
+    "instanceType": "db.m6g.large",
+    "nodes": 1,
+    "deployment": "Single-AZ",
+    "storageGb": 0,
+    "backupGb": 0
+   },
+   "engineMonthlyUsd": 137.24
+  },
+  {
+   "service": "rds-postgresql",
+   "params": {
+    "instanceType": "db.m6g.large",
+    "nodes": 1,
+    "deployment": "Multi-AZ",
+    "storageGb": 0,
+    "backupGb": 0
+   },
+   "engineMonthlyUsd": 274.48
+  },
+  {
+   "service": "rds-postgresql",
+   "params": {
+    "instanceType": "db.m6g.xlarge",
+    "nodes": 1,
+    "deployment": "Single-AZ",
+    "storageGb": 0,
+    "backupGb": 0
+   },
+   "engineMonthlyUsd": 274.48
+  },
+  {
+   "service": "rds-postgresql",
+   "params": {
+    "instanceType": "db.m6g.xlarge",
+    "nodes": 1,
+    "deployment": "Multi-AZ",
+    "storageGb": 0,
+    "backupGb": 0
+   },
+   "engineMonthlyUsd": 548.96
+  },
+  {
+   "service": "rds-postgresql",
+   "params": {
+    "instanceType": "db.m7g.large",
+    "nodes": 1,
+    "deployment": "Single-AZ",
+    "storageGb": 0,
+    "backupGb": 0
+   },
+   "engineMonthlyUsd": 145.27
+  },
+  {
+   "service": "rds-postgresql",
+   "params": {
+    "instanceType": "db.m7g.large",
+    "nodes": 1,
+    "deployment": "Multi-AZ",
+    "storageGb": 0,
+    "backupGb": 0
+   },
+   "engineMonthlyUsd": 290.54
+  },
+  {
+   "service": "rds-postgresql",
+   "params": {
+    "instanceType": "db.m7g.xlarge",
+    "nodes": 1,
+    "deployment": "Single-AZ",
+    "storageGb": 0,
+    "backupGb": 0
+   },
+   "engineMonthlyUsd": 290.54
+  },
+  {
+   "service": "rds-postgresql",
+   "params": {
+    "instanceType": "db.m7g.xlarge",
+    "nodes": 1,
+    "deployment": "Multi-AZ",
+    "storageGb": 0,
+    "backupGb": 0
+   },
+   "engineMonthlyUsd": 581.08
+  },
+  {
+   "service": "rds-postgresql",
+   "params": {
+    "instanceType": "db.r6g.large",
+    "nodes": 1,
+    "deployment": "Single-AZ",
+    "storageGb": 0,
+    "backupGb": 0
+   },
+   "engineMonthlyUsd": 167.9
+  },
+  {
+   "service": "rds-postgresql",
+   "params": {
+    "instanceType": "db.r6g.large",
+    "nodes": 1,
+    "deployment": "Multi-AZ",
+    "storageGb": 0,
+    "backupGb": 0
+   },
+   "engineMonthlyUsd": 335.8
+  },
+  {
+   "service": "rds-postgresql",
+   "params": {
+    "instanceType": "db.r6g.xlarge",
+    "nodes": 1,
+    "deployment": "Single-AZ",
+    "storageGb": 0,
+    "backupGb": 0
+   },
+   "engineMonthlyUsd": 335.8
+  },
+  {
+   "service": "rds-postgresql",
+   "params": {
+    "instanceType": "db.r6g.xlarge",
+    "nodes": 1,
+    "deployment": "Multi-AZ",
+    "storageGb": 0,
+    "backupGb": 0
+   },
+   "engineMonthlyUsd": 671.6
+  },
+  {
+   "service": "rds-postgresql",
+   "params": {
+    "instanceType": "db.r7g.large",
+    "nodes": 1,
+    "deployment": "Single-AZ",
+    "storageGb": 0,
+    "backupGb": 0
+   },
+   "engineMonthlyUsd": 178.12
+  },
+  {
+   "service": "rds-postgresql",
+   "params": {
+    "instanceType": "db.r7g.large",
+    "nodes": 1,
+    "deployment": "Multi-AZ",
+    "storageGb": 0,
+    "backupGb": 0
+   },
+   "engineMonthlyUsd": 356.24
+  },
+  {
+   "service": "aurora-mysql",
+   "params": {
+    "instanceType": "db.r6g.large",
+    "nodes": 1,
+    "storageGb": 0
+   },
+   "engineMonthlyUsd": 194.18
+  },
+  {
+   "service": "aurora-mysql",
+   "params": {
+    "instanceType": "db.r6g.large",
+    "nodes": 3,
+    "storageGb": 0
+   },
+   "engineMonthlyUsd": 582.54
+  },
+  {
+   "service": "aurora-mysql",
+   "params": {
+    "instanceType": "db.r6g.xlarge",
+    "nodes": 1,
+    "storageGb": 0
+   },
+   "engineMonthlyUsd": 388.36
+  },
+  {
+   "service": "aurora-mysql",
+   "params": {
+    "instanceType": "db.r6g.xlarge",
+    "nodes": 3,
+    "storageGb": 0
+   },
+   "engineMonthlyUsd": 1165.08
+  },
+  {
+   "service": "aurora-mysql",
+   "params": {
+    "instanceType": "db.r7g.large",
+    "nodes": 1,
+    "storageGb": 0
+   },
+   "engineMonthlyUsd": 206.59
+  },
+  {
+   "service": "aurora-mysql",
+   "params": {
+    "instanceType": "db.r7g.large",
+    "nodes": 3,
+    "storageGb": 0
+   },
+   "engineMonthlyUsd": 619.77
+  },
+  {
+   "service": "aurora-mysql",
+   "params": {
+    "instanceType": "db.r7g.xlarge",
+    "nodes": 1,
+    "storageGb": 0
+   },
+   "engineMonthlyUsd": 413.18
+  },
+  {
+   "service": "aurora-mysql",
+   "params": {
+    "instanceType": "db.r7g.xlarge",
+    "nodes": 3,
+    "storageGb": 0
+   },
+   "engineMonthlyUsd": 1239.54
+  },
+  {
+   "service": "rds-postgresql",
+   "params": {
+    "instanceType": "db.r6g.xlarge",
+    "nodes": 2,
+    "deployment": "Multi-AZ",
+    "storageGb": 650,
+    "backupGb": 450
+   },
+   "engineMonthlyUsd": 1704.3
+  },
+  {
+   "service": "rds-postgresql",
+   "params": {
+    "instanceType": "db.r6g.xlarge",
+    "nodes": 2,
+    "deployment": "Multi-AZ",
+    "storageGb": 390,
+    "backupGb": 0
+   },
+   "engineMonthlyUsd": 1536.64
+  },
+  {
+   "service": "rds-postgresql",
+   "params": {
+    "instanceType": "db.r6g.xlarge",
+    "nodes": 1,
+    "deployment": "Single-AZ",
+    "storageGb": 650,
+    "backupGb": 0
+   },
+   "engineMonthlyUsd": 416.4
+  },
+  {
+   "service": "rds-postgresql",
+   "params": {
+    "instanceType": "db.m6g.large",
+    "nodes": 1,
+    "deployment": "Single-AZ",
+    "storageGb": 1000,
+    "backupGb": 0
+   },
+   "engineMonthlyUsd": 261.24
+  },
+  {
+   "service": "rds-mysql",
+   "params": {
+    "instanceType": "db.r6g.xlarge",
+    "nodes": 2,
+    "deployment": "Multi-AZ",
+    "storageGb": 650,
+    "backupGb": 450
+   },
+   "engineMonthlyUsd": 1704.3
+  },
+  {
+   "service": "rds-mysql",
+   "params": {
+    "instanceType": "db.m6g.large",
+    "nodes": 1,
+    "deployment": "Single-AZ",
+    "storageGb": 1000,
+    "backupGb": 0
+   },
+   "engineMonthlyUsd": 261.24
   }
  ]
 }

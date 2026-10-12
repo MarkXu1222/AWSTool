@@ -366,10 +366,10 @@ const TEMPLATES = {
         ]
       },
       "gp3Iops": {
-        "value": "3000"
+        "value": "12000"
       },
       "gp3Throughput": {
-        "value": "125",
+        "value": "500",
         "unit": "mbps"
       },
       "additionalBackupStorage": {
@@ -1079,7 +1079,15 @@ export function buildServiceBlock(item: ServiceItem): [string, CalculatorService
     case 'rds-mysql': case 'rds-postgresql':
       setRow('Instance Type', item.params.instanceType); setRow('Number of Nodes', item.params.nodes);
       setRow('Deployment Option', item.params.deployment); set(cc, 'storageAmount', item.params.storageGb);
-      set(cc, 'additionalBackupStorage', item.params.backupGb); break;
+      set(cc, 'additionalBackupStorage', item.params.backupGb);
+      // gp3 ≥400GB 的基线是 12000 IOPS / 500 MiBps；仍填 3000/125 会被引擎判为无效配置，
+      // Update estimate 后金额大幅偏低（r6g.xlarge ×2 MAZ 650GB：1704.30 → 800.55）
+      if (item.kind === 'rds-postgresql') {
+        const large = item.params.storageGb >= 400;
+        set(cc, 'gp3Iops', large ? 12000 : 3000);
+        set(cc, 'gp3Throughput', large ? 500 : 125);
+      }
+      break;
     case 'aurora-mysql': setRow('Instance Type', item.params.instanceType); setRow('Number of Nodes', item.params.nodes);
       set(cc, 'storageAmount', item.params.storageGb); break;
     case 'elasticache': setRow('Instance Type', item.params.instanceType); setRow('Number of Nodes', item.params.nodes); break;

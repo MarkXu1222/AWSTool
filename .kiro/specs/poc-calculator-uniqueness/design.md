@@ -6,9 +6,9 @@
 > | 路径 | 内容 |
 > |---|---|
 > | `templates/*.json` | 19 个服务的 calculator.aws JSON 模板，克隆自人工制作的真实估算，已在引擎实测 |
-> | `templates/calibration.json` | 137 个引擎实测用例（服务 + 参数 → 引擎重算月费），测试夹具 |
+> | `templates/calibration.json` | 183 个引擎实测用例（服务 + 参数 → 引擎重算月费），测试夹具 |
 > | `templates/engine-config-summaries.json` | 引擎自己生成的配置摘要原文（中英混杂，因 headless 浏览器为中文环境），§5.2 的英文摘要以此为准翻译 |
-> | `reference/formula.cjs` | 成本公式参考实现（对 137 个用例最大误差 0.01 USD） |
+> | `reference/formula.cjs` | 成本公式参考实现（对 183 个用例最大误差 0.01 USD） |
 > | `reference/generator-prototype.cjs` | 生成算法参考实现（`node generator-prototype.cjs` 输出唯一率统计） |
 >
 > `reference/` 是一次性原型，**不是产品代码**，不要 import，按本文档翻译成 TypeScript。
@@ -22,7 +22,7 @@
 验收（全部可执行）：
 
 - [ ] `cd web && npm test && npm run typecheck && npm run build` 全绿
-- [ ] `tests/calculator-calibration.test.ts`：137 个实测用例，本地 `monthlyCost()` 与 `engineMonthlyUsd` 差 ≤ 0.02
+- [ ] `tests/calculator-calibration.test.ts`：183 个实测用例，本地 `monthlyCost()` 与 `engineMonthlyUsd` 差 ≤ 0.02
 - [ ] `tests/pricing-calculator-target.test.ts`：§9 列出的全部断言通过
 - [ ] `tests/poc-calculator-ledger.test.ts`：§9 列出的全部断言通过
 - [ ] `tests/poc-calculator-flow.test.ts`：§9.5 列出的全部断言通过
@@ -645,7 +645,7 @@ export function recordManualCalculator(ctx: CalculatorContext, url: string): Cal
 
 ### 9.2 新建 `tests/calculator-calibration.test.ts`
 
-读取 `../../.kiro/specs/poc-calculator-uniqueness/templates/calibration.json`（相对 `web/tests/`），对每个 case：`Math.abs(monthlyCost({kind: c.service, params: c.params}) − c.engineMonthlyUsd) <= 0.02`。另断言 case 数 === 137。
+读取 `../../.kiro/specs/poc-calculator-uniqueness/templates/calibration.json`（相对 `web/tests/`），对每个 case：`Math.abs(monthlyCost({kind: c.service, params: c.params}) − c.engineMonthlyUsd) <= 0.02`。另断言 case 数 === 183。
 
 再对每个 kind 各构造一个 item，断言 `buildServiceBlock` 的 block：`serviceCode` 与模板一致、`region === 'ap-southeast-5'`、`serviceCost.monthly === monthlyCost(item)`、`configSummary` 不含中文字符（`/[一-鿿]/`）、不含 `,` 千分位（数字段用正则 `/\d,\d{3}/` 不匹配）。
 
@@ -731,5 +731,6 @@ export async function createApplicationWithLedger(
 | 日期 | 修订 | 原因 |
 |---|---|---|
 | 2026-10-12 | EFS 读写单价 0.033/0.066 → **0.036/0.063**；标定用例 112 → **137** | T5 联网验收发现 EFS 读 50/写 35 GB 时本地 198.36 vs 引擎 198.40。前 3 轮标定的 EFS 样本读写量恒相等，只能测出两者之和 0.099，拆分是假设。第 4 轮补测 25 个用例，把所有曾同比例变化的参数拆开独立测量：EFS 读/写、S3 PUT/GET、RDS 备份与按节点存储、WAF 规则/托管组；除 EFS 外全部与原公式逐分吻合 |
+| 2026-10-12 | **PostgreSQL gp3 存储 ≥400GB 时写入 12000 IOPS / 500 MiBps**（`buildServiceBlock` 按存储切换）；PG 模板恢复人工样本原值 12000/500；标定用例 137 → **183** | 联网验收 MRR 25000 一份 RDS PostgreSQL r6g.xlarge×2 MAZ 650GB：本地 1704.30 vs 引擎 800.55。≥400GB 仍填 3000 IOPS 被引擎判为无效配置。前 3 轮 PG 存储均 <400GB 未暴露；模板制作时误把 1000GB 样本的 IOPS 改成 3000。第 5 轮补测 RDS 两引擎×8 机型×2 部署全矩阵与 Aurora 4 机型，实例单价全部吻合 |
 | 2026-10-12 | §9.4 全覆盖估算：seed=`coverage`、名 `verify coverage`、target=total、signature=`coverage:`+各 kind 按 §5.2.1 声明顺序 `|` 连接 | 方案未定义，T5 提问后由协调者确定 |
 | 2026-10-12 | T4 由协调者接手实现 | worker 遇上游模型 502 中断，dispatch 卡在 stop_unknown |

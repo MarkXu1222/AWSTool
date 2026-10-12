@@ -44,10 +44,10 @@
       ]
     },
     "gp3Iops": {
-      "value": "3000"
+      "value": "12000"
     },
     "gp3Throughput": {
-      "value": "125",
+      "value": "500",
       "unit": "mbps"
     },
     "additionalBackupStorage": {

@@ -10,8 +10,8 @@ const calibration = JSON.parse(readFileSync(path.join(__dirname,
     cases: { service: ServiceKind; params: ServiceItem['params']; engineMonthlyUsd: number }[];
   };
 
-test('137 个 Update estimate 标定月费误差不超过 0.02 USD', () => {
-  assert.equal(calibration.cases.length, 137);
+test('183 个 Update estimate 标定月费误差不超过 0.02 USD', () => {
+  assert.equal(calibration.cases.length, 183);
   for (const c of calibration.cases) {
     const item = { kind: c.service, params: c.params } as ServiceItem;
     const actual = monthlyCost(item);
@@ -86,4 +86,22 @@ test('每种服务的模板非旋钮字段逐字保留', () => {
   assert.equal(block.region, 'ap-southeast-5');
   assert.equal((block.serviceCost as { monthly: number }).monthly, monthlyCost(item));
   assert.doesNotMatch(String(block.configSummary), /[一-鿿]|\d,\d{3}/);
+});
+
+test('PostgreSQL gp3 存储 ≥400GB 时写入 12000 IOPS / 500 MiBps 基线', () => {
+  // 引擎对「≥400GB 仍填 3000 IOPS」判为无效配置并按错误口径重算：
+  // r6g.xlarge ×2 Multi-AZ 650GB 实测 800.55，正确基线下为 1704.30（第 6 轮标定）
+  const gp3 = (storageGb: number) => {
+    const [, block] = buildServiceBlock({ kind: 'rds-postgresql', params: {
+      instanceType: 'db.r6g.xlarge', nodes: 2, deployment: 'Multi-AZ', storageGb, backupGb: 0 } });
+    const cc = block.calculationComponents as Record<string, { value: string }>;
+    return [cc.gp3Iops.value, cc.gp3Throughput.value];
+  };
+  assert.deepEqual(gp3(399), ['3000', '125']);
+  assert.deepEqual(gp3(400), ['12000', '500']);
+  assert.deepEqual(gp3(650), ['12000', '500']);
+  // MySQL 用 gp2，模板里没有 gp3 字段，不受影响
+  const [, mysql] = buildServiceBlock({ kind: 'rds-mysql', params: {
+    instanceType: 'db.r6g.xlarge', nodes: 2, deployment: 'Multi-AZ', storageGb: 650, backupGb: 0 } });
+  assert.equal((mysql.calculationComponents as Record<string, unknown>).gp3Iops, undefined);
 });
