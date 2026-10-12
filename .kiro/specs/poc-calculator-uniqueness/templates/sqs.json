@@ -1,0 +1,39 @@
+{
+  "calculationComponents": {
+    "dataTransfer": {
+      "value": [
+        {
+          "entryType": "INBOUND",
+          "value": "",
+          "unit": "tb_month",
+          "fromRegion": ""
+        },
+        {
+          "entryType": "OUTBOUND",
+          "value": "",
+          "unit": "tb_month",
+          "toRegion": ""
+        }
+      ]
+    },
+    "standardQueueRequests": {
+      "value": "200",
+      "unit": "perMonth"
+    },
+    "fifoQueueRequests": {
+      "value": "0",
+      "unit": "perMonth"
+    }
+  },
+  "serviceCode": "amazonSimpleQueueService",
+  "region": "ap-southeast-5",
+  "estimateFor": "simpleQueueService",
+  "version": "0.0.51",
+  "description": null,
+  "serviceCost": {
+    "monthly": 0,
+    "upfront": 0
+  },
+  "serviceName": "Amazon Simple Queue Service (SQS)",
+  "regionName": "Asia Pacific (Malaysia)"
+}

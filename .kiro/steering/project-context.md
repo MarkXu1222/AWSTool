@@ -78,7 +78,7 @@ AWS 多账户管理平台。跨组织管理成员账户：配额提升、账单 
 | Bedrock | `bedrock-tools.ts`、`bedrock-delivery.ts`★ |
 | MAP 标签 | `tag-compliance.ts`、`tag-onboarding.ts` |
 | 批量 Root 改密 | `root-email-jobs.ts`、`root-email-core.ts`★、`root-email-browser.ts`、`root-email-execution-slot.ts`、`root-email-manual.ts`、`root-email-reconcile.ts`、`root-password-secrets.ts`、`root-reset-permissions.ts`、`root-mail-poll.ts`、`root-mail-links.ts`、`mail-api.ts`、`mail-api-config.ts` —— **改这块前先读 `web/ROOT_EMAIL.md`** |
-| POC Cash | `poc-cash.ts`、`poc-cash-funding.ts`、`pricing-calculator.ts` |
+| POC Cash | `poc-cash.ts`、`poc-cash-funding.ts`、`poc-calculator.ts`、`pricing-calculator.ts`★、`calculator-services.ts`★、`calculator-rates.ts`★ |
 | 路由 | `routes/aws.ts`★（主业务 50+ 端点）、`routes/regions.ts`、`routes/bedrock.ts`、`routes/poc-cash.ts` |
 
 四个 router 的挂载（`index.ts`）：
@@ -133,7 +133,7 @@ admin 链路：payer 自身 → **一级跳 `admin-console`** → 二级跳 OAAR
 
 **`config.json`**（gitignore，含密钥）：`credentials`、`region`、`payers[]`、`childRoleName`、`adminRoleName`、`supportRoleName`、`adminRoleExcludedAccounts[]`、`consoleAdminPayers[]`、`tagCompliance{}`、`partnerCentral{}`、`web{}`（含 `encryptionKey` 与最多 8 个 `encryptionKeyPrevious`）。字段语义见 **README「配置与数据」**。
 
-**`data/db.json`**（gitignore）顶层键：`users`、`quota_requests`、`audit_log`（5000 条滚动）、`region_data`、`accounts_cache` + `accounts_cache_time`、`account_roles`、`tag_onboarding_jobs`、`billing_export_jobs`、`restricted_accounts`、`departed_accounts`。遗留 `dashboard_cache` 不再读写。
+**`data/db.json`**（gitignore）顶层键：`users`、`quota_requests`、`audit_log`（5000 条滚动）、`region_data`、`accounts_cache` + `accounts_cache_time`、`account_roles`、`tag_onboarding_jobs`、`billing_export_jobs`、`restricted_accounts`、`departed_accounts`、`poc_calculator_ledger`。遗留 `dashboard_cache` 不再读写。
 
 ⚠️ 这些键**按需创建**。本地开发库通常只有前几个，且账户数远少于生产。**判断 schema 以 `db.ts` 代码为准，不要拿本地 `db.json` 当权威。**
 
@@ -191,6 +191,7 @@ Bedrock 配额特意用 `/api/bedrock` 独立前缀，就是为了躲开 `/quota
 | 任何 CSV 导出 | 数字不加千分位，`toLocaleString()` 的逗号会让下游 `split(',')` 串位 |
 | `restricted-accounts.ts` | `getExcludedAccountIds()` 刻意不按 state 过滤；收窄会**删除 admin-console**、OAAR 保留（Admin 凭证 ≤1h），INVITED 账户收窄后只剩 support-quota；取消标记顺序不能反（先补回 admin-console 并按备份恢复 support 权限，最后删记录）。`tests/restricted-admin-access.test.ts` 锁死 |
 | POC Cash IAM 策略 | action 前缀是 `partnercentral:`，**不是** `partnercentral-selling:`，写错整个策略静默失效 |
+| POC 定价计算器（`calculator-rates.ts` / `calculator-services.ts`） | 单价与 JSON 块必须与 calculator.aws「Update estimate」引擎一致，否则审核人一点重算金额就变（旧版 7,946 → 27,767）。单价来自引擎实测而非 Price List；标定时每个参数须独立变化（EFS 读写曾因同比例样本拆错）。`tests/calculator-calibration.test.ts` 锁 183 个实测用例；改动后必须联网跑 `scripts/verify-calculator-render.ts` |
 | 批量 Root 改密 | 提交边界语义复杂，`password_unknown` 绝不自动重试。改动前必读 `web/ROOT_EMAIL.md` |
 
 `web/tests/` 下有 14 个回归测试守着上述若干条，改完记得跑。
@@ -208,6 +209,7 @@ Bedrock 配额特意用 `/api/bedrock` 独立前缀，就是为了躲开 `/quota
 - 敏感度分档而非一刀切：可分配页 → 需显式勾选的 `ops`/`bedrock` → 勾不到的 `poccash`
 - 强制 **MFA + 审计日志 + 限速**；平台长期凭证只在服务端
 - POC Cash 参考旧商机复用客户资料、Marketing 字段和 Solution；新商机的 Use Case 与业务描述由用户按本次标题填写，不沿用旧项目内容
+- POC 定价计算器每条申请独一份：以本地台账（`poc_calculator_ledger`）ID 播种并兼作 `ClientToken`，生成后按总额/服务签名查重；成本公式以 calculator.aws 引擎实测为准（0.52.0，见 `.kiro/specs/poc-calculator-uniqueness/`）
 
 ---
 

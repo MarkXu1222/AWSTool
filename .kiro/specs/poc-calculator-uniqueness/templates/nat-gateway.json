@@ -1,0 +1,44 @@
+{
+  "version": "0.0.101",
+  "serviceCode": "amazonVirtualPrivateCloud",
+  "estimateFor": "virtualPrivateCloudSubServiceSelector",
+  "region": "ap-southeast-5",
+  "description": null,
+  "subServices": [
+    {
+      "calculationComponents": {
+        "regionalNatGatewayCount": {
+          "value": "0"
+        },
+        "regionalNatGatewayAzCount": {
+          "value": "0"
+        },
+        "numberOfGateways": {
+          "value": "3"
+        },
+        "dataProcessedPerNATGateway": {
+          "value": "100",
+          "unit": "gb|month"
+        },
+        "regionalNatGatewayDataProcessed": {
+          "value": "0",
+          "unit": "gb|month"
+        }
+      },
+      "serviceCode": "networkAddressTranslationNatGatewayVpc",
+      "region": "ap-southeast-5",
+      "estimateFor": "networkAddressTranslationGateway",
+      "version": "0.0.19",
+      "description": null,
+      "serviceCost": {
+        "monthly": 0
+      }
+    }
+  ],
+  "serviceCost": {
+    "monthly": 0,
+    "upfront": 0
+  },
+  "serviceName": "Amazon Virtual Private Cloud (VPC)",
+  "regionName": "Asia Pacific (Malaysia)"
+}

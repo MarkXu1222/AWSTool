@@ -1,0 +1,57 @@
+{
+  "calculationComponents": {
+    "EngineType": {
+      "value": "x4dSskWC2UA5R5dVtIkM0EjZJQKU02zll08quzox15U"
+    },
+    "columnFormIPM": {
+      "value": [
+        {
+          "Instance Type": {
+            "value": "cache.m7g.large"
+          },
+          "Cache Engine": {
+            "value": "Redis"
+          },
+          "Number of Nodes": {
+            "value": "2"
+          },
+          "undefined": {
+            "value": {
+              "unit": "100",
+              "selectedId": "%Utilized/Month"
+            }
+          },
+          "Instance Family": {
+            "value": "Standard"
+          },
+          "TermType": {
+            "value": "OnDemand"
+          }
+        }
+      ]
+    },
+    "columnFormIPM_dsp": {
+      "value": [
+        {
+          "TermType": {
+            "value": "OnDemand"
+          },
+          "Cache Engine": {
+            "value": "Memcached"
+          }
+        }
+      ]
+    }
+  },
+  "serviceCode": "amazonElastiCache",
+  "region": "ap-southeast-5",
+  "estimateFor": "amazonElastiCache",
+  "version": "0.0.87",
+  "description": null,
+  "serviceCost": {
+    "monthly": 0,
+    "upfront": 0
+  },
+  "serviceName": "Amazon ElastiCache",
+  "regionName": "Asia Pacific (Malaysia)"
+}

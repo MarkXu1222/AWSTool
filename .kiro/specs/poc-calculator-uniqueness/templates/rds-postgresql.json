@@ -1,0 +1,69 @@
+{
+  "calculationComponents": {
+    "createRDSProxy": {
+      "value": "0"
+    },
+    "storageAmount": {
+      "value": "1000",
+      "unit": "gb|NA"
+    },
+    "storageVolume": {
+      "value": "General Purpose-GP3"
+    },
+    "DatabaseInsightsSelected": {
+      "value": "0"
+    },
+    "addRDSExtendedSupport": {
+      "value": "0"
+    },
+    "RDSExtendedSupportYear": {
+      "value": "year12"
+    },
+    "columnFormIPM": {
+      "value": [
+        {
+          "Number of Nodes": {
+            "value": "1"
+          },
+          "Instance Type": {
+            "value": "db.m6g.xlarge"
+          },
+          "undefined": {
+            "value": {
+              "unit": "100",
+              "selectedId": "%Utilized/Month"
+            }
+          },
+          "Deployment Option": {
+            "value": "Multi-AZ"
+          },
+          "TermType": {
+            "value": "OnDemand"
+          }
+        }
+      ]
+    },
+    "gp3Iops": {
+      "value": "12000"
+    },
+    "gp3Throughput": {
+      "value": "500",
+      "unit": "mbps"
+    },
+    "additionalBackupStorage": {
+      "value": "0",
+      "unit": "gb|NA"
+    }
+  },
+  "serviceCode": "amazonRDSPostgreSQLDB",
+  "region": "ap-southeast-5",
+  "estimateFor": "rdsForPostgreSQL",
+  "version": "0.0.111",
+  "description": null,
+  "serviceCost": {
+    "monthly": 0,
+    "upfront": 0
+  },
+  "serviceName": "Amazon RDS for PostgreSQL",
+  "regionName": "Asia Pacific (Malaysia)"
+}

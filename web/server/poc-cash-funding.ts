@@ -19,11 +19,12 @@ import {
   ListBenefitApplicationsCommand,
   ListBenefitAllocationsCommand,
 } from '@aws-sdk/client-partnercentral-benefits';
-import { randomUUID } from 'crypto';
 import { GetOpportunityCommand } from '@aws-sdk/client-partnercentral-selling';
 import { benefitsClient, sellingClient, CATALOG_NAME as CATALOG,
   canonicalizeCompanyName, canonicalizeTitle } from './poc-cash';
-import { db } from './db';
+import { db, markPocCalculatorApplication, markPocCalculatorFailed } from './db';
+import { CALC_REGION } from './calculator-rates';
+import { recordManualCalculator, type CalculatorContext, type CalculatorOutcome } from './poc-calculator';
 
 export const BENEFIT_POC_FUNDING = 'ben-un8hh6qdrxqx50';   // 事前预批
 export const BENEFIT_POC_CASH_CLAIM = 'ben-8j7y5dohajcl16'; // 事后请款
@@ -157,6 +158,7 @@ export interface CreatePocInput {
   budgetYear?: number;
   calculatorUrl?: string;
   calcRegion?: string;
+  createdBy?: string;
   submit?: boolean;
   force?: boolean;
 }
@@ -207,6 +209,7 @@ export interface CreatePocResult {
   bucket: string | null;
   awsAccountId: string;
   calculatorUrl: string;
+  calculator: { ledgerId: string; total: number | null; items: { label: string; monthly: number }[] };
   amounts: PocAmounts;
   startDate: string;
   endDate: string;
@@ -215,9 +218,30 @@ export interface CreatePocResult {
   warnings: string[];
 }
 
+/** Create an application with the ledger UUID as its idempotency token. */
+export async function createApplicationWithLedger(
+  ledgerId: string,
+  send: () => Promise<{ Id?: string }>,
+): Promise<string> {
+  let applicationId: string;
+  try {
+    const created = await send();
+    if (!created.Id) throw new Error('AWS 未返回申请 ID');
+    applicationId = created.Id;
+  } catch (e) {
+    markPocCalculatorFailed(ledgerId, e instanceof Error ? e.message : String(e));
+    throw e;
+  }
+  try {
+    markPocCalculatorApplication(ledgerId, applicationId);
+  } catch (e) {
+    console.error('POC 申请已创建，但计算器台账回填申请 ID 失败', e);
+  }
+  return applicationId;
+}
+
 export async function createPocApplication(
-  input: CreatePocInput, calcFactory?: (name: string, region: string, mrr: number)
-    => Promise<string>,
+  input: CreatePocInput, calcFactory?: (ctx: CalculatorContext) => Promise<CalculatorOutcome>,
 ): Promise<CreatePocResult> {
   const pre = await precheckOpportunity(input.opportunityId);
   if (!pre.ok) {
@@ -244,11 +268,16 @@ export async function createPocApplication(
   // 用户手填的 activityName 也可能带错误主体，统一洗一遍
   const activityName = canonicalizeTitle(
     input.activityName || pre.title || '', pre.company || '');
-  const calculatorUrl = input.calculatorUrl
-    || (calcFactory
-      ? await calcFactory(activityName, input.calcRegion || 'ap-southeast-5', pre.mrrUsd)
-      : '');
-  if (!calculatorUrl) throw new Error('缺少定价计算器链接');
+  const ctx: CalculatorContext = {
+    name: activityName, region: input.calcRegion || CALC_REGION,
+    mrrUsd: pre.mrrUsd, opportunityId: input.opportunityId,
+    awsAccountId: input.awsAccountId, createdBy: input.createdBy || 'unknown',
+  };
+  const calculator = input.calculatorUrl
+    ? recordManualCalculator(ctx, input.calculatorUrl)
+    : calcFactory ? await calcFactory(ctx) : null;
+  if (!calculator) throw new Error('缺少定价计算器链接');
+  const calculatorUrl = calculator.url;
 
   const details = buildDetails({
     activityName, awsAccountId: input.awsAccountId,
@@ -264,22 +293,24 @@ export async function createPocApplication(
   // （返回成功、Revision 变了，但名字没变），所以必须在创建时就写对。
   const name = canonicalizeTitle(
     input.name || `POC - ${pre.company}`, pre.company || '');
-  const created: any = await ben.send(new CreateBenefitApplicationCommand({
-    Catalog: CATALOG,
-    ClientToken: randomUUID(),
-    BenefitIdentifier: BENEFIT_POC_FUNDING,
-    Name: name,
-    Description: input.description.slice(0, 200),
-    FulfillmentTypes: ['CASH'],
-    BenefitApplicationDetails: details as any,
-    PartnerContacts: [CONTACT],
-  }));
-  const applicationId = created.Id as string;
+  const applicationId = await createApplicationWithLedger(calculator.ledgerId,
+    () => ben.send(new CreateBenefitApplicationCommand({
+      Catalog: CATALOG,
+      ClientToken: calculator.ledgerId,
+      BenefitIdentifier: BENEFIT_POC_FUNDING,
+      Name: name,
+      Description: input.description.slice(0, 200),
+      FulfillmentTypes: ['CASH'],
+      BenefitApplicationDetails: details as any,
+      PartnerContacts: [CONTACT],
+    })));
 
   const result: CreatePocResult = {
     applicationId, name, opportunityId: input.opportunityId,
     bucket: bucketOfAccount(input.awsAccountId),
-    awsAccountId: input.awsAccountId, calculatorUrl, amounts,
+    awsAccountId: input.awsAccountId, calculatorUrl,
+    calculator: { ledgerId: calculator.ledgerId, total: calculator.total, items: calculator.items },
+    amounts,
     startDate: start.toISOString().slice(0, 10),
     endDate: end.toISOString().slice(0, 10),
     associated: false, submitted: false, warnings,

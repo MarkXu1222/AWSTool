@@ -1126,3 +1126,11 @@ code, pre {
   font-family: 'SFMono-Regular', 'JetBrains Mono', Consolas, 'Liberation Mono', Menlo, Courier, monospace;
   word-break: break-all;
 }
+
+/* POC 申请结果：计算器服务组成标签 */
+.poc-calc-items {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 4px;
+}

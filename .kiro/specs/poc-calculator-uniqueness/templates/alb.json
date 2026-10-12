@@ -1,0 +1,32 @@
+{
+  "serviceCode": "elasticLoadBalancing",
+  "region": "ap-southeast-5",
+  "description": null,
+  "subServices": [
+    {
+      "calculationComponents": {
+        "numberOfApplicationLoadBalancers": {
+          "value": "1"
+        },
+        "sizeOfDataProcessedForEC2InstanceAndIPAddressTargets": {
+          "value": "5",
+          "unit": "gb|hour"
+        }
+      },
+      "serviceCode": "applicationLoadBalancer",
+      "region": "ap-southeast-5",
+      "estimateFor": "template_0",
+      "version": "0.0.28",
+      "description": null,
+      "serviceCost": {
+        "monthly": 0
+      }
+    }
+  ],
+  "serviceCost": {
+    "monthly": 0,
+    "upfront": 0
+  },
+  "serviceName": "Elastic Load Balancing",
+  "regionName": "Asia Pacific (Malaysia)"
+}

@@ -166,7 +166,10 @@ AWS/
     │   # —— POC Cash ——
     │   ├── poc-cash.ts             # Partner Central 商机：创建 / 关联 Solution / 提交 / 阶段检查
     │   ├── poc-cash-funding.ts     # POC 资金申请、进展查询、CSV 台账
-    │   ├── pricing-calculator.ts   # 8 服务定价计算器链接与金额推导（带零头，MRR 做种子）
+    │   ├── pricing-calculator.ts   # 按台账 ID 播种生成计算器组合（服务池 + 收敛 + 签名），保存/读回 calculator.aws
+    │   ├── calculator-services.ts  # 19 种服务的 calculator.aws JSON 块、引擎一致成本公式、英文配置摘要
+    │   ├── calculator-rates.ts     # ap-southeast-5 单价快照（calculator.aws Update estimate 实测，非 Price List）
+    │   ├── poc-calculator.ts       # 计算器编排：台账预留查重 → 保存 → 读回校验 → 标记就绪
     │   └── routes/
     │       ├── aws.ts              # ★awsRouter：主业务端点（50+），含权限守卫
     │       ├── regions.ts          # regionsRouter：区域 opt-in 状态/扫描/开通
@@ -184,8 +187,9 @@ AWS/
     │       └── utils/              # cache(内存TTL) / color / console-launch / export
     │                               # / account-import{,.worker,-config}（浏览器本地 xlsx 解析，不上传）
     │                               # / root-account-selection / root-email-status / root-reset-link
-    ├── tests/                      # 14 个回归测试（bedrock 交付名匹配、账户级 TPD、MAP 策略、poc-cash、root-email 系列）
+    ├── tests/                      # 32 个回归测试文件（bedrock、MAP 策略、poc-cash、计算器标定/台账、root-email 系列等）
     ├── scripts/
+    │   ├── verify-calculator-render.ts # POC 计算器联网验收：Chrome 点 Update estimate 逐项核对引擎重算（--plan-only 离线）
     │   ├── setup-org-stacksets.ts  # ★加新 payer 时下发两个角色 StackSet（幂等，支持 --dry-run / --refresh-template）
     │   ├── setup-payer-tagger.ts   # payer 账户内单独创建 auto-tagger-role（StackSet 覆盖不到）
     │   ├── fix-payer-tagger-policy.ts / audit-org-roles.mts / check-billing-iam-access.mts
@@ -413,6 +417,7 @@ admin 恒有，其他角色必须显式授予，且**都不受 `allowed_pages` �
 - `billing_export_jobs` — 账单导出队列、进度、结果、取消/中断状态与下载元数据
 - `restricted_accounts` — 敏感权限客户账户（加密的 `external_id_enc`、state、last_error、可选 `support_policy_backup` 原策略备份）。**同时是 `setup-org-stacksets.ts` 的 StackSet 排除名单来源**
 - `departed_accounts` — 已移出组织的账户记录（含 `rejoined_at` 轨迹）
+- `poc_calculator_ledger` — POC 定价计算器台账：每条 POC 申请一条（台账 ID 即种子与 `ClientToken`），存总额与服务签名供查重，回填 `benappl-` 申请 ID；失败记录保留并继续参与查重（0.52.0）
 
 这些键**按需创建**：本地开发库通常只有 `users` / `quota_requests` / `audit_log` / `accounts_cache` / `region_data` 几个，缺少 `account_roles`、`billing_export_jobs`、`restricted_accounts` 等属正常现象。**判断 schema 一律以 `db.ts` 代码为准，不要拿本地 `db.json` 当权威** —— 本地库的账户数也远少于生产。
 
@@ -904,17 +909,53 @@ Organizations 反查，实测要 60~90 秒，放表单里不可接受。
 实测整行从第 6 列起错位（20 列 vs 18 列表头）。数字一律输出裸值。
 回归测试断言"数据列数 == 表头列数"。
 
-**计算器配置（0.37.1）**：8 个服务 —— EC2 应用层 / 压测机 / 数据库、
-EBS、S3、ALB、CloudFront、CloudWatch、CloudTrail。后三个是固定小额开销
-（监控/审计/CDN），不随算力缩放。
+**定价计算器生成（0.52.0）**：每条 POC 申请一份**独一无二**的计算器，
+且金额经得起审核人在 calculator.aws 点「Update estimate」重算。方案与实测数据见
+`.kiro/specs/poc-calculator-uniqueness/`。
 
-金额刻意**带零头**：整数（2400.00）一看就是凑的。用 MRR 做种子偏移
-+30~170 USD，同一商机每次生成结果一致，可复现可对账。
+> 起因（2026-10-12）：同日两条 Freightly POC 的计算器逐项完全相同 —— 旧实现只用
+> MRR 播种、服务组合写死 8 项，MRR 相同就产出同一份。排查时又发现旧计算器**一点
+> Update estimate 就从 7,946.93 变成 27,767.33**：EC2 的 `storageAmount` 被引擎按
+> **每台实例**计、ALB 每台「60 GB/小时」处理量按 LCU 计费、CloudFront 参数格式无效重算为 0。
+> 9 月以来平台生成的 13 份都受影响，已提交的不改。
 
-收敛项用 **EBS 而非 S3**：S3 单价仅 0.0225/GB，差额稍大就被压到 100GB
-下限而失去调节能力（实测 MRR 5000 时 S3 只剩 100GB，总额仍偏离 133 USD）。
-EBS 单价高近 4 倍，调节范围更大。S3 改为按算力等比放大（日志/制品量
-本来就跟规模走）。
+- **种子 = 台账 ID**：创建 POC 前先在 `poc_calculator_ledger` 预留一条（`id#attempt`），
+  同一 ID 也作 `CreateBenefitApplication` 的 `ClientToken`。生成 → 与台账比对 → 写入
+  在同一同步段内（无 `await`），并发提交不会都通过查重
+- **查重**：总额（精确到分）或服务签名任一相同即撞车，换 attempt 重生成，最多 20 次。
+  同一 MRR 金额窗口只有约 5,100 个分值，随机撞车约 16–20%，查重是必需的
+- **组合**：EC2 1~3 个角色（23 个机型）+ 数据库四选一（RDS MySQL / PostgreSQL /
+  Aurora MySQL / EC2 自建）+ ALB 1~3 个 + S3 + CloudWatch + 辅助服务池 13 选 3~6，
+  每份 8~13 项。总额仍为 **MRR + 100~151 USD、带零头**
+- **成本公式 = 引擎实测**，不是 Price List：价格文件与引擎不一致（如 ElastiCache 引擎按
+  Memcached 价计）。183 个 Update estimate 实测用例锁在 `tests/calculator-calibration.test.ts`
+- 服务块 JSON 一律**克隆人工制作的真实估算**（平台生成的样本参数本身就是错的）
+- 只支持 `ap-southeast-5`；最低 MRR 600 USD
+- 结果页展示计算器总额与服务组成
+
+⚠️ **标定时必须让每个参数独立变化**。EFS 首轮样本读写量恒相等，只测出读+写=0.099，
+按 0.033/0.066 拆分在读写不等时差 0.04；实测为读 0.036、写 0.063。S3 PUT/GET、
+RDS 备份、WAF 规则/托管组已单独补测确认。
+
+⚠️ **引擎会把「不合法的组合」静默按错误口径重算，而不是报错**。已知一条：RDS PostgreSQL gp3
+存储 ≥400GB 必须同时写 12000 IOPS / 500 MiBps（AWS 基线），仍填 3000/125 时
+r6g.xlarge×2 Multi-AZ 650GB 从 1,704.30 被算成 800.55。`buildServiceBlock` 按存储自动切换。
+新增服务或扩大参数区间时，必须联网跑大样本验收，别只看单测。
+
+⚠️ 移出服务池：CloudFront（引擎重算恒为 0，无人工样本）、Lambda（免费额度难与引擎对齐）、
+ElastiCache r 系列与 Serverless（Required input）、RDS SQL Server（含许可证）、
+Aurora t4g 与 PostgreSQL r7g.xlarge（引擎不认）。
+
+**改单价或模板后必须联网验收**：
+
+```bash
+cd web
+npx tsx scripts/verify-calculator-render.ts --plan-only --mrr 7800 --count 3  # 离线：看组合是否各不相同
+npx tsx scripts/verify-calculator-render.ts                                   # 联网：Chrome 打开计算器点 Update estimate 逐项核对
+```
+
+联网模式按 MRR 1500 / 7800 / 25000 各生成 2 份，另加覆盖全部 20 类服务的一份，
+单项差 ≤ 0.02、总额差 ≤ 0.10，否则退出码 1。AWS 调价后公式会漂移，靠它发现。
 
 CSV 前 18 列严格对齐现有台账，`PO ID` 就是商机 ID；第 19 列「AWS批准金额」
 （0.47.1 追加，新列只能加在末尾）。服务器留存带时间戳快照

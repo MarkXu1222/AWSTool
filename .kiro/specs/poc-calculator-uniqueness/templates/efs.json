@@ -1,0 +1,46 @@
+{
+  "calculationComponents": {
+    "throughputModeSS": {
+      "value": "pPg1vmtASUb_DcOGFyxPNa8abU3NDsNcdbBc06f_K_U"
+    },
+    "elasticThroughputReadDataInputSS": {
+      "value": "20",
+      "unit": "gb|month"
+    },
+    "elasticThroughputWriteDataInputSS": {
+      "value": "20",
+      "unit": "gb|month"
+    },
+    "standardStorageSize": {
+      "value": "50",
+      "unit": "gb|NA"
+    },
+    "Infrequent_Access_Tiering": {
+      "value": "0",
+      "unit": "gb|NA"
+    },
+    "Infrequent_Access_Read": {
+      "value": "0",
+      "unit": "gb|NA"
+    },
+    "Archive_Access_Tiering": {
+      "value": "0",
+      "unit": "gb|NA"
+    },
+    "Archive_Access_Read": {
+      "value": "0",
+      "unit": "gb|NA"
+    }
+  },
+  "serviceCode": "amazonEFS",
+  "region": "ap-southeast-5",
+  "estimateFor": "elasticFileSystem",
+  "version": "0.0.76",
+  "description": null,
+  "serviceCost": {
+    "monthly": 0,
+    "upfront": 0
+  },
+  "serviceName": "Amazon Elastic File System (EFS)",
+  "regionName": "Asia Pacific (Malaysia)"
+}

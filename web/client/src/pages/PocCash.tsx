@@ -820,6 +820,15 @@ const PocCashPage: React.FC = () => {
               <div>计算器 <a href={pocResult.calculatorUrl} target="_blank"
                 rel="noreferrer">{pocResult.calculatorUrl}</a></div>
             ) : <div><Text type="secondary">计算器链接未返回</Text></div>}
+            {/* 金额不加千分位：与 CSV 台账口径一致，也便于直接和计算器页面对数 */}
+            {pocResult.calculator?.total != null && (
+              <div>计算器总额 {pocResult.calculator.total} USD · {pocResult.calculator.items.length} 项服务
+                <div className="poc-calc-items">
+                  {pocResult.calculator.items.map((it: { label: string; monthly: number }, i: number) =>
+                    <Tag key={i}>{it.label} · {it.monthly} USD</Tag>)}
+                </div>
+              </div>
+            )}
             {pocResult.warnings?.map((w: string, i: number) =>
               <div key={i}><Text type="warning">⚠️ {w}</Text></div>)}
           </div>} />

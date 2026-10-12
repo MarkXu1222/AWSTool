@@ -1,0 +1,33 @@
+{
+  "calculationComponents": {
+    "numberOfCmk": {
+      "value": "10"
+    },
+    "numberOfSymmetricRequests": {
+      "value": "200000"
+    },
+    "numberOfAsymmetricRequestsExceptRsa2048": {
+      "value": "0"
+    },
+    "numberOfAsymmetricRsaRequests": {
+      "value": "0"
+    },
+    "numberOfEccGenerateDataKeyPairRequests": {
+      "value": "0"
+    },
+    "numberOfRsaGenerateDataKeyPairRequests": {
+      "value": "0"
+    }
+  },
+  "serviceCode": "awsKeyManagementService",
+  "region": "ap-southeast-5",
+  "estimateFor": "kms",
+  "version": "0.0.20",
+  "description": null,
+  "serviceCost": {
+    "monthly": 0,
+    "upfront": 0
+  },
+  "serviceName": "AWS Key Management Service",
+  "regionName": "Asia Pacific (Malaysia)"
+}
