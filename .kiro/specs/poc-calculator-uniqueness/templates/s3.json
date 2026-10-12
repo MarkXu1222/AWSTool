@@ -1,0 +1,68 @@
+{
+  "version": "0.0.86",
+  "serviceCode": "amazonSimpleStorageServiceGroup",
+  "estimateFor": "simpleStorageServiceClassesGroup",
+  "region": "ap-southeast-5",
+  "description": null,
+  "subServices": [
+    {
+      "calculationComponents": {
+        "moveToStorageClassMethod": {
+          "value": "No movement required"
+        },
+        "s3StandardStorageSize": {
+          "value": "2048",
+          "unit": "gb|month"
+        },
+        "s3StandardPutRequests": {
+          "value": "1000000"
+        },
+        "s3StandardGetRequests": {
+          "value": "10000000"
+        }
+      },
+      "serviceCode": "amazonS3Standard",
+      "region": "ap-southeast-5",
+      "estimateFor": "s3Standard",
+      "version": "0.0.71",
+      "description": null,
+      "serviceCost": {
+        "monthly": 0
+      }
+    },
+    {
+      "calculationComponents": {
+        "dataTransfer": {
+          "value": [
+            {
+              "entryType": "INBOUND",
+              "value": "",
+              "unit": "tb_month",
+              "fromRegion": ""
+            },
+            {
+              "entryType": "OUTBOUND",
+              "value": "",
+              "unit": "tb_month",
+              "toRegion": ""
+            }
+          ]
+        }
+      },
+      "serviceCode": "awsS3DataTransfer",
+      "region": "ap-southeast-5",
+      "estimateFor": "awsS3DataTransfer",
+      "version": "0.0.27",
+      "description": null,
+      "serviceCost": {
+        "monthly": 0
+      }
+    }
+  ],
+  "serviceCost": {
+    "monthly": 0,
+    "upfront": 0
+  },
+  "serviceName": "Amazon Simple Storage Service (S3)",
+  "regionName": "Asia Pacific (Malaysia)"
+}

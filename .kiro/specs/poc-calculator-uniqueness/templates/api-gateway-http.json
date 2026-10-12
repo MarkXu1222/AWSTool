@@ -1,0 +1,36 @@
+{
+  "calculationComponents": {
+    "APIOpsMult": {
+      "value": "1000000"
+    },
+    "dataPerRequest": {
+      "value": "50",
+      "unit": "kb|NA"
+    },
+    "RESTMult": {
+      "value": "1000000"
+    },
+    "cacheSize": {
+      "value": "[ZERO_COST]"
+    },
+    "numberOfAPIRequests": {
+      "value": "100",
+      "unit": "perMonth"
+    },
+    "numberOfRESTRequests": {
+      "value": "0",
+      "unit": "perMonth"
+    }
+  },
+  "serviceCode": "amazonApiGateway",
+  "region": "ap-southeast-5",
+  "estimateFor": "template",
+  "version": "0.0.59",
+  "description": null,
+  "serviceCost": {
+    "monthly": 0,
+    "upfront": 0
+  },
+  "serviceName": "Amazon API Gateway",
+  "regionName": "Asia Pacific (Malaysia)"
+}

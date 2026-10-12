@@ -1,0 +1,64 @@
+{
+  "calculationComponents": {
+    "numberOfHostedZones": {
+      "value": "10"
+    },
+    "numberOfStandardQueries": {
+      "value": "10",
+      "unit": "millionPerMonth"
+    },
+    "numberOfLatencyBasedRoutingQueries": {
+      "value": "0",
+      "unit": "millionPerMonth"
+    },
+    "numberOfGeoDNSQueries": {
+      "value": "0",
+      "unit": "millionPerMonth"
+    },
+    "numberOfIPRoutingQueries": {
+      "value": "0",
+      "unit": "millionPerMonth"
+    },
+    "numberOfElasticNetworkInterfaces": {
+      "value": ""
+    },
+    "numberOfDNSFirewallDomains": {
+      "value": "0"
+    },
+    "numberOfVPCs": {
+      "value": "0"
+    },
+    "numberOFhours": {
+      "value": "0",
+      "unit": "hr"
+    },
+    "numberOfFirewallDNSQueries": {
+      "value": "0",
+      "unit": "millionPerMonth"
+    },
+    "numberOfRecursiveAverageDNSQueries": {
+      "value": "",
+      "unit": "millionPerMonth"
+    },
+    "numberOfBasicChecksWithinAWS": {
+      "value": "0"
+    },
+    "numberOf_IP_blocks": {
+      "value": ""
+    },
+    "RRsetRecord": {
+      "value": ""
+    }
+  },
+  "serviceCode": "amazonRoute53",
+  "region": "ap-southeast-5",
+  "estimateFor": "Route53",
+  "version": "0.0.88",
+  "description": null,
+  "serviceCost": {
+    "monthly": 0,
+    "upfront": 0
+  },
+  "serviceName": "Amazon Route 53",
+  "regionName": "Asia Pacific (Malaysia)"
+}

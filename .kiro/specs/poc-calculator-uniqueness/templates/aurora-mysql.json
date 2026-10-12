@@ -1,0 +1,87 @@
+{
+  "calculationComponents": {
+    "edition": {
+      "value": "auroraStandard"
+    },
+    "createRDSProxy": {
+      "value": "0"
+    },
+    "changeRecordsPerStatement": {
+      "value": "0"
+    },
+    "averageStatements": {
+      "value": "0",
+      "unit": "perSecond"
+    },
+    "totalReads_BaseIO": {
+      "value": "0",
+      "unit": "perSecond"
+    },
+    "totalWrites_PeakIO": {
+      "value": "0",
+      "unit": "perSecond"
+    },
+    "durationPeakWriteId": {
+      "value": "0",
+      "unit": "perMonth"
+    },
+    "DatabaseInsightsSelected": {
+      "value": "0"
+    },
+    "retentionPeriod": {
+      "value": "0"
+    },
+    "addRDSExtendedSupport": {
+      "value": "0"
+    },
+    "columnFormIPM": {
+      "value": [
+        {
+          "Instance Type": {
+            "value": "db.r7g.large"
+          },
+          "Number of Nodes": {
+            "value": "2"
+          },
+          "undefined": {
+            "value": {
+              "unit": "100",
+              "selectedId": "%Utilized/Month"
+            }
+          },
+          "Instance Family": {
+            "value": "Memory optimized"
+          },
+          "TermType": {
+            "value": "OnDemand"
+          },
+          "LeaseContractLength": {
+            "value": "1yr"
+          },
+          "PurchaseOption": {
+            "value": "No Upfront"
+          }
+        }
+      ]
+    },
+    "storageAmount": {
+      "value": "500",
+      "unit": "gb|NA"
+    },
+    "additionalBackupStorage": {
+      "value": "0",
+      "unit": "gb|NA"
+    }
+  },
+  "serviceCode": "amazonAuroraMySQLCompatible",
+  "region": "ap-southeast-5",
+  "estimateFor": "auroraMySQLCompatible",
+  "version": "0.0.167",
+  "description": null,
+  "serviceCost": {
+    "monthly": 0,
+    "upfront": 0
+  },
+  "serviceName": "Amazon Aurora MySQL-Compatible",
+  "regionName": "Asia Pacific (Malaysia)"
+}

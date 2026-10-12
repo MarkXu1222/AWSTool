@@ -1,0 +1,65 @@
+{
+  "calculationComponents": {
+    "createRDSProxy": {
+      "value": "0"
+    },
+    "storageAmount": {
+      "value": "170",
+      "unit": "gb|NA"
+    },
+    "storageType": {
+      "value": "General Purpose"
+    },
+    "DatabaseInsightsSelected": {
+      "value": "0"
+    },
+    "retentionPeriod": {
+      "value": "0"
+    },
+    "addRDSExtendedSupport": {
+      "value": "0"
+    },
+    "RDSExtendedSupportYear": {
+      "value": "year12"
+    },
+    "columnFormIPM": {
+      "value": [
+        {
+          "Number of Nodes": {
+            "value": "1"
+          },
+          "Instance Type": {
+            "value": "db.m6g.xlarge"
+          },
+          "undefined": {
+            "value": {
+              "unit": "100",
+              "selectedId": "%Utilized/Month"
+            }
+          },
+          "Deployment Option": {
+            "value": "Multi-AZ"
+          },
+          "TermType": {
+            "value": "OnDemand"
+          }
+        }
+      ]
+    },
+    "additionalBackupStorage": {
+      "value": "0",
+      "unit": "gb|NA"
+    }
+  },
+  "serviceCode": "amazonRDSMySQLDB",
+  "region": "ap-southeast-5",
+  "estimateFor": "mySQLDB",
+  "version": "0.0.135",
+  "description": null,
+  "serviceCost": {
+    "monthly": 0,
+    "upfront": 0
+  },
+  "serviceName": "Amazon RDS for MySQL",
+  "regionName": "Asia Pacific (Malaysia)"
+}

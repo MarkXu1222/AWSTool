@@ -1,0 +1,35 @@
+{
+  "calculationComponents": {
+    "dataTransfer": {
+      "value": [
+        {
+          "entryType": "INBOUND",
+          "value": "",
+          "unit": "tb_month",
+          "fromRegion": ""
+        },
+        {
+          "entryType": "OUTBOUND",
+          "value": "",
+          "unit": "tb_month",
+          "toRegion": ""
+        }
+      ]
+    },
+    "amountofdatastored": {
+      "value": "1000",
+      "unit": "gb|month"
+    }
+  },
+  "serviceCode": "amazonElasticContainerRegistry",
+  "region": "ap-southeast-5",
+  "estimateFor": "template_0",
+  "version": "0.0.33",
+  "description": null,
+  "serviceCost": {
+    "monthly": 0,
+    "upfront": 0
+  },
+  "serviceName": "Amazon Elastic Container Registry",
+  "regionName": "Asia Pacific (Malaysia)"
+}

@@ -1,0 +1,40 @@
+{
+  "calculationComponents": {
+    "logStorageOption": {
+      "value": "1"
+    },
+    "logParquetFormatConversionSelect": {
+      "value": "[ZERO_COST]"
+    },
+    "numberOfMobileEvents": {
+      "value": "0"
+    },
+    "percentageOfMobileRumEvents": {
+      "value": "0"
+    },
+    "totalNumberOfMetrics": {
+      "value": "100"
+    },
+    "sizeOfStandardLogsDataIngested": {
+      "value": "200",
+      "unit": "gb|NA"
+    },
+    "numberOfDashboards": {
+      "value": "5"
+    },
+    "numberOfStandardAlarms": {
+      "value": "30"
+    }
+  },
+  "serviceCode": "amazonCloudWatch",
+  "region": "ap-southeast-5",
+  "estimateFor": "CloudWatch",
+  "version": "0.0.141",
+  "description": null,
+  "serviceCost": {
+    "monthly": 0,
+    "upfront": 0
+  },
+  "serviceName": "Amazon CloudWatch",
+  "regionName": "Asia Pacific (Malaysia)"
+}

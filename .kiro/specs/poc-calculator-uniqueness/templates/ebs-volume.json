@@ -1,0 +1,32 @@
+{
+  "calculationComponents": {
+    "numberOfInstances": {
+      "value": "1"
+    },
+    "durationOfInstanceRuns": {
+      "value": "730",
+      "unit": "hours"
+    },
+    "storageType": {
+      "value": "Storage General Purpose GB Mo"
+    },
+    "storageAmount": {
+      "value": "300",
+      "unit": "gb|NA"
+    },
+    "snapshotFrequency": {
+      "value": "0"
+    }
+  },
+  "serviceCode": "amazonElasticBlockStore",
+  "region": "ap-southeast-5",
+  "estimateFor": "elasticBlockStore",
+  "version": "0.0.159",
+  "description": null,
+  "serviceCost": {
+    "monthly": 0,
+    "upfront": 0
+  },
+  "serviceName": "Amazon Elastic Block Store (EBS)",
+  "regionName": "Asia Pacific (Malaysia)"
+}

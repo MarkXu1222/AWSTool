@@ -1,0 +1,41 @@
+{
+  "version": "0.0.101",
+  "serviceCode": "awsBackup",
+  "estimateFor": "awsBackupSelector",
+  "region": "ap-southeast-5",
+  "description": null,
+  "subServices": [
+    {
+      "calculationComponents": {
+        "annualGrowthOfPrimaryUsage": {
+          "value": "0"
+        },
+        "dailyChangeOfPrimaryUsage": {
+          "value": "02"
+        },
+        "dataSize": {
+          "value": "550",
+          "unit": "gb|NA"
+        },
+        "dailyPlansWarmDays": {
+          "value": "30",
+          "unit": "day"
+        }
+      },
+      "serviceCode": "ebsBackup",
+      "region": "ap-southeast-5",
+      "estimateFor": "ebsBackup",
+      "version": "0.0.32",
+      "description": null,
+      "serviceCost": {
+        "monthly": 0
+      }
+    }
+  ],
+  "serviceCost": {
+    "monthly": 0,
+    "upfront": 0
+  },
+  "serviceName": "AWS Backup",
+  "regionName": "Asia Pacific (Malaysia)"
+}

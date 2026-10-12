@@ -1,0 +1,47 @@
+{
+  "calculationComponents": {
+    "OpsMult": {
+      "value": "1000000"
+    },
+    "numberOfWriteTrails": {
+      "value": "2"
+    },
+    "numberOfReadTrails": {
+      "value": "0"
+    },
+    "dataOpsMult": {
+      "value": "1000000"
+    },
+    "numberOfS3Trails": {
+      "value": "0"
+    },
+    "numberOfLambdaTrails": {
+      "value": "0"
+    },
+    "networkActivityOpsMult": {
+      "value": "1000000"
+    },
+    "numberOfNetworkActivityTrails": {
+      "value": "0"
+    },
+    "numberOfWriteEvents": {
+      "value": "1",
+      "unit": "perMonth"
+    },
+    "numberOfReadEvents": {
+      "value": "0",
+      "unit": "perMonth"
+    }
+  },
+  "serviceCode": "awsCloudTrail",
+  "region": "ap-southeast-5",
+  "estimateFor": "template",
+  "version": "0.0.46",
+  "description": null,
+  "serviceCost": {
+    "monthly": 0,
+    "upfront": 0
+  },
+  "serviceName": "AWS CloudTrail",
+  "regionName": "Asia Pacific (Malaysia)"
+}
