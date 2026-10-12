@@ -284,6 +284,31 @@ export interface BillingExportJob {
   error?: string;
 }
 
+export type PocCalculatorStatus = 'reserved' | 'calculator_ready' | 'application_created' | 'failed';
+
+export interface PocCalculatorLedgerEntry {
+  id: string;
+  source: 'generated' | 'manual';
+  status: PocCalculatorStatus;
+  attempt: number;
+  seed: string | null;
+  opportunityId: string;
+  awsAccountId: string;
+  activityName: string;
+  region: string;
+  mrrUsd: number;
+  target: number | null;
+  total: number | null;
+  signature: string | null;
+  calculatorKey: string | null;
+  calculatorUrl: string | null;
+  applicationId: string | null;
+  createdBy: string;
+  createdAt: string;
+  updatedAt: string;
+  error: string | null;
+}
+
 interface DBSchema {
   users: any[];
   quota_requests: any[];
@@ -293,12 +318,13 @@ interface DBSchema {
   accounts_cache_time: string;
   tag_onboarding_jobs: TagOnboardingJob[];
   billing_export_jobs: BillingExportJob[];
+  poc_calculator_ledger: PocCalculatorLedgerEntry[];
   [key: string]: any;
 }
 
 const ARRAY_FIELDS = [
   'users', 'quota_requests', 'audit_log', 'region_data', 'accounts_cache', 'tag_onboarding_jobs',
-  'billing_export_jobs',
+  'billing_export_jobs', 'poc_calculator_ledger',
 ] as const;
 
 // In-memory cache to avoid reading file on every request
@@ -313,7 +339,7 @@ function ensureDir() {
 function emptyDB(): DBSchema {
   return {
     users: [], quota_requests: [], audit_log: [], region_data: [], accounts_cache: [],
-    accounts_cache_time: '', tag_onboarding_jobs: [], billing_export_jobs: [],
+    accounts_cache_time: '', tag_onboarding_jobs: [], billing_export_jobs: [], poc_calculator_ledger: [],
   };
 }
 
@@ -663,6 +689,107 @@ export function recoverBillingExportJobs(): number {
   }
   if (interrupted > 0) writeDB(data);
   return interrupted;
+}
+
+export interface PocCalculatorReserveInput {
+  opportunityId: string;
+  awsAccountId: string;
+  activityName: string;
+  region: string;
+  mrrUsd: number;
+  createdBy: string;
+}
+
+export interface PocCalculatorCandidate {
+  target: number;
+  total: number;
+  signature: string;
+}
+
+/** Generate, compare against every priced ledger entry, and reserve synchronously. */
+export function reservePocCalculator<T extends PocCalculatorCandidate>(
+  input: PocCalculatorReserveInput,
+  generate: (seed: string) => T,
+  maxAttempts = 20,
+): { entry: PocCalculatorLedgerEntry; result: T } {
+  const data = readDB();
+  const id = randomUUID();
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    const seed = `${id}#${attempt}`;
+    const result = generate(seed);
+    const duplicate = data.poc_calculator_ledger.some(entry => entry.total !== null && entry.signature !== null
+      && (Math.round(entry.total * 100) === Math.round(result.total * 100)
+        || entry.signature === result.signature));
+    if (duplicate) continue;
+
+    const now = new Date().toISOString();
+    const entry: PocCalculatorLedgerEntry = {
+      id, source: 'generated', status: 'reserved', attempt, seed,
+      opportunityId: input.opportunityId, awsAccountId: input.awsAccountId,
+      activityName: input.activityName, region: input.region, mrrUsd: input.mrrUsd,
+      target: result.target, total: result.total, signature: result.signature,
+      calculatorKey: null, calculatorUrl: null, applicationId: null,
+      createdBy: input.createdBy, createdAt: now, updatedAt: now, error: null,
+    };
+    data.poc_calculator_ledger.push(entry);
+    writeDB(data);
+    return { entry: { ...entry }, result };
+  }
+  throw new Error(`连续 ${maxAttempts} 次生成的计算器都与已有记录重复，请重试`);
+}
+
+function updatePocCalculatorEntry(
+  id: string,
+  updates: Partial<PocCalculatorLedgerEntry>,
+): PocCalculatorLedgerEntry {
+  const data = readDB();
+  const entry = data.poc_calculator_ledger.find(item => item.id === id);
+  if (!entry) throw new Error('计算器台账记录不存在');
+  Object.assign(entry, updates, { updatedAt: new Date().toISOString() });
+  writeDB(data);
+  return { ...entry };
+}
+
+/** Record the calculator.aws key and URL after successful verification. */
+export function markPocCalculatorReady(
+  id: string,
+  r: { calculatorKey: string; calculatorUrl: string },
+): PocCalculatorLedgerEntry {
+  return updatePocCalculatorEntry(id, { status: 'calculator_ready', ...r });
+}
+
+/** Link the successfully created benefit application to its ledger entry. */
+export function markPocCalculatorApplication(id: string, applicationId: string): PocCalculatorLedgerEntry {
+  return updatePocCalculatorEntry(id, { status: 'application_created', applicationId });
+}
+
+/** Retain a failed entry and its uniqueness fields for subsequent comparisons. */
+export function markPocCalculatorFailed(id: string, error: string): PocCalculatorLedgerEntry {
+  return updatePocCalculatorEntry(id, { status: 'failed', error: error.slice(0, 500) });
+}
+
+/** Track a user-supplied calculator URL without generation or uniqueness checks. */
+export function recordManualPocCalculator(
+  input: PocCalculatorReserveInput & { calculatorUrl: string },
+): PocCalculatorLedgerEntry {
+  const data = readDB();
+  const now = new Date().toISOString();
+  const entry: PocCalculatorLedgerEntry = {
+    id: randomUUID(), source: 'manual', status: 'calculator_ready', attempt: 0, seed: null,
+    opportunityId: input.opportunityId, awsAccountId: input.awsAccountId,
+    activityName: input.activityName, region: input.region, mrrUsd: input.mrrUsd,
+    target: null, total: null, signature: null, calculatorKey: null,
+    calculatorUrl: input.calculatorUrl, applicationId: null,
+    createdBy: input.createdBy, createdAt: now, updatedAt: now, error: null,
+  };
+  data.poc_calculator_ledger.push(entry);
+  writeDB(data);
+  return { ...entry };
+}
+
+/** List every ledger entry, including failed and manually supplied calculators. */
+export function listPocCalculatorEntries(): PocCalculatorLedgerEntry[] {
+  return readDB().poc_calculator_ledger.map(entry => ({ ...entry }));
 }
 
 // === Auto-backup: keep validated daily rotating copies of both permanent stores ===
