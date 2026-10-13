@@ -461,7 +461,8 @@ export const api = {
   bedrockCreateAdminUser: (body: { accountId: string; userName: string; createConsoleLogin?: boolean; createAccessKey?: boolean; passwordResetRequired?: boolean }) =>
     request('/bedrock/iam-users/create', { method: 'POST', body: JSON.stringify(body) }),
   // 交付表格：返回二进制 xlsx，用原生 fetch 下载
-  bedrockDeliveryExport: async (body: { rows: any[]; iamUser: string; iamPassword: string }) =>
+  // accountId 必填：服务端校验每个 ARN 属于该账户，并从 AWS 重新读标签（不采信前端 tags）
+  bedrockDeliveryExport: async (body: { accountId: string; rows: { name: string; arn: string; region: string }[]; iamUser: string; iamPassword: string }) =>
     bedrockDeliveryFetch('/bedrock/delivery', body),
   // 交付表格 v2（李浩版，五列带 TPM/TPD，服务端实时查配额匹配）
   // variant: 'global' = 每区 6 条（仅 global，默认）；'full' = 每区 12 条（us+global）

@@ -1,7 +1,8 @@
 /**
  * Bedrock 工具页 —— 从桌面版 Bedrock Profile Manager 迁移。
  * Tab：Profiles 管理 / 批量创建 / 模型测试 / 模型列表 / 模型开通(FTU) / 数据共享 / IAM 用户 / 交付表格。
- * ⚠️ Tag 纪律：创建/打 Tag 的 tags 必须每次显式输入，前后端都不提供默认值。
+ * ⚠️ Tag 纪律：创建/打 Tag 的 tags 必须每次显式输入，前后端都不提供默认值；
+ * map-migrated 值前端实时校验（utils/mapTag.ts，与服务端同规则），写入结果以 AWS 回查为准。
  */
 import React, { useState, useEffect, useRef } from 'react';
 import {
@@ -11,6 +12,8 @@ import {
 import { ReloadOutlined, PlusOutlined, DeleteOutlined, TagsOutlined, ThunderboltOutlined, DownloadOutlined, UserAddOutlined, CopyOutlined, LoadingOutlined } from '@ant-design/icons';
 import { api } from '../api';
 import { REGIONS } from '../constants/regions';
+import { MAP_TAG_KEY, checkMapTagValue, checkTagInputs } from '../utils/mapTag';
+import BedrockTagResults, { TAG_STATUS_LABEL, type TagResultRow } from '../components/BedrockTagResults';
 
 /**
  * 复制到剪贴板。navigator.clipboard 在非 HTTPS / 旧 WebView 下可能不存在，
@@ -65,33 +68,72 @@ const KNOWN_PROVIDERS = [
 ];
 
 // Tag key 固定用 map-migrated（业务纪律）；value 每次必须手动输入，无默认值
-const FIXED_TAG_KEY = 'map-migrated';
+const FIXED_TAG_KEY = MAP_TAG_KEY;
+
+type KV = { key: string; value: string };
+
+/** 提交前去首尾空格（既有行为）；不改大小写、不补也不删 mig —— 格式不对就让校验拦下 */
+const trimTags = (tags: KV[]): KV[] => tags.map(t => ({ key: t.key.trim(), value: t.value.trim() }));
+
+/** map-migrated 值或 key 的问题说明；合规返回 null（表格里标红用） */
+function mapTagProblem(t: KV): string | null {
+  if (t.key === MAP_TAG_KEY) return checkMapTagValue(t.value);
+  if (t.key.toLowerCase() === MAP_TAG_KEY) return '与 map-migrated 仅大小写不同';
+  return null;
+}
 
 /**
  * Tag 输入组件：第一行 key 固定为 map-migrated（只读），value 每次必填；
- * 追加行可自定义 key（少数场景需要额外 tag）。
+ * 追加行可自定义 key（少数场景需要额外 tag）。error 为前端实时校验结果（与服务端同规则）。
  */
 const TagInputs: React.FC<{
-  tags: { key: string; value: string }[];
-  onChange: (tags: { key: string; value: string }[]) => void;
-}> = ({ tags, onChange }) => (
+  tags: KV[];
+  onChange: (tags: KV[]) => void;
+  error?: string | null;
+}> = ({ tags, onChange, error }) => (
   <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
     {tags.map((t, i) => (
       <Space key={i}>
         <Input size="small" style={{ width: 220 }} value={t.key} disabled={i === 0}
           placeholder="Tag Key（必填）"
           onChange={e => onChange(tags.map((x, j) => j === i ? { ...x, key: e.target.value } : x))} />
-        <Input size="small" placeholder={i === 0 ? 'Tag Value（每次必填，如 migXXXXXXX）' : 'Tag Value（必填）'} style={{ width: 260 }} value={t.value}
+        <Input size="small" placeholder={i === 0 ? 'Tag Value（mig + 10 位大写字母或数字）' : 'Tag Value（必填）'} style={{ width: 260 }} value={t.value}
           onChange={e => onChange(tags.map((x, j) => j === i ? { ...x, value: e.target.value } : x))} />
         {i > 0 && <Button size="small" danger type="text" onClick={() => onChange(tags.filter((_, j) => j !== i))}>删除</Button>}
       </Space>
     ))}
     <Button size="small" type="dashed" onClick={() => onChange([...tags, { key: '', value: '' }])} style={{ width: 140 }}>+ 添加额外 Tag</Button>
+    {error && <Typography.Text type="danger" style={{ fontSize: 12 }}>{error}</Typography.Text>}
   </div>
 );
 
-function validTags(tags: { key: string; value: string }[]): boolean {
-  return tags.length > 0 && tags.every(t => t.key.trim() && t.value.trim());
+/** 按区域分组 ARN（后端接口一次一个区域） */
+function groupByRegion<T>(list: T[], region: (x: T) => string): Map<string, T[]> {
+  const m = new Map<string, T[]>();
+  for (const x of list) {
+    const r = region(x);
+    if (!m.has(r)) m.set(r, []);
+    m.get(r)!.push(x);
+  }
+  return m;
+}
+
+/** 按 key 用新结果替换旧结果，保持原顺序 */
+function mergeResults(prev: TagResultRow[], next: TagResultRow[]): TagResultRow[] {
+  const byKey = new Map(next.map(r => [r.key, r]));
+  return prev.map(r => byKey.get(r.key) || r);
+}
+
+/** 后端 TagWriteResult → 结果行；移除过变体 key 的写进说明 */
+function toTagResultRow(r: any, region: string, name?: string): TagResultRow {
+  const removed: string[] = Array.isArray(r.removedVariantKeys) ? r.removedVariantKeys : [];
+  const note = removed.length ? `已移除变体 key ${removed.join('/')}` : '';
+  return {
+    key: r.arn, region, arn: r.arn, name, status: r.status,
+    oldMapValue: r.oldReadFailed ? '读取失败' : (r.oldMapValue ?? null),
+    actualMapValue: r.actualMapValue ?? null,
+    error: [note, r.error].filter(Boolean).join('；') || undefined,
+  };
 }
 
 // ===== Tab 1: Profiles 管理 =====
@@ -103,8 +145,14 @@ const ProfilesTab: React.FC<{ accountId: string }> = ({ accountId }) => {
   const [selectedKeys, setSelectedKeys] = useState<React.Key[]>([]);
   const [search, setSearch] = useState('');
   const [tagModalOpen, setTagModalOpen] = useState(false);
-  const [tagInputs, setTagInputs] = useState<{ key: string; value: string }[]>([{ key: FIXED_TAG_KEY, value: '' }]);
+  const [tagInputs, setTagInputs] = useState<KV[]>([{ key: FIXED_TAG_KEY, value: '' }]);
   const [acting, setActing] = useState(false);
+  // 打 Tag 结果：逐项以 AWS 回查为准；重试沿用发起时的 tags（lastTags），不读输入框当前值
+  const [tagResults, setTagResults] = useState<TagResultRow[]>([]);
+  const [resultOpen, setResultOpen] = useState(false);
+  const [lastTags, setLastTags] = useState<KV[]>([]);
+  const [retrying, setRetrying] = useState(false);
+  const tagError = checkTagInputs(trimTags(tagInputs));
 
   const load = async () => {
     if (!accountId) { message.warning('请先选择账户'); return; }
@@ -151,28 +199,59 @@ const ProfilesTab: React.FC<{ accountId: string }> = ({ accountId }) => {
     } catch (e: any) { message.error(e.message); } finally { setActing(false); }
   };
 
+  // 逐区域打 Tag；整区域请求失败时该区域每个 ARN 记为写入失败，便于只重试它们
+  const runTag = async (targets: Map<string, string[]>, tags: KV[]): Promise<TagResultRow[]> => {
+    const nameOf = (arn: string) => rows.find(r => r.arn === arn)?.name;
+    const out: TagResultRow[] = [];
+    for (const [region, arns] of targets) {
+      const failAll = (error: string) => arns.forEach(arn =>
+        out.push({ key: arn, region, arn, name: nameOf(arn), status: 'write_failed', error }));
+      try {
+        const res = await api.bedrockTagProfiles({ accountId, region, arns, tags });
+        if (res.success) for (const r of res.data) out.push(toTagResultRow(r, region, nameOf(r.arn)));
+        else failAll(res.error || '请求失败');
+      } catch (e: any) { failAll(e.message || '请求失败'); }
+    }
+    return out;
+  };
+
   const doTag = async () => {
-    if (!validTags(tagInputs)) { message.warning('Tag 的 key 和 value 都必须填写（无默认值）'); return; }
+    if (tagError) { message.warning(tagError); return; }
+    const tags = trimTags(tagInputs);
     setActing(true);
     try {
-      let ok = 0, fail = 0;
-      for (const [region, arns] of byRegion(selectedRows)) {
-        const res = await api.bedrockTagProfiles({ accountId, region, arns, tags: tagInputs.map(t => ({ key: t.key.trim(), value: t.value.trim() })) });
-        if (res.success) { ok += res.data.filter((r: any) => r.ok).length; fail += res.data.filter((r: any) => !r.ok).length; }
-        else { fail += arns.length; if (res.error) message.error(res.error); }
-      }
-      message[fail ? 'warning' : 'success'](`打 Tag 完成：成功 ${ok}${fail ? `，失败 ${fail}` : ''}`);
+      setLastTags(tags);
+      const results = await runTag(byRegion(selectedRows), tags);
+      setTagResults(results);
+      const ok = results.filter(r => r.status === 'verified').length;
+      message[ok === results.length ? 'success' : 'warning'](`打 Tag 完成：核验通过 ${ok} / ${results.length}`);
       setTagModalOpen(false);
+      setResultOpen(true);
       setTagInputs([{ key: FIXED_TAG_KEY, value: '' }]);
       load();
-    } catch (e: any) { message.error(e.message); } finally { setActing(false); }
+    } finally { setActing(false); }
+  };
+
+  const retryTag = async () => {
+    const pending = tagResults.filter(r => r.status !== 'verified' && r.arn);
+    if (!pending.length) return;
+    setRetrying(true);
+    try {
+      const targets = new Map([...groupByRegion(pending, r => r.region)].map(([rg, list]) => [rg, list.map(r => r.arn!)]));
+      const merged = mergeResults(tagResults, await runTag(targets, lastTags));
+      setTagResults(merged);
+      const left = merged.filter(r => r.status !== 'verified').length;
+      message[left ? 'warning' : 'success'](left ? `重试完成，仍有 ${left} 项未完成` : '重试完成，全部核验通过');
+      load();
+    } finally { setRetrying(false); }
   };
 
   return (
     <ProfilesTabView {...{
       regions, setRegions, load, loading, search, setSearch, filtered,
       selectedKeys, setSelectedKeys, errors, doDelete, doTag, acting,
-      tagModalOpen, setTagModalOpen, tagInputs, setTagInputs,
+      tagModalOpen, setTagModalOpen, tagInputs, setTagInputs, tagError,
+      tagResults, resultOpen, setResultOpen, retryTag, retrying,
       visibleSelectedCount: selectedRows.length,
       // 复制用「当前可见且被选中」的 ARN：与删除/打 Tag 的口径一致，
       // 避免复制到被搜索框过滤掉、用户其实看不见的行。
@@ -184,7 +263,7 @@ const ProfilesTab: React.FC<{ accountId: string }> = ({ accountId }) => {
 const ProfilesTabView: React.FC<any> = ({
   regions, setRegions, load, loading, search: _s, setSearch, filtered, selectedKeys, setSelectedKeys,
   errors, doDelete, doTag, acting, tagModalOpen, setTagModalOpen, tagInputs, setTagInputs, visibleSelectedCount,
-  selectedArns,
+  selectedArns, tagError, tagResults, resultOpen, setResultOpen, retryTag, retrying,
 }) => (
   <div style={{ paddingTop: 12 }}>
     <Space wrap style={{ marginBottom: 12 }}>
@@ -234,7 +313,13 @@ const ProfilesTabView: React.FC<any> = ({
         { title: '后端模型', dataIndex: 'backendModels', ellipsis: true, width: 200 },
         {
           title: 'Tags', dataIndex: 'tags', width: 200,
-          render: (tags: any[]) => (tags || []).map(t => <Tag key={t.key} style={{ marginBottom: 2 }}>{t.key}={t.value}</Tag>),
+          // 格式不合规的 map-migrated 值、大小写变体 key 标红，悬停看原因
+          render: (tags: KV[]) => (tags || []).map(t => {
+            const problem = mapTagProblem(t);
+            return problem
+              ? <Tooltip key={t.key} title={problem}><Tag color="error" style={{ marginBottom: 2 }}>{t.key}={t.value}</Tag></Tooltip>
+              : <Tag key={t.key} style={{ marginBottom: 2 }}>{t.key}={t.value}</Tag>;
+          }),
         },
         {
           // ARN 是拿去测试/交付要逐字用的，之前 ellipsis 截断后根本看不全。
@@ -255,9 +340,13 @@ const ProfilesTabView: React.FC<any> = ({
       ]} />
     <Modal title={`批量打 Tag（${visibleSelectedCount} 个 Profile）`} open={tagModalOpen}
       onCancel={() => setTagModalOpen(false)} onOk={doTag} okText="打 Tag" confirmLoading={acting}
-      okButtonProps={{ disabled: !validTags(tagInputs) }}>
-      <Alert type="info" showIcon style={{ marginBottom: 12 }} message="Tag 必须每次显式输入，平台不提供默认值，请确认与该账户所属 MAP 协议一致。" />
-      <TagInputs tags={tagInputs} onChange={setTagInputs} />
+      okButtonProps={{ disabled: !!tagError }}>
+      <Alert type="info" showIcon style={{ marginBottom: 12 }} message="Tag 必须每次显式输入，平台不提供默认值，请确认与该账户所属 MAP 协议一致。写入后会逐个从 AWS 回查。" />
+      <TagInputs tags={tagInputs} onChange={setTagInputs} error={tagError} />
+    </Modal>
+    <Modal title="打 Tag 结果" open={resultOpen} width={960} onCancel={() => setResultOpen(false)}
+      footer={<Button onClick={() => setResultOpen(false)}>关闭</Button>}>
+      <BedrockTagResults rows={tagResults} retrying={retrying} onRetry={retryTag} />
     </Modal>
   </div>
 );
@@ -275,9 +364,14 @@ const CreateTab: React.FC<{ accountId: string }> = ({ accountId }) => {
   const [kw, setKw] = useState('');
   const [selectedKeys, setSelectedKeys] = useState<React.Key[]>([]);
   const [prefix, setPrefix] = useState('');
-  const [tagInputs, setTagInputs] = useState<{ key: string; value: string }[]>([{ key: FIXED_TAG_KEY, value: '' }]);
+  const [tagInputs, setTagInputs] = useState<KV[]>([{ key: FIXED_TAG_KEY, value: '' }]);
   const [creating, setCreating] = useState(false);
   const [log, setLog] = useState<string[]>([]);
+  // 创建结果以 AWS 回查为准；重试沿用发起创建时的 tags（lastTags）
+  const [createResults, setCreateResults] = useState<TagResultRow[]>([]);
+  const [lastTags, setLastTags] = useState<KV[]>([]);
+  const [retrying, setRetrying] = useState(false);
+  const tagError = checkTagInputs(trimTags(tagInputs));
 
   const loadModels = async () => {
     if (!accountId) { message.warning('请先选择账户'); return; }
@@ -314,34 +408,81 @@ const CreateTab: React.FC<{ accountId: string }> = ({ accountId }) => {
   // 之前直接用 selectedKeys.length 导致「只选 1 个却显示 8 个」。
   const visibleSelected = filtered.filter(m => selectedKeys.includes(m.modelId));
 
+  // 逐区域创建；整区域请求失败时该区域每个模型记为创建失败，便于只重试它们
+  const runCreate = async (byRgn: Map<string, Array<{ modelId: string; name: string }>>, tags: KV[]): Promise<TagResultRow[]> => {
+    const out: TagResultRow[] = [];
+    for (const [rgn, items] of byRgn) {
+      const failAll = (error: string) => {
+        items.forEach(it => out.push({ key: `${rgn}|${it.modelId}`, region: rgn, name: it.name, modelId: it.modelId, status: 'create_failed', error }));
+        setLog(prev => [...prev, `[ERR] [${rgn}] ${error}`]);
+      };
+      try {
+        const res = await api.bedrockCreateProfiles({ accountId, region: rgn, items, tags });
+        if (!res.success) { failAll(res.error || '请求失败'); continue; }
+        const rowsOut: TagResultRow[] = res.data.map((r: any) => ({
+          key: `${rgn}|${r.modelId}`, region: rgn, name: r.name, modelId: r.modelId, arn: r.arn,
+          status: r.status, actualMapValue: r.actualMapValue ?? null, error: r.error,
+        }));
+        out.push(...rowsOut);
+        setLog(prev => [...prev, ...rowsOut.map(r => r.status === 'verified'
+          ? `[OK] [${rgn}] ${r.name}`
+          : `[ERR] [${rgn}] ${r.name}: ${TAG_STATUS_LABEL[r.status]} ${r.error || ''}`)]);
+      } catch (e: any) { failAll(e.message || '请求失败'); }
+    }
+    return out;
+  };
+
   const doCreate = async () => {
     const sel = visibleSelected;
     if (!sel.length) { message.warning('请勾选模型'); return; }
-    if (!validTags(tagInputs)) { message.warning('必须填写 Tag（key/value 均必填，平台不提供默认值）'); return; }
+    if (tagError) { message.warning(tagError); return; }
+    const tags = trimTags(tagInputs);
     setCreating(true);
+    setLastTags(tags);
+    setCreateResults([]);
     setLog([`开始创建：${sel.length} 个模型 × ${regions.length} 个区域...`]);
     try {
-      let totalOk = 0, totalFail = 0;
       // 多区域批量：逐区域串行执行（同桌面版语义；后端一次一个区域）
-      for (const rgn of regions) {
-        const res = await api.bedrockCreateProfiles({
-          accountId, region: rgn,
-          items: sel.map(m => ({ modelId: m.modelId, name: buildName(m) })),
-          tags: tagInputs.map(t => ({ key: t.key.trim(), value: t.value.trim() })),
-        });
-        if (res.success) {
-          const lines = res.data.map((r: any) => r.ok ? `[OK] [${rgn}] ${r.name}` : `[ERR] [${rgn}] ${r.name}: ${r.error}`);
-          const ok = res.data.filter((r: any) => r.ok).length;
-          totalOk += ok; totalFail += res.data.length - ok;
-          setLog(prev => [...prev, ...lines]);
-        } else {
-          totalFail += sel.length;
-          setLog(prev => [...prev, `[ERR] [${rgn}] ${res.error}`]);
-        }
+      const items = sel.map(m => ({ modelId: m.modelId, name: buildName(m) }));
+      const results = await runCreate(new Map(regions.map(rgn => [rgn, items])), tags);
+      setCreateResults(results);
+      const ok = results.filter(r => r.status === 'verified').length;
+      setLog(prev => [...prev, `全部完成：核验通过 ${ok} / ${results.length}`]);
+      message[ok === results.length ? 'success' : 'warning'](`创建完成：核验通过 ${ok} / ${results.length}`);
+    } finally { setCreating(false); }
+  };
+
+  // 创建失败的重新创建；已创建但回查失败 / 值不一致的走打 Tag 接口重打
+  const retryCreate = async () => {
+    const pending = createResults.filter(r => r.status !== 'verified');
+    if (!pending.length) return;
+    setRetrying(true);
+    try {
+      const toCreate = pending.filter(r => r.status === 'create_failed' && r.modelId);
+      const toTag = pending.filter(r => r.status !== 'create_failed' && r.arn);
+      const next: TagResultRow[] = [];
+      if (toCreate.length) {
+        const byRgn = new Map([...groupByRegion(toCreate, r => r.region)]
+          .map(([rg, list]) => [rg, list.map(r => ({ modelId: r.modelId!, name: r.name || r.modelId! }))]));
+        next.push(...await runCreate(byRgn, lastTags));
       }
-      setLog(prev => [...prev, `全部完成：成功 ${totalOk} / 失败 ${totalFail}`]);
-      message[totalFail ? 'warning' : 'success'](`创建完成：成功 ${totalOk}${totalFail ? `，失败 ${totalFail}` : ''}`);
-    } catch (e: any) { message.error(e.message); } finally { setCreating(false); }
+      for (const [rgn, list] of groupByRegion(toTag, r => r.region)) {
+        const keyOf = new Map(list.map(r => [r.arn!, r]));
+        const failAll = (error: string) => list.forEach(r => next.push({ ...r, status: 'write_failed', error }));
+        try {
+          const res = await api.bedrockTagProfiles({ accountId, region: rgn, arns: list.map(r => r.arn!), tags: lastTags });
+          if (!res.success) { failAll(res.error || '请求失败'); continue; }
+          for (const t of res.data) {
+            const prev = keyOf.get(t.arn)!;
+            next.push({ ...toTagResultRow(t, rgn, prev.name), key: prev.key, modelId: prev.modelId, oldMapValue: undefined });
+          }
+        } catch (e: any) { failAll(e.message || '请求失败'); }
+      }
+      const merged = mergeResults(createResults, next);
+      setCreateResults(merged);
+      const left = merged.filter(r => r.status !== 'verified').length;
+      message[left ? 'warning' : 'success'](left ? `重试完成，仍有 ${left} 项未完成` : '重试完成，全部核验通过');
+    } finally { setRetrying(false); }
   };
 
   return (
@@ -370,19 +511,19 @@ const CreateTab: React.FC<{ accountId: string }> = ({ accountId }) => {
         )}
       </Space>
       <Alert type="warning" showIcon style={{ marginBottom: 8 }}
-        message="Tag Key 固定为 map-migrated，Value 每次必须手动输入（migXXXXXXX）。平台不记忆、不提供默认值——请核对与该账户所属 MAP 协议一致后再创建。" />
+        message="Tag Key 固定为 map-migrated，Value 每次必须手动输入，格式为 mig + 10 位大写字母或数字（如 migAB12CD34EF）。平台不记忆、不提供默认值——请核对与该账户所属 MAP 协议一致后再创建。" />
       <div style={{ marginBottom: 12 }}>
-        <TagInputs tags={tagInputs} onChange={setTagInputs} />
+        <TagInputs tags={tagInputs} onChange={setTagInputs} error={tagError} />
       </div>
       <Space style={{ marginBottom: 8 }}>
         <Button size="small" type="primary" icon={<PlusOutlined />} loading={creating}
-          disabled={!visibleSelected.length || !regions.length || !validTags(tagInputs)} onClick={doCreate}>
+          disabled={!visibleSelected.length || !regions.length || !!tagError} onClick={doCreate}>
           创建勾选（{visibleSelected.length} 个模型 × {regions.length} 区域）
         </Button>
         {/* 表头 checkbox 只作用于当前页（antd 默认），这两个按钮跨全部页 */}
         <Button size="small" onClick={() => setSelectedKeys(filtered.map(m => m.modelId))}>全选（{filtered.length}）</Button>
         <Button size="small" onClick={() => setSelectedKeys([])}>清空选择</Button>
-        {!validTags(tagInputs) && <span style={{ fontSize: 12, color: '#cf1322' }}>请先填写完整 Tag</span>}
+        {tagError && <Typography.Text type="danger" style={{ fontSize: 12 }}>{tagError}</Typography.Text>}
       </Space>
       <Table size="small" rowKey="modelId" dataSource={filtered} loading={loading}
         rowSelection={{
@@ -401,6 +542,14 @@ const CreateTab: React.FC<{ accountId: string }> = ({ accountId }) => {
         <pre style={{ marginTop: 12, padding: 12, background: '#fafafa', borderRadius: 6, fontSize: 12, maxHeight: 200, overflow: 'auto' }}>
           {log.join('\n')}
         </pre>
+      )}
+      {createResults.length > 0 && (
+        <div style={{ marginTop: 12 }}>
+          <Typography.Text type="secondary" style={{ display: 'block', marginBottom: 8, fontSize: 12 }}>
+            重试使用本次创建时的 Tag：{lastTags.map(t => `${t.key}=${t.value}`).join('; ')}
+          </Typography.Text>
+          <BedrockTagResults rows={createResults} retrying={retrying} onRetry={retryCreate} />
+        </div>
       )}
     </div>
   );
@@ -913,11 +1062,13 @@ const DeliveryTab: React.FC<{ accountId: string }> = ({ accountId }) => {
         // 服务端会按 variant 筛选清单内模型并实时查 Service Quotas，耗时约 10-30s
         ? await api.bedrockDeliveryExportV2({
           accountId,
-          rows: rows.map(r => ({ name: r.name, arn: r.arn, region: r.region, tags: r.tags || [], backendModels: r.backendModels, scope: r.scope })),
+          rows: rows.map(r => ({ name: r.name, arn: r.arn, region: r.region, backendModels: r.backendModels, scope: r.scope })),
           iamUser: iamUser.trim(), iamPassword, variant,
         })
+        // 不再传 tags：服务端按 ARN 从 AWS 重新读标签，前端值不得进入交付表
         : await api.bedrockDeliveryExport({
-          rows: rows.map(r => ({ name: r.name, arn: r.arn, region: r.region, tags: r.tags || [] })),
+          accountId,
+          rows: rows.map(r => ({ name: r.name, arn: r.arn, region: r.region })),
           iamUser: iamUser.trim(), iamPassword,
         });
       const url = URL.createObjectURL(res.blob);
@@ -949,7 +1100,7 @@ const DeliveryTab: React.FC<{ accountId: string }> = ({ accountId }) => {
   return (
     <div style={{ paddingTop: 12, maxWidth: 1000 }}>
       <Alert type="info" showIcon style={{ marginBottom: 12 }}
-        message="生成客户交付 Excel：账户信息 + ARN List（按区域分组）+ 使用须知。服务端强校验：所有 Profile 必须同属一个账户、且都带同一个 map-migrated Tag（无 Tag 或 Tag 不一致会拒绝生成）。" />
+        message="生成客户交付 Excel：账户信息 + ARN List（按区域分组）+ 使用须知。服务端会按 ARN 从 AWS 重新读取标签：所有 Profile 必须属于当前账户、带同一个 map-migrated 值，且格式为 mig + 10 位大写字母或数字，否则拒绝生成。" />
       <Space wrap style={{ marginBottom: 12 }}>
         {/* 交付表格走 /profiles，同样受 12 区域上限约束 */}
         <Select mode="multiple" size="small" style={{ minWidth: 280 }} value={regions} onChange={setRegions}
@@ -981,7 +1132,11 @@ const DeliveryTab: React.FC<{ accountId: string }> = ({ accountId }) => {
           { title: 'Name', dataIndex: 'name', width: 260 },
           { title: 'map-migrated', key: 'mig', width: 160, render: (_: any, r: any) => {
             const t = (r.tags || []).find((x: any) => x.key === 'map-migrated');
-            return t ? <Tag color="green">{t.value}</Tag> : <Tag color="red">缺失</Tag>;
+            if (!t) return <Tag color="red">缺失</Tag>;
+            const err = checkMapTagValue(t.value);
+            return err
+              ? <Tooltip title={err}><Tag color="error">{t.value}</Tag></Tooltip>
+              : <Tag color="green">{t.value}</Tag>;
           } },
           { title: 'ARN', dataIndex: 'arn', ellipsis: true },
         ]} />
@@ -1040,7 +1195,9 @@ const BedrockPage: React.FC = () => {
       </div>
 
       <Card size="small" bodyStyle={{ padding: '0 16px 16px' }}>
-        <Tabs activeKey={activeTab} onChange={setActiveTab} items={[
+        {/* 切换账户必须整体重建各 Tab：rows / 勾选 / 已填 Tag / 结果都是组件内 state，
+            不重建就会把上一个账户的数据带到新账户（曾出现把 A 账户的 Profile 选中后在 B 账户操作） */}
+        <Tabs key={selectedAccount || 'none'} activeKey={activeTab} onChange={setActiveTab} items={[
           { key: 'profiles', label: 'Profiles 管理', children: <ProfilesTab accountId={selectedAccount} /> },
           { key: 'create', label: '批量创建', children: <CreateTab accountId={selectedAccount} /> },
           { key: 'invoke', label: '模型测试', children: <InvokeTab accountId={selectedAccount} /> },
