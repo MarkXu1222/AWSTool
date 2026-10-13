@@ -40,6 +40,7 @@ import path from 'path';
 import fs from 'fs';
 import { db } from './db';
 import { getExternalId, isRestricted, isSupportOnlyRestricted } from './restricted-accounts';
+import { getActiveGrant, remainingSeconds, TempAdminRequiredError } from './temp-admin';
 
 // Load shared config
 const CONFIG_PATH = path.join(__dirname, '../../config.json');
@@ -61,8 +62,8 @@ const CHILD_ROLE_NAME = config.childRoleName || process.env.CHILD_ROLE_NAME || '
 // 一级跳专用: 每个账户里都建有并信任主账号的 role (方案 A: 优先用它，失败 fallback 到 payer 二级跳)
 const SUPPORT_ROLE_NAME = config.supportRoleName || process.env.SUPPORT_ROLE_NAME || 'support-quota';
 // 专用管理员角色（一级跳，AdministratorAccess，直接信任平台身份）。
-// 用于生成 Admin 临时凭证 / Admin 控制台：INVITED 账户没有 OrganizationAccountAccessRole，
-// 只能靠这个由组织级 StackSet 下发的角色进入。
+// 仅在临时开通期间存在（temp-admin.ts），不再由组织级 StackSet 常驻下发：
+// 没有 OrganizationAccountAccessRole 的账户（通常是 INVITED）需要 Admin 时由管理员临时开通。
 const ADMIN_ROLE_NAME = config.adminRoleName || process.env.ADMIN_ROLE_NAME || 'admin-console';
 
 // 哪些组织(按 payer 名称)在账户页控制台提供「只读(support-quota) / Admin」双选项。
@@ -304,7 +305,11 @@ async function assumeToAccount(accountId: string) {
 
 /** 临时管理员凭证签发的可安全暴露错误，路由据此返回准确 HTTP 状态。 */
 export class TempCredentialError extends Error {
-  constructor(message: string, public readonly statusCode: 400 | 409 | 503) {
+  constructor(
+    message: string,
+    public readonly statusCode: 400 | 409 | 503,
+    public readonly code?: 'TEMP_ADMIN_REQUIRED',
+  ) {
     super(message);
     this.name = 'TempCredentialError';
   }
@@ -318,7 +323,8 @@ function isRetryableStsError(error: any): boolean {
 
 /**
  * 生成账户的 Admin 权限临时凭证（1–12 个整数小时）。
- * payer 管理账户固定最多 1 小时；成员账户超过 1 小时只允许长期平台身份直接 AssumeRole 到 admin-console。
+ * payer 管理账户固定最多 1 小时。成员账户：临时开通 Admin 期间直跳 admin-console（时长不超过开通剩余时间），
+ * 否则经 OrganizationAccountAccessRole 角色链签发（AWS 硬上限 1 小时）。
  */
 export async function getTempAdminCredentials(accountId: string, durationHours = 1) {
   if (!Number.isInteger(durationHours) || durationHours < 1 || durationHours > 12) {
@@ -378,31 +384,44 @@ export async function getTempAdminCredentials(accountId: string, durationHours =
 
   let retryableFailure: any;
 
-  // 情况 2：成员账户优先一级跳专用 admin-console。只有这条从长期 IAM 用户发起的直接链路支持 >1 小时。
-  // INVITED 账户没有 OrganizationAccountAccessRole，也依赖这个由组织级 StackSet 下发的角色进入。
-  // 受限账户跳过此步（角色已删除），直接进情况 3。
-  if (!restricted) try {
-    const resp = await withAwsClient(
-      new STSClient({ region: DEFAULT_REGION, credentials: BASE_CREDENTIALS }),
-      sts => withAbortTimeout(AWS_REQUEST_TIMEOUT_MS, signal => sts.send(new AssumeRoleCommand({
-        RoleArn: `arn:aws:iam::${accountId}:role/${ADMIN_ROLE_NAME}`,
-        RoleSessionName: `admin-${accountId}`.slice(0, 64),
-        DurationSeconds: durationSeconds,
-      }), { abortSignal: signal })),
-    );
-    console.log(`[temp-cred] ${accountId} → ${ADMIN_ROLE_NAME} (一级跳, ${durationHours}h)`);
-    return format(resp);
-  } catch (e: any) {
-    if (durationHours > 1) {
-      if (isRetryableStsError(e)) {
-        throw new TempCredentialError('AWS STS 暂时不可用或请求超时，请稍后重试', 503);
-      }
-      throw new TempCredentialError(
-        `无法生成 ${durationHours} 小时凭证：请确认目标账户的 ${ADMIN_ROLE_NAME} 直接信任平台身份，且 MaxSessionDuration 不低于 ${durationHours} 小时（${e?.name || 'AssumeRoleFailed'}）`,
-        409,
-      );
+  // 情况 2：临时开通 Admin 期间直跳 admin-console。这是唯一支持 >1 小时的成员账户链路，
+  // 凭证不得超过开通剩余时间 —— 到期后角色会被删除。没有有效开通时一律不碰 admin-console，
+  // 即使账户里残留着它（未经开通的常驻 admin-console 属于待清理的异常）。
+  const grant = restricted ? null : getActiveGrant(accountId);
+  if (grant) {
+    const remaining = remainingSeconds(grant);
+    if (remaining < 900) {
+      throw new TempCredentialError('临时 Admin 剩余不足 15 分钟，请到期后重新开通', 409);
     }
-    if (isRetryableStsError(e)) retryableFailure = e;
+    const seconds = Math.min(durationSeconds, remaining);
+    try {
+      const resp = await withAwsClient(
+        new STSClient({ region: DEFAULT_REGION, credentials: BASE_CREDENTIALS }),
+        sts => withAbortTimeout(AWS_REQUEST_TIMEOUT_MS, signal => sts.send(new AssumeRoleCommand({
+          RoleArn: `arn:aws:iam::${accountId}:role/${ADMIN_ROLE_NAME}`,
+          RoleSessionName: `admin-${accountId}`.slice(0, 64),
+          DurationSeconds: seconds,
+        }), { abortSignal: signal })),
+      );
+      console.log(`[temp-cred] ${accountId} → ${ADMIN_ROLE_NAME} (临时开通, ${seconds}s)`);
+      return { ...format(resp), cappedByTempAdmin: seconds < durationSeconds, tempAdminExpiresAt: grant.expiresAt };
+    } catch (e: any) {
+      if (durationHours > 1) {
+        if (isRetryableStsError(e)) {
+          throw new TempCredentialError('AWS STS 暂时不可用或请求超时，请稍后重试', 503);
+        }
+        throw new TempCredentialError(
+          `临时开通期内无法 AssumeRole ${ADMIN_ROLE_NAME}（${e?.name || 'AssumeRoleFailed'}），请确认开通状态`,
+          409,
+        );
+      }
+      if (isRetryableStsError(e)) retryableFailure = e;
+    }
+  } else if (durationHours > 1) {
+    throw new TempCredentialError(
+      '成员账户的 Admin 临时凭证经 OrganizationAccountAccessRole 签发，最长 1 小时；临时开通 Admin 期间可签发更长凭证（不超过剩余时间）',
+      409,
+    );
   }
 
   // 情况 3：1 小时请求可回退到 payer admin → OrganizationAccountAccessRole。
@@ -437,10 +456,14 @@ export async function getTempAdminCredentials(accountId: string, durationHours =
   if (retryableFailure) {
     throw new TempCredentialError('AWS STS 暂时不可用或请求超时，请稍后重试', 503);
   }
-  throw new TempCredentialError(
-    `无法为账户 ${accountId} 生成管理员临时凭证：${lastErr?.message || '可用管理员角色均尝试失败'}`,
-    409,
-  );
+  // OAAR 全部明确拒绝：通常是邀请加入、没有 OAAR 的账户，需先临时开通 Admin
+  if (restricted) {
+    throw new TempCredentialError(
+      `无法为账户 ${accountId} 生成管理员临时凭证：${lastErr?.message || '可用管理员角色均尝试失败'}`,
+      409,
+    );
+  }
+  throw new TempCredentialError(new TempAdminRequiredError(accountId).message, 409, 'TEMP_ADMIN_REQUIRED');
 }
 
 // ===== 集中式根访问 (sts:AssumeRoot) =====
@@ -1816,9 +1839,10 @@ export async function assumeSupportRoleStrict(accountId: string) {
 }
 
 /**
- * Admin 控制台凭证：使用默认 OrganizationAccountAccessRole。
+ * Admin 控制台凭证。
  * - accountId 是某 payer 的管理账户：管理账户没有 OAAR，用该 payer 的 role/tool（管理员一级跳）。
- * - 否则(成员账户)：payer admin 凭证 → 二级跳 OrganizationAccountAccessRole。
+ * - 成员账户处于临时开通期：直跳 admin-console，会话不超过开通剩余时间。
+ * - 否则：payer admin 凭证 → 二级跳 OrganizationAccountAccessRole；进不去则提示临时开通。
  */
 async function assumeAdminViaOAAR(accountId: string) {
   const ADMIN_CHILD_ROLE = 'OrganizationAccountAccessRole';
@@ -1833,23 +1857,29 @@ async function assumeAdminViaOAAR(accountId: string) {
     throw new Error(`账户 ${accountId} 已配置为仅保留 support-quota，Admin 控制台不可用`);
   }
 
-  // 优先一级跳专用 admin-console（INVITED 账户没有 OrganizationAccountAccessRole）；
-  // 受限账户的 admin-console 已删除，直接走 OAAR
-  if (!isRestricted(accountId)) try {
-    const resp = await withAwsClient(
-      new STSClient({ region: DEFAULT_REGION, credentials: BASE_CREDENTIALS }),
-      sts => withAbortTimeout(AWS_REQUEST_TIMEOUT_MS, signal => sts.send(new AssumeRoleCommand({
-        RoleArn: `arn:aws:iam::${accountId}:role/${ADMIN_ROLE_NAME}`,
-        RoleSessionName: `console-admin-${accountId}`.slice(0, 64),
-        DurationSeconds: 3600,
-      }), { abortSignal: signal })),
-    );
-    return {
-      accessKeyId: resp.Credentials!.AccessKeyId!,
-      secretAccessKey: resp.Credentials!.SecretAccessKey!,
-      sessionToken: resp.Credentials!.SessionToken!,
-    };
-  } catch { /* 未部署则回退二级跳 */ }
+  // 临时开通期内直跳 admin-console（INVITED 账户没有 OAAR）；没有有效开通时不碰它。
+  // 受限账户不提供临时开通，直接走 OAAR。
+  const restricted = isRestricted(accountId);
+  const grant = restricted ? null : getActiveGrant(accountId);
+  if (grant) {
+    const remaining = remainingSeconds(grant);
+    if (remaining < 900) throw new TempAdminRequiredError(accountId);
+    try {
+      const resp = await withAwsClient(
+        new STSClient({ region: DEFAULT_REGION, credentials: BASE_CREDENTIALS }),
+        sts => withAbortTimeout(AWS_REQUEST_TIMEOUT_MS, signal => sts.send(new AssumeRoleCommand({
+          RoleArn: `arn:aws:iam::${accountId}:role/${ADMIN_ROLE_NAME}`,
+          RoleSessionName: `console-admin-${accountId}`.slice(0, 64),
+          DurationSeconds: Math.min(3600, remaining),
+        }), { abortSignal: signal })),
+      );
+      return {
+        accessKeyId: resp.Credentials!.AccessKeyId!,
+        secretAccessKey: resp.Credentials!.SecretAccessKey!,
+        sessionToken: resp.Credentials!.SessionToken!,
+      };
+    } catch { /* 开通状态与实际不符时回退 OAAR */ }
+  }
 
   const known = accountPayerMap.get(accountId) || getPayerRoleArnForAccount(accountId);
   const payerArns = known
@@ -1875,10 +1905,13 @@ async function assumeAdminViaOAAR(accountId: string) {
       };
     } catch (e) { lastErr = e; continue; }
   }
-  throw new Error(
-    `无法以 Admin 权限登录账户 ${accountId} 的控制台：未能经 OrganizationAccountAccessRole 假设` +
-    `（${lastErr?.name || lastErr?.message || '所有 payer 均尝试失败'}）。`,
-  );
+  if (restricted) {
+    throw new Error(
+      `无法以 Admin 权限登录账户 ${accountId} 的控制台：未能经 OrganizationAccountAccessRole 假设` +
+      `（${lastErr?.name || lastErr?.message || '所有 payer 均尝试失败'}）。`,
+    );
+  }
+  throw new TempAdminRequiredError(accountId);
 }
 
 /**

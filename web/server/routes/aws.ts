@@ -35,6 +35,9 @@ import { type CredentialDownloadSlot, RootEmailError } from '../root-email-core'
 import { MailApiError } from '../mail-api';
 import { createRootResetGuard } from '../root-reset-permissions';
 import { StepUpMfaError, verifyStepUpTotp } from '../step-up-mfa';
+import {
+  openTempAdmin, revokeTempAdmin, listOpenGrants, TempAdminError, TempAdminRequiredError,
+} from '../temp-admin';
 
 export const awsRouter = Router();
 
@@ -704,9 +707,9 @@ awsRouter.post('/accounts/restricted', requireStrictAdmin, async (req: Request, 
 awsRouter.delete('/accounts/restricted/:accountId', requireStrictAdmin, async (req: Request, res: Response) => {
   try {
     const accountId = String(req.params.accountId);
-    const r = await unmarkRestricted(accountId);
-    if (!r.ok) return res.status(400).json({ error: r.error });
     const user = (req as any).user;
+    const r = await unmarkRestricted(accountId, { id: user?.userId ?? null, username: user?.username || 'unknown' });
+    if (!r.ok) return res.status(400).json({ error: r.error });
     db.addAuditLog(user?.userId, 'ACCOUNT_UNRESTRICT',
       `取消敏感权限标记并恢复默认权限: ${accountId}`, user?.username, req.ip);
     (res.locals as any).audited = true;
@@ -726,6 +729,60 @@ awsRouter.get('/accounts/restricted/:accountId/external-id', requireStrictAdmin,
     (res.locals as any).audited = true;
     res.json({ success: true, data: { accountId, externalId: v } });
   } catch (e: any) { res.status(500).json({ error: e.message }); }
+});
+
+// ===== 临时 Admin（admin-console 按需开通，temp-admin.ts）=====
+// 必须注册在 /accounts/:id/detail 之前（与其它具体路径同理，避免被通配吞掉）。
+
+// 未结束的开通记录（账户页展示倒计时用；只含元数据，不含凭证）
+awsRouter.get('/temp-admin/grants', async (_req: Request, res: Response) => {
+  try { res.json({ success: true, data: listOpenGrants() }); }
+  catch (e: any) { res.status(500).json({ error: e.message }); }
+});
+
+// 临时开通：仅实时校验的 admin + TOTP step-up（给账户挂 AdministratorAccess，与创建 Admin IAM 用户同级敏感）
+awsRouter.post('/temp-admin', requireStrictAdmin, async (req: Request, res: Response) => {
+  const user = (req as any).user;
+  const accountId = String(req.body?.accountId || '');
+  const hours = Number(req.body?.hours);
+  try {
+    verifyStepUpTotp({ id: user.userId, username: user.username }, req.body?.mfaCode, req.ip);
+  } catch (e: any) {
+    db.addAuditLog(user?.userId, 'TEMP_ADMIN_STEPUP_FAILED',
+      `AWS 账户 ${accountId} · 临时开通 Admin 的 MFA 验证失败`, user?.username, req.ip);
+    (res.locals as any).audited = true;
+    return res.status(e instanceof StepUpMfaError ? e.statusCode : 500).json({ error: e.message });
+  }
+  try {
+    const grant = await openTempAdmin({ accountId, hours, requestedBy: { id: user.userId, username: user.username } });
+    db.addAuditLog(user?.userId, 'TEMP_ADMIN_OPEN',
+      `AWS 账户 ${accountId} · 临时开通 Admin ${hours} 小时，到期 ${grant.expiresAt}`, user?.username, req.ip);
+    (res.locals as any).audited = true;
+    res.json({ success: true, data: grant });
+  } catch (e: any) {
+    db.addAuditLog(user?.userId, 'TEMP_ADMIN_OPEN_FAILED',
+      `AWS 账户 ${accountId} · 临时开通 Admin ${hours} 小时失败：${e.message}`, user?.username, req.ip);
+    (res.locals as any).audited = true;
+    res.status(e instanceof TempAdminError ? e.statusCode : 500).json({ error: e.message });
+  }
+});
+
+// 提前关闭（降权操作，不要求 MFA）
+awsRouter.delete('/temp-admin/:accountId', requireStrictAdmin, async (req: Request, res: Response) => {
+  const user = (req as any).user;
+  const accountId = String(req.params.accountId);
+  if (!/^\d{12}$/.test(accountId)) return res.status(400).json({ error: '无效的账户 ID' });
+  try {
+    const grant = await revokeTempAdmin(accountId, user?.username || 'unknown');
+    if (grant) {
+      db.addAuditLog(user?.userId, 'TEMP_ADMIN_REVOKE',
+        `AWS 账户 ${accountId} · 提前关闭临时 Admin（操作人 ${user?.username}）`, user?.username, req.ip);
+      (res.locals as any).audited = true;
+    }
+    res.json({ success: true, data: grant });
+  } catch (e: any) {
+    res.status(e instanceof TempAdminError ? e.statusCode : 500).json({ error: e.message });
+  }
 });
 
 // Account detail
@@ -831,7 +888,10 @@ awsRouter.get('/console-url/:accountId', async (req: Request, res: Response) => 
       (res.locals as any).audited = true;
     }
     res.json({ success: true, url });
-  } catch (e: any) { res.status(500).json({ error: e.message }); }
+  } catch (e: any) {
+    if (e instanceof TempAdminRequiredError) return res.status(409).json({ error: e.message, code: e.code });
+    res.status(500).json({ error: e.message });
+  }
 });
 
 // Generate quota increase document (PDF)
@@ -1669,7 +1729,7 @@ awsRouter.get('/temp-credentials/:accountId', requireRootAccess, async (req: Req
     res.json({ success: true, data: creds });
   } catch (e: any) {
     const statusCode = [400, 409, 503].includes(e?.statusCode) ? e.statusCode : 500;
-    res.status(statusCode).json({ error: e.message });
+    res.status(statusCode).json({ error: e.message, ...(e?.code ? { code: e.code } : {}) });
   }
 });
 

@@ -10,6 +10,7 @@ import * as aws from './aws-service';
 import { db } from './db';
 // notify 已不再被调度器使用（配额变动通知于 2026-09-15 移除）
 import { syncAccountRoles } from './account-roles';
+import { sweepTempAdminGrants, recoverTempAdminGrantsOnStartup } from './temp-admin';
 import { recordDepartures, backfillDepartures } from './account-lifecycle';
 
 let quotaSyncRunning = false;
@@ -256,6 +257,17 @@ async function syncRegions() {
 // === Start scheduler ===
 export function startScheduler() {
   console.log('[Scheduler] Starting background sync scheduler');
+
+  // 临时 Admin：开通过程中被重启打断的记录交给回收；之后每 60 秒回收到期的开通
+  try {
+    const recovered = recoverTempAdminGrantsOnStartup();
+    if (recovered) console.log(`[TempAdmin] 启动时转入回收 ${recovered} 条中断的开通`);
+  } catch (e: any) {
+    console.error('[TempAdmin] 启动恢复失败:', e.message);
+  }
+  setInterval(() => {
+    sweepTempAdminGrants().catch(e => console.error('[TempAdmin] sweep failed:', e.message));
+  }, 60 * 1000);
 
   // 补录历史离场账户（本模块上线前已离开的，不会再触发 diff 检测）。
   // 只依赖现有缓存与遗留数据，不调 AWS，可以立即执行。
