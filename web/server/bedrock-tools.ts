@@ -9,6 +9,7 @@
  *
  * ⚠️ Tag 纪律：创建 Profile 的 tags 必填且不做任何默认值，每次由操作者输入
  * （桌面版默认 migSLQ1VY6LIX 会导致错打别家 MAP tag —— 平台侧强制显式输入）。
+ * 值格式由 map-tag-rules.ts 校验；创建 / 打 Tag 写后逐个回查，结果以 AWS 实际值为准。
  */
 import {
   BedrockClient,
@@ -30,6 +31,9 @@ import {
 } from '@aws-sdk/client-iam';
 import crypto from 'crypto';
 import { getTempAdminCredentials } from './aws-service';
+import {
+  readBackTags, findMapTagValue, parseProfileArn, variantKeysToRemove, type BedrockTag,
+} from './map-tag-rules';
 
 // ===== Admin 凭证缓存（50 分钟；STS 凭证本身 1 小时） =====
 // 有界缓存：平台有 3000+ 账户，无上限的 Map 会让 Admin 凭证在内存里无限累积
@@ -60,6 +64,11 @@ async function adminCreds(accountId: string) {
 
 function bedrock(creds: any, region: string) {
   return new BedrockClient({ region, credentials: creds, maxAttempts: 2 });
+}
+
+async function listTags(c: BedrockClient, arn: string): Promise<BedrockTag[]> {
+  const resp = await c.send(new ListTagsForResourceCommand({ resourceARN: arn }));
+  return (resp.tags || []).map(t => ({ key: String(t.key ?? ''), value: String(t.value ?? '') }));
 }
 
 // 按 SYSTEM_DEFINED profile ID 的厂商段（如 us.openai.gpt-6-sol 的 openai）与名称做关键词匹配，首个命中生效。
@@ -157,31 +166,52 @@ export async function listSystemProfiles(accountId: string, region: string) {
   } finally { c.destroy(); }
 }
 
+export type CreateProfileStatus = 'verified' | 'create_failed' | 'read_failed' | 'mismatch';
+export interface CreateProfileResult {
+  name: string;
+  modelId: string;
+  ok: boolean;                 // === (status === 'verified')
+  status: CreateProfileStatus;
+  arn?: string;
+  actualMapValue: string | null;
+  error?: string;
+}
+
 /**
- * 批量创建 Application Inference Profile。
- * ⚠️ tags 必填（route 层已强校验非空），不做默认值。
+ * 批量创建 Application Inference Profile，创建后逐个回查 tags。
+ * ⚠️ tags 必须已经过 validateBedrockTags（route 层），不做默认值。
  */
 export async function createProfiles(
   accountId: string, region: string,
   items: Array<{ modelId: string; name: string }>,
-  tags: Array<{ key: string; value: string }>,
-) {
+  tags: BedrockTag[],
+): Promise<CreateProfileResult[]> {
   const creds = await adminCreds(accountId);
   const c = bedrock(creds, region);
-  const results: Array<{ name: string; ok: boolean; arn?: string; error?: string }> = [];
+  const results: CreateProfileResult[] = [];
   try {
     for (const item of items) {
       const modelArn = `arn:aws:bedrock:${region}:${accountId}:inference-profile/${item.modelId}`;
+      let arn: string;
       try {
         const resp = await c.send(new CreateInferenceProfileCommand({
           inferenceProfileName: item.name,
           modelSource: { copyFrom: modelArn },
           tags: tags as any,
         }));
-        results.push({ name: item.name, ok: true, arn: resp.inferenceProfileArn });
+        arn = resp.inferenceProfileArn!;
       } catch (e: any) {
-        results.push({ name: item.name, ok: false, error: e?.message || String(e) });
+        results.push({
+          name: item.name, modelId: item.modelId, ok: false, status: 'create_failed',
+          actualMapValue: null, error: e?.message || String(e),
+        });
+        continue;
       }
+      const check = await readBackTags(() => listTags(c, arn), tags);
+      results.push({
+        name: item.name, modelId: item.modelId, ok: check.status === 'verified', status: check.status, arn,
+        actualMapValue: check.actual ? findMapTagValue(check.actual) : null, error: check.error,
+      });
     }
   } finally { c.destroy(); }
   return results;
@@ -202,19 +232,96 @@ export async function deleteProfiles(accountId: string, region: string, arns: st
   return results;
 }
 
-export async function tagProfiles(accountId: string, region: string, arns: string[], tags: Array<{ key: string; value: string }>) {
+export type TagWriteStatus = 'verified' | 'write_failed' | 'read_failed' | 'mismatch';
+export interface TagWriteResult {
+  arn: string;
+  ok: boolean;                  // === (status === 'verified')
+  status: TagWriteStatus;
+  oldMapValue: string | null;   // 写入前的 map-migrated；没有或读失败为 null
+  oldReadFailed: boolean;       // 写入前读取失败（不阻断写入）
+  removedVariantKeys: string[]; // 写入前移除的 map-migrated 大小写变体 key
+  actualMapValue: string | null;
+  error?: string;
+}
+
+/**
+ * 批量打 Tag：读旧值 → 移除大小写变体 key → 写入 → 回查。
+ * TagResource 对同名 key 是覆盖写，重打即可修正错值。
+ * 移除变体是因为旧版校验允许额外 Tag 写 Map-Migrated，而 Bedrock 页没有解 Tag 入口，
+ * 不自动移除它就永远过不了回查和交付；只动「不分大小写等于 map-migrated 但不精确」的 key。
+ */
+export async function tagProfiles(
+  accountId: string, region: string, arns: string[], tags: BedrockTag[],
+): Promise<TagWriteResult[]> {
   const creds = await adminCreds(accountId);
   const c = bedrock(creds, region);
-  const results: Array<{ arn: string; ok: boolean; error?: string }> = [];
+  const results: TagWriteResult[] = [];
   try {
     for (const arn of arns) {
+      const base = { arn, oldMapValue: null as string | null, oldReadFailed: false, removedVariantKeys: [] as string[] };
+      let variants: string[] = [];
+      try {
+        const oldTags = await listTags(c, arn);
+        base.oldMapValue = findMapTagValue(oldTags);
+        variants = variantKeysToRemove(oldTags);
+      } catch { base.oldReadFailed = true; }
+
+      if (variants.length) {
+        try {
+          await c.send(new UntagResourceCommand({ resourceARN: arn, tagKeys: variants }));
+          base.removedVariantKeys = variants;
+        } catch (e: any) {
+          results.push({ ...base, ok: false, status: 'write_failed', actualMapValue: null,
+            error: `移除大小写变体 key 失败：${e?.message || String(e)}` });
+          continue;
+        }
+      }
+
       try {
         await c.send(new TagResourceCommand({ resourceARN: arn, tags: tags as any }));
-        results.push({ arn, ok: true });
-      } catch (e: any) { results.push({ arn, ok: false, error: e?.message || String(e) }); }
+      } catch (e: any) {
+        results.push({ ...base, ok: false, status: 'write_failed', actualMapValue: null, error: e?.message || String(e) });
+        continue;
+      }
+
+      const check = await readBackTags(() => listTags(c, arn), tags);
+      results.push({
+        ...base, ok: check.status === 'verified', status: check.status,
+        actualMapValue: check.actual ? findMapTagValue(check.actual) : null, error: check.error,
+      });
     }
   } finally { c.destroy(); }
   return results;
+}
+
+/**
+ * 交付用：按 ARN 从 AWS 读真实 tags（不信任前端）。区域间并发、区域内串行，每个 ARN 读一次。
+ */
+export async function readProfileTagsByArn(
+  accountId: string, arns: string[],
+): Promise<{ tags: Map<string, BedrockTag[]>; failures: Array<{ arn: string; error: string }> }> {
+  const tags = new Map<string, BedrockTag[]>();
+  const failures: Array<{ arn: string; error: string }> = [];
+  const byRegion = new Map<string, string[]>();
+  for (const arn of arns) {
+    const parsed = parseProfileArn(arn);
+    if (!parsed) { failures.push({ arn, error: '无法解析 ARN' }); continue; }
+    if (!byRegion.has(parsed.region)) byRegion.set(parsed.region, []);
+    byRegion.get(parsed.region)!.push(arn);
+  }
+  if (!byRegion.size) return { tags, failures };
+
+  const creds = await adminCreds(accountId);
+  await Promise.all([...byRegion].map(async ([region, list]) => {
+    const c = bedrock(creds, region);
+    try {
+      for (const arn of list) {
+        try { tags.set(arn, await listTags(c, arn)); }
+        catch (e: any) { failures.push({ arn, error: e?.message || String(e) }); }
+      }
+    } finally { c.destroy(); }
+  }));
+  return { tags, failures };
 }
 
 export async function untagProfiles(accountId: string, region: string, arns: string[], tagKeys: string[]) {

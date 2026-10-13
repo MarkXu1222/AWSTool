@@ -7,6 +7,7 @@
  * 交付须知文案内置（桌面版从模板 xlsx 提取，平台内置等价文案）。
  */
 import ExcelJS from 'exceljs';
+import { checkMapTagValue, findMapTagKeyVariant, parseProfileArn, MapTagRuleError } from './map-tag-rules';
 
 const DELIVERY_REGION_ORDER = ['us-east-1', 'us-west-2'];
 
@@ -37,9 +38,38 @@ export interface DeliveryProfileRow {
   tags: Array<{ key: string; value: string }>;
 }
 
+export interface DeliveryInputRow { name: string; arn: string; region: string; backendModels?: string; scope?: string }
+
 /**
- * 校验并分组：账户 ID 全表唯一；tag（map-migrated）全表唯一且必须存在。
- * 平台纪律：tag 不做默认值，来自 Profile 实际打的 tag。
+ * 规范化前端传来的交付行：ARN 必须属于 accountId，region 一律取 ARN 解析值，
+ * 前端传来的 tags 直接丢弃 —— 路由随后从 AWS 重新读标签，前端值不得进入交付表。
+ */
+export function normalizeDeliveryRows(accountId: string, raw: unknown): DeliveryInputRow[] {
+  if (!Array.isArray(raw) || raw.length === 0) throw new MapTagRuleError('没有 Profile 数据');
+  const bad: string[] = [];
+  const out: DeliveryInputRow[] = [];
+  for (const r of raw as any[]) {
+    const arn = String(r?.arn ?? '');
+    const name = String(r?.name ?? '');
+    const parsed = parseProfileArn(arn);
+    if (!parsed || parsed.accountId !== accountId) { bad.push(name || arn); continue; }
+    const row: DeliveryInputRow = { name, arn, region: parsed.region };
+    if (typeof r.backendModels === 'string') row.backendModels = r.backendModels;
+    if (typeof r.scope === 'string') row.scope = r.scope;
+    out.push(row);
+  }
+  if (bad.length) {
+    throw new MapTagRuleError(`以下 Profile 不属于账户 ${accountId}，已拒绝生成：`
+      + `${bad.slice(0, 5).join('、')}${bad.length > 5 ? ` 等 ${bad.length} 个` : ''}`);
+  }
+  return out;
+}
+
+/**
+ * 校验并分组：账户 ID 全表唯一；map-migrated 必须存在、格式合规（map-tag-rules）、
+ * 无大小写变体 key、全表唯一。
+ * 平台纪律：tag 不做默认值；路由层传入的 tags 是服务端从 AWS 重新读到的实际值。
+ * 只校验唯一性不够 —— 曾经整批 profile 都打成同一个 migmig… 顺利生成了交付表。
  */
 export function prepareDelivery(rows: DeliveryProfileRow[]) {
   if (!rows.length) throw new Error('没有 Profile 数据');
@@ -48,11 +78,20 @@ export function prepareDelivery(rows: DeliveryProfileRow[]) {
   if (accountIds.size !== 1) throw new Error(`ARN 中的账户 ID 不唯一：${[...accountIds].join(', ')}`);
   const accountId = [...accountIds][0];
 
+  const bad: string[] = [];
   const tagValues = new Set<string>();
   for (const r of rows) {
+    const variant = findMapTagKeyVariant(r.tags);
+    if (variant) { bad.push(`${r.name}：存在与 map-migrated 仅大小写不同的 key「${variant}」`); continue; }
     const mig = (r.tags || []).find(t => t.key === 'map-migrated');
-    if (!mig || !mig.value) throw new Error(`Profile「${r.name}」没有 map-migrated tag，不能交付`);
+    if (!mig || !mig.value) { bad.push(`${r.name}：缺少 map-migrated`); continue; }
+    const err = checkMapTagValue(mig.value);
+    if (err) { bad.push(`${r.name}：${err}`); continue; }
     tagValues.add(mig.value);
+  }
+  if (bad.length) {
+    throw new Error(`以下 ${bad.length} 个 Profile 的 map-migrated 标签不合规，不能交付：`
+      + `${bad.slice(0, 10).join('；')}${bad.length > 10 ? ' 等' : ''}。请在「Profiles 管理」重新打 Tag 后再生成`);
   }
   if (tagValues.size !== 1) throw new Error(`map-migrated tag 不唯一：${[...tagValues].join(', ')}，请先统一`);
   const tagValue = [...tagValues][0];

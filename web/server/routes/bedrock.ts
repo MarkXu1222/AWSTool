@@ -3,15 +3,19 @@
  * 经 authMiddleware + auditMiddleware；写操作再加 requireAdmin/requireStrictAdmin）。
  *
  * ⚠️ Tag 纪律：创建 Profile / 打 Tag 的 tags 必填，服务端强校验非空且每个 key/value 非空，
- * 绝不提供默认值（防止错打别家 MAP tag）。
+ * 绝不提供默认值（防止错打别家 MAP tag）。map-migrated 值必须符合 ^mig[A-Z0-9]{10}$，
+ * 规则见 map-tag-rules.ts；交付表格一律从 AWS 重新读标签，不信任前端传来的 tags。
  */
 import { Router, Request, Response, NextFunction } from 'express';
 import { db } from '../db';
 import * as bt from '../bedrock-tools';
 import {
-  buildDeliveryXlsx, buildDeliveryXlsxV2, filterAndSortForDelivery,
+  buildDeliveryXlsx, buildDeliveryXlsxV2, filterAndSortForDelivery, normalizeDeliveryRows,
   type DeliveryVariant,
 } from '../bedrock-delivery';
+import {
+  validateBedrockTags, assertArnsBelong, MapTagRuleError, type BedrockTag,
+} from '../map-tag-rules';
 import { listBedrockQuotas } from '../aws-service';
 
 export const bedrockRouter = Router();
@@ -40,19 +44,27 @@ function parseRegions(raw: any): string[] {
   return String(raw || '').split(',').map(r => r.trim()).filter(r => REGION_RE.test(r));
 }
 
-/** tags 强校验：非空数组，每项 key/value 均为非空字符串。不提供任何默认值。 */
-function validateTags(tags: any): Array<{ key: string; value: string }> {
-  if (!Array.isArray(tags) || tags.length === 0) {
-    throw new Error('必须提供至少一个 Tag（key/value 均必填，平台不提供默认 Tag）');
+/** 各状态计数，如「verified 3，mismatch 1」，只列出现过的状态 */
+function statusSummary(results: Array<{ status: string }>): string {
+  const counts = new Map<string, number>();
+  for (const r of results) counts.set(r.status, (counts.get(r.status) || 0) + 1);
+  return [...counts].map(([status, n]) => `${status} ${n}`).join('，');
+}
+
+const formatTags = (tags: BedrockTag[]) => tags.map(t => `${t.key}=${t.value}`).join(';');
+
+/** 交付前从 AWS 读真实 tags 挂到行上；任一 ARN 读失败即拒绝（不允许用前端值兜底） */
+async function attachAwsTags<T extends { arn: string; name: string }>(
+  accountId: string, rows: T[],
+): Promise<Array<T & { tags: BedrockTag[] }>> {
+  const { tags, failures } = await bt.readProfileTagsByArn(accountId, rows.map(r => r.arn));
+  if (failures.length) {
+    const nameOf = (arn: string) => rows.find(r => r.arn === arn)?.name || arn;
+    const list = failures.slice(0, 5).map(f => `${nameOf(f.arn)}（${f.error}）`).join('、');
+    throw new MapTagRuleError(`无法从 AWS 读取以下 Profile 的标签，已拒绝生成：${list}`
+      + `${failures.length > 5 ? ` 等 ${failures.length} 个` : ''}`);
   }
-  const out: Array<{ key: string; value: string }> = [];
-  for (const t of tags) {
-    const key = typeof t?.key === 'string' ? t.key.trim() : '';
-    const value = typeof t?.value === 'string' ? t.value.trim() : '';
-    if (!key || !value) throw new Error('Tag 的 key 和 value 都不能为空');
-    out.push({ key, value });
-  }
-  return out;
+  return rows.map(r => ({ ...r, tags: tags.get(r.arn)! }));
 }
 
 function requireAccount(req: Request): string {
@@ -108,16 +120,17 @@ bedrockRouter.post('/profiles/create', requireAdmin, async (req: Request, res: R
     const items = Array.isArray(req.body.items) ? req.body.items : [];
     if (!items.length) return res.status(400).json({ error: '请至少选择一个模型' });
     if (items.length > 100) return res.status(400).json({ error: '一次最多创建 100 个' });
-    const tags = validateTags(req.body.tags);
+    const tags = validateBedrockTags(req.body.tags);
     const results = await bt.createProfiles(accountId, region, items, tags);
     const user = (req as any).user;
-    const ok = results.filter(r => r.ok).length;
+    const created = results.filter(r => r.status !== 'create_failed').length;
+    const verified = results.filter(r => r.ok).length;
     db.addAuditLog(user?.userId, 'BEDROCK_PROFILE_CREATE',
-      `账户 ${accountId} | ${region} | 创建 ${ok}/${results.length} 个 Profile | tags: ${tags.map(t => `${t.key}=${t.value}`).join(';')}`,
+      `账户 ${accountId} | ${region} | 创建 ${created}/${results.length}，核验通过 ${verified}（${statusSummary(results)}） | tags: ${formatTags(tags)}`,
       user?.username, req.ip);
     (res.locals as any).audited = true;
     res.json({ success: true, data: results });
-  } catch (e: any) { res.status(e.message?.includes('Tag') ? 400 : 500).json({ error: e.message }); }
+  } catch (e: any) { res.status(e instanceof MapTagRuleError ? 400 : 500).json({ error: e.message }); }
 });
 
 // 批量删除
@@ -144,17 +157,35 @@ bedrockRouter.post('/profiles/tag', requireAdmin, async (req: Request, res: Resp
     const accountId = requireAccount(req);
     const region = String(req.body.region || '');
     if (!REGION_RE.test(region)) return res.status(400).json({ error: '无效的区域' });
-    const arns = Array.isArray(req.body.arns) ? req.body.arns.filter((a: any) => typeof a === 'string' && a.startsWith('arn:')) : [];
+    const rawArns = req.body.arns;
+    if (!Array.isArray(rawArns) || rawArns.some((a: any) => typeof a !== 'string')) {
+      return res.status(400).json({ error: 'arns 必须是字符串数组' });
+    }
+    const arns: string[] = rawArns;
     if (!arns.length) return res.status(400).json({ error: '请至少选择一个 Profile' });
-    const tags = validateTags(req.body.tags);
+    if (arns.length > 100) return res.status(400).json({ error: '一次最多 100 个 Profile' });
+    const tags = validateBedrockTags(req.body.tags);
+    // 整单校验在任何写入之前：选错账户/区域分组时一个都不打
+    assertArnsBelong(arns, accountId, region);
     const results = await bt.tagProfiles(accountId, region, arns, tags);
     const user = (req as any).user;
+    const verified = results.filter(r => r.ok).length;
+    const oldCounts = new Map<string, number>();
+    for (const r of results) {
+      const label = r.oldReadFailed ? '读取失败' : (r.oldMapValue ?? '无');
+      oldCounts.set(label, (oldCounts.get(label) || 0) + 1);
+    }
+    const oldDist = [...oldCounts].map(([v, n]) => `${v}×${n}`).join(', ');
+    const removed = results.filter(r => r.removedVariantKeys.length)
+      .map(r => `${r.arn.split('/').pop()}(${r.removedVariantKeys.join('/')})`);
     db.addAuditLog(user?.userId, 'BEDROCK_PROFILE_TAG',
-      `账户 ${accountId} | ${region} | ${results.filter(r => r.ok).length}/${results.length} 个 Profile | tags: ${tags.map(t => `${t.key}=${t.value}`).join(';')}`,
+      `账户 ${accountId} | ${region} | 打 Tag 核验通过 ${verified}/${results.length}（${statusSummary(results)}）`
+      + ` | 旧 map-migrated: ${oldDist} | 新 tags: ${formatTags(tags)}`
+      + `${removed.length ? ` | 移除变体 key：${removed.join('，')}` : ''}`,
       user?.username, req.ip);
     (res.locals as any).audited = true;
     res.json({ success: true, data: results });
-  } catch (e: any) { res.status(e.message?.includes('Tag') ? 400 : 500).json({ error: e.message }); }
+  } catch (e: any) { res.status(e instanceof MapTagRuleError ? 400 : 500).json({ error: e.message }); }
 });
 
 // 解 Tag
@@ -267,15 +298,20 @@ bedrockRouter.post('/iam-users/create', requireStrictAdmin, async (req: Request,
 });
 
 // ===== 交付表格 =====
-// 前端传当前已加载的 profiles 行 + IAM 凭证，服务端校验（账户唯一、map-migrated tag 唯一且必须存在）并生成 xlsx
+// 前端传当前已加载的 profiles 行（只用 name/arn）+ IAM 凭证；服务端校验 ARN 归属，
+// 从 AWS 重新读 tags，再校验（map-migrated 存在、格式合规、全表唯一）并生成 xlsx
 bedrockRouter.post('/delivery', requireAdmin, async (req: Request, res: Response) => {
   try {
+    const requestedAccount = String(req.body.accountId || '');
+    if (!ACCOUNT_RE.test(requestedAccount)) return res.status(400).json({ error: '无效的账户 ID' });
     const rows = Array.isArray(req.body.rows) ? req.body.rows : [];
     const iamUser = String(req.body.iamUser || '').trim();
     const iamPassword = String(req.body.iamPassword || '');
     if (!rows.length) return res.status(400).json({ error: '没有 Profile 数据' });
     if (!iamUser || !iamPassword) return res.status(400).json({ error: 'IAM 用户名和密码必填' });
-    const { buffer, accountId, tagValue } = await buildDeliveryXlsx(rows, iamUser, iamPassword);
+    const base = normalizeDeliveryRows(requestedAccount, rows);
+    const authoritative = await attachAwsTags(requestedAccount, base);
+    const { buffer, accountId, tagValue } = await buildDeliveryXlsx(authoritative, iamUser, iamPassword);
     const user = (req as any).user;
     db.addAuditLog(user?.userId, 'BEDROCK_DELIVERY_EXPORT',
       `账户 ${accountId} | 交付表格生成（${rows.length} 个 Profile，tag=${tagValue}）`, user?.username, req.ip);
@@ -306,8 +342,9 @@ bedrockRouter.post('/delivery-v2', requireAdmin, async (req: Request, res: Respo
     // 1) prepareDelivery 会对**每一行**强校验 map-migrated tag，老模型若没打 tag
     //    会直接抛错，可它本来就不该出现在交付表里；
     // 2) 配额匹配对老模型也是纯浪费。
-    const { kept, dropped, missingByRegion } =
-      filterAndSortForDelivery(rows.map((r: any) => ({ ...r, name: String(r.name || ''), region: String(r.region || '') })), variant);
+    // 3) 标签只在筛选之后从 AWS 读（attachAwsTags），前端传来的 tags 一律不用
+    const base = normalizeDeliveryRows(accountId, rows);
+    const { kept, dropped, missingByRegion } = filterAndSortForDelivery(base, variant);
     if (!kept.length) {
       return res.status(400).json({
         error: `账户中找不到任何交付清单内的 Profile（变体：${variant === 'full' ? '全量版' : '仅 global 版'}）。`
@@ -315,14 +352,16 @@ bedrockRouter.post('/delivery-v2', requireAdmin, async (req: Request, res: Respo
       });
     }
 
+    const keptWithTags = await attachAwsTags(accountId, kept);
+
     // 实时拉配额（只覆盖筛选后 rows 涉及的区域）
-    const regions: string[] = [...new Set<string>(kept.map((r: any) => String(r.region)))].filter(r => REGION_RE.test(r));
+    const regions: string[] = [...new Set<string>(keptWithTags.map(r => r.region))].filter(r => REGION_RE.test(r));
     const quota = await listBedrockQuotas(accountId, regions);
-    const rowsV2 = kept.map((r: any) => ({
-      name: String(r.name || ''), arn: String(r.arn || ''), region: String(r.region || ''),
-      tags: Array.isArray(r.tags) ? r.tags : [],
+    const rowsV2 = keptWithTags.map(r => ({
+      name: r.name, arn: r.arn, region: r.region,
+      tags: r.tags,
       ...bt.matchProfileTpmTpd(
-        { backendModels: r.backendModels, name: r.name, scope: r.scope, region: r.region },
+        { backendModels: r.backendModels, name: r.name, scope: r.scope ?? '', region: r.region },
         quota.rows,
       ),
     }));
