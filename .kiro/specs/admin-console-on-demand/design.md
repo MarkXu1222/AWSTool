@@ -495,3 +495,28 @@ revokeTempAdmin: (accountId: string) => request(`/aws/temp-admin/${accountId}`, 
 - 不改 `consoleAdminPayers` 配置及其解析逻辑
 - 不重构 `Accounts.tsx` 其它部分
 - 不改 `version.ts`、`README.md`、`project-context.md`（P5 统一处理）
+
+## 11. 实现后回写（2026-10-14，P4 审核后）
+
+独立代码审核结论 With fixes（无 Critical，5 条 Important，其中 3 条并发问题经复现）。以下为在方案基础上的调整，代码与本节一致：
+
+**审核修复**
+- **占位先行**（Important 3）：`openTempAdmin` 的全部同步校验与写入 `provisioning` 记录之间不再有 `await`；payer 凭证、OAAR 探测、残留探测都在写入之后，失败时记录落 `failed`（`instanceRequested=false`）。并发开通同一账户只有一个成功
+- **锁内复查 + 复验后复查**：payer 锁内、`CreateStackInstances` 之前再查受限（非 bypass）与其它在开记录；复验通过后若账户已被标记受限，立即回收并返回 409
+- **残留探测**（Important 1）：写入占位后用平台身份直跳 `admin-console`，能进入即 409「已存在常驻 admin-console，请先运行清理脚本或人工删除」，不能确认即 503
+- **回收去重**（Important 2）：`runRevoke` 开头按 id 复读最新状态，已结束直接返回；模块级 `revokingIds` 集合使同一记录不会被手动关闭、sweeper、受限标记同时回收（重复时 409）；sweeper 处理每条前同步复读、先处理到期 `active` 再处理 `revoking`；退避从失败时刻起算
+- **信任截止（纵深防御，审核建议）**：模板新增参数 `ExpiresAt`（默认 `1970-01-01T00:00:00Z`，fail-closed），信任策略 `Condition: DateLessThan: aws:CurrentTime: !Ref ExpiresAt`；`CreateStackInstances` 用 `ParameterOverrides` 写入 `trustExpiresAt = 发起时间 + 时长 + 15 分钟`，记录新增字段 `trustExpiresAt`，`expiresAt = min(activatedAt + 时长, trustExpiresAt)`
+- **入口可达**（Important 4）：开通 / 提前关闭从控制台下拉菜单移到账户详情头部的独立按钮 `TempAdminAction`（不依赖 `consoleAdminPayers`）；受限账户不显示；`RootCredentialsPanel` 新增 `onTempAdminRequired` 回调，遇到 `TEMP_ADMIN_REQUIRED` 引导开通
+- **首次标记 INVITED 受限账户**（Important 5）：`markRestricted` 取不到管理员凭证且该账户此前未 `applied`、无在开记录时，内部 `openTempAdmin({ hours: 1, reason: 'restricted-mark', bypassRestricted: true })`；`removeAdmin` 随后回收，中途失败在 `finally` 中回收。`TempAdminGrantReason` 增加 `'restricted-mark'`
+- 路由先校验 `accountId` / `hours` 再消耗 TOTP；手动关闭失败写 `TEMP_ADMIN_REVOKE_FAILED`；受限标记 / 取消标记内部的开通与回收写 `TEMP_ADMIN_OPEN` / `TEMP_ADMIN_REVOKE`
+- `assumeAdminViaOAAR`：剩余不足 15 分钟报「请到期回收后重新开通」；开通期内直跳失败且 OAAR 也不通时报「临时开通期内无法 AssumeRole」，不再误报「请临时开通」
+- 角色自愈：开通未结束（`listOpenGrants`，含到期待回收、回收中）时存在 `admin-console` 不算常驻
+- 清理脚本：关闭 AutoDeployment 的操作非 `SUCCEEDED` 即停止该组织，不删实例
+- `RootCredentialsPanel`：无凭证且处于开通期时每 30 秒刷新 `now`；成功提示显示实际到期时间
+
+**实现细节偏差（G1 后、审核前）**
+- `temp-admin.ts` 的 `__test__` 额外暴露 `setNotifier` / `setAdminExcluded`（esbuild CJS 导出为只读 getter，无法 mock）
+- `removeAdmin` 回收临时开通并复验被拒后直接返回，不走 IAM 兜底（IAM 会话可能正属于刚删除的角色）
+- 测试 fixture 必须 mock `db.addAuditLog`，否则会写入本地 `data/db.json`
+
+**未采纳**：开通请求在同一 payer 排队时可能超过 nginx 10 分钟（极少见，记录会照常在后台变为 active，前端刷新即可见）；受限账户的取消标记路由不额外要求 TOTP（沿用既有守卫）。
