@@ -286,6 +286,37 @@ export interface BillingExportJob {
 
 export type PocCalculatorStatus = 'reserved' | 'calculator_ready' | 'application_created' | 'failed';
 
+export type TempAdminGrantStatus = 'provisioning' | 'active' | 'revoking' | 'revoked' | 'failed';
+export type TempAdminGrantReason = 'manual' | 'unmark-restricted';
+
+/** 临时 admin-console 开通记录（temp-admin.ts）。未结束 = provisioning / active / revoking */
+export interface TempAdminGrant {
+  id: string;
+  accountId: string;
+  accountName?: string;
+  payer: string;
+  hours: 1 | 2 | 3;
+  reason: TempAdminGrantReason;
+  status: TempAdminGrantStatus;
+  requestedBy: string;
+  requestedByUserId: number | string | null;
+  createdAt: string;
+  activatedAt?: string;
+  expiresAt?: string;
+  /** 是否已调用过 CreateStackInstances —— 决定失败后需要回收（revoking）还是直接 failed */
+  instanceRequested: boolean;
+  revokeRequestedAt?: string;
+  revokedAt?: string;
+  revokedBy?: string;
+  revokeAttempts: number;
+  nextRevokeAt?: string;
+  lastError?: string;
+  alertedAt?: string;
+}
+
+/** 终态开通记录只保留最近这么多条，未结束的永不裁剪 */
+const TEMP_ADMIN_HISTORY_LIMIT = 500;
+
 export interface PocCalculatorLedgerEntry {
   id: string;
   source: 'generated' | 'manual';
@@ -319,12 +350,13 @@ interface DBSchema {
   tag_onboarding_jobs: TagOnboardingJob[];
   billing_export_jobs: BillingExportJob[];
   poc_calculator_ledger: PocCalculatorLedgerEntry[];
+  temp_admin_grants: TempAdminGrant[];
   [key: string]: any;
 }
 
 const ARRAY_FIELDS = [
   'users', 'quota_requests', 'audit_log', 'region_data', 'accounts_cache', 'tag_onboarding_jobs',
-  'billing_export_jobs', 'poc_calculator_ledger',
+  'billing_export_jobs', 'poc_calculator_ledger', 'temp_admin_grants',
 ] as const;
 
 // In-memory cache to avoid reading file on every request
@@ -340,6 +372,7 @@ function emptyDB(): DBSchema {
   return {
     users: [], quota_requests: [], audit_log: [], region_data: [], accounts_cache: [],
     accounts_cache_time: '', tag_onboarding_jobs: [], billing_export_jobs: [], poc_calculator_ledger: [],
+    temp_admin_grants: [],
   };
 }
 
@@ -1114,7 +1147,37 @@ export const db = {
     writeDB(data);
   },
 
-  // 账户角色自愈状态 —— 记录每个账户的 support-quota / admin-console 可用性
+  // 临时 admin-console 开通记录（temp-admin.ts）
+  listTempAdminGrants(): TempAdminGrant[] {
+    return readDB().temp_admin_grants
+      .map(grant => ({ ...grant }))
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  },
+
+  insertTempAdminGrant(grant: TempAdminGrant) {
+    const data = readDB();
+    data.temp_admin_grants.push({ ...grant });
+    const terminal = data.temp_admin_grants
+      .filter(g => g.status === 'revoked' || g.status === 'failed')
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+    if (terminal.length > TEMP_ADMIN_HISTORY_LIMIT) {
+      const drop = new Set(terminal.slice(TEMP_ADMIN_HISTORY_LIMIT).map(g => g.id));
+      data.temp_admin_grants = data.temp_admin_grants.filter(g => !drop.has(g.id));
+    }
+    writeDB(data);
+  },
+
+  updateTempAdminGrant(id: string, updates: Partial<TempAdminGrant>): TempAdminGrant {
+    const data = readDB();
+    const grant = data.temp_admin_grants.find(g => g.id === id);
+    if (!grant) throw new Error(`临时 Admin 记录不存在: ${id}`);
+    const immutable = { id: grant.id, accountId: grant.accountId, payer: grant.payer, createdAt: grant.createdAt };
+    Object.assign(grant, updates, immutable);
+    writeDB(data);
+    return { ...grant };
+  },
+
+  // 账户角色自愈状态 —— support-quota 可用性 + 是否存在常驻 admin-console（应为无）
   getAccountRoles(): any[] {
     const data = readDB() as any;
     return data.account_roles || [];
