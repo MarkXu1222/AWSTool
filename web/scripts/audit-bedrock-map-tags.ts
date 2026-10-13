@@ -5,9 +5,11 @@
  * 用法（在 web/ 下）：
  *   npx tsx scripts/audit-bedrock-map-tags.ts [--payer <payer名>] [--out <目录>] [--plan-only]
  *
- * - 直接读 data/db.json（或 DB_PATH），不经 db.ts，不写 data/ 下任何文件
- * - 非 plan-only 会通过 Admin 链路读取各账户 Bedrock 标签（ListInferenceProfiles + ListTagsForResource），只读
- * - --plan-only：只解析审计日志，写 history CSV，打印将查询的账户与区域，不加载任何 AWS 模块
+ * - 审计日志直接读 data/db.json（或 DB_PATH），不经 db.ts
+ * - 非 plan-only 会通过 Admin 链路读取各账户 Bedrock 标签（ListInferenceProfiles + ListTagsForResource），
+ *   对 AWS 只读；但 Admin 链路会经 db.ts 读受限账户名单，若当天还没有备份，会触发与服务本身相同的
+ *   每日自动备份（写 data/backups/），不改 db.json / root-email-jobs.json 本身
+ * - --plan-only：只解析审计日志，写 history CSV，打印将查询的账户与区域，不加载任何 AWS 模块，完全不碰 data/
  *
  * 修正方式：在平台 Bedrock 页「Profiles 管理」重新打 Tag（会覆盖错值、移除大小写变体 key），
  * 再重新生成交付表。本脚本不做任何写操作。
@@ -62,9 +64,11 @@ function main() {
     const region = /\| ([a-z]{2}(?:-[a-z]+)+-\d) \|/.exec(detail)?.[1];
     if (region) regionsByAccount.get(accountId)!.add(region);
 
+    // 交付记录写的是「tag=值」；只对交付记录用这条，否则会把 cost-tag=abc 这类额外 Tag 误当成历史值
     const values = [
       ...[...detail.matchAll(/map-migrated=([^;|\s]+)/g)].map(m => m[1]),
-      ...[...detail.matchAll(/tag=([^\s，）)]+)/g)].map(m => m[1]),
+      ...(log.action === 'BEDROCK_DELIVERY_EXPORT'
+        ? [...detail.matchAll(/[，,(（]tag=([^\s，）)]+)/g)].map(m => m[1]) : []),
     ];
     for (const value of values) {
       const reason = checkMapTagValue(value);
@@ -121,7 +125,8 @@ async function scanCurrent(regionsByAccount: Map<string, Set<string>>, payerOf: 
         let status = 'OK';
         let reason = '';
         if (variant) { status = '大小写变体'; reason = `存在 key「${variant}」`; }
-        else if (value === null) { status = '缺失'; }
+        // listProfiles 读标签失败时返回空 tags，这里无法区分「真没打」与「读失败」
+        else if (value === null) { status = '缺失'; reason = '未读到 map-migrated（标签读取失败也会显示为缺失，请在页面复核）'; }
         else {
           const err = checkMapTagValue(value);
           if (err) { status = '格式错误'; reason = err; }

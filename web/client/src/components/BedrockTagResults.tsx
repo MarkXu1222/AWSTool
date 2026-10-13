@@ -33,7 +33,13 @@ const statusColor = (s: TagResultStatus) => (s === 'verified' ? 'success' : s ==
  * 创建 / 打 Tag 的逐项结果。成功只认 AWS 回查一致（verified）；
  * 其余状态都算未完成，「重试未完成项」只重发这些。
  */
-const BedrockTagResults: React.FC<{ rows: TagResultRow[]; retrying: boolean; onRetry: () => void }> = ({ rows, retrying, onRetry }) => {
+const BedrockTagResults: React.FC<{
+  rows: TagResultRow[];
+  retrying: boolean;
+  onRetry: () => void;
+  /** 有其它操作在跑时禁用重试（避免两批结果互相覆盖） */
+  disabled?: boolean;
+}> = ({ rows, retrying, onRetry, disabled }) => {
   const unfinished = rows.filter(r => r.status !== 'verified').length;
   const showOld = rows.some(r => r.oldMapValue !== undefined);
   const counts = STATUS_ORDER
@@ -47,7 +53,7 @@ const BedrockTagResults: React.FC<{ rows: TagResultRow[]; retrying: boolean; onR
           {counts.map(([s, n]) => <Tag key={s} color={statusColor(s)}>{TAG_STATUS_LABEL[s]} {n}</Tag>)}
         </Space>
         <Button size="small" icon={<ReloadOutlined />} loading={retrying}
-          disabled={unfinished === 0 || retrying} onClick={onRetry}>
+          disabled={unfinished === 0 || retrying || disabled} onClick={onRetry}>
           重试未完成项（{unfinished}）
         </Button>
       </Space>

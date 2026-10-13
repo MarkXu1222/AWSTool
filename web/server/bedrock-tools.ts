@@ -199,7 +199,8 @@ export async function createProfiles(
           modelSource: { copyFrom: modelArn },
           tags: tags as any,
         }));
-        arn = resp.inferenceProfileArn!;
+        if (!resp.inferenceProfileArn) throw new Error('AWS 未返回 Profile ARN，请到 Profiles 管理确认是否已创建');
+        arn = resp.inferenceProfileArn;
       } catch (e: any) {
         results.push({
           name: item.name, modelId: item.modelId, ok: false, status: 'create_failed',

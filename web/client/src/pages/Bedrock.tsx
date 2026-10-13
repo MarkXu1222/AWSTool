@@ -124,6 +124,10 @@ function mergeResults(prev: TagResultRow[], next: TagResultRow[]): TagResultRow[
   return prev.map(r => byKey.get(r.key) || r);
 }
 
+/** 创建失败的说明：整区域请求失败时服务端可能已部分创建，重试会撞名，提示改走打 Tag */
+const withCreateHint = (error?: string) =>
+  `${error || '创建失败'}；若提示已存在，请到「Profiles 管理」选中该 Profile 打 Tag`;
+
 /** 后端 TagWriteResult → 结果行；移除过变体 key 的写进说明 */
 function toTagResultRow(r: any, region: string, name?: string): TagResultRow {
   const removed: string[] = Array.isArray(r.removedVariantKeys) ? r.removedVariantKeys : [];
@@ -152,6 +156,8 @@ const ProfilesTab: React.FC<{ accountId: string }> = ({ accountId }) => {
   const [resultOpen, setResultOpen] = useState(false);
   const [lastTags, setLastTags] = useState<KV[]>([]);
   const [retrying, setRetrying] = useState(false);
+  // 批次号：发起新一批打 Tag 后，仍在跑的旧重试结果作废，不能覆盖新批次
+  const batchRef = useRef(0);
   const tagError = checkTagInputs(trimTags(tagInputs));
 
   const load = async () => {
@@ -218,10 +224,12 @@ const ProfilesTab: React.FC<{ accountId: string }> = ({ accountId }) => {
   const doTag = async () => {
     if (tagError) { message.warning(tagError); return; }
     const tags = trimTags(tagInputs);
+    const batch = ++batchRef.current;
     setActing(true);
     try {
       setLastTags(tags);
       const results = await runTag(byRegion(selectedRows), tags);
+      if (batch !== batchRef.current) return;
       setTagResults(results);
       const ok = results.filter(r => r.status === 'verified').length;
       message[ok === results.length ? 'success' : 'warning'](`打 Tag 完成：核验通过 ${ok} / ${results.length}`);
@@ -235,10 +243,13 @@ const ProfilesTab: React.FC<{ accountId: string }> = ({ accountId }) => {
   const retryTag = async () => {
     const pending = tagResults.filter(r => r.status !== 'verified' && r.arn);
     if (!pending.length) return;
+    const batch = batchRef.current;
     setRetrying(true);
     try {
       const targets = new Map([...groupByRegion(pending, r => r.region)].map(([rg, list]) => [rg, list.map(r => r.arn!)]));
-      const merged = mergeResults(tagResults, await runTag(targets, lastTags));
+      const next = await runTag(targets, lastTags);
+      if (batch !== batchRef.current) { message.info('期间发起了新一批打 Tag，本次重试结果已忽略'); return; }
+      const merged = mergeResults(tagResults, next);
       setTagResults(merged);
       const left = merged.filter(r => r.status !== 'verified').length;
       message[left ? 'warning' : 'success'](left ? `重试完成，仍有 ${left} 项未完成` : '重试完成，全部核验通过');
@@ -287,7 +298,10 @@ const ProfilesTabView: React.FC<any> = ({
           复制全部 ARN
         </Button>
       </Tooltip>
-      <Button size="small" icon={<TagsOutlined />} disabled={!visibleSelectedCount} onClick={() => setTagModalOpen(true)}>批量打 Tag</Button>
+      <Button size="small" icon={<TagsOutlined />} disabled={!visibleSelectedCount || retrying} onClick={() => setTagModalOpen(true)}>批量打 Tag</Button>
+      {tagResults.length > 0 && (
+        <Button size="small" onClick={() => setResultOpen(true)}>上次打 Tag 结果</Button>
+      )}
       <Popconfirm title={`确认删除选中的 ${visibleSelectedCount} 个 Profile？`} okText="删除" okButtonProps={{ danger: true }} onConfirm={doDelete}>
         <Button size="small" danger icon={<DeleteOutlined />} disabled={!visibleSelectedCount} loading={acting}>批量删除</Button>
       </Popconfirm>
@@ -340,13 +354,13 @@ const ProfilesTabView: React.FC<any> = ({
       ]} />
     <Modal title={`批量打 Tag（${visibleSelectedCount} 个 Profile）`} open={tagModalOpen}
       onCancel={() => setTagModalOpen(false)} onOk={doTag} okText="打 Tag" confirmLoading={acting}
-      okButtonProps={{ disabled: !!tagError }}>
+      okButtonProps={{ disabled: !!tagError || retrying }}>
       <Alert type="info" showIcon style={{ marginBottom: 12 }} message="Tag 必须每次显式输入，平台不提供默认值，请确认与该账户所属 MAP 协议一致。写入后会逐个从 AWS 回查。" />
       <TagInputs tags={tagInputs} onChange={setTagInputs} error={tagError} />
     </Modal>
     <Modal title="打 Tag 结果" open={resultOpen} width={960} onCancel={() => setResultOpen(false)}
       footer={<Button onClick={() => setResultOpen(false)}>关闭</Button>}>
-      <BedrockTagResults rows={tagResults} retrying={retrying} onRetry={retryTag} />
+      <BedrockTagResults rows={tagResults} retrying={retrying} onRetry={retryTag} disabled={acting} />
     </Modal>
   </div>
 );
@@ -371,6 +385,8 @@ const CreateTab: React.FC<{ accountId: string }> = ({ accountId }) => {
   const [createResults, setCreateResults] = useState<TagResultRow[]>([]);
   const [lastTags, setLastTags] = useState<KV[]>([]);
   const [retrying, setRetrying] = useState(false);
+  // 批次号：发起新一批创建后，仍在跑的旧重试结果作废，不能覆盖新批次
+  const batchRef = useRef(0);
   const tagError = checkTagInputs(trimTags(tagInputs));
 
   const loadModels = async () => {
@@ -413,7 +429,10 @@ const CreateTab: React.FC<{ accountId: string }> = ({ accountId }) => {
     const out: TagResultRow[] = [];
     for (const [rgn, items] of byRgn) {
       const failAll = (error: string) => {
-        items.forEach(it => out.push({ key: `${rgn}|${it.modelId}`, region: rgn, name: it.name, modelId: it.modelId, status: 'create_failed', error }));
+        items.forEach(it => out.push({
+          key: `${rgn}|${it.modelId}`, region: rgn, name: it.name, modelId: it.modelId,
+          status: 'create_failed', error: withCreateHint(error),
+        }));
         setLog(prev => [...prev, `[ERR] [${rgn}] ${error}`]);
       };
       try {
@@ -421,7 +440,8 @@ const CreateTab: React.FC<{ accountId: string }> = ({ accountId }) => {
         if (!res.success) { failAll(res.error || '请求失败'); continue; }
         const rowsOut: TagResultRow[] = res.data.map((r: any) => ({
           key: `${rgn}|${r.modelId}`, region: rgn, name: r.name, modelId: r.modelId, arn: r.arn,
-          status: r.status, actualMapValue: r.actualMapValue ?? null, error: r.error,
+          status: r.status, actualMapValue: r.actualMapValue ?? null,
+          error: r.status === 'create_failed' ? withCreateHint(r.error) : r.error,
         }));
         out.push(...rowsOut);
         setLog(prev => [...prev, ...rowsOut.map(r => r.status === 'verified'
@@ -437,6 +457,7 @@ const CreateTab: React.FC<{ accountId: string }> = ({ accountId }) => {
     if (!sel.length) { message.warning('请勾选模型'); return; }
     if (tagError) { message.warning(tagError); return; }
     const tags = trimTags(tagInputs);
+    const batch = ++batchRef.current;
     setCreating(true);
     setLastTags(tags);
     setCreateResults([]);
@@ -445,6 +466,7 @@ const CreateTab: React.FC<{ accountId: string }> = ({ accountId }) => {
       // 多区域批量：逐区域串行执行（同桌面版语义；后端一次一个区域）
       const items = sel.map(m => ({ modelId: m.modelId, name: buildName(m) }));
       const results = await runCreate(new Map(regions.map(rgn => [rgn, items])), tags);
+      if (batch !== batchRef.current) return;
       setCreateResults(results);
       const ok = results.filter(r => r.status === 'verified').length;
       setLog(prev => [...prev, `全部完成：核验通过 ${ok} / ${results.length}`]);
@@ -456,6 +478,7 @@ const CreateTab: React.FC<{ accountId: string }> = ({ accountId }) => {
   const retryCreate = async () => {
     const pending = createResults.filter(r => r.status !== 'verified');
     if (!pending.length) return;
+    const batch = batchRef.current;
     setRetrying(true);
     try {
       const toCreate = pending.filter(r => r.status === 'create_failed' && r.modelId);
@@ -478,6 +501,7 @@ const CreateTab: React.FC<{ accountId: string }> = ({ accountId }) => {
           }
         } catch (e: any) { failAll(e.message || '请求失败'); }
       }
+      if (batch !== batchRef.current) { message.info('期间发起了新一批创建，本次重试结果已忽略'); return; }
       const merged = mergeResults(createResults, next);
       setCreateResults(merged);
       const left = merged.filter(r => r.status !== 'verified').length;
@@ -517,7 +541,7 @@ const CreateTab: React.FC<{ accountId: string }> = ({ accountId }) => {
       </div>
       <Space style={{ marginBottom: 8 }}>
         <Button size="small" type="primary" icon={<PlusOutlined />} loading={creating}
-          disabled={!visibleSelected.length || !regions.length || !!tagError} onClick={doCreate}>
+          disabled={!visibleSelected.length || !regions.length || !!tagError || retrying} onClick={doCreate}>
           创建勾选（{visibleSelected.length} 个模型 × {regions.length} 区域）
         </Button>
         {/* 表头 checkbox 只作用于当前页（antd 默认），这两个按钮跨全部页 */}
@@ -548,7 +572,7 @@ const CreateTab: React.FC<{ accountId: string }> = ({ accountId }) => {
           <Typography.Text type="secondary" style={{ display: 'block', marginBottom: 8, fontSize: 12 }}>
             重试使用本次创建时的 Tag：{lastTags.map(t => `${t.key}=${t.value}`).join('; ')}
           </Typography.Text>
-          <BedrockTagResults rows={createResults} retrying={retrying} onRetry={retryCreate} />
+          <BedrockTagResults rows={createResults} retrying={retrying} onRetry={retryCreate} disabled={creating} />
         </div>
       )}
     </div>
@@ -1094,7 +1118,8 @@ const DeliveryTab: React.FC<{ accountId: string }> = ({ accountId }) => {
       } else {
         message.success('交付表格已下载');
       }
-    } catch (e: any) { message.error(e.message); } finally { setExporting(false); }
+    // 交付拒绝时会列出最多 10 个 profile，默认 3 秒读不完
+    } catch (e: any) { message.error({ content: e.message, duration: 10 }); } finally { setExporting(false); }
   };
 
   return (
