@@ -107,8 +107,8 @@ export async function notifyAccountRoleIssues(
   const MAX_SHOW = 15;
   for (const r of records.slice(0, MAX_SHOW)) {
     const miss: string[] = [];
+    // admin-console 已改为按需临时开通，缺失是健康状态，不再告警
     if (!r.support) miss.push('support-quota');
-    if (!r.admin) miss.push('admin-console');
     const orgLabel = r.payer ? `<font color='blue'>[${r.payer}]</font> ` : '';
     elements.push({
       tag: 'column_set',

@@ -72,7 +72,7 @@ AWS 多账户管理平台。跨组织管理成员账户：配额提升、账单 
 | 分组 | 文件 |
 |------|------|
 | 基础设施 | `index.ts`（入口/中间件/限速/路由挂载）、`auth.ts`★（权限模型）、`step-up-mfa.ts`、`db.ts`★、`audit.ts`、`audit-presentation.ts`、`scheduler.ts`、`ops-monitor.ts`、`security-alerts.ts`、`notify.ts` |
-| AWS 接入 | `aws-service.ts`★（AssumeRole 链）、`account-roles.ts`★、`account-lifecycle.ts`、`restricted-accounts.ts`★ |
+| AWS 接入 | `aws-service.ts`★（AssumeRole 链）、`account-roles.ts`★、`account-lifecycle.ts`、`restricted-accounts.ts`★、`temp-admin.ts`★（admin-console 按需临时开通） |
 | 提额文档 | `doc-generator.ts`、`doc-templates.ts`★、`case-doc-submitter.ts`★ |
 | 账单导出 | `billing-export-jobs.ts`、`billing-exporter.ts` |
 | Bedrock | `bedrock-tools.ts`、`bedrock-delivery.ts`★、`map-tag-rules.ts`★（前端 `utils/mapTag.ts` 逐字镜像） |
@@ -120,10 +120,10 @@ AWS 多账户管理平台。跨组织管理成员账户：配额提升、账单 
 2. **payer 自身** → 直接用该 payer 的 `role/tool`
 3. **二级跳** → payer `role/tool` 拿 admin，再 AssumeRole 成员账户 `OrganizationAccountAccessRole`
 
-admin 链路：payer 自身 → **一级跳 `admin-console`** → 二级跳 OAAR。
-第 2 步不只是性能优化：**INVITED 账户没有 OAAR**，只有 `admin-console` 进得去。
+admin 链路：payer 自身 → **临时开通期内**一级跳 `admin-console` → 二级跳 OAAR → 都不通返回 `TEMP_ADMIN_REQUIRED`。
+`admin-console` 不再常驻（0.54.0）：**INVITED 账户没有 OAAR**，需要 Admin 时由 admin 临时开通 1–3 小时，到期自动删除（`temp-admin.ts`）。
 
-成员账户角色由组织级 `SERVICE_MANAGED` StackSet 下发到根 OU（`AutoDeployment=true` 覆盖未来新账户）；**管理账户本身不在覆盖内**，靠 `role/tool` 兜底。
+成员账户的 `support-quota` 由组织级 `SERVICE_MANAGED` StackSet 下发到根 OU（`AutoDeployment=true` 覆盖未来新账户）；临时 `admin-console` 用每个 payer 的专用 StackSet `admin-console-role-temporary`（AutoDeployment 关闭）；**管理账户本身不在覆盖内**，靠 `role/tool` 兜底。
 
 角色清单、信任主体、新增 payer 的两个前置开关与完整 Runbook 见 **README「跨账户访问模型」与「新增 payer 安全 Runbook」**。
 
@@ -164,13 +164,13 @@ Bedrock 配额特意用 `/api/bedrock` 独立前缀，就是为了躲开 `/quota
 
 ### 新增 payer
 **必须走 README 的「新增 payer 安全 Runbook」全 10 步**，不能只改 `config.json`。
-关键：两个组织级开关缺一不可；双 StackSet 脚本**必须在 EC2 执行**（要读生产 `db.json` 的 `restricted_accounts` 排除名单）；验证通过后才能加入 `consoleAdminPayers`；改完 `pm2 restart`。
+关键：两个组织级开关缺一不可；StackSet 脚本（只剩 `support` 模式）**必须在 EC2 执行**（要读生产 `db.json` 的 `restricted_accounts` 排除名单）；验证通过后才能加入 `consoleAdminPayers`；改完 `pm2 restart`。
 
 ### 新增公司模板
 `doc-templates.ts` 的 `COMPANY_PROFILES` + `ACCOUNT_TO_COMPANY` / `PAYER_TO_COMPANY`；架构图放 `doc-templates/architectures/`。
 
 ### 调同步频率
-`scheduler.ts`：账户 30min、配额 4h、区域 24h、账户角色自愈（增量跟在账户同步后，全量复检 24h）。
+`scheduler.ts`：账户 30min、配额 4h、区域 24h、账户角色自愈（增量跟在账户同步后，全量复检 24h）、临时 Admin 到期回收 60s。
 
 ### 发布新版本
 递增 `web/client/src/version.ts` 的 `APP_VERSION`（小改 patch，大改 minor）。左下角展示，也用于确认部署是否生效。
@@ -190,7 +190,8 @@ Bedrock 配额特意用 `/api/bedrock` 独立前缀，就是为了躲开 `/quota
 | `case-doc-submitter.ts` | 文件名回显 ≠ 上传完成；成功判定只认 Reply textarea 收起（用页面文案判断会假成功） |
 | `index.ts` 的 CORS | 拒绝必须 `callback(null, false)`，**绝不 throw** —— throw 会被 Express 当 500，导致带 `crossorigin` 的静态资源失败、整站白屏 |
 | 任何 CSV 导出 | 数字不加千分位，`toLocaleString()` 的逗号会让下游 `split(',')` 串位 |
-| `restricted-accounts.ts` | `getExcludedAccountIds()` 刻意不按 state 过滤；收窄会**删除 admin-console**、OAAR 保留（Admin 凭证 ≤1h），INVITED 账户收窄后只剩 support-quota；取消标记顺序不能反（先补回 admin-console 并按备份恢复 support 权限，最后删记录）。`tests/restricted-admin-access.test.ts` 锁死 |
+| `temp-admin.ts` | 授予 AdministratorAccess 的唯一路径：占位记录必须与同步校验同一 tick 写入（中间不能有 await），否则受限账户/并发开通出现竞态；回收必须按 id 复读最新状态、只认 `AccessDenied`，绝不能误标 revoked；临时 StackSet 的 AutoDeployment 必须保持关闭。`tests/temp-admin*.test.ts` 锁死 |
+| `restricted-accounts.ts` | `getExcludedAccountIds()` 刻意不按 state 过滤；收窄会确保**无 admin-console**（回收临时开通 / 删残留）、OAAR 保留（Admin 凭证 ≤1h），INVITED 账户收窄后只剩 support-quota，首次标记无 OAAR 账户时内部临时开通 1h 并回收；取消标记顺序不能反（先取得管理员凭证——不再补回 admin-console——并按备份恢复 support 权限，最后删记录）。`tests/restricted-admin-access.test.ts` 锁死 |
 | POC Cash IAM 策略 | action 前缀是 `partnercentral:`，**不是** `partnercentral-selling:`，写错整个策略静默失效 |
 | POC 定价计算器（`calculator-rates.ts` / `calculator-services.ts`） | 单价与 JSON 块必须与 calculator.aws「Update estimate」引擎一致，否则审核人一点重算金额就变（旧版 7,946 → 27,767）。单价来自引擎实测而非 Price List；标定时每个参数须独立变化（EFS 读写曾因同比例样本拆错）。`tests/calculator-calibration.test.ts` 锁 183 个实测用例；改动后必须联网跑 `scripts/verify-calculator-render.ts` |
 | 批量 Root 改密 | 提交边界语义复杂，`password_unknown` 绝不自动重试。改动前必读 `web/ROOT_EMAIL.md` |
@@ -205,7 +206,8 @@ Bedrock 配额特意用 `/api/bedrock` 独立前缀，就是为了躲开 `/quota
 - 后端 **tsx 直跑不编译**，改 `.ts` 即生效
 - 存储用 **JSON 文件 + 内存缓存 + 每日备份**，而非数据库（体量可控、零运维）
 - 平台基础身份从 `134103550877` 迁移到 `509399618054:user/mark`（最小权限、精确主体信任）
-- 成员账户角色用**组织级 SERVICE_MANAGED StackSet** 统一下发，自动覆盖未来新账户
+- 成员账户角色用**组织级 SERVICE_MANAGED StackSet** 统一下发，自动覆盖未来新账户（0.54.0 起只有 `support-quota`）
+- `admin-console` 改为**按需临时开通**（0.54.0）：新账户不常驻管理员角色；仅没有 OAAR 的成员账户可由 strict admin + TOTP 开通 1–3 小时，到期从 payer 侧删实例，信任策略另带 `aws:CurrentTime` 截止；存量组织级 StackSet 用 `scripts/remove-orgwide-admin-console.ts` 清理（见 `.kiro/specs/admin-console-on-demand/`）
 - 账单 PDF 用**持久化后台 job + 单 job 全局队列**，严格只读 support 会话，可取消，重启中的活动任务明确标为 `interrupted`
 - 敏感度分档而非一刀切：可分配页 → 需显式勾选的 `ops`/`bedrock` → 勾不到的 `poccash`
 - 强制 **MFA + 审计日志 + 限速**；平台长期凭证只在服务端

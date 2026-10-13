@@ -1,7 +1,11 @@
 /**
  * 账户角色自愈 — 新账户加入后自动检测平台所需角色，缺失则补齐，补不上则告警。
  *
- * 背景：成员账户的两个角色由各组织的 SERVICE_MANAGED StackSet 下发，
+ * 只补齐 support-quota。admin-console 已改为按需临时开通（temp-admin.ts），不再常驻：
+ * 不存在是健康状态；未经开通而存在（组织级 StackSet 残留或手工创建）标为 partial 持续暴露，
+ * 但这里不自动删除高权限角色，由清理脚本或人工处理。
+ *
+ * 背景：成员账户的 support-quota 由各组织的 SERVICE_MANAGED StackSet 下发，
  * AutoDeployment 会在账户加入 Root OU 时自动创建。但自动部署并非 100% 可靠：
  *   - 账户未完成激活时 CloudFormation 返回 OptInRequired，部署必然失败
  *   - StackSet 操作可能排队/超时
@@ -24,6 +28,7 @@ import {
 import { db } from './db';
 import { notifyAccountRoleIssues } from './notify';
 import { getExcludedAccountIds, getExternalId } from './restricted-accounts';
+import { listOpenGrants } from './temp-admin';
 
 // ===== 配置 =====
 let CONFIG: any = {};
@@ -65,10 +70,9 @@ const ADMIN_ROLE_EXCLUDED_ACCOUNT_IDS = parseAdminRoleExcludedAccounts(CONFIG.ad
 const isAdminRoleExcluded = (accountId: string) => ADMIN_ROLE_EXCLUDED_ACCOUNT_IDS.has(accountId)
   || getExcludedAccountIds().includes(accountId);
 
-// StackSet 名称与角色的对应关系（与已部署的组织级 StackSet 保持一致）
-const STACKSET_FOR: Record<'support' | 'admin', string> = {
+// 自愈只补齐 support-quota；admin-console 不再有组织级 StackSet（按需开通见 temp-admin.ts）
+const STACKSET_FOR: Record<'support', string> = {
   support: 'support-quota-role-orgwide',
-  admin: 'admin-console-role-orgwide',
 };
 
 const MAX_ATTEMPTS = 3;          // 补齐尝试上限，超过标记 unreachable
@@ -149,7 +153,7 @@ async function assumePayer(payerName: string) {
  */
 async function deployToAccounts(
   payerName: string,
-  kind: RoleKind,
+  kind: 'support',
   accountIds: string[],
 ): Promise<{ ok: boolean; error?: string }> {
   const name = STACKSET_FOR[kind];
@@ -275,9 +279,10 @@ export async function syncAccountRoles(opts: SyncOptions = {}): Promise<SyncResu
     probed.push({ acct, ...r });
   });
 
-  const needFix = probed.filter(p => !p.support || (!p.admin && !isAdminRoleExcluded(p.acct.Id)));
-  const adminExcluded = probed.filter(p => isAdminRoleExcluded(p.acct.Id)).length;
-  console.log(`[AccountRoles] 探测完成：正常 ${probed.length - needFix.length}，缺角色 ${needFix.length}，Admin 排除 ${adminExcluded}`);
+  const needFix = probed.filter(p => !p.support);
+  const openGrantIds = new Set(listOpenGrants().map(g => g.accountId));
+  const residualAdmin = probed.filter(p => p.admin && !openGrantIds.has(p.acct.Id)).length;
+  console.log(`[AccountRoles] 探测完成：缺 support-quota ${needFix.length}，常驻 admin-console ${residualAdmin}`);
 
   // 2) 补齐 —— 按 payer + 角色种类分组批量部署
   const remediatedIds = new Set<string>();
@@ -291,18 +296,11 @@ export async function syncAccountRoles(opts: SyncOptions = {}): Promise<SyncResu
       const rec = knownMap.get(p.acct.Id);
       // 超过尝试上限的不再补（全量复检会重置机会）
       if (!opts.full && (rec?.attempts || 0) >= MAX_ATTEMPTS) continue;
-      if (!p.support) {
-        const k = `${payer}|support`;
-        groups.set(k, [...(groups.get(k) || []), p.acct.Id]);
-      }
-      if (!p.admin && !isAdminRoleExcluded(p.acct.Id)) {
-        const k = `${payer}|admin`;
-        groups.set(k, [...(groups.get(k) || []), p.acct.Id]);
-      }
+      groups.set(`${payer}|support`, [...(groups.get(`${payer}|support`) || []), p.acct.Id]);
     }
 
     for (const [key, ids] of groups) {
-      const [payer, kind] = key.split('|') as [string, RoleKind];
+      const [payer, kind] = key.split('|') as [string, 'support'];
       console.log(`[AccountRoles] 补齐 ${payer} 的 ${kind}：${ids.length} 个账户`);
       const r = await deployToAccounts(payer, kind, ids);
       if (r.ok) {
@@ -333,9 +331,12 @@ export async function syncAccountRoles(opts: SyncOptions = {}): Promise<SyncResu
     const st = finalState.get(p.acct.Id)!;
     const prev = knownMap.get(p.acct.Id);
     const adminExcluded = isAdminRoleExcluded(p.acct.Id);
-    const adminPolicyViolation = adminExcluded && st.admin;
-    const wasBroken = !p.support || (adminExcluded ? p.admin : !p.admin);
-    const nowGood = st.support && (adminExcluded ? !st.admin : st.admin);
+    // admin-console 只允许在开通未结束时存在（含到期后等待回收、回收中）；其余时间存在即异常
+    const tempAdmin = openGrantIds.has(p.acct.Id);
+    const residual = (admin: boolean) => admin && !tempAdmin;
+    const adminPolicyViolation = st.support && residual(st.admin);
+    const wasBroken = !p.support || residual(p.admin);
+    const nowGood = st.support && !residual(st.admin);
     const fixed = wasBroken && nowGood;
 
     let state: AccountRoleRecord['state'];
@@ -343,8 +344,8 @@ export async function syncAccountRoles(opts: SyncOptions = {}): Promise<SyncResu
     if (nowGood) {
       state = 'ok';
       attempts = 0;
-    } else if (adminPolicyViolation && st.support) {
-      // 排除策略只负责阻止补建，不自动删除高权限角色；残留/重建必须持续暴露为异常。
+    } else if (adminPolicyViolation) {
+      // 不自动删除高权限角色；残留/重建必须持续暴露为异常。
       state = 'partial';
       attempts = 0;
     } else {
@@ -365,7 +366,7 @@ export async function syncAccountRoles(opts: SyncOptions = {}): Promise<SyncResu
       last_error: nowGood
         ? null
         : adminPolicyViolation
-          ? `排除账户仍存在 ${ADMIN_ROLE}，需通过 Admin StackSet 删除实例`
+          ? `存在常驻 ${ADMIN_ROLE}（未经临时开通），请运行 scripts/remove-orgwide-admin-console.ts 或人工删除`
           : (prev?.last_error || null),
       checked_at: nowIso,
       remediated_at: fixed ? nowIso : (prev?.remediated_at || null),

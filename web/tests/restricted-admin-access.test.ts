@@ -10,16 +10,22 @@ process.env.ENCRYPTION_KEY ||= 'restricted-admin-tests-only-32-characters';
 const target = '123456789012', sibling = '123456789013';
 const modules = Promise.all([import('../server/db'), import('../server/restricted-accounts'), import('../server/aws-service'), import('../server/account-roles')]);
 
-async function fixture(t: TestContext, options: { manualAdmin?: boolean; adminDeleteFails?: boolean; invited?: boolean; trustLag?: number } = {}) {
+async function fixture(t: TestContext, options: { manualAdmin?: boolean; adminDeleteFails?: boolean; invited?: boolean; trustLag?: number; noOrgwideAdmin?: boolean } = {}) {
   const [{ db }, restricted, aws, accountRoles] = await modules;
   const config = JSON.parse(readFileSync(new URL('../../config.json', import.meta.url), 'utf8'));
   const payer = config.payers[0].name;
-  const records: any[] = [], roleRecords: any[] = [], issuedRoles: string[] = [];
+  const records: any[] = [], roleRecords: any[] = [], issuedRoles: string[] = [], grants: any[] = [];
+  let tempStackSetExists = false;
   const roles = new Map<string, any>([
     ['support-quota', { managed: ['arn:aws:iam::aws:policy/ReadOnlyAccess', 'arn:aws:iam::aws:policy/AWSSupportAccess'], inline: { SupportQuotaPerms: { Statement: [{ Effect: 'Allow', Action: 'servicequotas:*', Resource: '*' }] } }, externalId: null }],
     ['admin-console', { managed: ['arn:aws:iam::aws:policy/AdministratorAccess'], inline: { ExtraAdmin: { Statement: [{ Effect: 'Allow', Action: '*', Resource: '*' }] } } }],
   ]);
-  const instances = new Map([['support-quota-role-orgwide', new Set([target, sibling])], ['admin-console-role-orgwide', new Set(options.manualAdmin ? [sibling] : [target, sibling])]]);
+  const instances = new Map([
+    ['support-quota-role-orgwide', new Set([target, sibling])],
+    ['admin-console-role-orgwide', new Set(options.manualAdmin ? [sibling] : [target, sibling])],
+    ['admin-console-role-temporary', new Set<string>()],
+  ]);
+  if (options.noOrgwideAdmin) { instances.delete('admin-console-role-orgwide'); roles.delete('admin-console'); }
   const denied = () => Object.assign(new Error('fixture access denied'), { name: 'AccessDenied' });
   const missing = () => Object.assign(new Error('fixture role absent'), { name: 'NoSuchEntity' });
   t.mock.method(db, 'getAccountsCache', () => ({ accounts: [{ Id: target, Name: 'fixture', Status: 'ACTIVE', JoinedMethod: options.invited ? 'INVITED' : 'CREATED', _payer: payer }], cachedAt: '' }));
@@ -32,6 +38,13 @@ async function fixture(t: TestContext, options: { manualAdmin?: boolean; adminDe
   });
   t.mock.method(db, 'deleteRestrictedAccount', (id: string) => { const i = records.findIndex(x => x.account_id === id); if (i >= 0) records.splice(i, 1); });
   t.mock.method(db, 'getAccountRoles', () => roleRecords);
+  const audits: string[] = [];
+  t.mock.method(db, 'addAuditLog', (_u: any, action: string) => { audits.push(action); });
+  t.mock.method(db, 'listTempAdminGrants', () => grants.map(g => ({ ...g })));
+  t.mock.method(db, 'insertTempAdminGrant', (g: any) => { grants.push({ ...g }); });
+  t.mock.method(db, 'updateTempAdminGrant', (id: string, u: any) => {
+    const g = grants.find(x => x.id === id); if (!g) throw new Error('missing grant'); Object.assign(g, u); return { ...g };
+  });
   t.mock.method(db, 'upsertAccountRoles', (rows: any[]) => { roleRecords.splice(0, roleRecords.length, ...rows); });
   t.mock.method(globalThis, 'setTimeout', ((callback: (...args: any[]) => void, _delay: number, ...args: any[]) => {
     queueMicrotask(() => callback(...args)); return { unref() {} };
@@ -52,21 +65,32 @@ async function fixture(t: TestContext, options: { manualAdmin?: boolean; adminDe
   t.mock.method(OrganizationsClient.prototype, 'send', (async () => ({ Roots: [{ Id: 'r-test' }], $metadata: {} })) as any);
   t.mock.method(CloudFormationClient.prototype, 'send', (async (command: any) => {
     const i = command.input, set = instances.get(i.StackSetName);
+    const notFound = () => Object.assign(new Error('stack set not found'), { name: 'StackSetNotFoundException' });
     switch (command.constructor.name) {
-      case 'ListStackInstancesCommand': return { Summaries: [...(set || [])].map(Account => ({ Account, Region: config.region || 'us-east-1', Status: 'CURRENT' })), $metadata: {} };
+      case 'DescribeStackSetCommand':
+        if (i.StackSetName === 'admin-console-role-temporary' && !tempStackSetExists) throw notFound();
+        return { StackSet: { StackSetName: i.StackSetName, AutoDeployment: { Enabled: false } }, $metadata: {} };
+      case 'CreateStackSetCommand':
+        assert.equal(i.StackSetName, 'admin-console-role-temporary'); assert.equal(i.AutoDeployment.Enabled, false);
+        tempStackSetExists = true; return { StackSetId: 'temp', $metadata: {} };
+      case 'ListStackInstancesCommand':
+        if (!set) throw notFound();
+        return { Summaries: [...set].filter(a => !i.StackInstanceAccount || a === i.StackInstanceAccount).map(Account => ({ Account, Region: config.region || 'us-east-1', Status: 'CURRENT' })), $metadata: {} };
       case 'DeleteStackInstancesCommand':
         assert.deepEqual(i.DeploymentTargets.Accounts, [target]);
         assert.equal(i.DeploymentTargets.AccountFilterType, 'INTERSECTION');
         if (!(options.adminDeleteFails && i.StackSetName === 'admin-console-role-orgwide')) {
           set?.delete(target);
-          if (i.StackSetName === 'admin-console-role-orgwide' && !i.RetainStacks) roles.delete('admin-console');
+          if (i.StackSetName.startsWith('admin-console-role-') && !i.RetainStacks) roles.delete('admin-console');
         }
         return { OperationId: i.StackSetName, $metadata: {} };
       case 'DescribeStackSetOperationCommand': return { StackSetOperation: { Status: options.adminDeleteFails && i.StackSetName === 'admin-console-role-orgwide' ? 'FAILED' : 'SUCCEEDED' }, $metadata: {} };
       case 'CreateStackInstancesCommand':
       case 'UpdateStackInstancesCommand':
-        assert.deepEqual(i.DeploymentTargets.Accounts, [target]); set?.add(target);
-        if (i.StackSetName === 'admin-console-role-orgwide') roles.set('admin-console', { managed: ['arn:aws:iam::aws:policy/AdministratorAccess'], inline: {} });
+        assert.deepEqual(i.DeploymentTargets.Accounts, [target]);
+        assert.notEqual(i.StackSetName, 'admin-console-role-orgwide', '组织级 admin-console 不得再被补回');
+        set?.add(target);
+        if (i.StackSetName === 'admin-console-role-temporary') roles.set('admin-console', { managed: ['arn:aws:iam::aws:policy/AdministratorAccess'], inline: {} });
         return { OperationId: i.StackSetName, $metadata: {} };
       default: throw new Error(`Unexpected CloudFormation command: ${command.constructor.name}`);
     }
@@ -91,7 +115,7 @@ async function fixture(t: TestContext, options: { manualAdmin?: boolean; adminDe
       default: throw new Error(`Unexpected IAM command: ${command.constructor.name}`);
     }
   }) as any);
-  return { restricted, aws, accountRoles, payer, records, roleRecords, roles, instances, issuedRoles };
+  return { restricted, aws, accountRoles, payer, records, roleRecords, roles, instances, issuedRoles, grants, audits };
 }
 
 const federation = (t: TestContext) => t.mock.method(globalThis, 'fetch', (async () => ({
@@ -181,14 +205,72 @@ test('role healing treats intentional admin removal as healthy and never recreat
   assert.equal(f.roles.has('admin-console'), false);
 });
 
-test('unrestricting invited accounts restores admin and support grants before clearing the marker', async t => {
+test('unrestricting invited accounts restores support via a 1h temporary admin and leaves no admin-console', async t => {
   const f = await fixture(t, { invited: true }); assert.equal((await f.restricted.markRestricted([target])).results[0].ok, true);
-  f.roles.delete('admin-console'); f.instances.get('admin-console-role-orgwide')?.delete(target);
-  const result = await f.restricted.unmarkRestricted(target);
-  assert.equal(result.ok, true); assert.equal(f.records.length, 0);
-  assert.deepEqual(f.roles.get('admin-console').managed, ['arn:aws:iam::aws:policy/AdministratorAccess']);
+  assert.equal(f.roles.has('admin-console'), false);
+  const result = await f.restricted.unmarkRestricted(target, { id: 1, username: 'admin' });
+  assert.equal(result.ok, true, result.error); assert.equal(f.records.length, 0);
+  // 不再补回 admin-console：借用的 1 小时临时开通用完即回收
+  assert.equal(f.roles.has('admin-console'), false);
+  assert.equal(f.instances.get('admin-console-role-orgwide')?.has(target), false);
+  assert.equal(f.instances.get('admin-console-role-temporary')?.has(target), false);
+  assert.equal(f.grants.length, 1);
+  assert.equal(f.grants[0].reason, 'unmark-restricted');
+  assert.equal(f.grants[0].hours, 1);
+  assert.equal(f.grants[0].status, 'revoked');
   assert.deepEqual(f.roles.get('support-quota').managed.sort(), ['arn:aws:iam::aws:policy/AWSSupportAccess', 'arn:aws:iam::aws:policy/ReadOnlyAccess']);
   assert.equal(f.roles.get('support-quota').externalId, null); assert.ok(f.roles.get('support-quota').inline.SupportQuotaPerms);
+});
+
+test('unrestricting reuses an admin-opened temporary admin and leaves it active', async t => {
+  const f = await fixture(t, { invited: true }); assert.equal((await f.restricted.markRestricted([target])).results[0].ok, true);
+  // 模拟管理员此前已为该账户开通（内部路径），admin-console 当前存在
+  f.roles.set('admin-console', { managed: ['arn:aws:iam::aws:policy/AdministratorAccess'], inline: {} });
+  f.instances.get('admin-console-role-temporary')!.add(target);
+  const now = Date.now();
+  f.grants.push({ id: 'manual', accountId: target, payer: f.payer, hours: 2, reason: 'manual', status: 'active',
+    requestedBy: 'admin', requestedByUserId: 1, createdAt: new Date(now).toISOString(), activatedAt: new Date(now).toISOString(),
+    expiresAt: new Date(now + 7200_000).toISOString(), instanceRequested: true, revokeAttempts: 0 });
+  const result = await f.restricted.unmarkRestricted(target, { id: 1, username: 'admin' });
+  assert.equal(result.ok, true, result.error);
+  assert.equal(f.grants.length, 1);
+  assert.equal(f.grants[0].status, 'active');
+  assert.equal(f.roles.has('admin-console'), true);
+});
+
+test('restricting an account during an active temporary admin revokes it first', async t => {
+  const f = await fixture(t, { invited: true, manualAdmin: true });
+  f.instances.get('admin-console-role-temporary')!.add(target);
+  const now = Date.now();
+  f.grants.push({ id: 'g1', accountId: target, payer: f.payer, hours: 1, reason: 'manual', status: 'active',
+    requestedBy: 'admin', requestedByUserId: 1, createdAt: new Date(now).toISOString(), activatedAt: new Date(now).toISOString(),
+    expiresAt: new Date(now + 3600_000).toISOString(), instanceRequested: true, revokeAttempts: 0 });
+  const r = await f.restricted.markRestricted([target]);
+  assert.equal(r.results[0].ok, true, r.results[0].error);
+  assert.equal(f.grants[0].status, 'revoked');
+  assert.equal(f.grants[0].revokedBy, 'system:restricted-mark');
+  assert.equal(f.roles.has('admin-console'), false);
+  assert.equal(f.instances.get('admin-console-role-temporary')?.has(target), false);
+});
+
+test('first restriction of an INVITED account after cleanup uses an internal 1h temporary admin and revokes it', async t => {
+  const f = await fixture(t, { invited: true, noOrgwideAdmin: true });
+  const r = await f.restricted.markRestricted([target], { markedBy: 'admin' });
+  assert.equal(r.results[0].ok, true, r.results[0].error);
+  assert.equal(f.records[0].state, 'applied');
+  assert.equal(f.grants.length, 1);
+  assert.equal(f.grants[0].reason, 'restricted-mark');
+  assert.equal(f.grants[0].hours, 1);
+  assert.equal(f.grants[0].status, 'revoked');
+  assert.equal(f.roles.has('admin-console'), false);
+  assert.ok(f.audits.includes('TEMP_ADMIN_OPEN') && f.audits.includes('TEMP_ADMIN_REVOKE'));
+});
+
+test('restricting still succeeds after the org-wide admin StackSet has been deleted', async t => {
+  const f = await fixture(t, { noOrgwideAdmin: true });
+  const r = await f.restricted.markRestricted([target]);
+  assert.equal(r.results[0].ok, true, r.results[0].error);
+  assert.equal(f.records[0].state, 'applied');
 });
 
 test('re-marking an applied INVITED account without an admin path keeps it applied', async t => {

@@ -58,7 +58,9 @@ async function adminCreds(accountId: string) {
   const t = await getTempAdminCredentials(accountId);
   const creds = { accessKeyId: t.accessKeyId, secretAccessKey: t.secretAccessKey, sessionToken: t.sessionToken };
   pruneCredCache();
-  credCache.set(accountId, { creds, expireAt: Date.now() + 50 * 60 * 1000 });
+  // 临时开通 Admin 期间签发的凭证可能短于 50 分钟（不超过开通剩余时间），以实际到期为准
+  const expiresAt = t.expiration ? Date.parse(String(t.expiration)) - 5 * 60 * 1000 : Infinity;
+  credCache.set(accountId, { creds, expireAt: Math.min(Date.now() + 50 * 60 * 1000, expiresAt) });
   return creds;
 }
 

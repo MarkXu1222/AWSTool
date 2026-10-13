@@ -28,6 +28,10 @@ interface Props {
   adminExcluded?: boolean;
   // 父组件是否仍在拉取账户详情（含根凭证状态）。为 true 时状态区显示加载中，但操作按钮始终可见。
   loading?: boolean;
+  // 临时开通 Admin 的到期时间（ISO）。成员账户只有在开通期内才能签发超过 1 小时的凭证，且不超过剩余时间。
+  tempAdminExpiresAt?: string;
+  // 账户既无 OAAR 也未开通时（code=TEMP_ADMIN_REQUIRED）交给父组件引导去临时开通
+  onTempAdminRequired?: (error: string) => void;
 }
 
 async function copy(text: string, label: string) {
@@ -51,7 +55,7 @@ const CredRow: React.FC<{ label: string; value: string; secret?: boolean; reveal
   </div>
 );
 
-const RootCredentialsPanel: React.FC<Props> = ({ accountId, rootCredentials, canRoot, rootResetAccess = 'none', isAdmin, isPayer, adminExcluded, loading: detailLoading }) => {
+const RootCredentialsPanel: React.FC<Props> = ({ accountId, rootCredentials, canRoot, rootResetAccess = 'none', isAdmin, isPayer, adminExcluded, loading: detailLoading, tempAdminExpiresAt, onTempAdminRequired }) => {
   const isMobile = typeof window !== 'undefined' && window.innerWidth < 769;
   const [creds, setCreds] = useState<TempCreds | null>(null);
   const [durationHours, setDurationHours] = useState(1);
@@ -155,16 +159,32 @@ const RootCredentialsPanel: React.FC<Props> = ({ accountId, rootCredentials, can
     return () => clearInterval(t);
   }, [creds]);
 
+  // 没有凭证时 now 不会被倒计时刷新；开通期内每 30 秒刷新一次，保证可选时长随剩余时间收缩
+  useEffect(() => {
+    if (creds || !tempAdminExpiresAt) return;
+    const t = setInterval(() => setNow(Date.now()), 30_000);
+    return () => clearInterval(t);
+  }, [creds, tempAdminExpiresAt]);
+
+  // 成员账户经 OAAR 签发最长 1 小时（AWS 角色链上限）；临时开通期内可更长，但不超过剩余时间
+  const maxHours = !isAdmin || isPayer || !tempAdminExpiresAt
+    ? 1
+    : Math.min(12, Math.max(1, Math.floor((Date.parse(tempAdminExpiresAt) - now) / 3600_000)));
+  const effectiveHours = Math.min(durationHours, maxHours);
+
   const generate = async () => {
-    const requestedHours = isAdmin && !isPayer ? durationHours : 1;
+    const requestedHours = effectiveHours;
     setLoading(true);
     try {
       const res = await api.getTempCredentials(accountId, requestedHours);
       if (res.success) {
         setCreds(res.data);
         setNow(Date.now());
-        const actualHours = Number(res.data?.durationHours) || requestedHours;
-        message.success(`已生成 Admin 临时凭证（有效期约 ${actualHours} 小时）`);
+        const until = res.data?.expiration ? new Date(res.data.expiration).toLocaleTimeString() : '';
+        message.success(`已生成 Admin 临时凭证（有效期至 ${until}）`);
+        if (res.data?.cappedByTempAdmin) message.info('凭证有效期已按临时 Admin 剩余时间截断');
+      } else if (res.code === 'TEMP_ADMIN_REQUIRED' && onTempAdminRequired) {
+        onTempAdminRequired(res.error);
       } else {
         if (requestedHours > 1) setDurationHours(1);
         message.error(res.error || '生成失败');
@@ -179,7 +199,6 @@ const RootCredentialsPanel: React.FC<Props> = ({ accountId, rootCredentials, can
 
   const remainMs = creds ? new Date(creds.expiration).getTime() - now : 0;
   const expired = remainMs <= 0;
-  const credentialHours = creds?.durationHours || 1;
   const remainText = useMemo(() => {
     if (!creds || remainMs <= 0) return '已过期';
     const total = Math.floor(remainMs / 1000);
@@ -308,17 +327,17 @@ const RootCredentialsPanel: React.FC<Props> = ({ accountId, rootCredentials, can
           <SafetyCertificateOutlined style={{ marginRight: 6, color: '#1677ff' }} />Admin 临时凭证
         </span>
         <Space size={4} wrap>
-          {isAdmin && !isPayer && (
+          {maxHours > 1 && (
             <InputNumber
               size="small"
               min={1}
-              max={12}
+              max={maxHours}
               precision={0}
-              value={durationHours}
+              value={effectiveHours}
               addonAfter="小时"
               aria-label="Admin 临时凭证有效期（小时）"
               disabled={loading}
-              onChange={value => setDurationHours(typeof value === 'number' ? Math.min(12, Math.max(1, value)) : 1)}
+              onChange={value => setDurationHours(typeof value === 'number' ? Math.min(maxHours, Math.max(1, value)) : 1)}
               style={{ width: 112 }}
             />
           )}
@@ -334,7 +353,7 @@ const RootCredentialsPanel: React.FC<Props> = ({ accountId, rootCredentials, can
             loading={loading}
             onClick={generate}
           >
-            {creds ? '重新生成' : `生成 (${isAdmin && !isPayer ? durationHours : 1}小时)`}
+            {creds ? '重新生成' : `生成 (${effectiveHours}小时)`}
           </Button>
         </Space>
       </div>
@@ -356,16 +375,14 @@ const RootCredentialsPanel: React.FC<Props> = ({ accountId, rootCredentials, can
             style={{ marginTop: 8 }}
             type="warning"
             showIcon
-            message={`完整管理员权限凭证，请勿泄露。有效期约 ${credentialHours} 小时，过期后可重新生成。`}
+            message={`完整管理员权限凭证，请勿泄露。有效期至 ${new Date(creds.expiration).toLocaleTimeString()}，过期后可重新生成。`}
           />
         </div>
       ) : (
         <p style={{ color: '#8a94a6', fontSize: 12, margin: 0 }}>
           {isPayer
             ? 'payer 管理账户通过 role/tool 生成，固定有效期 1 小时。'
-            : isAdmin
-              ? '选择 1–12 小时后生成。超过 1 小时仅支持已部署 admin-console 的成员账户。'
-              : '点击生成后可复制到 AWS CLI / SDK 使用（AdministratorAccess，有效期 1 小时）。'}
+            : '成员账户经 OrganizationAccountAccessRole 签发，最长 1 小时；临时开通 Admin 期间可签发更长凭证，但不超过剩余时间。'}
         </p>
       )}
         </>

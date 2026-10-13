@@ -1,9 +1,10 @@
 import React, { useState, useEffect } from 'react';
 import { Card, Table, Tag, Button, Space, message, Input, Spin, Descriptions, Tabs, Badge, Dropdown, Switch, Tooltip, Modal, Select, Popconfirm } from 'antd';
-import { ReloadOutlined, SearchOutlined, SafetyOutlined, CheckCircleOutlined, CloseCircleOutlined, LeftOutlined, LoginOutlined, DownOutlined, WarningOutlined } from '@ant-design/icons';
+import { ReloadOutlined, SearchOutlined, SafetyOutlined, CheckCircleOutlined, CloseCircleOutlined, LeftOutlined, LoginOutlined, DownOutlined, WarningOutlined, FieldTimeOutlined } from '@ant-design/icons';
 import { api } from '../api';
 import { exportToCSV } from '../utils/export';
 import RootCredentialsPanel from '../components/RootCredentialsPanel';
+import TempAdminModal from '../components/TempAdminModal';
 import { hashColor, initials } from '../utils/color';
 import { openAwsConsole, isIsolatedEnabled, setIsolatedEnabled, isLauncherInstalled, setLauncherInstalled, promptLauncherInstall } from '../utils/console-launch';
 
@@ -51,6 +52,11 @@ const AccountsPage: React.FC = () => {
     if (on && !isLauncherInstalled()) promptLauncherInstall({ onInstalled: apply });
     else apply();
   };
+  // 临时 Admin（admin-console 按需开通）：accountId → 未结束的开通记录。
+  // nowTick 每 30 秒走一次，只用于重算剩余时间；记录本身每 5 分钟重新拉取。
+  const [tempGrants, setTempGrants] = useState<Record<string, any>>({});
+  const [tempModalAccount, setTempModalAccount] = useState<any>(null);
+  const [nowTick, setNowTick] = useState(() => Date.now());
   // 账户角色自愈状态：accountId → 记录，用于在列表里标出平台无法访问的账户
   const [roleMap, setRoleMap] = useState<Record<string, any>>({});
   const [roleChecking, setRoleChecking] = useState(false);
@@ -114,6 +120,98 @@ const AccountsPage: React.FC = () => {
   };
 
   useEffect(() => { fetchAccounts(); loadDeparted(); loadRestricted(); loadApnAccounts(); }, []);
+
+  const loadTempGrants = async () => {
+    try {
+      const res = await api.listTempAdminGrants();
+      if (res.success) {
+        const m: Record<string, any> = {};
+        (res.data || []).forEach((g: any) => { m[g.accountId] = g; });
+        setTempGrants(m);
+      }
+    } catch { /* 附加信息，失败不影响账户列表 */ }
+  };
+  useEffect(() => {
+    loadTempGrants();
+    const tick = setInterval(() => setNowTick(Date.now()), 30_000);
+    const refetch = setInterval(loadTempGrants, 5 * 60_000);
+    return () => { clearInterval(tick); clearInterval(refetch); };
+  }, []);
+
+  const openTempModal = (accountId: string) =>
+    setTempModalAccount(accounts.find(a => a.Id === accountId) || { Id: accountId });
+
+  const revokeTemp = (accountId: string) => Modal.confirm({
+    title: '提前关闭临时 Admin？',
+    content: '将从 payer 侧删除该账户的 admin-console，正在使用的 Admin 会话随之失效。',
+    okText: '关闭',
+    okButtonProps: { danger: true },
+    onOk: async () => {
+      try {
+        const res = await api.revokeTempAdmin(accountId);
+        if (res.success) message.success('临时 Admin 已关闭');
+        else message.error(res.error || '关闭失败');
+      } catch (e: any) { message.error(e.message || '关闭失败'); }
+      loadTempGrants();
+    },
+  });
+
+  // 账户没有 OAAR 且未开通时，Admin 入口会返回 TEMP_ADMIN_REQUIRED；admin 可直接去开通
+  const handleTempAdminRequired = (accountId: string, error: string) => {
+    if (!isAdmin) { message.error({ content: error, duration: 8 }); return; }
+    Modal.confirm({
+      title: '需要临时开通 Admin',
+      content: error,
+      okText: '去开通',
+      onOk: () => openTempModal(accountId),
+    });
+  };
+
+  const formatRemaining = (ms: number) => {
+    const minutes = Math.ceil(ms / 60_000);
+    return `${Math.floor(minutes / 60)}h${minutes % 60}m`;
+  };
+
+  // 临时 Admin 开通 / 关闭入口：独立于控制台菜单（菜单只在 consoleAdminPayers 组织出现），仅 admin 可见。
+  // payer、APN、仅保留 support-quota、敏感权限客户账户不提供；能经 OAAR 进入的账户由服务端拒绝。
+  const TempAdminAction: React.FC<{ account: any }> = ({ account }) => {
+    if (!isAdmin || !account || account._isPayer || account._isApn || account._adminRoleExcluded) return null;
+    if (restricted.some((r: any) => r.account_id === account.Id)) return null;
+    const g = tempGrants[account.Id];
+    if (g?.status === 'provisioning') return null;
+    if (g) {
+      return (
+        <Tooltip title="提前关闭临时 Admin">
+          <Button size="small" danger icon={<CloseCircleOutlined />} aria-label="提前关闭临时 Admin"
+            style={{ flexShrink: 0 }} onClick={() => revokeTemp(account.Id)} />
+        </Tooltip>
+      );
+    }
+    return (
+      <Tooltip title="临时开通 Admin（仅没有 OrganizationAccountAccessRole 的账户）">
+        <Button size="small" icon={<FieldTimeOutlined />} style={{ flexShrink: 0 }}
+          onClick={() => openTempModal(account.Id)}>临时 Admin</Button>
+      </Tooltip>
+    );
+  };
+
+  // 临时 Admin 状态标记：开通中 / 剩余时间 / 回收中
+  const TempAdminTag: React.FC<{ accountId: string }> = ({ accountId }) => {
+    const g = tempGrants[accountId];
+    if (!g) return null;
+    const tagStyle = { margin: 0, flexShrink: 0 };
+    if (g.status === 'provisioning') return <Tag color="processing" style={tagStyle}>临时 Admin 开通中</Tag>;
+    if (g.status === 'revoking') {
+      return <Tooltip title={g.lastError || '正在删除 admin-console'}><Tag color="error" style={tagStyle}>临时 Admin 回收中</Tag></Tooltip>;
+    }
+    const left = g.expiresAt ? Date.parse(g.expiresAt) - nowTick : 0;
+    if (left <= 0) return <Tag color="error" style={tagStyle}>到期回收中</Tag>;
+    return (
+      <Tooltip title={`到期 ${new Date(g.expiresAt).toLocaleString()}，开通人 ${g.requestedBy}`}>
+        <Tag color="warning" style={tagStyle}>临时 Admin · 剩余 {formatRemaining(left)}</Tag>
+      </Tooltip>
+    );
+  };
 
   const loadRestricted = async () => {
     try {
@@ -251,6 +349,8 @@ const AccountsPage: React.FC = () => {
             duration: 6,
           });
         }
+      } else if (res.code === 'TEMP_ADMIN_REQUIRED') {
+        handleTempAdminRequired(accountId, res.error);
       } else {
         message.error(res.error || '生成链接失败');
       }
@@ -470,7 +570,9 @@ const AccountsPage: React.FC = () => {
         </>
       ) : <span style={{ color: '#8a94a6' }}>无数据</span> },
       { key: 'root', label: '根用户', children: (
-        <RootCredentialsPanel accountId={acct.Id} rootCredentials={detail?.rootCredentials} canRoot={canRoot} rootResetAccess={rootResetAccess} isAdmin={isAdmin} isPayer={!!acct._isPayer} adminExcluded={!!acct._adminRoleExcluded} loading={detailLoading} />
+        <RootCredentialsPanel accountId={acct.Id} rootCredentials={detail?.rootCredentials} canRoot={canRoot} rootResetAccess={rootResetAccess} isAdmin={isAdmin} isPayer={!!acct._isPayer} adminExcluded={!!acct._adminRoleExcluded} loading={detailLoading}
+          tempAdminExpiresAt={tempGrants[acct.Id]?.status === 'active' ? tempGrants[acct.Id].expiresAt : undefined}
+          onTempAdminRequired={(error: string) => handleTempAdminRequired(acct.Id, error)} />
       ) },
     ];
   };
@@ -488,6 +590,8 @@ const AccountsPage: React.FC = () => {
             <span style={{ fontWeight: 600, flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
               {selectedAccount.Name}
             </span>
+            <TempAdminTag accountId={selectedAccount.Id} />
+            <TempAdminAction account={selectedAccount} />
             <ConsoleButton account={selectedAccount} style={{ flexShrink: 0 }} />
           </div>
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginTop: 8 }}>
@@ -498,6 +602,8 @@ const AccountsPage: React.FC = () => {
           </div>
         </div>
         <Tabs size="small" items={renderDetailTabs(selectedAccount)} />
+        <TempAdminModal open={!!tempModalAccount} account={tempModalAccount}
+          onClose={() => setTempModalAccount(null)} onOpened={() => loadTempGrants()} />
       </div>
     );
   }
@@ -771,8 +877,9 @@ const AccountsPage: React.FC = () => {
         width={860}
       >
         <p style={{ color: 'rgba(0,0,0,0.55)', fontSize: 12, marginTop: 0 }}>
-          平台访问成员账户依赖两个角色：<code>support-quota</code>（只读）与 <code>admin-console</code>（管理员临时凭证 / 控制台）。
-          系统每 30 分钟自动检测新账户、每 24 小时全量复检，缺失会自动通过 StackSet 补齐；连续 3 次补不上才需要人工介入。
+          平台访问成员账户依赖 <code>support-quota</code>（只读）；<code>admin-console</code> 只在临时开通期间存在，常驻即异常。
+          系统每 30 分钟自动检测新账户、每 24 小时全量复检，缺 support-quota 会自动通过 StackSet 补齐；连续 3 次补不上才需要人工介入。
+          常驻 admin-console 不会自动删除，请运行清理脚本或人工处理。
         </p>
 
         {/* 覆盖与状态统计 */}
@@ -835,12 +942,12 @@ const AccountsPage: React.FC = () => {
               render: (p: string) => p ? <Tag style={{ margin: 0, fontSize: 11 }}>{p}</Tag> : '-',
             },
             {
-              title: '缺失角色', key: 'miss', width: 190,
+              title: '异常', key: 'miss', width: 190,
               render: (_: any, x: any) => {
-                const miss: string[] = [];
-                if (!x.support) miss.push('support-quota');
-                if (!x.admin) miss.push('admin-console');
-                return <span style={{ fontSize: 11, color: '#cf1322' }}>{miss.join(' + ') || '-'}</span>;
+                const issues: string[] = [];
+                if (!x.support) issues.push('缺 support-quota');
+                if (x.support && x.admin && x.state === 'partial') issues.push('常驻 admin-console');
+                return <span style={{ fontSize: 11, color: '#cf1322' }}>{issues.join(' + ') || '-'}</span>;
               },
             },
             {
@@ -876,7 +983,7 @@ const AccountsPage: React.FC = () => {
                   size="small"
                   onClick={() => exportToCSV(problems.map(x => ({
                     账户ID: x.account_id, 名称: x.account_name, 组织: x.payer,
-                    support_quota: x.support ? '有' : '缺', admin_console: x.admin ? '有' : '缺',
+                    support_quota: x.support ? '有' : '缺', admin_console: x.admin ? '存在' : '无',
                     状态: x.state, 尝试次数: x.attempts, 最近检测: x.checked_at,
                   })), 'account-role-issues')}
                 >
@@ -907,18 +1014,22 @@ const AccountsPage: React.FC = () => {
     if (!r) return null;
     const miss: string[] = [];
     if (!r.support) miss.push('support-quota');
-    if (!r.admin) miss.push('admin-console');
+    // admin-console 只应在临时开通期间存在，常驻即异常（自愈标为 partial，不自动删除）
+    const residualAdmin = r.support && r.admin && r.state === 'partial';
+    if (!miss.length && !residualAdmin) return null;
     const unreachable = r.state === 'unreachable';
-    const tip = unreachable
-      ? `平台无法访问该账户：缺 ${miss.join(' / ')}。已重试 ${r.attempts} 次仍失败，需人工处理（常见原因是账户未完成激活）。`
-      : `缺 ${miss.join(' / ')}，自动补齐进行中（已尝试 ${r.attempts} 次）。`;
+    const tip = residualAdmin
+      ? '存在常驻 admin-console（未经临时开通），请运行 scripts/remove-orgwide-admin-console.ts 或人工删除。'
+      : unreachable
+        ? `平台无法访问该账户：缺 ${miss.join(' / ')}。已重试 ${r.attempts} 次仍失败，需人工处理（常见原因是账户未完成激活）。`
+        : `缺 ${miss.join(' / ')}，自动补齐进行中（已尝试 ${r.attempts} 次）。`;
     return (
       <Tooltip title={tip}>
         <Tag
           color={unreachable ? 'red' : 'orange'}
           style={{ margin: 0, fontSize: 10, lineHeight: '16px', padding: '0 5px', flexShrink: 0 }}
         >
-          {unreachable ? '权限缺失' : '补齐中'}
+          {residualAdmin ? '常驻 Admin' : unreachable ? '权限缺失' : '补齐中'}
         </Tag>
       </Tooltip>
     );
@@ -1106,6 +1217,8 @@ const AccountsPage: React.FC = () => {
                   : selectedAccount._isPayer && <Tag color="gold" style={{ marginLeft: 8 }}>Payer</Tag>}</span>}
                   extra={
                     <Space size={4}>
+                      <TempAdminTag accountId={selectedAccount.Id} />
+                      <TempAdminAction account={selectedAccount} />
                       <ConsoleButton account={selectedAccount} />
                       <Button type="text" size="small" aria-label="关闭" onClick={() => setSelectedAccount(null)}>✕</Button>
                     </Space>
@@ -1121,6 +1234,8 @@ const AccountsPage: React.FC = () => {
       {renderRoleModal()}
       {renderDepartedModal()}
       {renderRestrictModal()}
+      <TempAdminModal open={!!tempModalAccount} account={tempModalAccount}
+        onClose={() => setTempModalAccount(null)} onOpened={() => loadTempGrants()} />
     </div>
   );
 };

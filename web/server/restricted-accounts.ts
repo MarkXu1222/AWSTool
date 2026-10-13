@@ -11,10 +11,12 @@
  *      过程中平台访问不中断。
  *   2. 就地收窄 support-quota（配额查询 / 提额 / 提额进度 / Support 工单 / 区域状态查询），
  *      信任策略带 sts:ExternalId 条件，备份原策略用于取消标记时恢复。
- *   3. 删除该账户的 admin-console（StackSet 实例 RetainStacks=false；手工角色走 IAM 删除），
- *      删除后复验 AssumeRole 被拒。自愈（account-roles.ts）与组织脚本都不会补回。
+ *   3. 确保该账户没有 admin-console：处于临时开通期则回收临时开通（temp-admin.ts）；
+ *      否则删组织级 StackSet 残留实例（RetainStacks=false）或走 IAM 删手工角色，删除后复验 AssumeRole 被拒。
+ *      admin-console 已改为按需临时开通，受限账户不提供开通，自愈与组织脚本也都不会补回。
  *   4. OrganizationAccountAccessRole 保留不动：Admin 临时凭证（≤1h）、Admin 控制台、区域开通经它执行。
  *      INVITED 账户本来没有 OAAR，收窄后平台只剩 support-quota（见 isSupportOnlyRestricted）。
+ *      首次标记没有 OAAR 的账户时，内部临时开通 1 小时 Admin 完成 IAM 改造，第 3 步随即回收。
  *   5. AutoDeployment 只在账户「加入 OU」时触发，已移除的实例不会被自动重建；
  *      但手工跑 scripts/setup-org-stacksets.ts 会重新覆盖，故该脚本必须读取
  *      本模块的排除名单。这是最容易漏的一环。
@@ -26,8 +28,8 @@ import { randomBytes } from 'crypto';
 import { STSClient, AssumeRoleCommand } from '@aws-sdk/client-sts';
 import { OrganizationsClient, ListRootsCommand } from '@aws-sdk/client-organizations';
 import {
-  CloudFormationClient, CreateStackInstancesCommand, DeleteStackInstancesCommand,
-  DescribeStackSetOperationCommand, paginateListStackInstances, UpdateStackInstancesCommand,
+  CloudFormationClient, DeleteStackInstancesCommand,
+  DescribeStackSetOperationCommand, paginateListStackInstances,
 } from '@aws-sdk/client-cloudformation';
 import {
   IAMClient, DetachRolePolicyCommand, ListAttachedRolePoliciesCommand,
@@ -38,6 +40,7 @@ import {
 import fs from 'fs';
 import path from 'path';
 import { db, encryptField, decryptField } from './db';
+import { openTempAdmin, revokeTempAdmin, listOpenGrants, getActiveGrant } from './temp-admin';
 
 let CONFIG: any = {};
 try {
@@ -266,7 +269,17 @@ async function rolePolicies(iam: IAMClient, roleName: string): Promise<SupportPo
   return { managed, inline };
 }
 
+/** 组织级 admin StackSet 被清理脚本删除后不再存在，视为无实例 */
 async function stackAccounts(cf: CloudFormationClient, name: string): Promise<Set<string>> {
+  try {
+    return await listStackAccounts(cf, name);
+  } catch (e: any) {
+    if (e?.name === 'StackSetNotFoundException') return new Set();
+    throw e;
+  }
+}
+
+async function listStackAccounts(cf: CloudFormationClient, name: string): Promise<Set<string>> {
   const accounts = new Set<string>();
   try {
     for await (const page of paginateListStackInstances({ client: cf }, { StackSetName: name, CallAs: 'SELF' })) {
@@ -285,6 +298,14 @@ async function requireOperation(cf: CloudFormationClient, name: string, opId?: s
 }
 
 async function removeAdmin(cf: CloudFormationClient, rootId: string, accountId: string, iam: IAMClient) {
+  // 处于临时开通期：admin-console 来自 admin-console-role-temporary，由 temp-admin 删除并复验被拒。
+  // 复验通过即返回 —— 此时 iam 用的可能正是刚删除的 admin-console 会话，不能再拿它走 IAM 兜底。
+  if (listOpenGrants().some(g => g.accountId === accountId)) {
+    await revokeTempAdmin(accountId, 'system:restricted-mark');
+    db.addAuditLog(null, 'TEMP_ADMIN_REVOKE',
+      `AWS 账户 ${accountId} · 标记敏感权限账户时回收临时 Admin`, 'system', undefined);
+    return;
+  }
   const managedAccounts = await stackAccounts(cf, ADMIN_STACKSET);
   if (managedAccounts.has(accountId)) {
     const op = await cf.send(new DeleteStackInstancesCommand({
@@ -399,6 +420,8 @@ export async function markRestricted(
   const now = new Date().toISOString();
 
   const byPayer = new Map<string, { id: string; name?: string }[]>();
+  // 本次标记中为改 IAM 而内部临时开通过 Admin 的账户
+  const openedForMark = new Set<string>();
   for (const id of accountIds) {
     const acct = (accounts || []).find((a: any) => a.Id === id);
     if (!acct?._payer) {
@@ -470,10 +493,30 @@ export async function markRestricted(
           try {
             admin = await assumeChildAdmin(creds, id);
           } catch (e: any) {
-            const err: any = new Error(e?.message || '无法取得管理员凭证');
-            err.name = e?.name || 'Error';
-            err.code = 'NO_ADMIN_PATH';
-            throw err;
+            // 首次标记没有 OAAR 的账户（组织级 admin-console 已清理）：内部临时开通 1 小时完成改造，
+            // 第 3 步 removeAdmin 会回收它。已 applied 的账户重复标记不开通（保持原有语义，见下方 NO_ADMIN_PATH）。
+            let viaTemp = false;
+            if (previousById.get(id)?.state !== 'applied' && !getActiveGrant(id)) {
+              try {
+                await openTempAdmin({
+                  accountId: id, hours: 1, reason: 'restricted-mark', bypassRestricted: true,
+                  requestedBy: { id: null, username: opts.markedBy || 'system' },
+                });
+                openedForMark.add(id);
+                db.addAuditLog(null, 'TEMP_ADMIN_OPEN',
+                  `AWS 账户 ${id} · 标记敏感权限账户内部临时开通 Admin 1 小时（操作人 ${opts.markedBy || 'system'}）`, 'system', undefined);
+                admin = await assumeChildAdmin(creds, id);
+                viaTemp = true;
+              } catch (inner: any) {
+                e = inner;
+              }
+            }
+            if (!viaTemp) {
+              const err: any = new Error(e?.message || '无法取得管理员凭证');
+              err.name = e?.name || 'Error';
+              err.code = 'NO_ADMIN_PATH';
+              throw err;
+            }
           }
           const iam = new IAMClient({ region: REGION, credentials: admin });
           const policies = await rolePolicies(iam, SUPPORT_ROLE);
@@ -536,6 +579,12 @@ export async function markRestricted(
           db.upsertRestrictedAccounts([{ account_id: id, state: 'failed' as const, last_error: msg }]);
           results.push({ accountId: id, ok: false, state: 'failed', error: msg });
           console.error(`[Restricted] ${id}: ${msg}`);
+        } finally {
+          // 中途失败时内部开通还在：受限账户不能挂着 AdministratorAccess 等到期
+          if (openedForMark.has(id) && listOpenGrants().some(g => g.accountId === id)) {
+            await revokeTempAdmin(id, 'system:restricted-mark')
+              .catch(err => console.error(`[Restricted] ${id}: 内部临时 Admin 回收失败，交由定时回收:`, err?.message));
+          }
         }
       }
     } catch (e: any) {
@@ -550,35 +599,36 @@ export async function markRestricted(
 }
 
 /**
- * 取消标记：先恢复管理员入口和 support 权限，成功后才删除标记。
+ * 取消标记：先恢复 support 权限，成功后才删除标记。
+ * 不再补回 admin-console（已改为按需临时开通）。没有 OAAR 的账户需要管理员凭证改 IAM 时：
+ * 有人工开通则直接借用、结束不回收；否则内部临时开通 1 小时，用完立即回收。
  */
-export async function unmarkRestricted(accountId: string): Promise<{ ok: boolean; error?: string }> {
+export async function unmarkRestricted(
+  accountId: string,
+  requestedBy: { id: number | string | null; username: string } = { id: null, username: 'system' },
+): Promise<{ ok: boolean; error?: string }> {
   const rec = db.getRestrictedAccounts().find((r: any) => r.account_id === accountId);
   if (!rec) return { ok: false, error: '该账户未被标记' };
 
+  let openedForUnmark = false;
   try {
     const creds = await assumePayer(rec.payer);
-    const org = new OrganizationsClient({ region: REGION, credentials: creds });
-    const rootId = (await org.send(new ListRootsCommand({}))).Roots![0].Id!;
-    const cf = new CloudFormationClient({ region: REGION, credentials: creds });
-    const adminOnlyExcluded = (CONFIG.adminRoleExcludedAccounts || []).some((r: any) => r.accountId === accountId);
-    if (!adminOnlyExcluded) {
-      // INVITED 账户可能只能通过 admin-console 管理，必须先由 payer 恢复此角色。
-      const existing = await stackAccounts(cf, ADMIN_STACKSET);
-      const input = {
-        StackSetName: ADMIN_STACKSET,
-        DeploymentTargets: { OrganizationalUnitIds: [rootId], Accounts: [accountId], AccountFilterType: 'INTERSECTION' as const },
-        Regions: [REGION], CallAs: 'SELF' as const,
-        OperationPreferences: { FailureTolerancePercentage: 0, MaxConcurrentPercentage: 100 },
-      };
-      const op = await cf.send(existing.has(accountId)
-        ? new UpdateStackInstancesCommand(input) : new CreateStackInstancesCommand(input));
-      await requireOperation(cf, ADMIN_STACKSET, op.OperationId);
-    }
-
     // 角色是就地改造的（非 StackSet 管理），恢复也走 IAM：
     // 原 support 堆栈保留在账户内，直接恢复备份，避免同名 IAM Role 冲突。
-    const admin = await assumeChildAdmin(creds, accountId);
+    let admin;
+    try {
+      admin = await assumeChildAdmin(creds, accountId);
+    } catch (e) {
+      // 已有人工开通却仍进不去，说明开通状态与实际不符，不再叠加一次开通
+      if (getActiveGrant(accountId)) throw e;
+      await openTempAdmin({
+        accountId, hours: 1, reason: 'unmark-restricted', bypassRestricted: true, requestedBy,
+      });
+      openedForUnmark = true;
+      db.addAuditLog(null, 'TEMP_ADMIN_OPEN',
+        `AWS 账户 ${accountId} · 取消敏感权限标记内部临时开通 Admin 1 小时（操作人 ${requestedBy.username}）`, 'system', undefined);
+      admin = await assumeChildAdmin(creds, accountId);
+    }
     const iam = new IAMClient({ region: REGION, credentials: admin });
     const backup: SupportPolicyBackup = rec.support_policy_backup || DEFAULT_SUPPORT_BACKUP;
     for (const arn of backup.managed) {
@@ -608,5 +658,13 @@ export async function unmarkRestricted(accountId: string): Promise<{ ok: boolean
     return { ok: true };
   } catch (e: any) {
     return { ok: false, error: `${e?.name}: ${String(e?.message || '').slice(0, 160)}` };
+  } finally {
+    if (openedForUnmark) {
+      // 回收失败不影响取消结果：记录停在 revoking，sweeper 会继续重试并在多次失败后告警
+      await revokeTempAdmin(accountId, 'system:unmark-restricted')
+        .then(() => db.addAuditLog(null, 'TEMP_ADMIN_REVOKE',
+          `AWS 账户 ${accountId} · 取消敏感权限标记后回收内部临时 Admin`, 'system', undefined))
+        .catch(err => console.error(`[Restricted] ${accountId}: 取消标记用的临时 Admin 回收失败，交由定时回收:`, err?.message));
+    }
   }
 }
