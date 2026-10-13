@@ -1,20 +1,19 @@
 /**
- * 组织级角色下发 —— 为各 AWS Organization 建立/修正两个 SERVICE_MANAGED StackSet，
- * 使成员账户（含未来新加入的）自动获得平台所需角色。
+ * 组织级角色下发 —— 为各 AWS Organization 建立/修正 SERVICE_MANAGED StackSet support-quota-role-orgwide，
+ * 使成员账户（含未来新加入的）自动获得平台只读角色 support-quota。
  *
  * 为什么需要这个脚本：
- *   平台访问成员账户依赖两个角色，`support-quota`（只读）和 `admin-console`（admin 一级跳）。
- *   新账户能否自动拿到它们，取决于 StackSet 的 AutoDeployment 是否开启且部署目标覆盖 Root OU。
+ *   新账户能否自动拿到 support-quota，取决于 StackSet 的 AutoDeployment 是否开启且部署目标覆盖 Root OU。
  *   加入新 payer 时必须跑一次本脚本，否则该组织的新账户在平台里只能看到名字、读不到任何数据。
  *
- *   `admin-console` 尤其重要：INVITED（邀请加入）的账户不会自带 OrganizationAccountAccessRole，
- *   payer 二级跳进不去，只有直接信任平台身份的 admin-console 这条路。
+ *   admin-console 不再由本脚本组织级下发：它已改为按需临时开通（server/temp-admin.ts），
+ *   新账户一律不常驻管理员角色。存量清理见 scripts/remove-orgwide-admin-console.ts。
  *
  * 用法:
  *   npx tsx scripts/setup-org-stacksets.ts support              # 所有组织
- *   npx tsx scripts/setup-org-stacksets.ts admin  yanhuang31    # 指定组织
- *   npx tsx scripts/setup-org-stacksets.ts admin  --dry-run     # 只看当前状态，不改
- *   npx tsx scripts/setup-org-stacksets.ts admin  upup --refresh-template # 显式更新模板并部署到已有实例
+ *   npx tsx scripts/setup-org-stacksets.ts support yanhuang31   # 指定组织
+ *   npx tsx scripts/setup-org-stacksets.ts support --dry-run    # 只看当前状态，不改
+ *   npx tsx scripts/setup-org-stacksets.ts support upup --refresh-template # 显式更新模板并部署到已有实例
  *
  * 行为（幂等，可重复执行）:
  *   StackSet 不存在        → 按整 Root OU + AutoDeployment 创建，然后部署
@@ -31,7 +30,7 @@
 import fs from 'fs';
 import path from 'path';
 import { STSClient, AssumeRoleCommand } from '@aws-sdk/client-sts';
-import { OrganizationsClient, ListAccountsCommand, ListRootsCommand } from '@aws-sdk/client-organizations';
+import { OrganizationsClient, ListRootsCommand } from '@aws-sdk/client-organizations';
 import {
   CloudFormationClient, CreateStackSetCommand, UpdateStackSetCommand, DescribeStackSetCommand,
   CreateStackInstancesCommand, UpdateStackInstancesCommand, ListStackInstancesCommand, DescribeStackSetOperationCommand,
@@ -80,52 +79,6 @@ function readRestrictedAccountIds(payerName: string): string[] {
       .map((r: any) => String(r.account_id));
   } catch (error: any) {
     throw new Error(`无法读取受限账户数据，拒绝部署: ${dbPath} (${error?.message || 'unknown error'})`);
-  }
-}
-
-/** 读取仅排除管理员角色的账户；support-quota 仍由原 StackSet/角色保留。 */
-function readAdminRoleExcludedAccountIds(payerName: string): string[] {
-  const records = CONFIG.adminRoleExcludedAccounts;
-  if (records == null) return [];
-  if (!Array.isArray(records)) {
-    throw new Error('config.adminRoleExcludedAccounts 必须是数组');
-  }
-  const knownPayers = new Set(PAYERS.map(payer => payer.name));
-  records.forEach((record: any, index: number) => {
-    const accountId = String(record?.accountId || '');
-    const recordPayer = String(record?.payer || '');
-    if (!/^\d{12}$/.test(accountId)) {
-      throw new Error(`adminRoleExcludedAccounts[${index}].accountId 无效`);
-    }
-    if (!knownPayers.has(recordPayer)) {
-      throw new Error(`adminRoleExcludedAccounts[${index}].payer 未配置`);
-    }
-  });
-  return [...new Set(records
-    .filter((record: any) => record.payer === payerName)
-    .map((record: any) => String(record.accountId)))];
-}
-
-/** 校验 admin-only 排除账户确实属于当前 payer，防止配置写错后真实组织继续补建 Admin。 */
-async function validateAdminRoleExcludedAccounts(
-  org: OrganizationsClient,
-  payerName: string,
-  accountIds: string[],
-): Promise<void> {
-  if (accountIds.length === 0) return;
-  const organizationAccountIds = new Set<string>();
-  let nextToken: string | undefined;
-  do {
-    const response = await org.send(new ListAccountsCommand({ NextToken: nextToken }));
-    for (const account of response.Accounts || []) {
-      if (account.Id) organizationAccountIds.add(account.Id);
-    }
-    nextToken = response.NextToken;
-  } while (nextToken);
-
-  const mismatched = accountIds.filter(accountId => !organizationAccountIds.has(accountId));
-  if (mismatched.length > 0) {
-    throw new Error(`${payerName}: adminRoleExcludedAccounts 账户不属于该组织: ${mismatched.join(', ')}`);
   }
 }
 
@@ -187,34 +140,6 @@ Resources:
           Value: AWSTool
 `,
   },
-  admin: {
-    stackSetName: 'admin-console-role-orgwide',
-    description: 'AWSTool admin-console role (one-hop admin, org-wide auto deploy)',
-    body: `AWSTemplateFormatVersion: "2010-09-09"
-Description: Deploy admin-console role for AWSTool (full admin, one-hop federated console)
-Resources:
-  AdminConsoleRole:
-    Type: AWS::IAM::Role
-    Properties:
-      RoleName: ${CONFIG.adminRoleName || 'admin-console'}
-      MaxSessionDuration: 43200
-      AssumeRolePolicyDocument:
-        Version: '2012-10-17'
-        Statement:
-          - Effect: Allow
-            Principal:
-              AWS:
-                - ${TRUST_PRINCIPAL}
-            Action: sts:AssumeRole
-      ManagedPolicyArns:
-        - arn:aws:iam::aws:policy/AdministratorAccess
-      Tags:
-        - Key: Purpose
-          Value: AdminConsole
-        - Key: ManagedBy
-          Value: AWSTool
-`,
-  },
 };
 
 async function waitOp(cf: CloudFormationClient, name: string, opId: string, maxMin = 30) {
@@ -270,23 +195,19 @@ async function handle(
     }
 
     // 在任何部署操作前读取权威排除名单；读取失败必须 fail-closed。
-    // restricted 同时排除 support/admin；adminRoleExcludedAccounts 只排除 admin。
-    const restricted = readRestrictedAccountIds(payer.name);
-    const adminOnlyExcluded = kind === 'admin' ? readAdminRoleExcludedAccountIds(payer.name) : [];
-    await validateAdminRoleExcludedAccounts(org, payer.name, adminOnlyExcluded);
-    const excluded = [...new Set([...restricted, ...adminOnlyExcluded])];
+    const excluded = [...new Set(readRestrictedAccountIds(payer.name))];
 
     if (dryRun) {
       const c = existing ? await countInstances(cf, tpl.stackSetName) : null;
       const maxSession = existing?.TemplateBody?.match(/MaxSessionDuration:\s*(\d+)/)?.[1];
       log(`${payer.name}: ${existing
         ? `存在 auto=${!!existing.AutoDeployment?.Enabled}${maxSession ? ` maxSession=${maxSession}s` : ''} 实例 ${c!.total}(ok${c!.ok}/susp${c!.susp}/fail${c!.fail})`
-        : '不存在'} | 排除 ${excluded.length}（受限 ${restricted.length}/仅Admin ${adminOnlyExcluded.length}）`);
+        : '不存在'} | 排除受限账户 ${excluded.length}`);
       return true;
     }
 
     if (excluded.length) {
-      log(`${payer.name}: ${kind} 排除 ${excluded.length} 个账户（受限 ${restricted.length}/仅Admin ${adminOnlyExcluded.length}）→ ${excluded.join(', ')}`);
+      log(`${payer.name}: ${kind} 排除受限账户 ${excluded.length} 个 → ${excluded.join(', ')}`);
     }
 
     let action = 'ALREADY-AUTO';
@@ -333,7 +254,7 @@ async function handle(
       action = `AUTO-ENABLED(${await waitOp(cf, tpl.stackSetName, up.OperationId!)})`;
     }
 
-    // 按角色种类应用排除：restricted 排除两类角色，admin-only 只影响管理员 StackSet。
+    // 受限账户（敏感权限客户）已就地收窄 support-quota，组织级模板绝不能把宽权限盖回去。
     const deploymentTargets = excluded.length
       ? { OrganizationalUnitIds: [rootId], Accounts: excluded, AccountFilterType: 'DIFFERENCE' as const }
       : { OrganizationalUnitIds: [rootId] };
@@ -390,8 +311,12 @@ async function main() {
   const refreshTemplate = args.includes('--refresh-template');
   const only = args.find(a => a !== kind && !a.startsWith('--'));
 
+  if (kind === 'admin') {
+    console.error('admin-console 已改为按需临时开通（server/temp-admin.ts），不再提供组织级部署');
+    process.exit(1);
+  }
   if (!TEMPLATES[kind]) {
-    console.error('用法: npx tsx scripts/setup-org-stacksets.ts <support|admin> [payerName] [--dry-run] [--refresh-template]');
+    console.error('用法: npx tsx scripts/setup-org-stacksets.ts support [payerName] [--dry-run] [--refresh-template]');
     process.exit(1);
   }
   if (dryRun && refreshTemplate) {
