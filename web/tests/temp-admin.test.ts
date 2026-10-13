@@ -30,6 +30,8 @@ type Opts = {
   deleteFails?: boolean;
   verifyNetworkError?: boolean;
   restricted?: boolean;
+  residualAdmin?: boolean;
+  restrictedAfterProbe?: boolean;
 };
 
 async function fixture(t: TestContext, opts: Opts = {}) {
@@ -48,7 +50,9 @@ async function fixture(t: TestContext, opts: Opts = {}) {
     adminRole: false,
     lastOpStatus: 'SUCCEEDED',
     verifyNetworkError: !!opts.verifyNetworkError,
+    restricted: !!opts.restricted,
   };
+  if (opts.residualAdmin) state.adminRole = true;
 
   temp.__test__.resetLocks();
   temp.__test__.setAdminExcluded([]);
@@ -63,7 +67,7 @@ async function fixture(t: TestContext, opts: Opts = {}) {
     { Id: target, Name: 'fixture', Status: 'ACTIVE', JoinedMethod: 'INVITED', _payer: payer.name },
     { Id: payerAccountId, Name: 'payer', Status: 'ACTIVE', _payer: payer.name, _isPayer: true },
   ], cachedAt: '' }));
-  t.mock.method(db, 'getRestrictedAccounts', () => (opts.restricted ? [{ account_id: target, payer: payer.name, state: 'applied' }] : []));
+  t.mock.method(db, 'getRestrictedAccounts', () => (state.restricted ? [{ account_id: target, payer: payer.name, state: 'applied' }] : []));
   t.mock.method(db, 'addAuditLog', (_u: any, action: string) => { audits.push(action); });
   t.mock.method(globalThis, 'setTimeout', ((cb: (...a: any[]) => void, _d: number, ...a: any[]) => {
     queueMicrotask(() => cb(...a)); return { unref() {} };
@@ -73,6 +77,8 @@ async function fixture(t: TestContext, opts: Opts = {}) {
   t.mock.method(STSClient.prototype, 'send', (async (command: any) => {
     const role = String(command.input.RoleArn || '').split('/').pop();
     if (role === 'OrganizationAccountAccessRole') {
+      // 模拟在 OAAR 探测窗口内账户被另一位管理员标记为受限
+      if (opts.restrictedAfterProbe) state.restricted = true;
       if (opts.oaar === 'yes') return creds();
       if (opts.oaar === 'unknown') throw Object.assign(new Error('socket hang up'), { name: 'TimeoutError' });
       throw denied();
@@ -125,17 +131,80 @@ const rejects = async (p: Promise<unknown>, status: number, re: RegExp) =>
   assert.rejects(p, (e: any) => { assert.equal(e.statusCode, status, e.message); assert.match(e.message, re); return true; });
 
 // ---- 1. OAAR 可用 ----
-test('能经 OAAR 进入的账户拒绝开通，不写记录也不碰 CloudFormation', async t => {
+// 占位记录先于任何 AWS 探测写入（消除并发 / 受限标记的竞态），探测失败后落为 failed
+test('能经 OAAR 进入的账户拒绝开通：占位记录落为 failed，不碰 CloudFormation', async t => {
   const f = await fixture(t, { oaar: 'yes' });
   await rejects(f.temp.openTempAdmin({ accountId: target, hours: 2, requestedBy: f.user }), 409, /OrganizationAccountAccessRole/);
-  assert.equal(f.grants.length, 0);
+  assert.equal(f.grants.length, 1);
+  assert.equal(f.grants[0].status, 'failed');
   assert.deepEqual(cfnNames(f), []);
+  assert.equal(f.temp.listOpenGrants().length, 0);
 });
 
 test('OAAR 状态探测出现网络错误时拒绝并提示稍后重试', async t => {
   const f = await fixture(t, { oaar: 'unknown' });
   await rejects(f.temp.openTempAdmin({ accountId: target, hours: 2, requestedBy: f.user }), 503, /OAAR 状态/);
-  assert.equal(f.grants.length, 0);
+  assert.equal(f.grants[0].status, 'failed');
+});
+
+test('账户里已有常驻 admin-console：拒绝开通，避免 StackSet 必然失败后卡在回收', async t => {
+  const f = await fixture(t, { residualAdmin: true });
+  await rejects(f.temp.openTempAdmin({ accountId: target, hours: 2, requestedBy: f.user }), 409, /常驻 admin-console/);
+  assert.equal(f.grants[0].status, 'failed');
+  assert.ok(!cfnNames(f).includes('CreateStackInstancesCommand'));
+});
+
+test('并发开通同一账户：只有一个能成功，另一个立即被占位记录挡住', async t => {
+  const f = await fixture(t);
+  const results = await Promise.allSettled([
+    f.temp.openTempAdmin({ accountId: target, hours: 1, requestedBy: f.user }),
+    f.temp.openTempAdmin({ accountId: target, hours: 1, requestedBy: f.user }),
+  ]);
+  assert.equal(results.filter(r => r.status === 'fulfilled').length, 1);
+  const rejected = results.find(r => r.status === 'rejected') as PromiseRejectedResult;
+  assert.match(rejected.reason.message, /已有临时 Admin/);
+  assert.equal(f.cfn.filter((c: any) => c.name === 'CreateStackInstancesCommand').length, 1);
+});
+
+test('探测窗口内账户被标记受限：锁内复查拦下，不部署 AdministratorAccess', async t => {
+  const f = await fixture(t, { restrictedAfterProbe: true });
+  await rejects(f.temp.openTempAdmin({ accountId: target, hours: 1, requestedBy: f.user }), 503, /敏感权限客户账户/);
+  assert.ok(!cfnNames(f).includes('CreateStackInstancesCommand'));
+  assert.equal(f.grants[0].status, 'failed');
+  assert.equal(f.state.adminRole, false);
+});
+
+test('信任策略带截止时间：按账户写入 ExpiresAt，开通到期不晚于信任截止', async t => {
+  const f = await fixture(t);
+  const g = await f.temp.openTempAdmin({ accountId: target, hours: 2, requestedBy: f.user });
+  assert.match(f.temp.__test__.TEMPLATE, /DateLessThan:\s*\n\s*aws:CurrentTime: !Ref ExpiresAt/);
+  assert.match(f.temp.__test__.TEMPLATE, /Default: "1970-01-01T00:00:00Z"/);
+  const inst = f.cfn.find((c: any) => c.name === 'CreateStackInstancesCommand')!.input;
+  assert.deepEqual(inst.ParameterOverrides, [{ ParameterKey: 'ExpiresAt', ParameterValue: g.trustExpiresAt }]);
+  assert.ok(Date.parse(g.expiresAt!) <= Date.parse(g.trustExpiresAt!));
+  assert.ok(Date.parse(g.trustExpiresAt!) - Date.parse(g.createdAt) <= 2 * 3600_000 + 15 * 60_000);
+});
+
+test('sweeper 快照过期：记录已被手动关闭并重新开通时，不得删除新开通的实例', async t => {
+  const f = await fixture(t);
+  const g1 = await f.temp.openTempAdmin({ accountId: target, hours: 1, requestedBy: f.user });
+  const stale = f.grants.map((g: any) => ({ ...g }));          // sweeper 一轮开头看到的快照：g1 active
+  await f.temp.revokeTempAdmin(target, 'admin');                 // 期间管理员提前关闭 g1
+  const g2 = await f.temp.openTempAdmin({ accountId: target, hours: 3, requestedBy: f.user }); // 又重新开通
+  // 让 sweeper 的第一次读取拿到旧快照，之后的复读拿到最新状态
+  const { db } = await import('../server/db');
+  let first = true;
+  t.mock.method(db, 'listTempAdminGrants', () => {
+    if (first) { first = false; return stale.map((g: any) => ({ ...g })); }
+    return f.grants.map((g: any) => ({ ...g }));
+  });
+  const deletesBefore = f.cfn.filter((c: any) => c.name === 'DeleteStackInstancesCommand').length;
+  const r = await f.temp.sweepTempAdminGrants(Date.parse(g1.expiresAt!) + 1000);
+  assert.deepEqual(r, { revoked: 0, failed: 0 });
+  assert.equal(f.cfn.filter((c: any) => c.name === 'DeleteStackInstancesCommand').length, deletesBefore);
+  assert.equal(f.grants.find((g: any) => g.id === g2.id).status, 'active');
+  assert.equal(f.grants.find((g: any) => g.id === g1.id).revokedBy, 'admin');
+  assert.equal(f.state.adminRole, true);
 });
 
 // ---- 2. 其它前置条件 ----

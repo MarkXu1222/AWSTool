@@ -53,9 +53,19 @@ const POLL_MS = 5_000;
 // IAM 最终一致：与受限账户复验同一经验值（36 × 5 秒，约 3 分钟）
 const VERIFY_MAX_ATTEMPTS = 36;
 const ALERT_AFTER_ATTEMPTS = 3;
+// 信任截止 = 发起开通时间 + 时长 + 部署余量；开通到期时间不会晚于它
+const TRUST_PROVISION_BUFFER_MS = 15 * 60_000;
 
+// 信任策略带 aws:CurrentTime 截止条件，截止时间按账户实例用 ParameterOverrides 写入：
+// 即使到期回收失败或服务长时间停机，角色过了截止时间也无法再被 AssumeRole。
+// 默认值是 1970 年 —— 漏传参数时角色从一开始就不可用（fail-closed）。
 const TEMP_ADMIN_TEMPLATE = `AWSTemplateFormatVersion: "2010-09-09"
 Description: AWSTool temporary admin-console role (per-account, time-boxed, deleted on expiry)
+Parameters:
+  ExpiresAt:
+    Type: String
+    Default: "1970-01-01T00:00:00Z"
+    Description: UTC ISO8601 deadline after which the role can no longer be assumed
 Resources:
   AdminConsoleRole:
     Type: AWS::IAM::Role
@@ -70,6 +80,9 @@ Resources:
               AWS:
                 - ${TRUST_PRINCIPAL}
             Action: sts:AssumeRole
+            Condition:
+              DateLessThan:
+                aws:CurrentTime: !Ref ExpiresAt
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/AdministratorAccess
       Tags:
@@ -213,6 +226,23 @@ function instanceTargets(rootId: string, accountId: string) {
 
 // ===== 开通 =====
 
+/** 平台身份能否直接 AssumeRole admin-console：yes = 账户里已有（常驻残留或手工创建）的同名角色 */
+async function probeAdminConsole(accountId: string): Promise<'yes' | 'no' | 'unknown'> {
+  const sts = new STSClient({ region: REGION, credentials: BASE_CREDENTIALS });
+  try {
+    await sts.send(new AssumeRoleCommand({
+      RoleArn: `arn:aws:iam::${accountId}:role/${ADMIN_ROLE}`,
+      RoleSessionName: 'awstool-admin-residual-probe', DurationSeconds: 900,
+    }));
+    return 'yes';
+  } catch (e) {
+    return isDenied(e) ? 'no' : 'unknown';
+  } finally { sts.destroy(); }
+}
+
+const isRestrictedNow = (accountId: string) =>
+  db.getRestrictedAccounts().some((r: any) => r.account_id === accountId);
+
 export async function openTempAdmin(input: {
   accountId: string;
   hours: number;
@@ -226,26 +256,24 @@ export async function openTempAdmin(input: {
   }
   if (!/^\d{12}$/.test(accountId)) throw new TempAdminError('无效的账户 ID', 400);
 
+  // ⚠️ 以下校验到写入占位记录之间不能有 await：受限标记与并发开通都要看到这条 provisioning 记录，
+  // 否则两个请求可能同时通过「无在开记录」检查，或受限标记在探测窗口内完成而看不到本次开通。
   const acct = (db.getAccountsCache().accounts || []).find((a: any) => a.Id === accountId);
   if (!acct?._payer) throw new TempAdminError('账户不在缓存中或无组织归属，请先刷新账户列表', 404);
   const isPayerAccount = acct._isPayer
     || PAYERS.some(p => /arn:aws:iam::(\d+):role\//.exec(p.roleArn)?.[1] === accountId);
   if (isPayerAccount) throw new TempAdminError('payer 管理账户经 role/tool 管理，无需临时开通', 409);
   if (adminExcluded.has(accountId)) throw new TempAdminError('该账户已配置为仅保留 support-quota，不提供 Admin', 409);
-  const restricted = db.getRestrictedAccounts().some((r: any) => r.account_id === accountId);
-  if (restricted && !input.bypassRestricted) throw new TempAdminError('该账户为敏感权限客户账户，不提供临时 Admin', 409);
+  if (isRestrictedNow(accountId) && !input.bypassRestricted) {
+    throw new TempAdminError('该账户为敏感权限客户账户，不提供临时 Admin', 409);
+  }
   const existing = db.listTempAdminGrants().find(g => g.accountId === accountId && isOpen(g));
   if (existing) {
     throw new TempAdminError(`该账户已有临时 Admin（${existing.status}${existing.expiresAt ? `，到期 ${existing.expiresAt}` : ''}）`, 409);
   }
   const payer: string = acct._payer;
-
-  let payerCreds: any;
-  try { payerCreds = await assumePayer(payer); }
-  catch (e) { throw new TempAdminError(`无法以 payer ${payer} 管理身份操作：${errMsg(e)}`, 503); }
-  const oaar = await probeOaar(payerCreds, accountId);
-  if (oaar === 'yes') throw new TempAdminError('该账户可经 OrganizationAccountAccessRole 获得 Admin，无需临时开通', 409);
-  if (oaar === 'unknown') throw new TempAdminError('暂时无法确认 OAAR 状态，请稍后重试', 503);
+  const requestedAt = Date.now();
+  const trustExpiresAt = new Date(requestedAt + hours * 3600_000 + TRUST_PROVISION_BUFFER_MS).toISOString();
 
   const grant: TempAdminGrant = {
     id: randomUUID(),
@@ -257,14 +285,41 @@ export async function openTempAdmin(input: {
     status: 'provisioning',
     requestedBy: input.requestedBy.username,
     requestedByUserId: input.requestedBy.id,
-    createdAt: new Date().toISOString(),
+    createdAt: new Date(requestedAt).toISOString(),
+    trustExpiresAt,
     instanceRequested: false,
     revokeAttempts: 0,
   };
   db.insertTempAdminGrant(grant);
 
+  // 未请求实例前的失败一律落 failed（没有需要回收的东西）
+  const fail = (message: string, statusCode: 409 | 503): never => {
+    db.updateTempAdminGrant(grant.id, { status: 'failed', lastError: message });
+    throw new TempAdminError(message, statusCode);
+  };
+
+  let payerCreds: any;
+  try { payerCreds = await assumePayer(payer); }
+  catch (e) { fail(`无法以 payer ${payer} 管理身份操作：${errMsg(e)}`, 503); }
+  const oaar = await probeOaar(payerCreds, accountId);
+  if (oaar === 'yes') fail('该账户可经 OrganizationAccountAccessRole 获得 Admin，无需临时开通', 409);
+  if (oaar === 'unknown') fail('暂时无法确认 OAAR 状态，请稍后重试', 503);
+  // 账户里已有同名角色时 StackSet 必然 CREATE_FAILED，且回收后复验永远过不了 —— 提前拒绝
+  const residual = await probeAdminConsole(accountId);
+  if (residual === 'yes') {
+    fail(`该账户已存在常驻 ${ADMIN_ROLE}（未经临时开通），请先运行 scripts/remove-orgwide-admin-console.ts 或人工删除`, 409);
+  }
+  if (residual === 'unknown') fail(`暂时无法确认 ${ADMIN_ROLE} 状态，请稍后重试`, 503);
+
   try {
     await withPayerLock(payer, async () => {
+      // 锁内复查：排队期间账户可能被标记受限，或（异常情况下）出现另一条在开记录
+      if (!input.bypassRestricted && isRestrictedNow(accountId)) {
+        throw new Error('账户在开通过程中被标记为敏感权限客户账户');
+      }
+      if (db.listTempAdminGrants().some(g => g.accountId === accountId && g.id !== grant.id && isOpen(g))) {
+        throw new Error('该账户出现了另一条未结束的临时 Admin');
+      }
       const cf = new CloudFormationClient({ region: REGION, credentials: payerCreds });
       try {
         let autoDeploy = false;
@@ -295,6 +350,7 @@ export async function openTempAdmin(input: {
           StackSetName: TEMP_ADMIN_STACKSET,
           DeploymentTargets: instanceTargets(rootId, accountId),
           Regions: [REGION],
+          ParameterOverrides: [{ ParameterKey: 'ExpiresAt', ParameterValue: trustExpiresAt }],
           OperationPreferences: { FailureTolerancePercentage: 0, MaxConcurrentPercentage: 100 },
           CallAs: 'SELF',
         }));
@@ -310,11 +366,18 @@ export async function openTempAdmin(input: {
     throw new TempAdminError(`临时开通失败：${errMsg(e)}`, 503);
   }
 
+  // 复验期间被标记受限：受限账户绝不能挂着 AdministratorAccess，立即回收
+  if (!input.bypassRestricted && isRestrictedNow(accountId)) {
+    await runRevoke(grant, 'system:restricted-mark').catch(() => undefined);
+    throw new TempAdminError('账户在开通过程中被标记为敏感权限客户账户，已回收本次开通', 409);
+  }
+
   const activatedAt = Date.now();
+  const expiresAt = Math.min(activatedAt + hours * 3600_000, Date.parse(trustExpiresAt));
   return db.updateTempAdminGrant(grant.id, {
     status: 'active',
     activatedAt: new Date(activatedAt).toISOString(),
-    expiresAt: new Date(activatedAt + hours * 3600_000).toISOString(),
+    expiresAt: new Date(expiresAt).toISOString(),
   });
 }
 
@@ -324,57 +387,73 @@ function backoffMs(attempts: number): number {
   return Math.min(2 ** (attempts - 1) * 60_000, 30 * 60_000);
 }
 
+// 正在回收的记录 id：手动关闭、sweeper、受限标记共用，同一条记录同时只回收一次
+const revokingIds = new Set<string>();
+
 async function runRevoke(grant: TempAdminGrant, by: string, now = Date.now()): Promise<TempAdminGrant> {
-  db.updateTempAdminGrant(grant.id, {
-    status: 'revoking',
-    revokeRequestedAt: grant.revokeRequestedAt || new Date(now).toISOString(),
-    revokedBy: by,
-  });
+  if (revokingIds.has(grant.id)) throw new TempAdminError('该临时 Admin 正在回收，请稍后刷新', 409);
+  // 调用方可能拿的是旧快照（sweeper 一轮开头取的列表）：以存储中的最新状态为准，
+  // 已结束的记录绝不再动 —— 否则会按账户删掉之后新开通的实例。
+  const current = db.listTempAdminGrants().find(g => g.id === grant.id);
+  if (!current || !isOpen(current)) return current || grant;
+  revokingIds.add(grant.id);
   try {
-    await withPayerLock(grant.payer, async () => {
-      const creds = await assumePayer(grant.payer);
-      const cf = new CloudFormationClient({ region: REGION, credentials: creds });
-      try {
-        let hasInstance = false;
+    db.updateTempAdminGrant(grant.id, {
+      status: 'revoking',
+      revokeRequestedAt: current.revokeRequestedAt || new Date(now).toISOString(),
+      revokedBy: by,
+    });
+    try {
+      await withPayerLock(current.payer, async () => {
+        const creds = await assumePayer(current.payer);
+        const cf = new CloudFormationClient({ region: REGION, credentials: creds });
         try {
-          const list = await cf.send(new ListStackInstancesCommand({
-            StackSetName: TEMP_ADMIN_STACKSET, StackInstanceAccount: grant.accountId, CallAs: 'SELF',
-          }));
-          hasInstance = (list.Summaries || []).some(s => s.Account === grant.accountId);
-        } catch (e) { if (!isStackSetMissing(e)) throw e; }
-        if (hasInstance) {
-          const op = await cf.send(new DeleteStackInstancesCommand({
-            StackSetName: TEMP_ADMIN_STACKSET,
-            DeploymentTargets: instanceTargets(await rootOuId(creds), grant.accountId),
-            Regions: [REGION],
-            RetainStacks: false,
-            OperationPreferences: { FailureTolerancePercentage: 0, MaxConcurrentPercentage: 100 },
-            CallAs: 'SELF',
-          }));
-          await waitOperation(cf, op.OperationId);
-        }
-      } finally { cf.destroy(); }
-    });
-    await waitAssumable(grant.accountId, false);
-  } catch (e) {
-    const attempts = (db.listTempAdminGrants().find(g => g.id === grant.id)?.revokeAttempts || 0) + 1;
-    const updated = db.updateTempAdminGrant(grant.id, {
-      revokeAttempts: attempts,
-      nextRevokeAt: new Date(now + backoffMs(attempts)).toISOString(),
-      lastError: errMsg(e),
-    });
-    if (attempts >= ALERT_AFTER_ATTEMPTS && !updated.alertedAt) {
-      db.updateTempAdminGrant(grant.id, { alertedAt: new Date(now).toISOString() });
-      notifier('临时 Admin 回收失败',
-        `账户 ${grant.accountId}（${grant.accountName || '-'}，payer ${grant.payer}）的临时 admin-console 已连续 ${attempts} 次未能删除。`
-        + `\n到期时间：${grant.expiresAt || '-'}\n最近错误：${errMsg(e)}\n平台会继续重试，请人工确认该账户的 ${TEMP_ADMIN_STACKSET} 实例。`)
-        .catch(err => console.error('[TempAdmin] 告警发送失败:', errMsg(err)));
+          let hasInstance = false;
+          try {
+            const list = await cf.send(new ListStackInstancesCommand({
+              StackSetName: TEMP_ADMIN_STACKSET, StackInstanceAccount: current.accountId, CallAs: 'SELF',
+            }));
+            hasInstance = (list.Summaries || []).some(s => s.Account === current.accountId);
+          } catch (e) { if (!isStackSetMissing(e)) throw e; }
+          if (hasInstance) {
+            const op = await cf.send(new DeleteStackInstancesCommand({
+              StackSetName: TEMP_ADMIN_STACKSET,
+              DeploymentTargets: instanceTargets(await rootOuId(creds), current.accountId),
+              Regions: [REGION],
+              RetainStacks: false,
+              OperationPreferences: { FailureTolerancePercentage: 0, MaxConcurrentPercentage: 100 },
+              CallAs: 'SELF',
+            }));
+            await waitOperation(cf, op.OperationId);
+          }
+        } finally { cf.destroy(); }
+      });
+      await waitAssumable(current.accountId, false);
+    } catch (e) {
+      // 单次回收可能耗时数分钟：退避从失败时刻起算，不能被尝试本身吃掉
+      const failedAt = Math.max(now, Date.now());
+      const attempts = (db.listTempAdminGrants().find(g => g.id === grant.id)?.revokeAttempts || 0) + 1;
+      const updated = db.updateTempAdminGrant(grant.id, {
+        revokeAttempts: attempts,
+        nextRevokeAt: new Date(failedAt + backoffMs(attempts)).toISOString(),
+        lastError: errMsg(e),
+      });
+      if (attempts >= ALERT_AFTER_ATTEMPTS && !updated.alertedAt) {
+        db.updateTempAdminGrant(grant.id, { alertedAt: new Date(failedAt).toISOString() });
+        notifier('临时 Admin 回收失败',
+          `账户 ${current.accountId}（${current.accountName || '-'}，payer ${current.payer}）的临时 admin-console 已连续 ${attempts} 次未能删除。`
+          + `\n到期时间：${current.expiresAt || '-'}；信任截止：${current.trustExpiresAt || '-'}（截止后角色已无法被 AssumeRole）`
+          + `\n最近错误：${errMsg(e)}\n平台会继续重试，请人工确认该账户的 ${TEMP_ADMIN_STACKSET} 实例。`)
+          .catch(err => console.error('[TempAdmin] 告警发送失败:', errMsg(err)));
+      }
+      throw e;
     }
-    throw e;
+    return db.updateTempAdminGrant(grant.id, {
+      status: 'revoked', revokedAt: new Date().toISOString(), nextRevokeAt: undefined, lastError: undefined,
+    });
+  } finally {
+    revokingIds.delete(grant.id);
   }
-  return db.updateTempAdminGrant(grant.id, {
-    status: 'revoked', revokedAt: new Date().toISOString(), nextRevokeAt: undefined, lastError: undefined,
-  });
 }
 
 export async function revokeTempAdmin(accountId: string, by: string): Promise<TempAdminGrant | null> {
@@ -384,29 +463,36 @@ export async function revokeTempAdmin(accountId: string, by: string): Promise<Te
   try {
     return await runRevoke(grant, by);
   } catch (e) {
+    if (e instanceof TempAdminError) throw e;
     throw new TempAdminError(`临时 Admin 回收失败：${errMsg(e)}（平台会继续自动重试）`, 503);
   }
 }
 
 let sweeping = false;
 
-/** 调度器每 60 秒调用：回收到期的 active，重试到点的 revoking */
+/** 调度器每 60 秒调用：先回收到期的 active，再重试到点的 revoking（卡住的记录不能拖延正常到期回收） */
 export async function sweepTempAdminGrants(now = Date.now()): Promise<{ revoked: number; failed: number }> {
   if (sweeping) return { revoked: 0, failed: 0 };
   sweeping = true;
   let revoked = 0, failed = 0;
   try {
-    const due = db.listTempAdminGrants().filter(g =>
-      (g.status === 'active' && !!g.expiresAt && Date.parse(g.expiresAt) <= now)
-      || (g.status === 'revoking' && (!g.nextRevokeAt || Date.parse(g.nextRevokeAt) <= now)));
-    for (const g of due) {
-      const by = g.status === 'active' ? 'system:expiry' : (g.revokedBy || 'system:expiry');
+    const all = db.listTempAdminGrants().filter(g => !revokingIds.has(g.id));
+    const expired = all.filter(g => g.status === 'active' && !!g.expiresAt && Date.parse(g.expiresAt) <= now);
+    const retry = all
+      .filter(g => g.status === 'revoking' && (!g.nextRevokeAt || Date.parse(g.nextRevokeAt) <= now))
+      .sort((a, b) => (a.nextRevokeAt || '').localeCompare(b.nextRevokeAt || ''));
+    for (const g of [...expired, ...retry]) {
+      // 快照取自一轮开头；处理前同步复读，期间已被手动关闭等结束的记录直接跳过
+      const current = db.listTempAdminGrants().find(x => x.id === g.id);
+      if (!current || !isOpen(current) || revokingIds.has(g.id)) continue;
+      const by = current.status === 'active' ? 'system:expiry' : (current.revokedBy || 'system:expiry');
       try {
-        await runRevoke(g, by, now);
+        await runRevoke(current, by, now);
         revoked++;
         db.addAuditLog(null, 'TEMP_ADMIN_REVOKE',
           `AWS 账户 ${g.accountId} · 临时 Admin 已回收（${by}，开通人 ${g.requestedBy}）`, 'system', undefined);
       } catch (e) {
+        if (e instanceof TempAdminError && e.statusCode === 409) continue; // 正在被手动回收
         failed++;
         db.addAuditLog(null, 'TEMP_ADMIN_REVOKE_FAILED',
           `AWS 账户 ${g.accountId} · 临时 Admin 回收失败：${errMsg(e)}`, 'system', undefined);
@@ -430,7 +516,7 @@ export function recoverTempAdminGrantsOnStartup(): number {
 export const __test__ = {
   TEMPLATE: TEMP_ADMIN_TEMPLATE,
   backoffMs,
-  resetLocks() { payerLocks.clear(); sweeping = false; },
+  resetLocks() { payerLocks.clear(); revokingIds.clear(); sweeping = false; },
   setNotifier(fn: (title: string, content: string) => Promise<unknown>) { notifier = fn; },
   setAdminExcluded(ids: string[]) { adminExcluded = new Set(ids); },
 };

@@ -172,6 +172,29 @@ const AccountsPage: React.FC = () => {
     return `${Math.floor(minutes / 60)}h${minutes % 60}m`;
   };
 
+  // 临时 Admin 开通 / 关闭入口：独立于控制台菜单（菜单只在 consoleAdminPayers 组织出现），仅 admin 可见。
+  // payer、APN、仅保留 support-quota、敏感权限客户账户不提供；能经 OAAR 进入的账户由服务端拒绝。
+  const TempAdminAction: React.FC<{ account: any }> = ({ account }) => {
+    if (!isAdmin || !account || account._isPayer || account._isApn || account._adminRoleExcluded) return null;
+    if (restricted.some((r: any) => r.account_id === account.Id)) return null;
+    const g = tempGrants[account.Id];
+    if (g?.status === 'provisioning') return null;
+    if (g) {
+      return (
+        <Tooltip title="提前关闭临时 Admin">
+          <Button size="small" danger icon={<CloseCircleOutlined />} aria-label="提前关闭临时 Admin"
+            style={{ flexShrink: 0 }} onClick={() => revokeTemp(account.Id)} />
+        </Tooltip>
+      );
+    }
+    return (
+      <Tooltip title="临时开通 Admin（仅没有 OrganizationAccountAccessRole 的账户）">
+        <Button size="small" icon={<FieldTimeOutlined />} style={{ flexShrink: 0 }}
+          onClick={() => openTempModal(account.Id)}>临时 Admin</Button>
+      </Tooltip>
+    );
+  };
+
   // 临时 Admin 状态标记：开通中 / 剩余时间 / 回收中
   const TempAdminTag: React.FC<{ accountId: string }> = ({ accountId }) => {
     const g = tempGrants[accountId];
@@ -335,25 +358,14 @@ const AccountsPage: React.FC = () => {
     finally { setConsoleLoading(false); }
   };
 
-  // 控制台下拉菜单：只读(support-quota) 对所有人开放；Admin 仅对有根用户权限者显示；
-  // 临时开通 / 提前关闭 Admin 仅 admin 可见（服务端对能经 OAAR 进入的账户会拒绝开通）
-  const consoleMenu = (accountId: string) => {
-    const tempItems = !isAdmin ? [] : tempGrants[accountId]
-      ? [{ key: 'temp-admin-revoke', icon: <CloseCircleOutlined />, label: '提前关闭临时 Admin', danger: true }]
-      : [{ key: 'temp-admin', icon: <FieldTimeOutlined />, label: '临时开通 Admin（无 OAAR 账户）' }];
-    return {
-      items: [
-        { key: 'support', icon: <SafetyOutlined />, label: '只读控制台（support-quota）' },
-        ...(canRoot ? [{ key: 'admin', icon: <LoginOutlined />, label: 'Admin 控制台（完整权限）', danger: true }] : []),
-        ...(tempItems.length ? [{ type: 'divider' as const }, ...tempItems] : []),
-      ],
-      onClick: ({ key }: { key: string }) => {
-        if (key === 'temp-admin') return openTempModal(accountId);
-        if (key === 'temp-admin-revoke') return revokeTemp(accountId);
-        openConsole(accountId, key as 'support' | 'admin');
-      },
-    };
-  };
+  // 控制台下拉菜单：只读(support-quota) 对所有人开放；Admin 仅对有根用户权限者显示
+  const consoleMenu = (accountId: string) => ({
+    items: [
+      { key: 'support', icon: <SafetyOutlined />, label: '只读控制台（support-quota）' },
+      ...(canRoot ? [{ key: 'admin', icon: <LoginOutlined />, label: 'Admin 控制台（完整权限）', danger: true }] : []),
+    ],
+    onClick: ({ key }: { key: string }) => openConsole(accountId, key as 'support' | 'admin'),
+  });
 
   // payer 管理账户的菜单：它上面没有 support-quota（StackSet 不覆盖管理账户），
   // 入口统一走 role/tool。有根用户权限者默认进 Admin；
@@ -559,7 +571,8 @@ const AccountsPage: React.FC = () => {
       ) : <span style={{ color: '#8a94a6' }}>无数据</span> },
       { key: 'root', label: '根用户', children: (
         <RootCredentialsPanel accountId={acct.Id} rootCredentials={detail?.rootCredentials} canRoot={canRoot} rootResetAccess={rootResetAccess} isAdmin={isAdmin} isPayer={!!acct._isPayer} adminExcluded={!!acct._adminRoleExcluded} loading={detailLoading}
-          tempAdminExpiresAt={tempGrants[acct.Id]?.status === 'active' ? tempGrants[acct.Id].expiresAt : undefined} />
+          tempAdminExpiresAt={tempGrants[acct.Id]?.status === 'active' ? tempGrants[acct.Id].expiresAt : undefined}
+          onTempAdminRequired={(error: string) => handleTempAdminRequired(acct.Id, error)} />
       ) },
     ];
   };
@@ -578,6 +591,7 @@ const AccountsPage: React.FC = () => {
               {selectedAccount.Name}
             </span>
             <TempAdminTag accountId={selectedAccount.Id} />
+            <TempAdminAction account={selectedAccount} />
             <ConsoleButton account={selectedAccount} style={{ flexShrink: 0 }} />
           </div>
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginTop: 8 }}>
@@ -1204,6 +1218,7 @@ const AccountsPage: React.FC = () => {
                   extra={
                     <Space size={4}>
                       <TempAdminTag accountId={selectedAccount.Id} />
+                      <TempAdminAction account={selectedAccount} />
                       <ConsoleButton account={selectedAccount} />
                       <Button type="text" size="small" aria-label="关闭" onClick={() => setSelectedAccount(null)}>✕</Button>
                     </Space>

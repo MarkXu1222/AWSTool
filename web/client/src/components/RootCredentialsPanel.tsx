@@ -30,6 +30,8 @@ interface Props {
   loading?: boolean;
   // 临时开通 Admin 的到期时间（ISO）。成员账户只有在开通期内才能签发超过 1 小时的凭证，且不超过剩余时间。
   tempAdminExpiresAt?: string;
+  // 账户既无 OAAR 也未开通时（code=TEMP_ADMIN_REQUIRED）交给父组件引导去临时开通
+  onTempAdminRequired?: (error: string) => void;
 }
 
 async function copy(text: string, label: string) {
@@ -53,7 +55,7 @@ const CredRow: React.FC<{ label: string; value: string; secret?: boolean; reveal
   </div>
 );
 
-const RootCredentialsPanel: React.FC<Props> = ({ accountId, rootCredentials, canRoot, rootResetAccess = 'none', isAdmin, isPayer, adminExcluded, loading: detailLoading, tempAdminExpiresAt }) => {
+const RootCredentialsPanel: React.FC<Props> = ({ accountId, rootCredentials, canRoot, rootResetAccess = 'none', isAdmin, isPayer, adminExcluded, loading: detailLoading, tempAdminExpiresAt, onTempAdminRequired }) => {
   const isMobile = typeof window !== 'undefined' && window.innerWidth < 769;
   const [creds, setCreds] = useState<TempCreds | null>(null);
   const [durationHours, setDurationHours] = useState(1);
@@ -157,6 +159,13 @@ const RootCredentialsPanel: React.FC<Props> = ({ accountId, rootCredentials, can
     return () => clearInterval(t);
   }, [creds]);
 
+  // 没有凭证时 now 不会被倒计时刷新；开通期内每 30 秒刷新一次，保证可选时长随剩余时间收缩
+  useEffect(() => {
+    if (creds || !tempAdminExpiresAt) return;
+    const t = setInterval(() => setNow(Date.now()), 30_000);
+    return () => clearInterval(t);
+  }, [creds, tempAdminExpiresAt]);
+
   // 成员账户经 OAAR 签发最长 1 小时（AWS 角色链上限）；临时开通期内可更长，但不超过剩余时间
   const maxHours = !isAdmin || isPayer || !tempAdminExpiresAt
     ? 1
@@ -174,6 +183,8 @@ const RootCredentialsPanel: React.FC<Props> = ({ accountId, rootCredentials, can
         const until = res.data?.expiration ? new Date(res.data.expiration).toLocaleTimeString() : '';
         message.success(`已生成 Admin 临时凭证（有效期至 ${until}）`);
         if (res.data?.cappedByTempAdmin) message.info('凭证有效期已按临时 Admin 剩余时间截断');
+      } else if (res.code === 'TEMP_ADMIN_REQUIRED' && onTempAdminRequired) {
+        onTempAdminRequired(res.error);
       } else {
         if (requestedHours > 1) setDurationHours(1);
         message.error(res.error || '生成失败');

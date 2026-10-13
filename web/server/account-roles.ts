@@ -28,7 +28,7 @@ import {
 import { db } from './db';
 import { notifyAccountRoleIssues } from './notify';
 import { getExcludedAccountIds, getExternalId } from './restricted-accounts';
-import { getActiveGrant } from './temp-admin';
+import { listOpenGrants } from './temp-admin';
 
 // ===== 配置 =====
 let CONFIG: any = {};
@@ -280,7 +280,8 @@ export async function syncAccountRoles(opts: SyncOptions = {}): Promise<SyncResu
   });
 
   const needFix = probed.filter(p => !p.support);
-  const residualAdmin = probed.filter(p => p.admin && !getActiveGrant(p.acct.Id)).length;
+  const openGrantIds = new Set(listOpenGrants().map(g => g.accountId));
+  const residualAdmin = probed.filter(p => p.admin && !openGrantIds.has(p.acct.Id)).length;
   console.log(`[AccountRoles] 探测完成：缺 support-quota ${needFix.length}，常驻 admin-console ${residualAdmin}`);
 
   // 2) 补齐 —— 按 payer + 角色种类分组批量部署
@@ -330,8 +331,8 @@ export async function syncAccountRoles(opts: SyncOptions = {}): Promise<SyncResu
     const st = finalState.get(p.acct.Id)!;
     const prev = knownMap.get(p.acct.Id);
     const adminExcluded = isAdminRoleExcluded(p.acct.Id);
-    // admin-console 只允许在有效开通期内存在；其余时间存在即异常
-    const tempAdmin = !!getActiveGrant(p.acct.Id);
+    // admin-console 只允许在开通未结束时存在（含到期后等待回收、回收中）；其余时间存在即异常
+    const tempAdmin = openGrantIds.has(p.acct.Id);
     const residual = (admin: boolean) => admin && !tempAdmin;
     const adminPolicyViolation = st.support && residual(st.admin);
     const wasBroken = !p.support || residual(p.admin);

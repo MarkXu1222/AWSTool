@@ -175,7 +175,10 @@ async function handle(payer: { name: string; roleArn: string }): Promise<string>
             StackSetName: ORGWIDE_STACKSET, UsePreviousTemplate: true, Capabilities: ['CAPABILITY_NAMED_IAM'],
             PermissionModel: 'SERVICE_MANAGED', AutoDeployment: { Enabled: false }, CallAs: 'SELF',
           }));
-          log(`${payer.name}: 关闭 AutoDeployment → ${await waitOp(cf, op.OperationId, 30)}`);
+          const status = await waitOp(cf, op.OperationId, 30);
+          log(`${payer.name}: 关闭 AutoDeployment → ${status}`);
+          // 自动部署没关掉就删实例，新加入的账户仍会被补上常驻 admin-console —— 停在这里人工处理
+          if (!status.startsWith('SUCCEEDED')) throw new Error(`关闭 AutoDeployment 未成功（${status}），未删除任何实例`);
         }
         if (before.length) {
           const root = (await new OrganizationsClient({ region: REGION, credentials: creds }).send(new ListRootsCommand({}))).Roots![0].Id!;

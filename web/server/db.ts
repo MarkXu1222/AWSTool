@@ -287,7 +287,7 @@ export interface BillingExportJob {
 export type PocCalculatorStatus = 'reserved' | 'calculator_ready' | 'application_created' | 'failed';
 
 export type TempAdminGrantStatus = 'provisioning' | 'active' | 'revoking' | 'revoked' | 'failed';
-export type TempAdminGrantReason = 'manual' | 'unmark-restricted';
+export type TempAdminGrantReason = 'manual' | 'unmark-restricted' | 'restricted-mark';
 
 /** 临时 admin-console 开通记录（temp-admin.ts）。未结束 = provisioning / active / revoking */
 export interface TempAdminGrant {
@@ -303,6 +303,8 @@ export interface TempAdminGrant {
   createdAt: string;
   activatedAt?: string;
   expiresAt?: string;
+  /** 角色信任策略里 aws:CurrentTime 的截止时间：超过后即使实例未删也无法 AssumeRole（纵深防御） */
+  trustExpiresAt?: string;
   /** 是否已调用过 CreateStackInstances —— 决定失败后需要回收（revoking）还是直接 failed */
   instanceRequested: boolean;
   revokeRequestedAt?: string;

@@ -38,6 +38,8 @@ async function fixture(t: TestContext, options: { manualAdmin?: boolean; adminDe
   });
   t.mock.method(db, 'deleteRestrictedAccount', (id: string) => { const i = records.findIndex(x => x.account_id === id); if (i >= 0) records.splice(i, 1); });
   t.mock.method(db, 'getAccountRoles', () => roleRecords);
+  const audits: string[] = [];
+  t.mock.method(db, 'addAuditLog', (_u: any, action: string) => { audits.push(action); });
   t.mock.method(db, 'listTempAdminGrants', () => grants.map(g => ({ ...g })));
   t.mock.method(db, 'insertTempAdminGrant', (g: any) => { grants.push({ ...g }); });
   t.mock.method(db, 'updateTempAdminGrant', (id: string, u: any) => {
@@ -113,7 +115,7 @@ async function fixture(t: TestContext, options: { manualAdmin?: boolean; adminDe
       default: throw new Error(`Unexpected IAM command: ${command.constructor.name}`);
     }
   }) as any);
-  return { restricted, aws, accountRoles, payer, records, roleRecords, roles, instances, issuedRoles, grants };
+  return { restricted, aws, accountRoles, payer, records, roleRecords, roles, instances, issuedRoles, grants, audits };
 }
 
 const federation = (t: TestContext) => t.mock.method(globalThis, 'fetch', (async () => ({
@@ -249,6 +251,19 @@ test('restricting an account during an active temporary admin revokes it first',
   assert.equal(f.grants[0].revokedBy, 'system:restricted-mark');
   assert.equal(f.roles.has('admin-console'), false);
   assert.equal(f.instances.get('admin-console-role-temporary')?.has(target), false);
+});
+
+test('first restriction of an INVITED account after cleanup uses an internal 1h temporary admin and revokes it', async t => {
+  const f = await fixture(t, { invited: true, noOrgwideAdmin: true });
+  const r = await f.restricted.markRestricted([target], { markedBy: 'admin' });
+  assert.equal(r.results[0].ok, true, r.results[0].error);
+  assert.equal(f.records[0].state, 'applied');
+  assert.equal(f.grants.length, 1);
+  assert.equal(f.grants[0].reason, 'restricted-mark');
+  assert.equal(f.grants[0].hours, 1);
+  assert.equal(f.grants[0].status, 'revoked');
+  assert.equal(f.roles.has('admin-console'), false);
+  assert.ok(f.audits.includes('TEMP_ADMIN_OPEN') && f.audits.includes('TEMP_ADMIN_REVOKE'));
 });
 
 test('restricting still succeeds after the org-wide admin StackSet has been deleted', async t => {

@@ -348,7 +348,7 @@ export async function getTempAdminCredentials(accountId: string, durationHours =
   });
   if (selfPayer) {
     if (durationHours > 1) {
-      throw new TempCredentialError('payer 管理账户的 Admin 临时凭证最多 1 小时；长时凭证仅支持已部署 admin-console 的成员账户', 400);
+      throw new TempCredentialError('payer 管理账户的 Admin 临时凭证最多 1 小时；长时凭证仅支持处于临时开通 Admin 期间的成员账户', 400);
     }
     try {
       const resp = await withAwsClient(
@@ -1861,9 +1861,11 @@ async function assumeAdminViaOAAR(accountId: string) {
   // 受限账户不提供临时开通，直接走 OAAR。
   const restricted = isRestricted(accountId);
   const grant = restricted ? null : getActiveGrant(accountId);
+  let grantErr: any;
   if (grant) {
     const remaining = remainingSeconds(grant);
-    if (remaining < 900) throw new TempAdminRequiredError(accountId);
+    // 记录仍在、无法重新开通：不能提示「请临时开通」
+    if (remaining < 900) throw new Error('临时 Admin 剩余不足 15 分钟，请到期回收后重新开通');
     try {
       const resp = await withAwsClient(
         new STSClient({ region: DEFAULT_REGION, credentials: BASE_CREDENTIALS }),
@@ -1878,7 +1880,7 @@ async function assumeAdminViaOAAR(accountId: string) {
         secretAccessKey: resp.Credentials!.SecretAccessKey!,
         sessionToken: resp.Credentials!.SessionToken!,
       };
-    } catch { /* 开通状态与实际不符时回退 OAAR */ }
+    } catch (e) { grantErr = e; /* 开通状态与实际不符时先回退 OAAR */ }
   }
 
   const known = accountPayerMap.get(accountId) || getPayerRoleArnForAccount(accountId);
@@ -1910,6 +1912,9 @@ async function assumeAdminViaOAAR(accountId: string) {
       `无法以 Admin 权限登录账户 ${accountId} 的控制台：未能经 OrganizationAccountAccessRole 假设` +
       `（${lastErr?.name || lastErr?.message || '所有 payer 均尝试失败'}）。`,
     );
+  }
+  if (grant) {
+    throw new Error(`临时开通期内无法 AssumeRole ${ADMIN_ROLE_NAME}（${grantErr?.name || 'AssumeRoleFailed'}），请检查开通状态或提前关闭后重新开通`);
   }
   throw new TempAdminRequiredError(accountId);
 }

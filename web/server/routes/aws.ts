@@ -745,6 +745,9 @@ awsRouter.post('/temp-admin', requireStrictAdmin, async (req: Request, res: Resp
   const user = (req as any).user;
   const accountId = String(req.body?.accountId || '');
   const hours = Number(req.body?.hours);
+  // 先校验参数再消耗 TOTP：输错时长不应白费一个（防重放的）验证码
+  if (!/^\d{12}$/.test(accountId)) return res.status(400).json({ error: '无效的账户 ID' });
+  if (![1, 2, 3].includes(hours)) return res.status(400).json({ error: '临时 Admin 时长只能是 1、2、3 小时' });
   try {
     verifyStepUpTotp({ id: user.userId, username: user.username }, req.body?.mfaCode, req.ip);
   } catch (e: any) {
@@ -781,6 +784,9 @@ awsRouter.delete('/temp-admin/:accountId', requireStrictAdmin, async (req: Reque
     }
     res.json({ success: true, data: grant });
   } catch (e: any) {
+    db.addAuditLog(user?.userId, 'TEMP_ADMIN_REVOKE_FAILED',
+      `AWS 账户 ${accountId} · 提前关闭临时 Admin 失败：${e.message}`, user?.username, req.ip);
+    (res.locals as any).audited = true;
     res.status(e instanceof TempAdminError ? e.statusCode : 500).json({ error: e.message });
   }
 });
