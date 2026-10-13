@@ -401,6 +401,11 @@ export const api = {
     request('/aws/apn-accounts/probe', { method: 'POST', body: JSON.stringify(partnerKey ? { partnerKey } : {}) }),
   // 敏感权限客户账户：收窄平台权限 + ExternalId
   getRestrictedAccounts: () => request('/aws/accounts/restricted'),
+  // 临时 Admin（admin-console 按需开通）：列表对所有登录用户开放；开通/关闭仅 admin，开通需 TOTP
+  listTempAdminGrants: () => request('/aws/temp-admin/grants'),
+  openTempAdmin: (body: { accountId: string; hours: number; mfaCode: string }) =>
+    request('/aws/temp-admin', { method: 'POST', body: JSON.stringify(body) }),
+  revokeTempAdmin: (accountId: string) => request(`/aws/temp-admin/${accountId}`, { method: 'DELETE' }),
   markRestrictedAccounts: (accountIds: string[], note?: string) =>
     request('/aws/accounts/restricted', { method: 'POST', body: JSON.stringify({ accountIds, note }) }),
   unmarkRestrictedAccount: (accountId: string) =>
