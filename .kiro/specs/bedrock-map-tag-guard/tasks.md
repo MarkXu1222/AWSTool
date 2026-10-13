@@ -1,6 +1,11 @@
 # 任务拆分 —— bedrock-map-tag-guard
 
 > 前置：`design.md` 已通过闸门 G1（2026-10-13）。所有任务的唯一依据是同目录 `design.md`。
+> **执行方式偏离（用户决定，2026-10-13）**：协调会话运行在 VSCode 扩展内，不是 Orca 托管终端，
+> `orca orchestration run-create` 报 `no_active_sender_terminal`，无法建 run。用户指示「都直接用 Claude 实现，不走 codex」。
+> 实际由协调会话按本表的任务边界与顺序串行实现（T1 `58cbe65` → T2 `f97b121` → T3 `058d8c9` → T4 `b7c9471`），
+> 每个任务单独提交并跑各自验收命令；全部完成后派独立审核子代理，审核修复见 `6903c14`（design.md §13）。
+>
 > 拆分时为避免两个任务写同一测试文件，把 §9 的测试拆成两个文件、给 §10 脚本加了 `--plan-only`（均已回写 design.md，不改行为）。
 
 | # | 任务名 | 独占文件 | 依赖 | design.md 章节 | 验收命令 |

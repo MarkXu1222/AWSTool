@@ -75,7 +75,7 @@ AWS 多账户管理平台。跨组织管理成员账户：配额提升、账单 
 | AWS 接入 | `aws-service.ts`★（AssumeRole 链）、`account-roles.ts`★、`account-lifecycle.ts`、`restricted-accounts.ts`★ |
 | 提额文档 | `doc-generator.ts`、`doc-templates.ts`★、`case-doc-submitter.ts`★ |
 | 账单导出 | `billing-export-jobs.ts`、`billing-exporter.ts` |
-| Bedrock | `bedrock-tools.ts`、`bedrock-delivery.ts`★ |
+| Bedrock | `bedrock-tools.ts`、`bedrock-delivery.ts`★、`map-tag-rules.ts`★（前端 `utils/mapTag.ts` 逐字镜像） |
 | MAP 标签 | `tag-compliance.ts`、`tag-onboarding.ts` |
 | 批量 Root 改密 | `root-email-jobs.ts`、`root-email-core.ts`★、`root-email-browser.ts`、`root-email-execution-slot.ts`、`root-email-manual.ts`、`root-email-reconcile.ts`、`root-password-secrets.ts`、`root-reset-permissions.ts`、`root-mail-poll.ts`、`root-mail-links.ts`、`mail-api.ts`、`mail-api-config.ts` —— **改这块前先读 `web/ROOT_EMAIL.md`** |
 | POC Cash | `poc-cash.ts`、`poc-cash-funding.ts`、`poc-calculator.ts`、`pricing-calculator.ts`★、`calculator-services.ts`★、`calculator-rates.ts`★ |
@@ -185,6 +185,7 @@ Bedrock 配额特意用 `/api/bedrock` 独立前缀，就是为了躲开 `/quota
 |------|------|
 | `bedrock-delivery.ts` 的 `normalizeProfileName()` | scope 词 `us`/`global` 折叠掉会让两个 Profile 互相顶替，交付表出错且肉眼发现不了。`tests/bedrock-delivery-name-match.test.ts` 锁死 |
 | Bedrock TPD 的 `inherited` 标记 | 硬契约，三处依赖（前端灰显 / CSV 的「TPD来源」列 / 交付表第 9 条须知）。必须按标记判断，不能按「有没有值」 |
+| `map-tag-rules.ts` ↔ `client/src/utils/mapTag.ts` | 两份规则顺序与文案必须逐字一致，否则前端放行的请求会被服务端换理由拒绝。Bedrock 交付只认服务端从 AWS 重读的标签，**不得**让前端 tags 进入 `prepareDelivery`。`tests/bedrock-map-tag-guard.test.ts`、`tests/bedrock-delivery-tag-guard.test.ts` 锁死 |
 | `billing-exporter.ts` | 必须 headed + `--kiosk-printing`；每账户独立浏览器实例（复用会导出全是第一个账户的内容）；固定 `access='support'`，**绝不回退 admin/OAAR** |
 | `case-doc-submitter.ts` | 文件名回显 ≠ 上传完成；成功判定只认 Reply textarea 收起（用页面文案判断会假成功） |
 | `index.ts` 的 CORS | 拒绝必须 `callback(null, false)`，**绝不 throw** —— throw 会被 Express 当 500，导致带 `crossorigin` 的静态资源失败、整站白屏 |
@@ -194,7 +195,7 @@ Bedrock 配额特意用 `/api/bedrock` 独立前缀，就是为了躲开 `/quota
 | POC 定价计算器（`calculator-rates.ts` / `calculator-services.ts`） | 单价与 JSON 块必须与 calculator.aws「Update estimate」引擎一致，否则审核人一点重算金额就变（旧版 7,946 → 27,767）。单价来自引擎实测而非 Price List；标定时每个参数须独立变化（EFS 读写曾因同比例样本拆错）。`tests/calculator-calibration.test.ts` 锁 183 个实测用例；改动后必须联网跑 `scripts/verify-calculator-render.ts` |
 | 批量 Root 改密 | 提交边界语义复杂，`password_unknown` 绝不自动重试。改动前必读 `web/ROOT_EMAIL.md` |
 
-`web/tests/` 下有 14 个回归测试守着上述若干条，改完记得跑。
+`web/tests/` 下有 34 个回归测试守着上述若干条，改完记得跑。
 
 ---
 
@@ -209,6 +210,7 @@ Bedrock 配额特意用 `/api/bedrock` 独立前缀，就是为了躲开 `/quota
 - 敏感度分档而非一刀切：可分配页 → 需显式勾选的 `ops`/`bedrock` → 勾不到的 `poccash`
 - 强制 **MFA + 审计日志 + 限速**；平台长期凭证只在服务端
 - POC Cash 参考旧商机复用客户资料、Marketing 字段和 Solution；新商机的 Use Case 与业务描述由用户按本次标题填写，不沿用旧项目内容
+- Bedrock `map-migrated` 防错**不存储** payer 标准值：只做格式强校验（`^mig[A-Z0-9]{10}$`）+ 写后 AWS 回查 + 交付从 AWS 重读标签；「格式合法但属于别家 payer」靠人工（0.53.0，见 `.kiro/specs/bedrock-map-tag-guard/`）
 - POC 定价计算器每条申请独一份：以本地台账（`poc_calculator_ledger`）ID 播种并兼作 `ClientToken`，生成后按总额/服务签名查重；成本公式以 calculator.aws 引擎实测为准（0.52.0，见 `.kiro/specs/poc-calculator-uniqueness/`）
 
 ---

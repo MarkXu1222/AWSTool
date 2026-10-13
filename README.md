@@ -80,7 +80,7 @@
 | `quotas` | `Quotas.tsx` | `/api/aws/quotas/*`、`/api/aws/bedrock/quotas/*` | 配额查询、一键提额、流式同步、生成提额 PDF、一键提交文档到 Support Case。Tab：当前配额 / Bedrock 配额 / 当前账户请求 / 在线查询 / 提升记录 |
 | `bulkquota` | `BulkQuota.tsx` | `/api/aws/bulk-quota/*` | 批量提额（按 payer 组织 × 多区域）。**不在 `ALL_PAGE_KEYS` 里**，可见性只由独立权限 `bulk_quota_access` 决定 |
 | `rootreset` | `BulkRootReset.tsx` | `/api/aws/root-email/*` | 批量设置 Root 新密码。**不在 `ALL_PAGE_KEYS` 里**，由独立权限 `root_reset_access`（`none`/`view`/`operate`）决定可见与可操作。详见「批量自动设置 Root 新密码」与 [`web/ROOT_EMAIL.md`](web/ROOT_EMAIL.md) |
-| `bedrock` | `Bedrock.tsx` | `/api/bedrock/*` | Bedrock 工具（从桌面版 Bedrock Profile Manager 迁移）：Inference Profile 管理/批量创建/模型测试/模型列表/FTU 开通/Fable 5 数据共享/IAM 用户/交付表格。**敏感页面**：全部走 Admin 凭证，non-admin 需显式授权；创建/打 Tag 的 Tag 必须每次手动输入（前后端均无默认值） |
+| `bedrock` | `Bedrock.tsx` | `/api/bedrock/*` | Bedrock 工具（从桌面版 Bedrock Profile Manager 迁移）：Inference Profile 管理/批量创建/模型测试/模型列表/FTU 开通/Fable 5 数据共享/IAM 用户/交付表格。**敏感页面**：全部走 Admin 凭证，non-admin 需显式授权；创建/打 Tag 的 Tag 必须每次手动输入（前后端均无默认值），`map-migrated` 值严格校验 `mig` + 10 位大写字母数字、写后从 AWS 回查（0.53.0） |
 | `poccash` | `PocCash.tsx` | `/api/poc-cash/*` | POC Cash：创建 AWS Partner Central 商机、阶段检查、POC 资金申请与进展台账。**admin 专属**，连「页面权限」勾选都无法授予（创建的是提交给 AWS 的真实商机）。四 Tab：创建商机 / 商机阶段检查 / POC 申请 / POC 进展 |
 | `regions` | `Regions.tsx` | `/api/regions/*` | opt-in 区域开通状态扫描与单个/批量开通 |
 | `billing` | `Billing.tsx` | `/api/aws/billing/*` | AWS 官方账单 PDF 批量导出、历史任务、取消与 ZIP 下载 |
@@ -145,8 +145,9 @@ AWS/
     │   ├── billing-export-jobs.ts  # 账单导出持久化 job、全局队列、永久历史、重复下载与重启恢复
     │   ├── billing-exporter.ts     # 严格只读抓取 AWS 官方账单 PDF + 可取消 zip 打包
     │   # —— Bedrock ——
-    │   ├── bedrock-tools.ts        # Bedrock 工具：Profile 管理/批量创建/FTU/数据共享/IAM（全部走 Admin 凭证，50min 缓存）
-    │   ├── bedrock-delivery.ts     # Bedrock 客户交付 xlsx（v1 三列 / v2 李浩版五列含 TPM/TPD；按变体白名单筛选模型 + 固定排序；校验 map-migrated tag 唯一）
+    │   ├── bedrock-tools.ts        # Bedrock 工具：Profile 管理/批量创建/FTU/数据共享/IAM（全部走 Admin 凭证，50min 缓存）；创建/打 Tag 写后回查
+    │   ├── bedrock-delivery.ts     # Bedrock 客户交付 xlsx（v1 三列 / v2 李浩版五列含 TPM/TPD；按变体白名单筛选模型 + 固定排序；校验 map-migrated 格式与唯一）
+    │   ├── map-tag-rules.ts        # ★map-migrated 标签规则（纯函数）：值格式、Tag 数组、ARN 归属、写后回查；前端 utils/mapTag.ts 逐字镜像
     │   # —— MAP 标签 ——
     │   ├── tag-compliance.ts       # MAP 标签合规（编排中央工具账户的 Step Functions + S3 报告；payer 自身 auto-tagger-role 单独创建）
     │   ├── tag-onboarding.ts       # MAP 全自动接入持久化 runner（资源、索引、StackSet、S3 配置与校验）
@@ -173,7 +174,7 @@ AWS/
     │   └── routes/
     │       ├── aws.ts              # ★awsRouter：主业务端点（50+），含权限守卫
     │       ├── regions.ts          # regionsRouter：区域 opt-in 状态/扫描/开通
-    │       ├── bedrock.ts          # bedrockRouter：挂 /api/bedrock；tags 强校验无默认值
+    │       ├── bedrock.ts          # bedrockRouter：挂 /api/bedrock；tags 按 map-tag-rules 强校验无默认值；交付从 AWS 重读标签
     │       └── poc-cash.ts         # pocCashRouter：挂 /api/poc-cash；全部 requireStrictAdmin
     ├── client/
     │   ├── vite.config.ts          # dev 端口 5174；manualChunks 三包分割（vendor/charts/业务）
@@ -187,12 +188,14 @@ AWS/
     │       └── utils/              # cache(内存TTL) / color / console-launch / export
     │                               # / account-import{,.worker,-config}（浏览器本地 xlsx 解析，不上传）
     │                               # / root-account-selection / root-email-status / root-reset-link
-    ├── tests/                      # 32 个回归测试文件（bedrock、MAP 策略、poc-cash、计算器标定/台账、root-email 系列等）
+    │                               # / mapTag（map-migrated 前端校验，与 server/map-tag-rules.ts 逐字一致）
+    ├── tests/                      # 34 个回归测试文件（bedrock、MAP 策略、poc-cash、计算器标定/台账、root-email 系列等）
     ├── scripts/
     │   ├── verify-calculator-render.ts # POC 计算器联网验收：Chrome 点 Update estimate 逐项核对引擎重算（--plan-only 离线）
     │   ├── setup-org-stacksets.ts  # ★加新 payer 时下发两个角色 StackSet（幂等，支持 --dry-run / --refresh-template）
     │   ├── setup-payer-tagger.ts   # payer 账户内单独创建 auto-tagger-role（StackSet 覆盖不到）
     │   ├── fix-payer-tagger-policy.ts / audit-org-roles.mts / check-billing-iam-access.mts
+    │   ├── audit-bedrock-map-tags.ts # Bedrock map-migrated 存量排查（只读；--plan-only 不调 AWS）
     │   └── print-bills.mts / ce-untagged-audit.ts / probe-*.ts / scan-p-quota.ts   # 一次性排查脚本
     ├── ROOT_EMAIL.md               # ★批量 Root 改密的完整运行与恢复语义
     ├── setup-nginx.sh              # Nginx + HTTPS 配置脚本
@@ -278,7 +281,7 @@ Admin 临时凭证时长默认 1 小时。数据库当前角色为 `admin` 的�
 | 账单 | PDF job：`POST/GET /billing/export-jobs`、`GET /billing/export-jobs/:jobId`、`POST .../:jobId/cancel`、`GET .../:jobId/download`（均 `requireBillingAccess`，单任务再校验 owner/admin） |
 | 配额 | `GET /quotas/:accountId/:serviceCode`、`POST /quotas/increase`(admin)、`GET /quotas/requests`、`GET /quotas/stats`、`GET /quotas/companies`、`GET /quotas/company/:accountId`、`POST /quotas/generate-doc`、`POST /quotas/case-doc-submit`(admin)、`GET /quotas/case-doc-submit/:jobId`（轮询不写审计；**必须注册在 `/quotas/:accountId/:serviceCode` 通配之前**）、`POST /quotas/sync`、`POST /quotas/sync-account/:accountId`、`GET /quotas/sync-status`、`GET /quotas/sync-stream`(SSE) |
 | Bedrock 配额 | `GET /bedrock/quotas/:accountId?regions=a,b` |
-| Bedrock 工具（独立前缀 `/api/bedrock`） | `GET /profiles/:accountId?regions=`（**最多 12 个区域**）、`GET /models/:accountId?region=`、`GET /foundation-models/:accountId?region=`、`POST /profiles/create`(admin,**tags 必填强校验**)、`POST /profiles/delete`(admin)、`POST /profiles/tag`(admin,tags 必填)、`POST /profiles/untag`(admin)、`POST /invoke`(admin)、`POST /ftu`(admin)、`GET /data-retention/:accountId?regions=`（**最多 20 个区域**）、`POST /data-retention/enable`(strict admin)、`GET /iam-users/:accountId`(admin)、`POST /iam-users/create`(strict admin)、`POST /delivery`(admin，服务端校验 map-migrated tag 唯一且必存在)、`POST /delivery-v2`(admin，李浩版五列含 TPM/TPD) |
+| Bedrock 工具（独立前缀 `/api/bedrock`） | `GET /profiles/:accountId?regions=`（**最多 12 个区域**）、`GET /models/:accountId?region=`、`GET /foundation-models/:accountId?region=`、`POST /profiles/create`(admin,**tags 按 map-tag-rules 强校验，返回逐项回查状态**)、`POST /profiles/delete`(admin)、`POST /profiles/tag`(admin,同上；ARN 须属于该账户与区域，≤100)、`POST /profiles/untag`(admin)、`POST /invoke`(admin)、`POST /ftu`(admin)、`GET /data-retention/:accountId?regions=`（**最多 20 个区域**）、`POST /data-retention/enable`(strict admin)、`GET /iam-users/:accountId`(admin)、`POST /iam-users/create`(strict admin)、`POST /delivery`(admin，**`accountId` 必填**；从 AWS 重读标签，校验 map-migrated 格式且唯一)、`POST /delivery-v2`(admin，李浩版五列含 TPM/TPD；同样从 AWS 重读标签) |
 | 批量提额 | `GET /bulk-quota/payers`、`GET /bulk-quota/accounts/:payerAccountId`、`POST /bulk-quota/submit`、`GET /bulk-quota/job/:jobId`（全部 `requireBulkQuotaAccess`） |
 | 根凭证 | `GET /root-credentials/:accountId`、`GET /temp-credentials/:accountId?durationHours=1`（rootAccess；仅 admin 可请求 2–12 小时）、`POST /root-credentials/:accountId/delete-mfa`(rootAccess)、`.../recover-password`(rootAccess)、`.../delete-access-key`(rootAccess)、`.../delete-key`(admin) |
 | 批量 Root 改密 | 批次：`GET/POST /root-email/batches`、`GET /root-email/batches/:id`、`POST .../:id/credentials-csv`、`POST .../:id/cancel`；单账户：`GET/POST /root-email/accounts/:accountId/jobs`、`POST /root-email/jobs/:id/cancel`、`.../retry`、`.../reset-link`、`.../manual-reset-link`、`.../manual-captcha`、`.../manual-captcha/answer`；其它：`GET /root-email/availability`、`GET /root-email/catalog`。全部经 `root_reset_access` 守卫（`root-reset-permissions.ts`），创建批次与单独重试另需 step-up TOTP（`step-up-mfa.ts`） |
@@ -531,6 +534,20 @@ v2 按 `variant` 筛选核心 6 模型并固定排序：`global`（每区 6 条�
 **交付白名单（0.47.0 起 9 个核心模型）**：原 6 个 + Sonnet 5.5 / Opus 5.5 / Haiku 5.5。原有行顺序不变，5.5 追加在后（global 变体每区最多 9 条，全量版最多 18 条）；账户里没有的型号自动跳过并在下载提示里列出。**AWS 上新模型不会自动进表**，要加到 `bedrock-delivery.ts` 的 `VARIANT_*_ORDER`。Haiku 5.5 进表、Haiku 4.5 仍剔除，见 `tests/bedrock-delivery-55.test.ts`。
 
 筛选必须在 `prepareDelivery()` **之前**执行：后者对每一行强校验 `map-migrated` tag，老模型往往没打 tag 会直接让整个导出失败，而它们本就不该进交付表。
+
+**map-migrated 标签防错（0.53.0）**：曾把 `migmig…`（手敲 mig 又粘贴了带 mig 的 MPE ID）写进 AWS，交付表只校验「全表一致」，整批错值进了客户 Excel。平台**不存储**各 payer 的标准值（由操作者手填），防线只拦格式错误与覆盖写法：
+
+- **格式**：`^mig[A-Z0-9]{10}$` 原样比对，不 trim、不改大小写、不补删 `mig`。`migmig` 判断区分大小写 —— 10 位恰好以 `MIG` 开头的合法值（`migMIGAB12345`）不能误伤
+- **Tag 数组**：`map-migrated` 恰好一个；`Map-Migrated` 等大小写变体 key、不分大小写的重复 key、`aws:` 前缀一律拒绝
+- **规则同源**：`server/map-tag-rules.ts` 与 `client/src/utils/mapTag.ts` 规则顺序与文案逐字一致，`tests/bedrock-map-tag-guard.test.ts` 锁死（前端放行的请求，服务端不会换一条理由拒绝）
+- **写后回查**：创建 / 打 Tag 后逐个 `ListTagsForResource`（最多 3 次、间隔 1s，容忍最终一致性），状态分 `verified` / `create_failed` / `write_failed` / `read_failed` / `mismatch`，**只有 verified 算成功**（响应里 `ok` 的语义随之收紧）。页面结果表可「重试未完成项」，重试沿用发起时的 tags；重试与新一批操作互斥，并用批次号丢弃过期结果
+- **自动移除变体 key**：打 Tag 前若资源上已有 `Map-Migrated` 等变体（旧版校验允许过），先 `UntagResource` 移除再写入，记入审计。Bedrock 页没有解 Tag 入口，不移除就永远过不了回查和交付
+- **交付只认 AWS**：`/delivery` 与 `/delivery-v2` 丢弃前端传来的 tags（`normalizeDeliveryRows`：ARN 必须属于该账户、region 取 ARN 解析值），再按 ARN 从 AWS 重读；任一读失败即拒绝，不用前端值兜底。`prepareDelivery()` 依次拦缺失 / 大小写变体 / 格式错误，最后才查唯一 —— 「全部一致但全部错误」也过不去。v2 仍是**先筛选后读标签**
+- **切换账户**：`<Tabs key={selectedAccount}>` 整体重建各 Tab，rows / 勾选 / 已填 Tag / 结果都不会带到新账户
+- **不覆盖**：格式合法但属于别家 payer 的值无法自动识别，靠人工核对
+- **存量排查**：`web/scripts/audit-bedrock-map-tags.ts` 从审计日志找做过 Bedrock 创建/打 Tag/交付的账户，读当前 profile 标签输出不合规清单（CSV）。`--plan-only` 只解析审计日志；全量模式对 AWS 只读，但 Admin 链路会经 `db.ts`，当天无备份时会触发每日自动备份。修正方式：页面上重打 Tag（覆盖写）后重新生成交付表
+
+回归测试：`tests/bedrock-map-tag-guard.test.ts`（规则、回查、前后端一致）、`tests/bedrock-delivery-tag-guard.test.ts`（交付校验）。
 
 **Profile 名归一化回退（0.34.2）**：清单是精确字符串白名单，但不少账户的 Profile 用控制台默认命名。实测 `703844615335`（HDL Account 7）6 个核心模型全都在，名字却是 `Global Anthropic Claude Opus 4.6`，与清单的 `sef-global-claude-opus-4-6-v1` 一条都对不上，导出直接报「账户中找不到任何交付清单内的 Profile」。
 

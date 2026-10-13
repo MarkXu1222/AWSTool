@@ -531,3 +531,16 @@ export default BedrockTagResults;
 - 不自动修正存量标签（脚本只读）
 - 不重构 `Bedrock.tsx` 的其它 Tab、不清理其中既有的 inline style 债务
 - 不改 `version.ts`、`README.md`、`project-context.md`（协调者在 P5 统一改）
+
+## 13. 实现后回写（2026-10-13，P4 审核后）
+
+独立代码审核结论 With fixes（无 Critical）。以下是在方案基础上的补充，代码与本节一致：
+
+- **重试与新批次互斥**（审核 Important #1）：ProfilesTab / CreateTab 各持一个 `batchRef`（`useRef(0)`），发起新一批 `++batchRef.current`；重试开始时记下批次号，完成时不一致就丢弃结果并提示「期间发起了新一批…，本次重试结果已忽略」。同时互斥禁用：重试中禁用「批量打 Tag」/ 打 Tag 确认 /「创建勾选」；主操作进行中禁用「重试未完成项」（`BedrockTagResults` 新增可选 prop `disabled?: boolean`）
+- ProfilesTab 工具栏在有结果时显示「上次打 Tag 结果」，关闭结果弹窗后可重新打开
+- `createProfiles`：AWS 未返回 `inferenceProfileArn` 时记为 `create_failed`（「AWS 未返回 Profile ARN，请到 Profiles 管理确认是否已创建」），避免出现无 ARN、无法重试的 `read_failed` 行
+- CreateTab 的 `create_failed` 说明统一追加「若提示已存在，请到「Profiles 管理」选中该 Profile 打 Tag」（整区域请求失败时服务端可能已部分创建，重试会撞名）
+- 打 Tag 结果的「旧值」列：`oldReadFailed` 时显示「读取失败」
+- 交付失败提示 `message.error({ duration: 10 })`
+- 排查脚本：`tag=` 正则只用于 `BEDROCK_DELIVERY_EXPORT` 且要求前置 `，`/`(`（避免 `cost-tag=abc` 误报）；`缺失` 行 reason 注明可能是标签读取失败；头注释更正 —— 全量模式经 Admin 链路会走 `db.ts`，当天无备份时会触发每日自动备份（写 `data/backups/`），`--plan-only` 完全不碰 `data/`
+- 未采纳：打开弹窗即显示「第 1 个 Tag 的 key 和 value 都不能为空」红字 —— 与旧版「请先填写完整 Tag」行为一致，保留
