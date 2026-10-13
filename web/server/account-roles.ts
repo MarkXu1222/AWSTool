@@ -406,9 +406,26 @@ export async function syncAccountRoles(opts: SyncOptions = {}): Promise<SyncResu
   return { scanned: probed.length, ok: okN, remediated: remediatedN, pending: pendingN, unreachable: unreachableN, skippedSuspended, details };
 }
 
+/**
+ * 按当前规则判定一条已存记录的状态。
+ * 0.54.0 之前的旧规则把「缺 admin-console」记为 partial / unreachable（面板显示「补齐中」），
+ * 现在 admin-console 只在临时开通期存在，缺失是健康状态；这些记录要等下次复检才会被改写，
+ * 汇总不能直接沿用存下的 state。
+ *   - 缺 support-quota：沿用存下的状态（真问题）
+ *   - 有 admin-console：新逻辑检测出的 partial（常驻）且没有未结束的开通 → 异常；
+ *     旧规则存下的 ok 视为待复检，不标异常（避免组织级残留清理前一次性冒出几千条）
+ *   - 其余：正常
+ */
+function effectiveState(r: AccountRoleRecord, openGrantIds: Set<string>): AccountRoleRecord['state'] {
+  if (!r.support) return r.state === 'ok' ? 'partial' : r.state;
+  if (r.admin && r.state === 'partial' && !openGrantIds.has(r.account_id)) return 'partial';
+  return 'ok';
+}
+
 /** 汇总视图，供前端展示 */
 export function getAccountRolesSummary() {
-  const all = db.getAccountRoles();
+  const openGrantIds = new Set(listOpenGrants().map(g => g.accountId));
+  const all = db.getAccountRoles().map((r: AccountRoleRecord) => ({ ...r, state: effectiveState(r, openGrantIds) }));
   const byState: Record<string, number> = {};
   all.forEach(r => { byState[r.state] = (byState[r.state] || 0) + 1; });
   const problems = all

@@ -151,3 +151,34 @@ test('自愈：support 缺失时只补齐 support-quota-role-orgwide', async t =
   const created = f.cfn.filter(c => c.startsWith('CreateStackInstancesCommand'));
   assert.deepEqual(created, ['CreateStackInstancesCommand:support-quota-role-orgwide']);
 });
+
+// ---- 汇总按新规则重新判定存量记录（0.54.0 跟进） ----
+// 上线前按旧规则存下的记录里，「缺 admin-console」被记为 partial / unreachable（面板显示「补齐中」），
+// 新规则下这是健康状态；汇总不能直接沿用存下的 state。
+test('权限状态汇总：旧规则下缺 admin 的记录判为正常，只有 support 缺失与新逻辑检测出的常驻 admin 才算异常', async t => {
+  const f = await fixture(t);
+  const rec = (id: string, state: string, support: boolean, admin: boolean, last_error: string | null = null) =>
+    ({ account_id: id, payer: 'p', support, admin, state, attempts: 1, last_error, checked_at: '2026-10-13T00:00:00.000Z' });
+  f.roleRecords.push(
+    rec('100000000001', 'partial', true, false),                // 旧：缺 admin「补齐中」→ 正常
+    rec('100000000002', 'unreachable', true, false),            // 旧：缺 admin 补不上 → 正常
+    rec('100000000003', 'ok', true, true),                      // 旧规则存下的 ok（组织级 admin 尚未清理）→ 待复检，不标异常
+    rec('100000000004', 'partial', true, true, '存在常驻 admin-console（未经临时开通）'), // 新逻辑检测出的常驻 → 异常
+    rec('100000000005', 'unreachable', false, false),           // 缺 support → 仍是异常
+    rec('100000000006', 'partial', false, true),                // 缺 support → 仍是异常
+    rec('100000000007', 'ok', true, false),
+  );
+  const s = f.accountRoles.getAccountRolesSummary();
+  assert.equal(s.total, 7);
+  assert.deepEqual(s.byState, { ok: 4, partial: 2, unreachable: 1 });
+  assert.deepEqual(s.problems.map((p: any) => p.account_id).sort(), ['100000000004', '100000000005', '100000000006']);
+});
+
+test('权限状态汇总：常驻 admin 的账户处于临时开通期时不算异常', async t => {
+  const f = await fixture(t, { grantRemainingSec: 3600 });
+  f.roleRecords.push({ account_id: target, payer: 'p', support: true, admin: true, state: 'partial', attempts: 0,
+    last_error: '存在常驻 admin-console（未经临时开通）', checked_at: '2026-10-13T00:00:00.000Z' });
+  const s = f.accountRoles.getAccountRolesSummary();
+  assert.deepEqual(s.byState, { ok: 1 });
+  assert.equal(s.problems.length, 0);
+});
