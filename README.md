@@ -190,7 +190,7 @@ AWS/
     │                               # / account-import{,.worker,-config}（浏览器本地 xlsx 解析，不上传）
     │                               # / root-account-selection / root-email-status / root-reset-link
     │                               # / mapTag（map-migrated 前端校验，与 server/map-tag-rules.ts 逐字一致）
-    ├── tests/                      # 36 个回归测试文件（bedrock、MAP 策略、poc-cash、计算器标定/台账、root-email 系列等）
+    ├── tests/                      # 37 个回归测试文件（bedrock、MAP 策略、poc-cash、计算器标定/台账、root-email 系列等）
     ├── scripts/
     │   ├── verify-calculator-render.ts # POC 计算器联网验收：Chrome 点 Update estimate 逐项核对引擎重算（--plan-only 离线）
     │   ├── setup-org-stacksets.ts  # ★加新 payer 时下发 support-quota StackSet（幂等，支持 --dry-run / --refresh-template；admin 模式已移除）
@@ -306,10 +306,12 @@ Admin 临时凭证时长默认 1 小时。数据库当前角色为 `admin` 的�
 
 | 分组 | 端点 |
 |------|------|
-| 元数据 | `GET /meta`（partner 列表/用例/行业/凭证状态）、`GET /solutions`、`GET /amounts`、`POST /preview-title` |
+| 元数据 | `GET /meta`（partner 列表/用例/行业/凭证状态/`fundingEnabled` 与发票主体名）、`GET /solutions`、`GET /amounts`、`POST /preview-title` |
 | 商机 | `GET /opportunities`、`GET /opportunities/:id`、`POST /opportunities`（创建 → 关联 Solution → 提交）、`GET/POST /opportunities/:id/stage`（阶段检查与推进） |
 | POC 资金 | `GET /funding/meta`、`GET /funding/account/:id`（按账户带出项目桶）、`POST /funding/preview`、`POST /funding`、`POST /funding/:id/submit`、`GET /funding`（进展台账） |
 | 台账导出 | `POST /funding/export`（19 列 CSV）、`GET /funding/exports` |
+
+`/funding*` 与商机端点一样按 `partnerKey`（query 或 body）分流，缺省 webby，非法值 400（0.55.0）。
 
 ### 其它
 
@@ -425,7 +427,7 @@ admin 恒有，其他角色必须显式授予，且**都不受 `allowed_pages` �
 - `billing_export_jobs` — 账单导出队列、进度、结果、取消/中断状态与下载元数据
 - `restricted_accounts` — 敏感权限客户账户（加密的 `external_id_enc`、state、last_error、可选 `support_policy_backup` 原策略备份）。**同时是 `setup-org-stacksets.ts` 的 StackSet 排除名单来源**
 - `departed_accounts` — 已移出组织的账户记录（含 `rejoined_at` 轨迹）
-- `poc_calculator_ledger` — POC 定价计算器台账：每条 POC 申请一条（台账 ID 即种子与 `ClientToken`），存总额与服务签名供查重，回填 `benappl-` 申请 ID；失败记录保留并继续参与查重（0.52.0）
+- `poc_calculator_ledger` — POC 定价计算器台账：每条 POC 申请一条（台账 ID 即种子与 `ClientToken`），存总额与服务签名供查重，回填 `benappl-` 申请 ID；失败记录保留并继续参与查重（0.52.0）。可选字段 `partnerKey` 记录所属主体（0.55.0；旧条目缺省即 webby），查重不按主体过滤
 
 这些键**按需创建**：本地开发库通常只有 `users` / `quota_requests` / `audit_log` / `accounts_cache` / `region_data` 几个，缺少 `account_roles`、`billing_export_jobs`、`restricted_accounts` 等属正常现象。**判断 schema 一律以 `db.ts` 代码为准，不要拿本地 `db.json` 当权威** —— 本地库的账户数也远少于生产。
 
@@ -633,7 +635,7 @@ v2 按 `variant` 筛选核心 6 模型并固定排序：`global`（每区 6 条�
 | 主体 | APN 账户 | 默认 Solution | 说明 |
 |---|---|---|---|
 | Webby | `105673812363` | `S-0070517` | 商机 + POC 全流程 |
-| Mergebytes | `072471709462` | 无 | 仅商机创建 / 阶段检查，POC 待补发票信息 |
+| Mergebytes | `072471709462` | 无 | 商机 + POC 全流程（POC 0.55.0 起） |
 
 `config.json` 用**嵌套结构**，每个主体一套 role 与独立 ExternalId：
 
@@ -911,7 +913,28 @@ POC 申请额 > 9,900 USD（实测 114 条记录的经验上限）。
 Approved / Action Required。不满足直接拒绝，不降级 —— AWS 侧会打回。
 
 **用户只需填 4 项**：商机（下拉）、AWS 账户 ID、业务描述（≥50 字）、人天。
-其余全自动：计算器链接、ARR、全部金额、Webby 发票信息、联系人。
+其余全自动：计算器链接、ARR、全部金额、发票信息、联系人。
+
+**多主体（0.55.0）**：发票主体、Payee Central 收款档案（`AccountProfileID`）与申请联系人
+放在 `server/poc-cash.ts` 各主体的 `PartnerProfile.funding`，不放 `config.json`（不是密钥）。
+预检 / 创建 / 提交 / 进展 / 导出全部按当前主体取凭证与资料；`getFundingProfile()` 对未配置
+`funding` 的主体在任何 AWS 调用前抛错，**绝不回退到 Webby** —— 发票主体错了钱会打给别家，
+且建成后很难察觉。人天单价、币种、执行国家、申请名格式两主体相同。
+
+| 主体 | Invoice Entity | AccountProfileID | 联系人 |
+|---|---|---|---|
+| Webby | `WEBBY SDN BHD` | `123749FB67ZJQ` | sy.siow@webbygroup.com |
+| Mergebytes | `MERGEBYTES AI SDN. BHD.` | `2MGE7NZ9LMR3C` | cloud@mergebytes.ai |
+
+⚠️ `InvoiceRemitCountry` 写 ISO 代码 `MY`，不是 `MALAYSIA`（Webby 已批准件实测为 `MY`）。
+
+⚠️ 改动前前端有个隐患：「POC 申请」的商机下拉随页面主体加载，后端却恒用 Webby 凭证 ——
+切到 Mergebytes 后选商机一定报 `ResourceNotFoundException`。现在三个 Tab 共用主体选择器，
+切换主体时统一清空已选商机、预览与进展列表，并丢弃切换前发出的列表请求的响应。
+创建确认框会显示「主体（发票 xxx）」，提交前最后核对一次。
+
+> Mergebytes 账户 0.55.0 之前从未提过 POC，其资料由业务方提供、没有已批准件可对照。
+> 首单建议「只创建，暂不提交」，在控制台核对发票与收款档案后再提交。
 
 **项目桶 = 账户所属 payer**，填完账户 ID 毫秒级带出 —— 走平台
 `accounts_cache` 的 `_payer` 字段。**不要**改成遍历 45 个 payer 的
@@ -982,6 +1005,8 @@ npx tsx scripts/verify-calculator-render.ts                                   # 
 CSV 前 18 列严格对齐现有台账，`PO ID` 就是商机 ID；第 19 列「AWS批准金额」
 （0.47.1 追加，新列只能加在末尾）。服务器留存带时间戳快照
 （`data/poc-cash/`）+ `poc-cash-latest.csv`，同时浏览器下载一份 ——
+**按主体分文件**（0.55.0）：Webby 沿用 `poc-cash-<ts>.csv`，其他主体为 `poc-cash-<key>-<ts>.csv`
+（如 `poc-cash-mergebytes-latest.csv`），`GET /funding/exports` 只列当前主体的快照 ——
 留存是为了回溯 PO 号、批准金额是何时被 AWS 回填的。
 
 **AWS 批准金额（0.47.1）**：进展表与 CSV 的「AWS 批准额」取
