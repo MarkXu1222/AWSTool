@@ -7,7 +7,7 @@
  * 金额联动（docs/poc-cash-guide.md 第 4 节，81 条实操记录 100% 吻合）：
  *   ARR = MRR × 12 ；POC 可申请 = ARR / 10
  */
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Card, Form, Input, InputNumber, Select, Button, Space, Radio, Alert,
   Descriptions, Typography, Divider, message, Modal, Tag, DatePicker, Result, Tabs,
@@ -28,6 +28,9 @@ interface Meta {
     requiredTags: string[];
     /** 该主体是否配了跨账户 role；false 时前端置灰不可选 */
     configured?: boolean;
+    /** 该主体是否配了 POC 发票信息；false 时 POC 表单禁用 */
+    fundingEnabled?: boolean;
+    fundingInvoiceEntity?: string | null;
   }[];
   useCases: string[];
   industries: string[];
@@ -175,6 +178,8 @@ const PocCashPage: React.FC = () => {
    * 默认主体（webby）上，查别的主体的商机会一律报「找不到」。
    */
   const [activePartner, setActivePartner] = useState<string>('');
+  /** 异步回调里读「当前」主体，用来丢弃切换前发出的请求的响应 */
+  const activePartnerRef = useRef('');
   // POC 资金申请
   const [pocForm] = Form.useForm();
   const [pocPreview, setPocPreview] = useState<any>(null);
@@ -563,9 +568,15 @@ const PocCashPage: React.FC = () => {
   // ===== POC 资金申请 =====
 
   const loadPocRows = async () => {
+    const requested = activePartnerRef.current;
+    if (!requested) return;
     setPocLoading(true);
     try {
-      const r = await api.pocFundingList();
+      const r = await api.pocFundingList(requested);
+      // 加载期间切了主体：丢弃旧主体的结果，避免列出别家的申请
+      if (activePartnerRef.current !== requested) return;
+      // request() 对非 2xx 不抛错，{ error } 会被当成正常结果返回
+      if (r?.error) { message.error(r.error); return; }
       setPocRows(r.applications || []);
     } catch (e: any) {
       message.error(e.message || '加载 POC 列表失败');
@@ -573,6 +584,23 @@ const PocCashPage: React.FC = () => {
       setPocLoading(false);
     }
   };
+
+  /**
+   * 主体切换后的统一清理（无论从哪个选择器切换）。
+   *
+   * POC 表单里已选的商机、预览与进展列表都属于旧主体，留着会拿新主体的
+   * 凭证去查旧主体的商机，或把两家的申请混在一张表里。
+   */
+  useEffect(() => {
+    activePartnerRef.current = activePartner;
+    setCheckId('');
+    setStageInfo(null);
+    pocForm.setFieldsValue({ opportunityId: undefined });
+    setPocPreview(null);
+    setPocResult(null);
+    setPocRows([]);
+    if (activePartner && tab === 'progress') loadPocRows();
+  }, [activePartner]);
 
   /** 账户 ID → 项目桶。不在任何 payer 下的账户（客户自有/APN 账户）
    *  查不到属正常，留空即可，不编造。 */
@@ -594,6 +622,7 @@ const PocCashPage: React.FC = () => {
     setPocBusy(true);
     try {
       setPocPreview(await api.pocFundingPreview({
+        partnerKey: activePartner,
         opportunityId: v.opportunityId, awsAccountId: v.awsAccountId,
         people: v.people, days: v.days, leadDays: v.leadDays,
       }));
@@ -612,6 +641,8 @@ const PocCashPage: React.FC = () => {
       width: 560,
       content: (
         <div style={{ lineHeight: 1.9 }}>
+          <div>主体 {activeP?.label}
+            <Text type="secondary">（发票 {activeP?.fundingInvoiceEntity}）</Text></div>
           <div>商机 <Text code>{values.opportunityId}</Text></div>
           <div>AWS 账户 {values.awsAccountId}
             {pocBucket && <Text type="secondary">（{pocBucket}）</Text>}</div>
@@ -631,7 +662,7 @@ const PocCashPage: React.FC = () => {
       onOk: async () => {
         setPocBusy(true);
         try {
-          const r = await api.pocFundingCreate(values);
+          const r = await api.pocFundingCreate({ ...values, partnerKey: activePartner });
           // request() 对 HTTP 400 不抛错，而是把 { error } 当正常结果返回。
           // 不在这里拦住，下面的结果页会渲染出「undefined 已创建」，
           // 真实失败原因被这条假的成功提示盖掉（与创建商机同一类问题）。
@@ -668,7 +699,7 @@ const PocCashPage: React.FC = () => {
       okText: '提交',
       onOk: async () => {
         try {
-          const r = await api.pocFundingSubmit(row.applicationId);
+          const r = await api.pocFundingSubmit(row.applicationId, activePartner);
           message.success(`已提交：${r.status} / ${r.stage}`);
           loadPocRows();
         } catch (e: any) {
@@ -682,7 +713,8 @@ const PocCashPage: React.FC = () => {
   const doExport = async () => {
     setExporting(true);
     try {
-      const r = await api.pocFundingExport();
+      const r = await api.pocFundingExport(activePartner);
+      if (r?.error) { message.error(r.error); return; }
       const blob = new Blob([r.csv], { type: 'text/csv;charset=utf-8' });
       const a = document.createElement('a');
       a.href = URL.createObjectURL(blob);
@@ -699,7 +731,13 @@ const PocCashPage: React.FC = () => {
 
   const renderPocForm = () => (
     <Form form={pocForm} layout="vertical" onFinish={doPocCreate}
+      disabled={activeP?.fundingEnabled === false}
       initialValues={{ people: 2, days: 3, leadDays: 14, considering: 'Other', submit: true }}>
+      {renderPartnerPicker()}
+      {activeP?.fundingEnabled === false && (
+        <Alert style={{ marginBottom: 16, maxWidth: 900 }} type="warning" showIcon
+          message={`${activeP.label} 未配置 POC 发票信息，暂不能提 POC 资金申请`} />
+      )}
       <Alert style={{ marginBottom: 16, maxWidth: 900 }} type="info" showIcon
         message="POC 必须先有商机"
         description="商机要已到 Technical Validation 且 ReviewStatus 为 Approved / Action Required。计算器链接、金额、发票信息由平台自动生成。" />
@@ -833,6 +871,7 @@ const PocCashPage: React.FC = () => {
               <div key={i}><Text type="warning">⚠️ {w}</Text></div>)}
           </div>} />
       )}
+      {renderPartnerPicker()}
       <Space style={{ marginBottom: 12 }} wrap>
         <Button onClick={loadPocRows} loading={pocLoading}>刷新</Button>
         <Button icon={<DownloadOutlined />} onClick={doExport} loading={exporting}
@@ -1074,6 +1113,35 @@ const PocCashPage: React.FC = () => {
     );
   };
 
+  /**
+   * 「阶段检查」「POC 申请」「POC 进展」共用的主体选择器，绑定页面级 activePartner。
+   * 切换后的清理（商机、预览、进展列表）统一在 activePartner 的 effect 里做。
+   */
+  const renderPartnerPicker = () => (
+    <Space style={{ marginBottom: 12 }} wrap>
+      <Text type="secondary">Partner 主体</Text>
+      <Select
+        style={{ width: 260 }}
+        value={activePartner || undefined}
+        // POC 表单整体 disabled 时选择器仍需可用，否则切不回已配置的主体
+        disabled={false}
+        onChange={(v: string) => {
+          setActivePartner(v);
+          form.setFieldValue('partnerKey', v);
+        }}
+        options={(meta?.partners || []).map(p => ({
+          value: p.key,
+          label: p.configured === false ? `${p.label}（未配置）` : p.label,
+          disabled: p.configured === false,
+        }))} />
+      {activeP && (
+        <Text type="secondary" style={{ fontSize: 12 }}>
+          APN 账户 {activeP.apnAccountId}
+        </Text>
+      )}
+    </Space>
+  );
+
   const renderStageTab = () => (
     <>
       <Paragraph type="secondary" style={{ maxWidth: 900 }}>
@@ -1084,30 +1152,7 @@ const PocCashPage: React.FC = () => {
 
       {/* 本 Tab 不在创建表单里，必须有独立的主体切换 —— 否则查别的主体的
           商机会一直落到默认主体账户上，报「找不到」 */}
-      <Space style={{ marginBottom: 12 }} wrap>
-        <Text type="secondary">Partner 主体</Text>
-        <Select
-          style={{ width: 260 }}
-          value={activePartner || undefined}
-          onChange={(v: string) => {
-            setActivePartner(v);
-            form.setFieldValue('partnerKey', v);
-            // 商机属于旧主体，换主体后必须清空，否则会拿新主体的凭证
-            // 去查旧主体的 ID
-            setCheckId('');
-            setStageInfo(null);
-          }}
-          options={(meta?.partners || []).map(p => ({
-            value: p.key,
-            label: p.configured === false ? `${p.label}（未配置）` : p.label,
-            disabled: p.configured === false,
-          }))} />
-        {activeP && (
-          <Text type="secondary" style={{ fontSize: 12 }}>
-            APN 账户 {activeP.apnAccountId}
-          </Text>
-        )}
-      </Space>
+      {renderPartnerPicker()}
 
       <Space.Compact style={{ width: '100%', maxWidth: 620, marginBottom: 16 }}>
         <Select
