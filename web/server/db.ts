@@ -325,6 +325,8 @@ export interface PocCalculatorLedgerEntry {
   status: PocCalculatorStatus;
   attempt: number;
   seed: string | null;
+  /** 所属 APN 主体；旧条目没有此字段，语义为 webby（查重不按主体过滤） */
+  partnerKey?: string;
   opportunityId: string;
   awsAccountId: string;
   activityName: string;
@@ -733,6 +735,7 @@ export interface PocCalculatorReserveInput {
   region: string;
   mrrUsd: number;
   createdBy: string;
+  partnerKey?: string;
 }
 
 export interface PocCalculatorCandidate {
@@ -760,6 +763,7 @@ export function reservePocCalculator<T extends PocCalculatorCandidate>(
     const now = new Date().toISOString();
     const entry: PocCalculatorLedgerEntry = {
       id, source: 'generated', status: 'reserved', attempt, seed,
+      ...(input.partnerKey ? { partnerKey: input.partnerKey } : {}),
       opportunityId: input.opportunityId, awsAccountId: input.awsAccountId,
       activityName: input.activityName, region: input.region, mrrUsd: input.mrrUsd,
       target: result.target, total: result.total, signature: result.signature,
@@ -811,6 +815,7 @@ export function recordManualPocCalculator(
   const now = new Date().toISOString();
   const entry: PocCalculatorLedgerEntry = {
     id: randomUUID(), source: 'manual', status: 'calculator_ready', attempt: 0, seed: null,
+    ...(input.partnerKey ? { partnerKey: input.partnerKey } : {}),
     opportunityId: input.opportunityId, awsAccountId: input.awsAccountId,
     activityName: input.activityName, region: input.region, mrrUsd: input.mrrUsd,
     target: null, total: null, signature: null, calculatorKey: null,
