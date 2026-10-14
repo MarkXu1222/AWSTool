@@ -21,7 +21,8 @@ import {
 } from '@aws-sdk/client-partnercentral-benefits';
 import { GetOpportunityCommand } from '@aws-sdk/client-partnercentral-selling';
 import { benefitsClient, sellingClient, CATALOG_NAME as CATALOG,
-  canonicalizeCompanyName, canonicalizeTitle } from './poc-cash';
+  canonicalizeCompanyName, canonicalizeTitle, DEFAULT_PARTNER_KEY, getFundingProfile,
+  type PartnerFundingProfile } from './poc-cash';
 import { db, markPocCalculatorApplication, markPocCalculatorFailed } from './db';
 import { CALC_REGION } from './calculator-rates';
 import { recordManualCalculator, type CalculatorContext, type CalculatorOutcome } from './poc-calculator';
@@ -34,21 +35,7 @@ const USD_TO_MYR = 4.27;
 export const MIN_LEAD_DAYS = 14;   // 流程硬要求：开始日期须在 14 天后
 const POC_CAP_USD = 9900;          // 实测上限，114 条记录无一超过
 
-/** Webby 主体固定信息（11/11 已批准件完全一致） */
-const WEBBY_INVOICE = {
-  InvoiceEntityName: 'WEBBY SDN BHD',
-  InvoiceRemitCountry: 'MY',
-  InvoiceRemitAddress:
-    '2-3, Jalan Merbah 1, Bandar Puchong Jaya, 47170 Puchong, Selangor',
-  AccountProfileID: '123749FB67ZJQ',
-};
-
-const CONTACT = {
-  Email: 'sy.siow@webbygroup.com',
-  FirstName: 'SY',
-  LastName: 'Siow',
-  BusinessTitle: 'Business Strategy Director',
-};
+// 发票主体与联系人按主体取自 PartnerProfile.funding（poc-cash.ts）
 
 export const CONSIDERING_OPTIONS =
   ['Other', 'No Competition', 'AliCloud', 'On-Premise'];
@@ -113,8 +100,10 @@ export interface OppPrecheck {
 }
 
 /** POC 的硬前置：商机必须存在、到 Technical Validation、且未被锁定。 */
-export async function precheckOpportunity(oppId: string): Promise<OppPrecheck> {
-  const sell = await sellingClient();
+export async function precheckOpportunity(
+  oppId: string, partnerKey: string = DEFAULT_PARTNER_KEY,
+): Promise<OppPrecheck> {
+  const sell = await sellingClient(partnerKey);
   const o: any = await sell.send(new GetOpportunityCommand({
     Catalog: CATALOG, Identifier: oppId,
   }));
@@ -161,13 +150,16 @@ export interface CreatePocInput {
   createdBy?: string;
   submit?: boolean;
   force?: boolean;
+  /** 缺省 webby；未配置资金资料的主体会被拒绝 */
+  partnerKey?: string;
 }
 
-function buildDetails(i: {
+export function buildDetails(i: {
   activityName: string; awsAccountId: string; description: string;
   start: Date; end: Date; budgetYear: number; amounts: PocAmounts;
   calculatorUrl: string; considering: string;
-}) {
+  invoice: PartnerFundingProfile['invoice'];
+}): Record<string, unknown> {
   const myr = (v: number) => ({ Amount: v.toFixed(2), Currency: 'MYR' });
   return {
     Program: 'Proof Of Concept',
@@ -195,7 +187,7 @@ function buildDetails(i: {
       PartnerContribution: myr(i.amounts.partnerMyr),
       OtherPartyContribution: myr(0),
       Currency: 'MYR',
-      ...WEBBY_INVOICE,
+      ...i.invoice,
     },
   };
 }
@@ -216,6 +208,7 @@ export interface CreatePocResult {
   associated: boolean;
   submitted: boolean;
   warnings: string[];
+  partnerKey: string;
 }
 
 /** Create an application with the ledger UUID as its idempotency token. */
@@ -243,7 +236,10 @@ export async function createApplicationWithLedger(
 export async function createPocApplication(
   input: CreatePocInput, calcFactory?: (ctx: CalculatorContext) => Promise<CalculatorOutcome>,
 ): Promise<CreatePocResult> {
-  const pre = await precheckOpportunity(input.opportunityId);
+  // 资金资料先于任何 AWS 调用校验：未配置的主体零副作用地拒绝
+  const partnerKey = input.partnerKey ?? DEFAULT_PARTNER_KEY;
+  const funding = getFundingProfile(partnerKey);
+  const pre = await precheckOpportunity(input.opportunityId, partnerKey);
   if (!pre.ok) {
     // 不做补救、不降级 —— 没有合格商机就不该有 POC
     throw new Error(`商机不满足 POC 前置条件：${pre.problems.join('；')}`);
@@ -272,6 +268,7 @@ export async function createPocApplication(
     name: activityName, region: input.calcRegion || CALC_REGION,
     mrrUsd: pre.mrrUsd, opportunityId: input.opportunityId,
     awsAccountId: input.awsAccountId, createdBy: input.createdBy || 'unknown',
+    partnerKey,
   };
   const calculator = input.calculatorUrl
     ? recordManualCalculator(ctx, input.calculatorUrl)
@@ -285,9 +282,10 @@ export async function createPocApplication(
     budgetYear: input.budgetYear ?? new Date().getUTCFullYear() + 1,
     amounts, calculatorUrl,
     considering: input.considering || 'Other',
+    invoice: funding.invoice,
   });
 
-  const ben = await benefitsClient();
+  const ben = await benefitsClient(partnerKey);
   // 申请名同理：默认由公司名拼出（已收敛），手填的也洗一遍。
   // POC 申请名一旦建成，实测 UpdateBenefitApplication 改 Name 会被**静默丢弃**
   // （返回成功、Revision 变了，但名字没变），所以必须在创建时就写对。
@@ -302,7 +300,7 @@ export async function createPocApplication(
       Description: input.description.slice(0, 200),
       FulfillmentTypes: ['CASH'],
       BenefitApplicationDetails: details as any,
-      PartnerContacts: [CONTACT],
+      PartnerContacts: [funding.contact],
     })));
 
   const result: CreatePocResult = {
@@ -313,7 +311,7 @@ export async function createPocApplication(
     amounts,
     startDate: start.toISOString().slice(0, 10),
     endDate: end.toISOString().slice(0, 10),
-    associated: false, submitted: false, warnings,
+    associated: false, submitted: false, warnings, partnerKey,
   };
 
   // 关联商机：已批准件 100% 都有，失败不回滚但要如实报告
@@ -355,8 +353,11 @@ export async function createPocApplication(
 }
 
 /** 提交一条已创建的申请。与创建分开，避免重跑时产生重复单据。 */
-export async function submitExisting(applicationId: string) {
-  const ben = await benefitsClient();
+export async function submitExisting(
+  applicationId: string, partnerKey: string = DEFAULT_PARTNER_KEY,
+) {
+  getFundingProfile(partnerKey);   // 未配置资金资料的主体不允许写操作
+  const ben = await benefitsClient(partnerKey);
   const r: any = await ben.send(new GetBenefitApplicationCommand({
     Catalog: CATALOG, Identifier: applicationId,
   }));
@@ -741,8 +742,10 @@ async function loadClaimIndex(ben: any, allApps: any[]) {
  * 账户里 39 条 "Migrated Fund Request" 是旧系统迁移的历史存量，
  * 混进台账会让人以为有一堆待办。
  */
-export async function listPocApplications(opts: { includeMigrated?: boolean } = {}) {
-  const ben = await benefitsClient();
+export async function listPocApplications(
+  opts: { includeMigrated?: boolean; partnerKey?: string } = {},
+) {
+  const ben = await benefitsClient(opts.partnerKey ?? DEFAULT_PARTNER_KEY);
   const out: any[] = [];
   let token: string | undefined;
   do {
@@ -815,8 +818,10 @@ export async function listPocApplications(opts: { includeMigrated?: boolean } = 
     .sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')));
 }
 
-export async function getPocApplication(applicationId: string): Promise<PocRow> {
-  const ben = await benefitsClient();
+export async function getPocApplication(
+  applicationId: string, partnerKey: string = DEFAULT_PARTNER_KEY,
+): Promise<PocRow> {
+  const ben = await benefitsClient(partnerKey);
   const r: any = await ben.send(new GetBenefitApplicationCommand({
     Catalog: CATALOG, Identifier: applicationId,
   }));
@@ -891,4 +896,15 @@ export function buildCsv(rows: PocRow[], ctx: CsvContext = {}): string {
   }
   // BOM：Excel / 表格软件打开中文表头不乱码
   return '\uFEFF' + lines.join('\r\n') + '\r\n';
+}
+
+/** Webby 沿用历史前缀 poc-cash，其余主体为 poc-cash-<key>，避免旧快照被归到别的主体 */
+export function pocCsvFilePrefix(partnerKey: string): string {
+  return partnerKey === DEFAULT_PARTNER_KEY ? 'poc-cash' : `poc-cash-${partnerKey}`;
+}
+
+/** 是否为该主体的带时间戳快照（排除 latest 与其他主体的文件） */
+export function isPocCsvSnapshotOf(file: string, partnerKey: string): boolean {
+  const prefix = pocCsvFilePrefix(partnerKey).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(`^${prefix}-\\d{4}-\\d{2}-\\d{2}T\\d{2}-\\d{2}-\\d{2}\\.csv$`).test(file);
 }

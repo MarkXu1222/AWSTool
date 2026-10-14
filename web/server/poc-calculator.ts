@@ -11,6 +11,7 @@ export interface CalculatorContext {
   opportunityId: string;
   awsAccountId: string;
   createdBy: string;
+  partnerKey: string;
 }
 
 export interface CalculatorOutcome {
@@ -29,6 +30,7 @@ export async function createUniqueCalculator(ctx: CalculatorContext): Promise<Ca
     region: ctx.region,
     mrrUsd: ctx.mrrUsd,
     createdBy: ctx.createdBy,
+    partnerKey: ctx.partnerKey,
   }, seed => {
     const built = buildPocEstimate({ name: ctx.name, mrrUsd: ctx.mrrUsd, seed, region: ctx.region });
     return { target: built.plan.target, total: built.plan.total,
@@ -63,6 +65,7 @@ export function recordManualCalculator(ctx: CalculatorContext, url: string): Cal
     region: ctx.region,
     mrrUsd: ctx.mrrUsd,
     createdBy: ctx.createdBy,
+    partnerKey: ctx.partnerKey,
     calculatorUrl: url,
   });
   return { ledgerId: entry.id, url, total: null, items: [] };

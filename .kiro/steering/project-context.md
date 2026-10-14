@@ -192,11 +192,12 @@ Bedrock 配额特意用 `/api/bedrock` 独立前缀，就是为了躲开 `/quota
 | 任何 CSV 导出 | 数字不加千分位，`toLocaleString()` 的逗号会让下游 `split(',')` 串位 |
 | `temp-admin.ts` | 授予 AdministratorAccess 的唯一路径：占位记录必须与同步校验同一 tick 写入（中间不能有 await），否则受限账户/并发开通出现竞态；回收必须按 id 复读最新状态、只认 `AccessDenied`，绝不能误标 revoked；临时 StackSet 的 AutoDeployment 必须保持关闭。`tests/temp-admin*.test.ts` 锁死 |
 | `restricted-accounts.ts` | `getExcludedAccountIds()` 刻意不按 state 过滤；收窄会确保**无 admin-console**（回收临时开通 / 删残留）、OAAR 保留（Admin 凭证 ≤1h），INVITED 账户收窄后只剩 support-quota，首次标记无 OAAR 账户时内部临时开通 1h 并回收；取消标记顺序不能反（先取得管理员凭证——不再补回 admin-console——并按备份恢复 support 权限，最后删记录）。`tests/restricted-admin-access.test.ts` 锁死 |
+| POC 资金发票主体（`PartnerProfile.funding`） | 发票主体 / `AccountProfileID` 错了钱会打给别家且难以察觉；未配置主体必须在任何 AWS 调用前拒绝，绝不回退 Webby。`tests/poc-cash-partner-funding.test.ts` 锁死 |
 | POC Cash IAM 策略 | action 前缀是 `partnercentral:`，**不是** `partnercentral-selling:`，写错整个策略静默失效 |
 | POC 定价计算器（`calculator-rates.ts` / `calculator-services.ts`） | 单价与 JSON 块必须与 calculator.aws「Update estimate」引擎一致，否则审核人一点重算金额就变（旧版 7,946 → 27,767）。单价来自引擎实测而非 Price List；标定时每个参数须独立变化（EFS 读写曾因同比例样本拆错）。`tests/calculator-calibration.test.ts` 锁 183 个实测用例；改动后必须联网跑 `scripts/verify-calculator-render.ts` |
 | 批量 Root 改密 | 提交边界语义复杂，`password_unknown` 绝不自动重试。改动前必读 `web/ROOT_EMAIL.md` |
 
-`web/tests/` 下有 34 个回归测试守着上述若干条，改完记得跑。
+`web/tests/` 下有 37 个回归测试守着上述若干条，改完记得跑。
 
 ---
 
@@ -212,6 +213,7 @@ Bedrock 配额特意用 `/api/bedrock` 独立前缀，就是为了躲开 `/quota
 - 敏感度分档而非一刀切：可分配页 → 需显式勾选的 `ops`/`bedrock` → 勾不到的 `poccash`
 - 强制 **MFA + 审计日志 + 限速**；平台长期凭证只在服务端
 - POC Cash 参考旧商机复用客户资料、Marketing 字段和 Solution；新商机的 Use Case 与业务描述由用户按本次标题填写，不沿用旧项目内容
+- POC 资金申请按主体分流（0.55.0）：发票主体 / 收款档案 / 联系人放 `PartnerProfile.funding`（代码，非 config），未配置即拒绝、绝不回退 Webby；进展与 CSV 按主体分开，计算器查重仍跨主体全局（见 `.kiro/specs/poc-cash-mergebytes-funding/`）
 - Bedrock `map-migrated` 防错**不存储** payer 标准值：只做格式强校验（`^mig[A-Z0-9]{10}$`）+ 写后 AWS 回查 + 交付从 AWS 重读标签；「格式合法但属于别家 payer」靠人工（0.53.0，见 `.kiro/specs/bedrock-map-tag-guard/`）
 - POC 定价计算器每条申请独一份：以本地台账（`poc_calculator_ledger`）ID 播种并兼作 `ClientToken`，生成后按总额/服务签名查重；成本公式以 calculator.aws 引擎实测为准（0.52.0，见 `.kiro/specs/poc-calculator-uniqueness/`）
 

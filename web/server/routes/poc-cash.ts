@@ -16,20 +16,22 @@ import { createUniqueCalculator } from '../poc-calculator';
 // CSV 快照目录。与账单导出同级，纳入同一套磁盘监控。
 const POC_CSV_DIR = path.join(__dirname, '../../../data/poc-cash');
 
-function savePocCsv(csv: string) {
+/** 按主体分文件：Webby 沿用 poc-cash-<ts>.csv，其余主体为 poc-cash-<key>-<ts>.csv */
+function savePocCsv(csv: string, partnerKey: string) {
   fs.mkdirSync(POC_CSV_DIR, { recursive: true });
   const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
-  const file = `poc-cash-${ts}.csv`;
+  const prefix = fund.pocCsvFilePrefix(partnerKey);
+  const file = `${prefix}-${ts}.csv`;
   fs.writeFileSync(path.join(POC_CSV_DIR, file), csv, 'utf-8');
   // 同时维护一份 latest，方便直接覆盖到本地台账
-  fs.writeFileSync(path.join(POC_CSV_DIR, 'poc-cash-latest.csv'), csv, 'utf-8');
+  fs.writeFileSync(path.join(POC_CSV_DIR, `${prefix}-latest.csv`), csv, 'utf-8');
   return { file, savedAt: new Date().toISOString() };
 }
 
-function listPocCsvFiles() {
+function listPocCsvFiles(partnerKey: string) {
   try {
     return fs.readdirSync(POC_CSV_DIR)
-      .filter(f => f.endsWith('.csv') && f !== 'poc-cash-latest.csv')
+      .filter(f => fund.isPocCsvSnapshotOf(f, partnerKey))
       .sort().reverse().slice(0, 50)
       .map(f => {
         const st = fs.statSync(path.join(POC_CSV_DIR, f));
@@ -81,6 +83,9 @@ pocCashRouter.get('/meta', (_req: Request, res: Response) => {
       // 逐个主体报告可用性：某个主体没配 role 时前端能直接标出来，
       // 而不是等用户提交后才报错
       configured: poc.isConfigured(p.key),
+      // 能否提 POC 资金申请；发票主体名用于前端确认框，提交前最后核对一次主体
+      fundingEnabled: !!p.funding,
+      fundingInvoiceEntity: p.funding?.invoice.InvoiceEntityName ?? null,
     })),
     useCases: poc.USE_CASES,
     industries: poc.INDUSTRIES,
@@ -160,12 +165,14 @@ pocCashRouter.post('/funding/preview', async (req: Request, res: Response) => {
   const oppId = String(b.opportunityId || '');
   if (!OPP_ID_RE.test(oppId)) return res.status(400).json({ error: '无效的商机 ID' });
   try {
-    const pre = await fund.precheckOpportunity(oppId);
+    const pk = partnerKeyOf(req);
+    const pre = await fund.precheckOpportunity(oppId, pk);
     const people = Number(b.people) || 2;
     const days = Number(b.days) || 3;
     const leadDays = Number(b.leadDays) || fund.MIN_LEAD_DAYS;
     const amounts = fund.computeAmounts(pre.mrrUsd, people, days);
     res.json({
+      partnerKey: pk,
       precheck: pre,
       amounts,
       warnings: fund.warningsFor(amounts, leadDays),
@@ -189,8 +196,10 @@ pocCashRouter.post('/funding', async (req: Request, res: Response) => {
     const desc = String(b.description || '').trim();
     if (desc.length < 50) throw new Error('业务描述至少 50 字');
     const user = (req as any).user;
+    const pk = partnerKeyOf(req);
 
     const result = await fund.createPocApplication({
+      partnerKey: pk,
       opportunityId: String(b.opportunityId),
       awsAccountId: String(b.awsAccountId),
       description: desc,
@@ -209,7 +218,7 @@ pocCashRouter.post('/funding', async (req: Request, res: Response) => {
     }, createUniqueCalculator);
 
     db.addAuditLog(user?.userId, 'POC_FUNDING_CREATE',
-      `${result.applicationId} | ${result.name} | 商机 ${result.opportunityId}`
+      `[${pk}] ${result.applicationId} | ${result.name} | 商机 ${result.opportunityId}`
       + ` | ${result.amounts.pocUsd} USD | ${result.submitted ? '已提交' : '未提交'}`
       + ` | 计算器 ${result.calculator.total ?? '手填'} USD`
       + `${result.warnings.length ? ` | 警告 ${result.warnings.length} 条` : ''}`,
@@ -226,10 +235,11 @@ pocCashRouter.post('/funding/:id/submit', async (req: Request, res: Response) =>
   const id = String(req.params.id || '');
   if (!APP_ID_RE.test(id)) return res.status(400).json({ error: '无效的申请 ID' });
   try {
-    const r = await fund.submitExisting(id);
+    const pk = partnerKeyOf(req);
+    const r = await fund.submitExisting(id, pk);
     const user = (req as any).user;
     db.addAuditLog(user?.userId, 'POC_FUNDING_SUBMIT',
-      `${id} | ${r.status} / ${r.stage}`, user?.username, req.ip);
+      `[${pk}] ${id} | ${r.status} / ${r.stage}`, user?.username, req.ip);
     (res.locals as any).audited = true;
     res.json(r);
   } catch (e: any) {
@@ -243,6 +253,7 @@ pocCashRouter.get('/funding', async (req: Request, res: Response) => {
     res.json({
       applications: await fund.listPocApplications({
         includeMigrated: req.query.includeMigrated === '1',
+        partnerKey: partnerKeyOf(req),
       }),
     });
   } catch (e: any) {
@@ -258,13 +269,14 @@ pocCashRouter.get('/funding', async (req: Request, res: Response) => {
  */
 pocCashRouter.post('/funding/export', async (req: Request, res: Response) => {
   try {
-    const rows = await fund.listPocApplications();
+    const pk = partnerKeyOf(req);
+    const rows = await fund.listPocApplications({ partnerKey: pk });
     // 商机标题/MRR/阶段在 Benefits API 里没有，逐个补齐
     const oppIds = [...new Set(rows.map(r => r.opportunityId).filter(Boolean))];
     const opportunities: Record<string, any> = {};
     await Promise.all(oppIds.map(async (id) => {
       try {
-        const t = await poc.getStageStatus(id as string);
+        const t = await poc.getStageStatus(id as string, pk);
         opportunities[id as string] = {
           title: t.title, mrrUsd: t.mrrUsd, stage: t.stage,
         };
@@ -277,19 +289,23 @@ pocCashRouter.post('/funding/export', async (req: Request, res: Response) => {
       owner: String(req.body?.owner || user?.username || ''),
     });
 
-    const saved = savePocCsv(csv);
+    const saved = savePocCsv(csv, pk);
     db.addAuditLog(user?.userId, 'POC_FUNDING_EXPORT',
-      `导出 ${rows.length} 条 | ${saved.file}`, user?.username, req.ip);
+      `[${pk}] 导出 ${rows.length} 条 | ${saved.file}`, user?.username, req.ip);
     (res.locals as any).audited = true;
-    res.json({ rows: rows.length, file: saved.file, savedAt: saved.savedAt, csv });
+    res.json({ partnerKey: pk, rows: rows.length, file: saved.file, savedAt: saved.savedAt, csv });
   } catch (e: any) {
     res.status(400).json({ error: e.message });
   }
 });
 
 /** 历史快照列表 */
-pocCashRouter.get('/funding/exports', (_req: Request, res: Response) => {
-  res.json({ files: listPocCsvFiles() });
+pocCashRouter.get('/funding/exports', (req: Request, res: Response) => {
+  try {
+    res.json({ files: listPocCsvFiles(partnerKeyOf(req)) });
+  } catch (e: any) {
+    res.status(400).json({ error: e.message });
+  }
 });
 
 /** 查商机阶段与可操作性（提交后用它确认 AWS 审到哪一步了）。 */

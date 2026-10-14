@@ -500,15 +500,16 @@ export const api = {
   pocFundingMeta: () => request('/poc-cash/funding/meta'),
   pocFundingAccount: (id: string) =>
     request(`/poc-cash/funding/account/${encodeURIComponent(id)}`),
-  pocFundingPreview: (body: any) =>
+  // 资金申请同样按主体分流：凭证、发票主体、联系人都随 partnerKey 切换
+  pocFundingPreview: (body: Record<string, unknown> & { partnerKey: string }) =>
     request('/poc-cash/funding/preview', { method: 'POST', body: JSON.stringify(body) }),
-  pocFundingCreate: (body: any) =>
+  pocFundingCreate: (body: Record<string, unknown> & { partnerKey: string }) =>
     request('/poc-cash/funding', { method: 'POST', body: JSON.stringify(body) }),
-  pocFundingSubmit: (id: string) =>
-    request(`/poc-cash/funding/${encodeURIComponent(id)}/submit`, { method: 'POST' }),
-  pocFundingList: () => request('/poc-cash/funding'),
-  pocFundingExport: (owner?: string) =>
-    request('/poc-cash/funding/export', { method: 'POST', body: JSON.stringify({ owner }) }),
+  pocFundingSubmit: (id: string, partnerKey: string) =>
+    request(`/poc-cash/funding/${encodeURIComponent(id)}/submit${pk(partnerKey)}`, { method: 'POST' }),
+  pocFundingList: (partnerKey: string) => request(`/poc-cash/funding${pk(partnerKey)}`),
+  pocFundingExport: (partnerKey: string, owner?: string) =>
+    request('/poc-cash/funding/export', { method: 'POST', body: JSON.stringify({ partnerKey, owner }) }),
   pocCashPreviewTitle: (body: { partnerKey: string; companyName: string; projectName: string; titleOverride?: string }) =>
     request('/poc-cash/preview-title', { method: 'POST', body: JSON.stringify(body) }),
   pocCashCreate: (body: any) =>

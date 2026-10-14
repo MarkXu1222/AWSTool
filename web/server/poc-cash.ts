@@ -59,6 +59,21 @@ export interface PartnerProfile {
   apnAccountId: string;
   /** config.json -> partnerCentral 下的键名。缺省走顶层配置（兼容旧结构） */
   configKey?: string;
+  /** POC 资金申请用的发票与联系人。缺省表示该主体不能提 POC */
+  funding?: PartnerFundingProfile;
+}
+
+/** POC 资金申请（Benefits）用的主体资料 */
+export interface PartnerFundingProfile {
+  invoice: {
+    InvoiceEntityName: string;
+    /** ISO 3166-1 alpha-2，如 MY（不是 MALAYSIA） */
+    InvoiceRemitCountry: string;
+    InvoiceRemitAddress: string;
+    /** Payee Central 收款档案 ID */
+    AccountProfileID: string;
+  };
+  contact: { Email: string; FirstName: string; LastName: string; BusinessTitle: string };
 }
 
 export const PARTNERS: PartnerProfile[] = [
@@ -79,6 +94,22 @@ export const PARTNERS: PartnerProfile[] = [
     defaultSolutionId: 'S-0070517', // Migration services
     apnAccountId: '105673812363',
     configKey: 'webby',
+    // 11/11 已批准件完全一致
+    funding: {
+      invoice: {
+        InvoiceEntityName: 'WEBBY SDN BHD',
+        InvoiceRemitCountry: 'MY',
+        InvoiceRemitAddress:
+          '2-3, Jalan Merbah 1, Bandar Puchong Jaya, 47170 Puchong, Selangor',
+        AccountProfileID: '123749FB67ZJQ',
+      },
+      contact: {
+        Email: 'sy.siow@webbygroup.com',
+        FirstName: 'SY',
+        LastName: 'Siow',
+        BusinessTitle: 'Business Strategy Director',
+      },
+    },
   },
   {
     key: 'mergebytes',
@@ -98,6 +129,22 @@ export const PARTNERS: PartnerProfile[] = [
     defaultSolutionId: '',  // 实测账户内无已发布 Solution
     apnAccountId: '072471709462',
     configKey: 'mergebytes',
+    // 该账户此前从未提过 POC，以下由业务方 2026-10-14 提供，没有已批准件可对照
+    funding: {
+      invoice: {
+        InvoiceEntityName: 'MERGEBYTES AI SDN. BHD.',
+        InvoiceRemitCountry: 'MY',
+        InvoiceRemitAddress:
+          '3-1, JALAN MERBAH 1, BANDAR PUCHONG JAYA, 47170 PUCHONG SELANGOR MALAYSIA',
+        AccountProfileID: '2MGE7NZ9LMR3C',
+      },
+      contact: {
+        Email: 'cloud@mergebytes.ai',
+        FirstName: 'SY',
+        LastName: 'Siow',
+        BusinessTitle: 'OpportunityOwner',
+      },
+    },
   },
 ];
 
@@ -108,6 +155,15 @@ export function getPartner(key: string): PartnerProfile {
     throw new Error(`未知的 Partner: ${key}（可选：${known}）`);
   }
   return p;
+}
+
+/** 取主体的 POC 资金资料；未配置即抛错，绝不回退到 Webby（发票主体错了很难察觉）。 */
+export function getFundingProfile(partnerKey: string): PartnerFundingProfile {
+  const p = getPartner(partnerKey);
+  if (!p.funding) {
+    throw new Error(`${p.label} 未配置 POC 发票信息，不能提 POC 资金申请`);
+  }
+  return p.funding;
 }
 
 /** CustomerUseCase 合法值（取自 Project.CustomerUseCase 文档，必须完整字面量）。
