@@ -2,9 +2,12 @@
 
 > 前置：`design.md` 已通过闸门 G1（2026-10-15）。所有任务的唯一依据是同目录 `design.md`；邮箱接口以 `mailbox-api-spec.md`（含顶部「上线差异」）为准。
 > P2 回写 design.md（不改设计思路，见其顶部状态行）：邮箱改密不做认证缓存刷新；补 `NOT_FOUND`/`HTTPS_REQUIRED`；新增测试注入点 `accountReclaimDeps`（§5.4）；受限账户矩阵测试归 service 测试（§9）。
-> 执行方式：协调会话跑在 VSCode 扩展，不在 Orca 托管终端内（`run-create` 会报 `no_active_sender_terminal`）。按既定偏好由 Claude 按本表边界与顺序直接实现、逐任务提交、逐任务跑验收，全部完成后派独立审核子代理；其余阶段与四道闸门不变。
+> 执行方式（2026-10-15 调整）：T1 由 Claude 在 VSCode 会话直接实现。实现 T2 时 Claude 的输出被安全审查拦截（与此前起草 tasks.md 被拦同类），
+> 用户选择 **T2–T7 由用户在 Orca 托管终端派 codex（gpt-6-sol / high）实现**，Claude 只做审核、串行合并到 `integration/account-reclaim` 与后续阶段。
+> 派发简报见同目录 `briefs.md`。四道闸门不变。
 >
-> **实际执行记录**：（P3 完成后回填提交号）
+> **实际执行记录**：T1 `0083ed5`（Claude）；T2–T7 待派发（P3 完成后回填提交号）。
+> T1 相对 design 的增补：catalog 账户项增加 `restricted?: boolean`（前端给 admin 显示「受限账户」Tag 用），P5 回写 design.md §5.4。
 
 | # | 任务名 | 独占文件 | 依赖 | design.md 章节 | 验收命令 |
 |---|--------|----------|------|----------------|----------|
@@ -77,11 +80,11 @@
 
 ## 波次
 
-- **波次 1**（互不依赖）：T1（持 `db.ts`、`auth.ts`）、T2、T3（持 `aws-service.ts`）、T7（持 `api.ts`、`MainLayout.tsx`、`Settings.tsx`、`global.css`）
+- **波次 1**（互不依赖）：T1（持 `db.ts`、`auth.ts`，已完成）、T2、T3（持 `aws-service.ts`）、T7（持 `api.ts`、`MainLayout.tsx`、`Settings.tsx`、`global.css`）
 - **波次 2**：T4（依赖 T1）
 - **波次 3**：T5（依赖 T1–T4）
 - **波次 4**：T6（持 `routes/aws.ts`、`index.ts`；依赖 T5）
-- 实际执行（Claude 直接实现，串行）：T1 → T2 → T3 → T4 → T5 → T6 → T7，每个任务单独提交并跑自己的验收；全部完成后在集成分支 `integration/account-reclaim` 全量 `npm test && npm run typecheck && npm run build`，再派独立审核子代理。
+- 实际执行：T1 已由 Claude 提交；T2/T3/T7 由 codex 并行，协调者逐个审核后串行合入 `integration/account-reclaim`，再按波次派 T4 → T5 → T6（base 均为合入后的最新提交）；全部合完后在集成分支全量 `npm test && npm run typecheck && npm run build`，再派独立审核子代理。
 
 依赖链：T1 → T4 → T5 → T6，深度 3（上限）。
 

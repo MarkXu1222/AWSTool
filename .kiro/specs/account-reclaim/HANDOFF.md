@@ -1,7 +1,7 @@
 # 账户回收 —— 进度交接（供新会话续作）
 
 > 最后更新：2026-10-15。本需求走 **orca-dev-flow 七阶段四闸门**。
-> G1 已批（2026-10-15）；`tasks.md` 已起草，目前处于 **P2 待 G2 审阅**。
+> G1、G2 已批（2026-10-15）；处于 **P3**：T1 完成，T2–T7 待用户在 Orca 终端派 codex（见 `briefs.md`）。
 > 五步编号已统一；具体接口与状态设计以当前 `design.md` 为准。
 
 ## 需求一句话
@@ -42,11 +42,12 @@
 ## 待做（按顺序）
 
 - [x] 闸门 **G1**：2026-10-15 用户已批准 design.md（受限账户已统一为「仅 admin 可回收」）。
-- [ ] P2 拆 `tasks.md`（文件所有权互斥）→ 闸门 G2。**2026-10-15 已落盘 7 个任务 / 4 波次，待用户批准 G2**；同时回写 design.md（对齐上线邮箱接口、补 `accountReclaimDeps` 测试注入点）。
+- [x] P2 `tasks.md` 7 个任务 / 4 波次，**G2 已于 2026-10-15 批准**；同时回写 design.md（对齐上线邮箱接口、补 `accountReclaimDeps` 测试注入点）。
+- [ ] P3：分支 `integration/account-reclaim`。T1 已完成 `0083ed5`（Claude）。T2 起 Claude 输出被安全审查拦截，
+      **用户决定 T2–T7 由用户在 Orca 终端派 codex**，简报在 `briefs.md`；Claude 负责审核与串行合并。下一步：派波次 1（T2、T3、T7）。
       拆分规则见 `.claude/skills/orca-dev-flow/references/task-split.md`，可参照 `.kiro/specs/admin-console-on-demand/tasks.md`。
       提醒：`root-email-jobs.ts` / `root-email-core.ts` / `root-reset-permissions.ts` 三个文件须归同一任务（来源隔离、互斥、验证码注入互相牵连），
       该任务简报写明「先读 `web/ROOT_EMAIL.md`」；`db.ts`、`auth.ts`、`routes/aws.ts`、`index.ts`、`MainLayout.tsx`、`api.ts`、`Settings.tsx` 为枢纽文件，同一波次各只能归一个任务。
-- [ ] P3 派 codex（`gpt-6-sol`，`--effort high`，核对 `launch.effective`）。
 - [ ] P4 集成分支串行合并 + 审核 + `npm test && npm run typecheck && npm run build` 全绿。
 - [ ] P5 发版（改 `web/client/src/version.ts` 的 `APP_VERSION`、README、project-context）→ 闸门 G3。
 - [ ] P6 Claude 亲自部署 EC2 → 闸门 G4。邮箱侧接口上线后用授权测试账户联调五步。

@@ -259,7 +259,7 @@ export class MailboxAdminApiError extends Error {
 }
 export function mailboxAdminApiConfigured(): boolean;
 export class MailboxAdminApiClient {
-  constructor(config?: () => Promise<MailApiConfig>, transport?: typeof fetch, intervalMs?: number);
+  constructor(config?: () => Promise<MailApiConfig>, transport?: typeof fetch, intervalMs?: number, timeoutMs?: number);
   lookup(emails: string[], signal?: AbortSignal): Promise<MailboxAdminLookupItem[]>;
   deleteForwards(email: string, signal?: AbortSignal): Promise<MailboxAdminDeleteResult>;
   setPassword(email: string, password: string, signal?: AbortSignal): Promise<MailboxAdminPasswordResult>;
@@ -273,7 +273,7 @@ SSM 配置内存缓存 10 分钟，读取失败清缓存并返回固定脱敏说
 
 响应从 unknown 做运行时校验：lookup 返回每个请求邮箱恰好一项，无缺失/重复/非请求邮箱；flags 必须为 boolean；删除数量非负整数且 removed 合法；改密必须 `updated===true`、sessionsKicked 为非负整数。只按已验证的结构推进步骤。
 
-429 记录 Retry-After（数字秒或 HTTP 日期），夹在 1 秒–10 分钟并更新 client 下一可调用时间；**不透明自动重试写请求**。超时、连接中断、无效响应属于写结果未知，由回收页提示 TOTP 后幂等重试。其他业务错误码按 §8 映射；不能把原始 body/msg 不加筛选地写进持久化日志。邮箱实现或权限未就绪时不降级到网页管理、SSH 或旧 token。
+429 记录 Retry-After（数字秒或 HTTP 日期），夹在 1 秒–10 分钟并更新 client 下一可调用时间；**不透明自动重试写请求**。超时、连接中断、无效响应属于写结果未知，由回收页提示 TOTP 后幂等重试。其他业务错误码按 §8 映射（P2 补充：改密 500 且 `msg` 以 `doveadm who failed` / `doveadm kick failed` 开头时，抛 `code='INTERNAL_ERROR'`、`message` 分别为固定文案「查询在线会话失败」「踢出旧会话失败」，其他 INTERNAL_ERROR 的 message 为「邮箱服务内部错误」——T1 的 `translateAccountReclaimError` 只认这两句；`timeoutMs` 默认 15000，仅供测试缩短）；不能把原始 body/msg 不加筛选地写进持久化日志。邮箱实现或权限未就绪时不降级到网页管理、SSH 或旧 token。
 
 ### 5.4 编排服务：新建 `web/server/account-reclaim.ts`
 
