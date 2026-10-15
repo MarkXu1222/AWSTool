@@ -63,7 +63,8 @@ function linkedReclaim(root: RootEmailJob, requireRunning = false): AccountRecla
   const reclaim = matches[0];
   const attempt = currentReclaimAttempt(reclaim);
   if (root.batchId !== attempt.requestId || (attempt.rootEmailJobId && attempt.rootEmailJobId !== root.id)
-    || (reclaim.rootEmailJobId && reclaim.rootEmailJobId !== root.id)
+    || (reclaim.rootEmailJobId && reclaim.rootEmailJobId !== root.id
+      && reclaim.rootEmailJobId !== attempt.retryOfJobId)
     || root.accountId !== reclaim.accountId || root.email.toLowerCase() !== reclaim.email.toLowerCase()
     || root.payerAccountId !== reclaim.payerAccountId || root.payerName !== reclaim.payer
     || root.createdBy !== reclaim.createdBy || root.createdByUserId !== reclaim.createdByUserId

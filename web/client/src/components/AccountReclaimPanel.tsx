@@ -254,7 +254,7 @@ export default function AccountReclaimPanel({ isAdmin = false }: { isAdmin?: boo
     <div className="reclaim-table-scroll"><Table<CatalogItem> rowKey="accountId" size="small" dataSource={catalog?.accounts || []}
       pagination={{ current: page, pageSize, total: catalog?.total || 0, showSizeChanger: true, pageSizeOptions: [20, 50, 100],
         onChange: (next, size) => { setPage(next); setPageSize(size as 20 | 50 | 100); } }}
-      rowSelection={{ selectedRowKeys: Object.keys(selected), onSelect: toggle,
+      rowSelection={{ selectedRowKeys: Object.keys(selected), onSelect: toggle, hideSelectAll: true,
         getCheckboxProps: item => ({ disabled: !item.eligible || (!!item.restricted && !isAdmin),
           name: item.eligible ? item.accountName : item.reason }) }}
       columns={[{ title: '账户', key: 'account', width: 230, render: (_, item) => <>

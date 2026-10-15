@@ -13,8 +13,9 @@ try {
   FEISHU_WEBHOOK = config.web?.feishuWebhook || '';
 } catch {}
 
-export async function sendNotification(title: string, content: string) {
+export async function sendNotification(title: string, content: string, options: { strict?: boolean } = {}) {
   if (!FEISHU_WEBHOOK) {
+    if (options.strict) throw new Error('飞书通知未配置');
     console.log('[Notify] No Feishu webhook configured, skipping');
     return;
   }
@@ -23,6 +24,7 @@ export async function sendNotification(title: string, content: string) {
     const resp = await fetch(FEISHU_WEBHOOK, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
+      signal: options.strict ? AbortSignal.timeout(15_000) : undefined,
       body: JSON.stringify({
         msg_type: 'interactive',
         card: {
@@ -39,12 +41,16 @@ export async function sendNotification(title: string, content: string) {
       }),
     });
     const data: any = await resp.json();
+    if (options.strict && (!resp.ok || (data.code !== 0 && data.StatusCode !== 0))) {
+      throw new Error('飞书通知未确认送达');
+    }
     if (data.code === 0 || data.StatusCode === 0) {
       console.log(`[Notify] ✅ Sent: ${title}`);
     } else {
       console.log(`[Notify] ❌ Failed:`, data.msg || data.message || JSON.stringify(data));
     }
   } catch (e: any) {
+    if (options.strict) throw new Error('飞书通知发送失败');
     console.error(`[Notify] Error: ${e.message}`);
   }
 }

@@ -408,6 +408,33 @@ test('batch request identifiers are idempotent and cannot be reused with another
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
+test('ordinary Root retries retain admin takeover while reclaim retries preserve their creator', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'root-email-retry-owner-'));
+  try {
+    for (const reclaim of [false, true]) {
+      const file = path.join(dir, reclaim ? 'reclaim.json' : 'ordinary.json');
+      const store = new RootEmailStore(file);
+      const originalInput = { ...input, ...(reclaim
+        ? { origin: 'account-reclaim' as const, reclaimJobId: randomUUID() } : {}) };
+      const meta = { batchId: randomUUID(), autoSetPassword: true as const,
+        payerAccountId: '999999999999', payerName: 'fixture' };
+      const source = store.createBatchGroup([originalInput], meta).jobs[0];
+      store.update(source.id, { status: 'failed', phase: 'done', emailSubmitAttempted: false,
+        passwordSubmitAttempted: false, createdAt: new Date(Date.now() - 61_000).toISOString() });
+      const retryInput = { ...originalInput, createdBy: 'another-admin', createdByUserId: '99' };
+      const retryMeta = { ...meta, batchId: randomUUID() };
+      if (reclaim) {
+        assert.throws(() => store.createRetry(source.id, retryInput, retryMeta), /参数与原任务不匹配/);
+      } else {
+        const retry = store.createRetry(source.id, retryInput, retryMeta).job;
+        assert.equal(retry.createdBy, 'another-admin');
+        assert.equal(retry.createdByUserId, '99');
+        assert.equal(new RootEmailStore(file).get(retry.id)?.retryOfJobId, source.id);
+      }
+    }
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
 test('reclaim origin survives reload and safe retries but cannot be changed by a replay', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'root-email-origin-'));
   try {

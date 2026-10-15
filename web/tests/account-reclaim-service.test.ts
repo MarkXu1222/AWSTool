@@ -91,6 +91,20 @@ test('creates atomically, validates count, replays request and blocks changed co
   assert.equal(db.listAccountReclaimJobs().length, 1);
 });
 
+test('concurrent identical request IDs return one batch and one creation audit', async t => {
+  mocks(t); accounts = [account('616161616161')]; user = actor; restricted = []; root = null;
+  const values = { accountIds: ['616161616161'], requestId: randomUUID(), confirmAccountCount: 1 };
+  const results = await Promise.all([
+    service.createAccountReclaimBatch(values, actor),
+    service.createAccountReclaimBatch(values, actor),
+  ]);
+  assert.deepEqual(results.map(result => result.reused).sort(), [false, true]);
+  assert.equal(results[0].batch.id, results[1].batch.id);
+  assert.equal(db.listAccountReclaimJobs().filter(job => job.batchId === values.requestId).length, 1);
+  assert.equal(db.getAuditLog(5000).filter(log => log.action === 'ACCOUNT_RECLAIM_BATCH_CREATE'
+    && log.detail.includes(values.requestId)).length, 1);
+});
+
 test('restricted account is catalog-visible but only a current admin may create and run it', async t => {
   mocks(t);
   t.after(() => service.stopAccountReclaimRunner());
@@ -578,4 +592,54 @@ test('catalog rejects invalid pagination and unknown payer without lookup', asyn
   for (const query of [{ page: 0 }, { page: 1.2 }, { pageSize: 10 }, { payer: 'missing' }]) {
     await assert.rejects(service.getAccountReclaimCatalog(query as any, actor), { statusCode: 400 });
   }
+});
+
+test('a pending result notification cannot block another account or be marked as delivered', async t => {
+  mocks(t); accounts = [account('818181818181'), account('828282828282')];
+  user = actor; restricted = []; events = []; root = null;
+  let release!: () => void;
+  const held = new Promise<void>(resolve => { release = resolve; });
+  let notifying = false;
+  t.after(async () => { release(); await service.stopAccountReclaimRunner(); });
+  t.mock.method(service.accountReclaimDeps, 'sendNotification', async (title: string) => {
+    if (title === '账户回收结果') { notifying = true; await held; }
+  });
+  t.mock.method(service.accountReclaimDeps.mailbox, 'deleteForwards', async (email: string) => {
+    if (email.includes('818181818181')) throw Object.assign(new Error('Fixture rejection'), { code: 'SCOPE_DENIED' });
+    events.push('second account started');
+    return { deleted: 0, removed: [] };
+  });
+  const first = await create(['818181818181']);
+  service.startAccountReclaimRunner();
+  await waitFor(() => notifying);
+  assert.equal(db.listAccountReclaimJobs().find(j => j.id === first.batch.jobs[0].id)?.outcomeNotifiedRevision, undefined);
+  await create(['828282828282']);
+  await waitFor(() => events.includes('second account started'));
+  release();
+  await waitFor(() => db.listAccountReclaimJobs().find(j => j.id === first.batch.jobs[0].id)?.outcomeNotifiedRevision === 1);
+});
+
+test('shutdown during Root admission preserves the durable attempt for startup recovery', async t => {
+  mocks(t); accounts = [account('838383838383')]; user = actor; restricted = []; events = []; root = null;
+  let release!: () => void;
+  const held = new Promise<void>(resolve => { release = resolve; });
+  let entering = false;
+  t.after(async () => { release(); await service.stopAccountReclaimRunner(); });
+  t.mock.method(service.accountReclaimDeps, 'ensureAccountReclaimRootJob', async () => {
+    entering = true;
+    await held;
+    throw Object.assign(new Error('Root runner is stopping'), { statusCode: 503 });
+  });
+  const { batch } = await create(['838383838383']);
+  service.startAccountReclaimRunner();
+  await waitFor(() => entering);
+  const attempt = db.listAccountReclaimJobs().find(j => j.id === batch.jobs[0].id)!.rootAttempts[0].requestId;
+  const stopped = service.stopAccountReclaimRunner();
+  release();
+  await stopped;
+  const stored = db.listAccountReclaimJobs().find(j => j.id === batch.jobs[0].id)!;
+  assert.equal(stored.status, 'running');
+  assert.equal(stored.steps[4].state, 'running');
+  assert.equal(stored.rootAttempts[0].requestId, attempt);
+  assert.equal(stored.outcomeRevision, 0);
 });

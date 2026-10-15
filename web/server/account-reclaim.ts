@@ -148,7 +148,7 @@ function audit(action: string, job: Pick<AccountReclaimJob, 'batchId' | 'id' | '
 }
 function notify(title: string, job: Pick<AccountReclaimJob, 'batchId' | 'id' | 'accountId' | 'status'>) {
   void accountReclaimDeps.sendNotification(title,
-    `批次 ${job.batchId} · 任务 ${job.id} · 账户 ${job.accountId} · 状态 ${job.status}`).catch(() => {
+    `批次 ${job.batchId} · 任务 ${job.id} · 账户 ${job.accountId} · 状态 ${job.status}`, { strict: true }).catch(() => {
     console.error('[AccountReclaim] 飞书通知失败');
   });
 }
@@ -177,10 +177,18 @@ async function emitOutcome(job: AccountReclaimJob) {
     }
     job = accountReclaimDeps.updateJob(job.id, job.revision, { outcomeAuditRevision: job.outcomeRevision });
   }
-  if (job.outcomeNotifiedRevision !== job.outcomeRevision) {
-    await accountReclaimDeps.sendNotification('账户回收结果',
-      `批次 ${job.batchId} · 任务 ${job.id} · 账户 ${job.accountId} · 状态 ${job.status}`);
-    accountReclaimDeps.updateJob(job.id, job.revision, { outcomeNotifiedRevision: job.outcomeRevision });
+  if (job.outcomeNotifiedRevision !== job.outcomeRevision && !outcomeNotifications.has(job.id)) {
+    const outcomeRevision = job.outcomeRevision;
+    const notification = accountReclaimDeps.sendNotification('账户回收结果',
+      `批次 ${job.batchId} · 任务 ${job.id} · 账户 ${job.accountId} · 状态 ${job.status}`, { strict: true })
+      .then(() => {
+        const current = jobs().find(item => item.id === job.id);
+        if (current?.outcomeRevision === outcomeRevision && current.outcomeNotifiedRevision !== outcomeRevision) {
+          accountReclaimDeps.updateJob(current.id, current.revision, { outcomeNotifiedRevision: outcomeRevision });
+        }
+      }).catch(() => console.error('[AccountReclaim] 结果通知待补发'))
+      .finally(() => { outcomeNotifications.delete(job.id); });
+    outcomeNotifications.set(job.id, notification);
   }
 }
 function rootRetryAvailable(job: AccountReclaimJob) {
@@ -311,11 +319,11 @@ export async function createAccountReclaimBatch(values: Values, actor: AccountRe
   if (again.some((target, i) => JSON.stringify(target) !== JSON.stringify(targets[i]))) {
     fail('ACCOUNT_CHANGED', '账户邮箱或归属已变化', 409);
   }
+  const secondReplay = findAccountReclaimBatchReplay(values, actor);
+  if (secondReplay) return { batch: secondReplay, reused: true };
   assertShared(again);
   assertNoConflict(accountIds);
   accountReclaimDeps.assertAccountReclaimRootAdmission(accountIds);
-  const secondReplay = findAccountReclaimBatchReplay(values, actor);
-  if (secondReplay) return { batch: secondReplay, reused: true };
   const at = iso();
   const created: AccountReclaimJob[] = again.map(target => ({ id: randomUUID(), batchId: requestId,
     accountId: target.accountId, accountName: target.accountName, email: target.email,
@@ -425,6 +433,7 @@ export function answerAccountReclaimManualCaptcha(id: string, actor: AccountRecl
 
 let timer: NodeJS.Timeout | undefined;
 let inFlight: Promise<void> | undefined;
+const outcomeNotifications = new Map<string, Promise<void>>();
 let stopping = false;
 let mailboxAbortController = new AbortController();
 function kick() {
@@ -490,6 +499,7 @@ async function reconcile(job: AccountReclaimJob) {
       terminal(job, 'partial', blockAccountReclaimSteps(job.steps, 'aws_password', problem, iso()));
     }
   } catch (error) {
+    if (stopping) return; // Preserve the durable attempt for the restarted Root runner to reconcile.
     const current = jobs().find(item => item.id === job.id);
     if (current?.status === 'running' && current.steps[4].state === 'running') {
       let problem = (error as any)?.code === 'ROOT_JOB_LINK_INVALID' ? error : normalizeRootError(error);
@@ -598,4 +608,5 @@ export async function stopAccountReclaimRunner(): Promise<void> {
   if (timer) clearInterval(timer);
   timer = undefined;
   if (inFlight) await inFlight;
+  await Promise.all(outcomeNotifications.values());
 }

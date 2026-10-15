@@ -373,7 +373,8 @@ export class RootEmailStore {
     }
     if (input.accountId !== source.accountId || input.email.toLowerCase() !== source.email.toLowerCase()
       || input.origin !== source.origin || input.reclaimJobId !== source.reclaimJobId
-      || input.createdBy !== source.createdBy || input.createdByUserId !== source.createdByUserId
+      || (source.origin === 'account-reclaim'
+        && (input.createdBy !== source.createdBy || input.createdByUserId !== source.createdByUserId))
       || meta.payerAccountId !== source.payerAccountId || meta.payerName !== source.payerName
       || !JOB_ID.test(meta.batchId) || this.jobs.some(job => job.batchId === meta.batchId)) {
       throw new RootEmailError('重试任务参数与原任务不匹配', 409);

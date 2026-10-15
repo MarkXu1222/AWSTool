@@ -45,6 +45,16 @@ function click(element: Element | null) {
 
 const catalogAccount = { accountId: '123456789012', accountName: '客户账户', email: 'root@example.test',
   payer: 'payer-a', payerAccountId: '999999999999', eligible: true, restricted: true };
+
+test('account selection exposes working row controls without an inert select-all checkbox', async () => {
+  const panel = await setupPanel({ accounts: [{ ...catalogAccount, restricted: false }] });
+  try {
+    assert.equal(!!panel.container.querySelector('thead input[type="checkbox"]'), false,
+      'an unimplemented select-all control must not be shown');
+    await panel.React.act(async () => { click(panel.container.querySelector('tbody input[type="checkbox"]')); });
+    assert.match(panel.container.textContent || '', /回收所选 \(1\/20\)/);
+  } finally { await panel.cleanup(); }
+});
 const job = { id: 'reclaim-job-1', batchId: 'batch-1', accountId: catalogAccount.accountId,
   accountName: catalogAccount.accountName, email: catalogAccount.email, payer: 'payer-a',
   payerAccountId: catalogAccount.payerAccountId, createdBy: 'test', createdAt: '', updatedAt: '', status: 'partial',
