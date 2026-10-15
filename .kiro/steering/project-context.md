@@ -215,6 +215,7 @@ Bedrock 配额特意用 `/api/bedrock` 独立前缀，就是为了躲开 `/quota
 - POC Cash 参考旧商机复用客户资料、Marketing 字段和 Solution；新商机的 Use Case 与业务描述由用户按本次标题填写，不沿用旧项目内容
 - POC 资金申请按主体分流（0.55.0）：发票主体 / 收款档案 / 联系人放 `PartnerProfile.funding`（代码，非 config），未配置即拒绝、绝不回退 Webby；进展与 CSV 按主体分开，计算器查重仍跨主体全局（见 `.kiro/specs/poc-cash-mergebytes-funding/`）
 - Bedrock `map-migrated` 防错**不存储** payer 标准值：只做格式强校验（`^mig[A-Z0-9]{10}$`）+ 写后 AWS 回查 + 交付从 AWS 重读标签；「格式合法但属于别家 payer」靠人工（0.53.0，见 `.kiro/specs/bedrock-map-tag-guard/`）
+- POC 商机的 Solution 默认值以 Partner Central 实时 Active 列表为准（0.56.0）：代码只存偏好 `preferredSolutionId`，有 Active Solution 时必选、建商机前后端再校验，列表为空或查询失败才放行（见 `.kiro/specs/poc-solution-live-default/`）
 - POC 定价计算器每条申请独一份：以本地台账（`poc_calculator_ledger`）ID 播种并兼作 `ClientToken`，生成后按总额/服务签名查重；成本公式以 calculator.aws 引擎实测为准（0.52.0，见 `.kiro/specs/poc-calculator-uniqueness/`）
 
 ---

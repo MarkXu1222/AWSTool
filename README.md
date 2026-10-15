@@ -306,7 +306,7 @@ Admin 临时凭证时长默认 1 小时。数据库当前角色为 `admin` 的�
 
 | 分组 | 端点 |
 |------|------|
-| 元数据 | `GET /meta`（partner 列表/用例/行业/凭证状态/`fundingEnabled` 与发票主体名）、`GET /solutions`、`GET /amounts`、`POST /preview-title` |
+| 元数据 | `GET /meta`（partner 列表/用例/行业/凭证状态/`fundingEnabled` 与发票主体名）、`GET /solutions`（实时 Active 列表 + 后端算好的 `defaultSolutionId`，0.56.0）、`GET /amounts`、`POST /preview-title` |
 | 商机 | `GET /opportunities`、`GET /opportunities/:id`、`POST /opportunities`（创建 → 关联 Solution → 提交）、`GET/POST /opportunities/:id/stage`（阶段检查与推进） |
 | POC 资金 | `GET /funding/meta`、`GET /funding/account/:id`（按账户带出项目桶）、`POST /funding/preview`、`POST /funding`、`POST /funding/:id/submit`、`GET /funding`（进展台账） |
 | 台账导出 | `POST /funding/export`（19 列 CSV）、`GET /funding/exports` |
@@ -632,10 +632,10 @@ v2 按 `variant` 筛选核心 6 模型并固定排序：`global`（每区 6 条�
 
 ### 多 APN 主体（0.38.0）
 
-| 主体 | APN 账户 | 默认 Solution | 说明 |
+| 主体 | APN 账户 | 优先 Solution | 说明 |
 |---|---|---|---|
 | Webby | `105673812363` | `S-0070517` | 商机 + POC 全流程 |
-| Mergebytes | `072471709462` | 无 | 商机 + POC 全流程（POC 0.55.0 起） |
+| Mergebytes | `072471709462` | 无（实时唯一的 Active 即默认，现为 `S-0100389`） | 商机 + POC 全流程（POC 0.55.0 起） |
 
 `config.json` 用**嵌套结构**，每个主体一套 role 与独立 ExternalId：
 
@@ -810,9 +810,17 @@ marketing.awsFundingUsed is required when marketing.source is Yes.`
 > 这意味着**阶段推进功能此前从未成功过**，直到 0.38.2 才真正跑通
 > （实测 `O28440608` Prospect → Qualified → 回滚 Prospect）。
 
-⚠️ **Mergebytes 无 Solution**：实测 `ListSolutions` 返回 0 条。
-`defaultSolutionId` 留空是刻意的，`createOpportunity` 据此**跳过关联**并记一
-条 warning，而不是把空串传给 AWS（会被拒）。
+**Solution 默认值以实时 Active 列表为准（0.56.0）**：代码里只有偏好
+`PartnerProfile.preferredSolutionId`（仅 Webby `S-0070517`），默认值由
+`resolveSolutionDefault` 计算——0 个 Active → 无；优先项在列表里 → 优先项；
+恰好 1 个 → 它；多个且无可用优先项 → 必须手选。有 Active Solution 时表单必选；
+`createOpportunity` 在 `CreateOpportunity` **之前**用实时列表再校验一次
+（`decideSolutionForCreate`）：所选不在 Active 列表、或多个却没选 → 400，不建商机；
+列表为空或 `ListSolutions` 失败 → 放行并记 warning（失败时 Webby 回落优先项）。
+
+> 教训：此前硬编码 `defaultSolutionId`（Mergebytes 为空串）。2026-10-15 Mergebytes 在 Partner Central
+> 发布了 `S-0100389` 后，平台仍静默跳过关联、提示「暂无可关联的 Solution」。另外 Solution 按 APN 账户隔离，
+> 在 Webby 账户里建的「Mergebyte …」Solution（`S-0099438`，Inactive）对 Mergebytes 商机不可见。
 
 > 最初方案是存 APN 的 AK/SK —— 但那个 IAM 用户挂着 **AdministratorAccess**，
 > 把长期密钥放进配置文件等于泄露整个 APN 账户的管理员权限。改成 role 后
@@ -870,7 +878,7 @@ EC2 DescribeInstances 与 ServiceQuotas ListServices 被拒。
 
 ```
 CreateOpportunity                      → 建成 Prospect
-  → AssociateOpportunity               → 挂 Solution（默认 S-0070517 Migration services）
+  → AssociateOpportunity               → 挂 Solution（默认值见下文「Solution 默认值以实时 Active 列表为准」）
   → StartEngagementFromOpportunityTask → 建 engagement 并提交
 ```
 
