@@ -239,6 +239,12 @@ export function getAccountReclaimRootJob(job: AccountReclaimJob): RootEmailJob |
   return findReclaimAttemptRoot(current);
 }
 
+/** A reclaim retry must never supersede a later Root job for the same account (e.g. one created from /rootreset). */
+export function hasNewerRootEmailJobForAccountReclaim(job: AccountReclaimJob): boolean {
+  const root = getAccountReclaimRootJob(job);
+  return !!root && hasNewerRootEmailJob(getStore().list(), root);
+}
+
 export function hasPendingRootEmailForAccount(accountId: string): boolean {
   return getStore().list().some(root => root.accountId === accountId && isPendingEmailJob(root));
 }
