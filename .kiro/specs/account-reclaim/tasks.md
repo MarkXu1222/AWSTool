@@ -6,7 +6,7 @@
 > 用户选择 **T2–T7 由用户在 Orca 托管终端派 codex（gpt-6-sol / high）实现**，Claude 只做审核、串行合并到 `integration/account-reclaim` 与后续阶段。
 > 派发简报见同目录 `briefs.md`。四道闸门不变。
 >
-> **实际执行记录**：T1 `0083ed5`（Claude）；T2–T7 待派发（P3 完成后回填提交号）。
+> **实际执行记录**：T1 `0083ed5`（Claude）；T3 `7ac57c7`；T7 `02a1b8a`；T2 `57896d5` + 审核返工 `96afc7f`（codex，Run `run_bd066de5c0e9`）；T4–T6 进行中。
 > T1 相对 design 的增补：catalog 账户项增加 `restricted?: boolean`（前端给 admin 显示「受限账户」Tag 用），P5 回写 design.md §5.4。
 
 | # | 任务名 | 独占文件 | 依赖 | design.md 章节 | 验收命令 |

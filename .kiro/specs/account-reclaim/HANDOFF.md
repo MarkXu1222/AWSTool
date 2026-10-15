@@ -44,7 +44,16 @@
 - [x] 闸门 **G1**：2026-10-15 用户已批准 design.md（受限账户已统一为「仅 admin 可回收」）。
 - [x] P2 `tasks.md` 7 个任务 / 4 波次，**G2 已于 2026-10-15 批准**；同时回写 design.md（对齐上线邮箱接口、补 `accountReclaimDeps` 测试注入点）。
 - [ ] P3：分支 `integration/account-reclaim`。T1 已完成 `0083ed5`（Claude）。T2 起 Claude 输出被安全审查拦截，
-      **用户决定 T2–T7 由用户在 Orca 终端派 codex**，简报在 `briefs.md`；Claude 负责审核与串行合并。下一步：派波次 1（T2、T3、T7）。
+      **用户决定 T2–T7 由 codex 实现**，简报在 `briefs.md`；Claude 负责审核与串行合并。
+      2026-10-15 11:55 波次 1 已派（Claude 新建专用协调者终端 `term_56e2623f-ad4a-4a7c-a5b7-7abb861c2350`
+      「account-reclaim 协调者」，在其中执行编排命令；VSCode 会话本身无 Orca 句柄）。Run `run_bd066de5c0e9`：
+      T2 `ctx_9694949f5b30`（worktree account-reclaim-t2）、T3 `ctx_4ab945db4ec4`（account-reclaim-t3）、
+      T7 `ctx_acaa8a157778`（account-reclaim-t7）；三者 launch.effective 均为 gpt-6-sol/high，base `aa397a9`。
+      收信：`orca orchestration check --terminal <协调者句柄> --run run_bd066de5c0e9 --json`；派发脚本与简报副本在 `/tmp/account-reclaim-orca/`。
+      **波次 1 已全部合入 `integration/account-reclaim`**：T3 `7ac57c7`→merge `941f88e`；T7 `02a1b8a`→merge `c15e21c`；
+      T2 `57896d5` + 审核返工 `96afc7f`（配置错误码、非 JSON 4xx 判明确失败、MAILBOX_INVALID_RESPONSE）→merge `92c72f3`。
+      主仓库全量 403/403 通过、typecheck 通过。worktree 内全量有 56 个基线失败（缺 config.json），与 aa397a9 一致。
+      下一步：派 T4（base = 集成分支最新提交）。
       拆分规则见 `.claude/skills/orca-dev-flow/references/task-split.md`，可参照 `.kiro/specs/admin-console-on-demand/tasks.md`。
       提醒：`root-email-jobs.ts` / `root-email-core.ts` / `root-reset-permissions.ts` 三个文件须归同一任务（来源隔离、互斥、验证码注入互相牵连），
       该任务简报写明「先读 `web/ROOT_EMAIL.md`」；`db.ts`、`auth.ts`、`routes/aws.ts`、`index.ts`、`MainLayout.tsx`、`api.ts`、`Settings.tsx` 为枢纽文件，同一波次各只能归一个任务。
