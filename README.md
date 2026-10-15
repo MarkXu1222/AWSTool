@@ -200,8 +200,9 @@ AWS/
     │   ├── verify-calculator-render.ts # POC 计算器联网验收：Chrome 点 Update estimate 逐项核对引擎重算（--plan-only 离线）
     │   ├── setup-org-stacksets.ts  # ★加新 payer 时下发 support-quota StackSet（幂等，支持 --dry-run / --refresh-template；admin 模式已移除）
     │   ├── remove-orgwide-admin-console.ts # 一次性：删除组织级 admin-console StackSet 并列出残留（默认 dry-run，EC2 执行）
-    │   ├── setup-payer-tagger.ts   # payer 账户内单独创建 auto-tagger-role（StackSet 覆盖不到）
-    │   ├── fix-payer-tagger-policy.ts / audit-org-roles.mts / check-billing-iam-access.mts
+    │   ├── setup-payer-tagger.ts / fix-payer-tagger-policy.ts # ⚠️ 已被 provisionOrg 取代，勿再使用（会重新挂 ReadOnlyAccess）
+    │   ├── tag-keys-canary.ts      # 打标角色 aws:TagKeys 限制：单账户金丝雀 / 全量开启或回滚 / --status（EC2 执行）
+    │   ├── audit-org-roles.mts / check-billing-iam-access.mts
     │   ├── audit-bedrock-map-tags.ts # Bedrock map-migrated 存量排查（只读；--plan-only 不调 AWS）
     │   └── print-bills.mts / ce-untagged-audit.ts / probe-*.ts / scan-p-quota.ts   # 一次性排查脚本
     ├── ROOT_EMAIL.md               # ★批量 Root 改密的完整运行与恢复语义
@@ -1146,7 +1147,35 @@ POC 可申请额。
 
 - `provisionOrg()` 增加一步，在 payer 账户内**单独创建** `auto-tagger-role`（StackSet 覆盖不到，只能直接建）
 - 新建组织不再自动把 payer 写进 `exclude_accounts`，默认全账户打标；仍可显式传值排除特定账户
-- payer 角色的权限由 `AUTO_TAGGER_INLINE_POLICY()` 从 `AUTO_TAGGER_ROLE_TEMPLATE` 正则解析生成（约 136 个 Action），与 StackSet 模板**同源**，避免两处维护漂移
+- payer 角色的权限由 `AUTO_TAGGER_INLINE_POLICY()` 从 `AUTO_TAGGER_ROLE_TEMPLATE` 正则解析生成（约 130 个 Action），与 StackSet 模板**同源**，避免两处维护漂移
+
+#### 最小权限（v0.57.0）
+
+下发到客户组织的角色只保留中央代码实际调用所需的权限（中央 `search_handler` 只调 OrgView 的 `ListResources` 与
+`organizations:ListAccounts`；`tag_handler` 只调 Tagging API `TagResources`）：
+
+| 角色 | 信任 | 权限 |
+|---|---|---|
+| 成员 `auto-tagger-role`（StackSet `AutoTaggerRole`） | 中央 `382309211956` 的 `role/tag-compliance*` | `tag:TagResources` + 各服务打标 Action；API Gateway 只有 `/tags/*` 上的 PUT/POST；含 `s3:TagResource`（S3 ABAC 的增量打标）。**无** `tag:GetResources`、无 API Gateway GET/PATCH/DELETE |
+| payer `auto-tagger-role` | 同上 | 同源内联 `AutoTagPolicy`，**不挂任何托管策略**（旧版的 `ReadOnlyAccess` 会被摘掉） |
+| payer `resource-explorer-search-role` | 同上（旧版无 PrincipalArn 条件，会被收紧） | 内联 `SearchPolicy`：`us-east-1` OrgView 上的 `resource-explorer-2:ListResources` + `organizations:ListAccounts`（旧版的两个托管只读策略会被摘掉） |
+
+- **存量纠正**：`provisionOrg` 不再按名字跳过已存在的 `AutoTaggerRole` StackSet；模板或参数（含 `CentralToolingAccountId`）
+  不符就 `UpdateStackSet`，步骤为 pending，接入任务轮询到一致为止。payer 角色一律「先写新策略，再摘旧托管策略」。
+  > 教训：taoVolt 的 `AutoTaggerRole` 是按 RE-AUTOTAG 旧 README 手工建的，一直信任旧中央 `211125508317`，平台只看名字
+  > 判「已存在」，中央账户迁移后该组织实际无法打标。
+- **TagKeys 限制**：模板参数 `AllowedTagKeys`（接入任务传 `map-migrated` + 组织额外标签 key）与 `EnforceTagKeys`（默认 false）。
+  重跑接入**不会**改 `EnforceTagKeys`；切换只用 `scripts/tag-keys-canary.ts`：先 `--account <id> --enforce true` 单账户实测，
+  扫描确认失败数不增加，再 `--all`（先更新 payer 角色，再更新 StackSet）。回滚用 `--all false`；`--enforce reset` 清除单账户覆盖。
+  单账户覆盖优先于 StackSet 值，`--all` 遇到与目标值相反的覆盖会拒绝执行。⚠️ 开启后重点看 S3：`PutBucketTagging` 是整组替换，
+  若 S3 对它评估 `aws:TagKeys`，已有其它标签的桶会被拒——扫描里 S3 失败数上升就 `--all false` 回滚。
+- **受限账户也打标**：成员区域发现改用 `account:ListRegions`（受限账户收窄策略本来就允许，`ec2:DescribeRegions` 不允许）；
+  既有索引在成员侧读不到（受限账户无 `GetIndex`）时，改用 payer 的 `ListIndexesForMembers` 按类型核对。受限账户的收窄策略不变。
+- **单账户失败不拖垮整个组织**：进不去的成员账户（拿不到凭证或 `ListRegions` 被拒）记入任务 `artifacts.unreachableAccounts`
+  并从覆盖核验中排除，结果文案列出。限流、超时等瞬时错误不算不可达，直接抛出让任务重试，避免账户被永久跳过。
+- **payer 角色不会被意外放宽**：步骤 5 取不到 StackSet 参数时，步骤 6 不改 payer 的 `AutoTagPolicy`（失败待重跑），
+  否则已开启的 TagKeys 限制会被一次瞬时失败悄悄去掉。
+- ⚠️ 其它已接入的 payer 仍是旧模板，**逐个重跑接入时**才会被纠正；页面「一键接入」按钮同样会触发纠正。
 
 #### 组织级额外自定义标签（v0.40.0）
 
@@ -1172,7 +1201,8 @@ MAP 主标签 `map-migrated` 是固定纪律（key 不可改，每个组织只�
 | `tests/test_extra_tag.py` | 新增 9 个用例 |
 
 `config_handler` 原样透传整个 org 对象，State Machine 与 IAM 都不用改
-（`auto-tagger-role` 的 `tag:TagResources` 没有 `aws:TagKeys` 限制）。
+（`EnforceTagKeys` 未开启时 `auto-tagger-role` 不限制 key；开启后只能写 `AllowedTagKeys`，接入任务会把额外标签 key 一并写入，
+后来新增额外标签需重跑接入以更新 `AllowedTagKeys`）。
 
 > ⚠️ **改完要重新部署 SAM 栈才生效**（`sam build && sam deploy`，
 > 中央账户 `382309211956`）。平台侧写进 `orgs.json` 的字段，在旧版
