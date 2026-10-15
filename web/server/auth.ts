@@ -9,6 +9,7 @@ import { recordLoginFailure, recordLoginSuccess } from './security-alerts';
 import path from 'path';
 import fs from 'fs';
 import { isRootResetAccess, resolveRootResetAccess } from './root-reset-permissions';
+import { isAccountReclaimAccess, resolveAccountReclaimAccess } from './account-reclaim-permissions';
 
 // Allow 2 steps before/after (150 second window) to handle time drift and slow input
 authenticator.options = { window: 2 };
@@ -177,6 +178,7 @@ authRouter.get('/me', (req: Request, res: Response) => {
       rootAccess: resolveRootAccess(user),
       bulkQuotaAccess: resolveBulkQuotaAccess(user),
       rootResetAccess: resolveRootResetAccess(user),
+      accountReclaimAccess: resolveAccountReclaimAccess(user),
     });
   } catch { res.status(401).json({ error: 'Token expired' }); }
 });
@@ -223,8 +225,9 @@ authRouter.post('/users', (req: Request, res: Response) => {
   try {
     const decoded = jwt.verify(authHeader.replace('Bearer ', ''), JWT_SECRET) as any;
     if (!isCurrentAdmin(decoded)) return res.status(403).json({ error: '无权限或管理员身份已变更' });
-    const { username, password, role, allowedPages, rootAccess, bulkQuotaAccess, rootResetAccess } = req.body;
+    const { username, password, role, allowedPages, rootAccess, bulkQuotaAccess, rootResetAccess, accountReclaimAccess } = req.body;
     if (rootResetAccess !== undefined && !isRootResetAccess(rootResetAccess)) return res.status(400).json({ error: '批量重置权限无效' });
+    if (accountReclaimAccess !== undefined && !isAccountReclaimAccess(accountReclaimAccess)) return res.status(400).json({ error: '账户回收权限无效' });
     if (!username || !password) return res.status(400).json({ error: '用户名和密码必填' });
     if (db.getUser(username)) return res.status(400).json({ error: '用户已存在' });
     const normalizedRole = role || 'viewer';
@@ -244,8 +247,9 @@ authRouter.post('/users', (req: Request, res: Response) => {
       root_access: !!rootAccess, // admin 恒有（resolveRootAccess 里按角色判定），此处仅对非 admin 生效
       bulk_quota_access: !!bulkQuotaAccess, // 批量 payer 提额，同样 admin 恒有
       root_reset_access: rootResetAccess ?? 'none',
+      account_reclaim_access: accountReclaimAccess ?? 'none',
     });
-    db.addAuditLog(decoded.userId, 'USER_CREATE', `创建用户 ${username} (${normalizedRole}${rootAccess ? ', 根用户权限' : ''}${bulkQuotaAccess ? ', 批量提额权限' : ''}, 批量重置权限=${rootResetAccess ?? 'none'})`, decoded.username, req.ip);
+    db.addAuditLog(decoded.userId, 'USER_CREATE', `创建用户 ${username} (${normalizedRole}${rootAccess ? ', 根用户权限' : ''}${bulkQuotaAccess ? ', 批量提额权限' : ''}, 批量重置权限=${rootResetAccess ?? 'none'}, 账户回收权限=${accountReclaimAccess ?? 'none'})`, decoded.username, req.ip);
     res.json({ success: true, message: `用户 ${username} 已创建` });
   } catch { res.status(401).json({ error: 'Invalid token' }); }
 });
@@ -262,8 +266,9 @@ authRouter.put('/users/:id', (req: Request, res: Response) => {
     const data = (db as any).getAllUsers().find((u: any) => u.id === userId);
     if (!data) return res.status(404).json({ error: '用户不存在' });
 
-    const { role, allowedPages, rootAccess, bulkQuotaAccess, rootResetAccess } = req.body;
+    const { role, allowedPages, rootAccess, bulkQuotaAccess, rootResetAccess, accountReclaimAccess } = req.body;
     if (rootResetAccess !== undefined && !isRootResetAccess(rootResetAccess)) return res.status(400).json({ error: '批量重置权限无效' });
+    if (accountReclaimAccess !== undefined && !isAccountReclaimAccess(accountReclaimAccess)) return res.status(400).json({ error: '账户回收权限无效' });
     const updates: any = {};
 
     if (role !== undefined) {
@@ -292,12 +297,13 @@ authRouter.put('/users/:id', (req: Request, res: Response) => {
       updates.bulk_quota_access = !!bulkQuotaAccess;
     }
     if (rootResetAccess !== undefined) updates.root_reset_access = rootResetAccess;
+    if (accountReclaimAccess !== undefined) updates.account_reclaim_access = accountReclaimAccess;
 
     db.updateUser(userId, updates);
     db.addAuditLog(
       decoded.userId,
       'USER_UPDATE',
-      `更新用户 ${data.username}: role=${finalRole}, pages=${JSON.stringify(updates.allowed_pages ?? 'unchanged')}, 根用户权限=${updates.root_access ?? 'unchanged'}, 批量提额权限=${updates.bulk_quota_access ?? 'unchanged'}, 批量重置权限=${updates.root_reset_access ?? 'unchanged'}`,
+      `更新用户 ${data.username}: role=${finalRole}, pages=${JSON.stringify(updates.allowed_pages ?? 'unchanged')}, 根用户权限=${updates.root_access ?? 'unchanged'}, 批量提额权限=${updates.bulk_quota_access ?? 'unchanged'}, 批量重置权限=${updates.root_reset_access ?? 'unchanged'}, 账户回收权限=${updates.account_reclaim_access ?? 'unchanged'}`,
       decoded.username,
       req.ip,
     );
