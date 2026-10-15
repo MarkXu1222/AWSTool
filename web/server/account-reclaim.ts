@@ -185,9 +185,12 @@ async function emitOutcome(job: AccountReclaimJob) {
 }
 function rootRetryAvailable(job: AccountReclaimJob) {
   if (job.steps[4].errorCode === 'ROOT_JOB_LINK_INVALID' || job.steps[4].state === 'unknown') return false;
-  if (!job.rootEmailJobId && !job.rootAttempts[job.rootAttempts.length - 1]?.rootEmailJobId) return true;
   try {
     const root = accountReclaimDeps.getAccountReclaimRootJob(job);
+    if (!root && !job.rootAttempts[job.rootAttempts.length - 1]?.rootEmailJobId) {
+      // The bridge only resolves the latest attempt. createRetry validates its source and newer jobs at admission.
+      return true;
+    }
     return !!root && canRetryFailedRootEmailJob(root)
       && !accountReclaimDeps.hasNewerRootEmailJobForAccountReclaim(job)
       && !accountReclaimDeps.hasPendingRootEmailForAccount(job.accountId)
@@ -256,7 +259,7 @@ export async function getAccountReclaimCatalog(query: AccountReclaimCatalogQuery
   let lookupFailed = false;
   try {
     const emails = [...new Set(pageAccounts.map((a: any) => String(a.Email || '').trim().toLowerCase()).filter(Boolean))];
-    if (emails.length) lookup = await accountReclaimDeps.mailbox.lookup(emails);
+    if (emails.length) lookup = await accountReclaimDeps.mailbox.lookup(emails, mailboxAbortController.signal);
   } catch { lookupFailed = true; }
   let ready = false;
   try { await readiness(); ready = true; } catch {}
@@ -301,7 +304,7 @@ export async function createAccountReclaimBatch(values: Values, actor: AccountRe
   assertShared(targets);
   assertNoConflict(accountIds);
   await readiness();
-  assertLookup(await accountReclaimDeps.mailbox.lookup(targets.map(t => t.email)), targets);
+  assertLookup(await accountReclaimDeps.mailbox.lookup(targets.map(t => t.email), mailboxAbortController.signal), targets);
   // After awaits, derive targets again and perform the final admission and write without yielding.
   const current = requireOperate(actor);
   const again = accountIds.map(id => checkedTarget(id, current));
@@ -347,7 +350,7 @@ async function assertRetryReady(job: AccountReclaimJob) {
   assertShared([target]);
   assertNoConflict([job.accountId], job.id);
   await readiness();
-  assertLookup(await accountReclaimDeps.mailbox.lookup([job.email]), [job]);
+  assertLookup(await accountReclaimDeps.mailbox.lookup([job.email], mailboxAbortController.signal), [job]);
   const freshCreator = requireOperate({ id: job.createdByUserId, username: job.createdBy, role: '' });
   if (!sameTarget(job, checkedTarget(job.accountId, freshCreator))) fail('ACCOUNT_CHANGED', '账户信息已变化', 409);
   assertShared([job]);
@@ -423,6 +426,7 @@ export function answerAccountReclaimManualCaptcha(id: string, actor: AccountRecl
 let timer: NodeJS.Timeout | undefined;
 let inFlight: Promise<void> | undefined;
 let stopping = false;
+let mailboxAbortController = new AbortController();
 function kick() {
   if (!timer || stopping || inFlight) return;
   inFlight = tick().catch(() => console.error('[AccountReclaim] 编排 tick 失败'))
@@ -517,14 +521,15 @@ async function runStep(job: AccountReclaimJob, key: AccountReclaimStepKey) {
     steps: current.steps.map((s, i) => i === index ? step : s), encryptedMailboxPassword: encrypted,
     rootAttempts: retryRootAttempts });
   if (key === 'aws_password') { await reconcile(current); return; }
+  const mailboxSignal = mailboxAbortController.signal;
   try {
     creatorForStep(current);
     let skipped = false;
     if (key === 'forward') {
-      const result = await accountReclaimDeps.mailbox.deleteForwards(current.email);
+      const result = await accountReclaimDeps.mailbox.deleteForwards(current.email, mailboxSignal);
       skipped = result.deleted === 0;
     } else if (key === 'mailbox_password') {
-      await accountReclaimDeps.mailbox.setPassword(current.email, accountReclaimDeps.decryptMailboxPassword(encrypted!));
+      await accountReclaimDeps.mailbox.setPassword(current.email, accountReclaimDeps.decryptMailboxPassword(encrypted!), mailboxSignal);
     } else if (key === 'root_mfa') {
       try {
         const result = await accountReclaimDeps.deleteRootMFA(current.accountId);
@@ -543,12 +548,14 @@ async function runStep(job: AccountReclaimJob, key: AccountReclaimStepKey) {
         skipped = true;
       }
     }
+    if (mailboxSignal.aborted && (key === 'forward' || key === 'mailbox_password')) return;
     const fresh = jobs().find(item => item.id === current.id)!;
     if (fresh.revision !== current.revision || fresh.steps[index].state !== 'running') return;
     const steps = fresh.steps.map((s, i) => i === index ? { ...s, state: skipped ? 'skipped' as const : 'succeeded' as const,
       message: skipped ? '条件已满足' : '已完成', finishedAt: iso() } : s);
     accountReclaimDeps.updateJob(fresh.id, fresh.revision, { steps });
   } catch (error) {
+    if (mailboxSignal.aborted && (key === 'forward' || key === 'mailbox_password')) return;
     const fresh = jobs().find(item => item.id === current.id)!;
     if (fresh.revision === current.revision && fresh.steps[index].state === 'running') stopAt(fresh, key, error);
   }
@@ -579,6 +586,7 @@ async function tick() {
 }
 export function startAccountReclaimRunner(): void {
   if (timer) return;
+  if (mailboxAbortController.signal.aborted) mailboxAbortController = new AbortController();
   stopping = false;
   // Running synchronous steps from a prior process retain their durable inputs and resume in place.
   timer = setInterval(kick, 2_000);
@@ -586,6 +594,7 @@ export function startAccountReclaimRunner(): void {
 }
 export async function stopAccountReclaimRunner(): Promise<void> {
   stopping = true;
+  mailboxAbortController.abort();
   if (timer) clearInterval(timer);
   timer = undefined;
   if (inFlight) await inFlight;

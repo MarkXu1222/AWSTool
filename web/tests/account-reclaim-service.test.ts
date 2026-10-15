@@ -151,6 +151,38 @@ test('mailbox write unknown blocks AWS and retries the same encrypted password',
   assert.deepEqual(events, ['forward', 'mailbox', 'mfa', 'recovery', 'root']);
 });
 
+test('shutdown aborts an in-flight mailbox write and restart resumes with the same password', async t => {
+  mocks(t); t.after(() => service.stopAccountReclaimRunner());
+  accounts = [account('445445445445')]; user = actor; restricted = []; events = []; root = null;
+  const passwords: string[] = [];
+  let aborted = false;
+  t.mock.method(service.accountReclaimDeps.mailbox, 'setPassword', async (_email: string, password: string, signal?: AbortSignal) => {
+    passwords.push(password);
+    if (passwords.length === 1) {
+      assert.ok(signal);
+      await new Promise<void>((_resolve, reject) => {
+        signal.addEventListener('abort', () => { aborted = true; reject(new DOMException('aborted', 'AbortError')); }, { once: true });
+      });
+    }
+    events.push('mailbox');
+    return { updated: true, sessionsKicked: 1 };
+  });
+  const { batch } = await create(['445445445445']);
+  service.startAccountReclaimRunner();
+  await waitFor(() => passwords.length === 1);
+  await service.stopAccountReclaimRunner();
+  const interrupted = db.listAccountReclaimJobs().find(j => j.id === batch.jobs[0].id)!;
+  assert.equal(aborted, true);
+  assert.equal(interrupted.status, 'running');
+  assert.equal(interrupted.steps[1].state, 'running');
+  assert.equal(interrupted.steps[1].attempts, 1);
+  assert.equal(events.includes('mfa'), false);
+  service.startAccountReclaimRunner();
+  await waitFor(() => events.includes('root'));
+  assert.deepEqual(passwords, [passwords[0], passwords[0]]);
+  assert.equal(db.listAccountReclaimJobs().find(j => j.id === batch.jobs[0].id)?.steps[1].state, 'succeeded');
+});
+
 test('partial MFA and unknown recovery both block step five', async t => {
   mocks(t); t.after(() => service.stopAccountReclaimRunner());
   accounts = [account('555555555555'), account('666666666666')]; user = actor; restricted = []; events = []; root = null;
@@ -257,6 +289,64 @@ test('safe Root failure uses a new attempt; a possible password submission does 
   assert.notEqual(retried.rootAttempts[0].requestId, retried.rootAttempts[1].requestId);
   root.status = 'password_set'; root.credentialRetentionPolicy = 'permanent'; root.encryptedPassword = 'gcm2:fake';
   await waitFor(() => db.listAccountReclaimJobs().find(j => j.id === failed.id)?.status === 'completed');
+});
+
+test('Root retry remains available when the latest attempt was rejected before enqueue', async t => {
+  mocks(t); t.after(() => service.stopAccountReclaimRunner());
+  accounts = [account('425425425425')]; user = actor; restricted = []; events = []; root = null;
+  let enqueueCalls = 0;
+  const ensure = service.accountReclaimDeps.ensureAccountReclaimRootJob;
+  t.mock.method(service.accountReclaimDeps, 'ensureAccountReclaimRootJob', async (job: any) => {
+    enqueueCalls++;
+    if (enqueueCalls === 2) throw Object.assign(new Error('队列容量不足'), { statusCode: 429 });
+    return ensure(job);
+  });
+  const { batch } = await create(['425425425425']);
+  service.startAccountReclaimRunner();
+  await waitFor(() => events.includes('root'));
+  const source = root;
+  source.status = 'failed'; source.payerAccountId = '999999999999'; source.payerName = 'test';
+  source.emailSubmitAttempted = false; source.createdAt = new Date(Date.now() - 61_000).toISOString();
+  await waitFor(() => db.listAccountReclaimJobs().find(j => j.id === batch.jobs[0].id)?.status === 'partial');
+  await service.retryAccountReclaimJob(batch.jobs[0].id, actor);
+  await waitFor(() => enqueueCalls === 2 && db.listAccountReclaimJobs().find(j => j.id === batch.jobs[0].id)?.status === 'partial');
+  const rejected = db.listAccountReclaimJobs().find(j => j.id === batch.jobs[0].id)!;
+  assert.equal(rejected.rootEmailJobId, source.id);
+  assert.equal(rejected.rootAttempts.at(-1)?.rootEmailJobId, undefined);
+  assert.equal(rejected.rootAttempts.at(-1)?.retryOfJobId, source.id);
+  assert.equal(service.getAccountReclaimBatch(batch.id, actor).jobs[0].canRetry, true);
+  await service.retryAccountReclaimJob(rejected.id, actor);
+  await waitFor(() => enqueueCalls === 3 && events.filter(event => event === 'root').length === 2);
+  const third = db.listAccountReclaimJobs().find(j => j.id === rejected.id)!;
+  assert.equal(third.rootAttempts.at(-1)?.retryOfJobId, source.id);
+  root.status = 'password_set'; root.credentialRetentionPolicy = 'permanent'; root.encryptedPassword = 'gcm2:fake';
+  await waitFor(() => db.listAccountReclaimJobs().find(j => j.id === rejected.id)?.status === 'completed');
+});
+
+test('Root admission refuses a newer job after an unqueued retry attempt', async t => {
+  mocks(t); t.after(() => service.stopAccountReclaimRunner());
+  accounts = [account('426426426426')]; user = actor; restricted = []; events = []; root = null;
+  let calls = 0;
+  const ensure = service.accountReclaimDeps.ensureAccountReclaimRootJob;
+  t.mock.method(service.accountReclaimDeps, 'ensureAccountReclaimRootJob', async (job: any) => {
+    calls++;
+    if (calls === 2) throw Object.assign(new Error('队列容量不足'), { statusCode: 429 });
+    if (calls === 3) throw Object.assign(new Error('来源已有更新任务'), { statusCode: 409 });
+    return ensure(job);
+  });
+  const { batch } = await create(['426426426426']);
+  service.startAccountReclaimRunner();
+  await waitFor(() => events.includes('root'));
+  root.status = 'failed'; root.payerAccountId = '999999999999'; root.payerName = 'test';
+  root.emailSubmitAttempted = false; root.createdAt = new Date(Date.now() - 61_000).toISOString();
+  await waitFor(() => db.listAccountReclaimJobs().find(j => j.id === batch.jobs[0].id)?.status === 'partial');
+  await service.retryAccountReclaimJob(batch.jobs[0].id, actor);
+  await waitFor(() => calls === 2 && db.listAccountReclaimJobs().find(j => j.id === batch.jobs[0].id)?.status === 'partial');
+  assert.equal(service.getAccountReclaimBatch(batch.id, actor).jobs[0].canRetry, true);
+  await service.retryAccountReclaimJob(batch.jobs[0].id, actor);
+  await waitFor(() => calls === 3 && db.listAccountReclaimJobs().find(j => j.id === batch.jobs[0].id)?.status === 'partial');
+  assert.equal(events.filter(event => event === 'root').length, 1);
+  assert.equal(db.listAccountReclaimJobs().find(j => j.id === batch.jobs[0].id)?.rootAttempts.at(-1)?.rootEmailJobId, undefined);
 });
 
 test('Root store link is restored after interruption without a second enqueue', async t => {
