@@ -64,7 +64,7 @@ const navItems = [
   { key: POC_CASH_PAGE_KEY, icon: <RocketOutlined />, label: 'POC Cash' },
   { key: 'regions', icon: <GlobalOutlined />, label: '区域管理' },
   { key: 'billing', icon: <DollarOutlined />, label: '账单导出' },
-  { key: 'cleanup', icon: <DeleteOutlined />, label: '资源清理' },
+  { key: 'cleanup', icon: <DeleteOutlined />, label: '账户回收' },
   { key: 'tagcompliance', icon: <TagsOutlined />, label: 'MAP 标签' },
   { key: 'audit', icon: <FileSearchOutlined />, label: '审计日志' },
   { key: OPS_PAGE_KEY, icon: <FundOutlined />, label: '运维监控' },
