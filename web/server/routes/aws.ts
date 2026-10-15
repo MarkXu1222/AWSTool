@@ -35,6 +35,13 @@ import { type CredentialDownloadSlot, RootEmailError } from '../root-email-core'
 import { MailApiError } from '../mail-api';
 import { createRootResetGuard } from '../root-reset-permissions';
 import { StepUpMfaError, verifyStepUpTotp } from '../step-up-mfa';
+import { createAccountReclaimGuard } from '../account-reclaim-permissions';
+import {
+  AccountReclaimError, answerAccountReclaimManualCaptcha, cancelAccountReclaimBatch,
+  createAccountReclaimBatch, findAccountReclaimBatchReplay, getAccountReclaimBatch,
+  getAccountReclaimCatalog, getAccountReclaimCredentials, getAccountReclaimManualCaptcha,
+  listAccountReclaimBatches, retryAccountReclaimJob,
+} from '../account-reclaim';
 import {
   openTempAdmin, revokeTempAdmin, listOpenGrants, TempAdminError, TempAdminRequiredError,
 } from '../temp-admin';
@@ -67,6 +74,101 @@ const requireStrictAdmin = (req: Request, res: Response, next: any) => {
   }
   next();
 };
+
+// Register before generalized account routes. The guard reads current DB permissions on every request.
+awsRouter.use('/account-reclaim', createAccountReclaimGuard(username => db.getUser(username)));
+const accountReclaimFailure = (res: Response, error: unknown) => {
+  if (error instanceof AccountReclaimError) {
+    return res.status(error.statusCode).json({ error: error.message, code: error.code });
+  }
+  if (error instanceof StepUpMfaError) {
+    return res.status(error.statusCode).json({ error: error.message, code: 'MFA_VERIFICATION_FAILED' });
+  }
+  if (error instanceof RootEmailError) {
+    return res.status(error.statusCode).json({ error: error.message, code: 'ROOT_EMAIL_ERROR' });
+  }
+  console.error('[AccountReclaim] 路由操作失败');
+  return res.status(500).json({ error: '账户回收服务异常，请联系管理员', code: 'INTERNAL_ERROR' });
+};
+const verifyAccountReclaimStepUp = (req: Request, res: Response, value: unknown) => {
+  try { verifyStepUpTotp(res.locals.accountReclaimUser, value, req.ip); }
+  catch (error) {
+    const actor = res.locals.accountReclaimUser;
+    try {
+      db.addAuditLog(Number(actor.id), 'ACCOUNT_RECLAIM_MFA_FAILED',
+        `账户回收二次验证失败 · ${req.method} ${req.path}`, actor.username, req.ip);
+      res.locals.audited = true;
+    } catch (auditError) { console.error('[AccountReclaim] MFA 失败审计写入失败:', auditError); }
+    throw error;
+  }
+};
+awsRouter.get('/account-reclaim/catalog', async (req, res) => {
+  try {
+    const { q, payer, page, pageSize } = req.query;
+    const data = await getAccountReclaimCatalog({ q: q as string, payer: payer as string,
+      page: page as unknown as number, pageSize: pageSize as unknown as 20 | 50 | 100 }, res.locals.accountReclaimUser);
+    res.json({ success: true, data });
+  } catch (error) { accountReclaimFailure(res, error); }
+});
+awsRouter.post('/account-reclaim/batches', async (req, res) => {
+  try {
+    const values = { accountIds: req.body?.accountIds, requestId: req.body?.requestId,
+      confirmAccountCount: req.body?.confirmAccountCount };
+    const replay = findAccountReclaimBatchReplay(values, res.locals.accountReclaimUser);
+    if (replay) return res.status(200).json({ success: true, data: { batch: replay, reused: true } });
+    verifyAccountReclaimStepUp(req, res, req.body?.totpCode);
+    const data = await createAccountReclaimBatch(values, res.locals.accountReclaimUser, req.ip);
+    try {
+      if (db.getAuditLog(5000).some(log => log.action === 'ACCOUNT_RECLAIM_BATCH_CREATE'
+        && String(log.detail).includes(`批次 ${data.batch.id} ·`))) res.locals.audited = true;
+    } catch { console.error('[AccountReclaim] 创建审计状态读取失败'); }
+    res.status(data.reused ? 200 : 202).json({ success: true, data });
+  } catch (error) { accountReclaimFailure(res, error); }
+});
+awsRouter.get('/account-reclaim/batches', (_req, res) => {
+  try { res.json({ success: true, data: listAccountReclaimBatches(res.locals.accountReclaimUser) }); }
+  catch (error) { accountReclaimFailure(res, error); }
+});
+awsRouter.get('/account-reclaim/batches/:id', (req, res) => {
+  try { res.json({ success: true, data: getAccountReclaimBatch(String(req.params.id), res.locals.accountReclaimUser) }); }
+  catch (error) { accountReclaimFailure(res, error); }
+});
+awsRouter.post('/account-reclaim/jobs/:id/retry', async (req, res) => {
+  try {
+    verifyAccountReclaimStepUp(req, res, req.body?.totpCode);
+    const data = await retryAccountReclaimJob(String(req.params.id), res.locals.accountReclaimUser, req.ip);
+    res.locals.audited = true;
+    res.status(202).json({ success: true, data });
+  } catch (error) { accountReclaimFailure(res, error); }
+});
+awsRouter.post('/account-reclaim/batches/:id/cancel', (req, res) => {
+  try {
+    const data = cancelAccountReclaimBatch(String(req.params.id), res.locals.accountReclaimUser, req.ip);
+    res.locals.audited = true;
+    res.json({ success: true, data });
+  } catch (error) { accountReclaimFailure(res, error); }
+});
+awsRouter.post('/account-reclaim/jobs/:id/credentials', (req, res) => {
+  res.set({ 'Cache-Control': 'no-store', Pragma: 'no-cache', Expires: '0' });
+  try {
+    const data = getAccountReclaimCredentials(String(req.params.id), res.locals.accountReclaimUser, req.ip);
+    res.locals.audited = true;
+    res.json({ success: true, data });
+  } catch (error) { accountReclaimFailure(res, error); }
+});
+awsRouter.post('/account-reclaim/jobs/:id/manual-captcha', (req, res) => {
+  try {
+    const data = getAccountReclaimManualCaptcha(String(req.params.id), res.locals.accountReclaimUser);
+    res.json({ success: true, data });
+  } catch (error) { accountReclaimFailure(res, error); }
+});
+awsRouter.post('/account-reclaim/jobs/:id/manual-captcha/answer', (req, res) => {
+  try {
+    const data = answerAccountReclaimManualCaptcha(String(req.params.id), res.locals.accountReclaimUser,
+      { challengeId: req.body?.challengeId, action: req.body?.action, captchaAnswer: req.body?.captchaAnswer }, req.ip);
+    res.status(202).json({ success: true, data });
+  } catch (error) { accountReclaimFailure(res, error); }
+});
 
 // ===== MAP 标签合规（编排中央工具账户的 tag-compliance 系统）=====
 

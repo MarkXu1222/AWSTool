@@ -57,6 +57,14 @@ const explicitActions: Record<string, Omit<AuditDisplay, 'target' | 'result' | '
   BILLING_EXPORT_CANCEL: { category: '账单导出', operation: '取消账单 PDF 导出' },
   BILLING_EXPORT_DOWNLOAD_START: { category: '账单导出', operation: '开始下载账单 PDF' },
   BILLING_EXPORT_DOWNLOAD: { category: '账单导出', operation: '完成下载账单 PDF' },
+  ACCOUNT_RECLAIM_BATCH_CREATE: { category: '账户回收', operation: '创建账户回收批次' },
+  ACCOUNT_RECLAIM_JOB_RETRY: { category: '账户回收', operation: '重试账户回收' },
+  ACCOUNT_RECLAIM_BATCH_CANCEL: { category: '账户回收', operation: '停止未开始的回收账户' },
+  ACCOUNT_RECLAIM_JOB_COMPLETED: { category: '账户回收', operation: '账户回收完成' },
+  ACCOUNT_RECLAIM_JOB_FAILED: { category: '账户回收', operation: '账户回收失败' },
+  ACCOUNT_RECLAIM_JOB_PARTIAL: { category: '账户回收', operation: '账户回收部分完成' },
+  ACCOUNT_RECLAIM_CREDENTIALS_VIEW: { category: '账户回收', operation: '查看回收密码' },
+  ACCOUNT_RECLAIM_MFA_FAILED: { category: '账户回收', operation: '账户回收二次验证失败' },
 };
 
 function parseTechnicalFields(log: any): TechnicalFields {
