@@ -109,6 +109,7 @@ const MainLayout: React.FC<MainLayoutProps> = ({ onLogout }) => {
   // 批量提额独立权限；未加载完前按无权限处理，避免菜单闪现
   const [bulkQuotaAccess, setBulkQuotaAccess] = useState(false);
   const [rootResetAccess, setRootResetAccess] = useState<'none' | 'view' | 'operate'>('none');
+  const [accountReclaimAccess, setAccountReclaimAccess] = useState<'none' | 'operate'>('none');
   // admin 恒有运维监控权限；未加载完前按无权限处理，避免敏感菜单闪现
   const [isAdmin, setIsAdmin] = useState(false);
   // 移动端「更多」抽屉
@@ -217,6 +218,7 @@ const MainLayout: React.FC<MainLayoutProps> = ({ onLogout }) => {
       setUsername(r.username || '');
       setBulkQuotaAccess(!!r.bulkQuotaAccess);
       setRootResetAccess(['view', 'operate'].includes(r.rootResetAccess) ? r.rootResetAccess : 'none');
+      setAccountReclaimAccess(r.accountReclaimAccess === 'operate' ? 'operate' : 'none');
       setIsAdmin(r.role === 'admin');
       if (Array.isArray(r.allowedPages)) {
         setAllowedPages(r.allowedPages);
@@ -224,6 +226,7 @@ const MainLayout: React.FC<MainLayoutProps> = ({ onLogout }) => {
         const requested = pageFromLocation();
         // 这些页面不走 allowedPages，直链访问时不能按「不在列表里」踢回首页
         const independentAccess = (requested === ROOT_RESET_PAGE_KEY && ['view', 'operate'].includes(r.rootResetAccess))
+          || (requested === 'cleanup' && r.accountReclaimAccess === 'operate')
           || (requested === BULK_QUOTA_PAGE_KEY && r.bulkQuotaAccess)
           || (requested === POC_CASH_PAGE_KEY && r.role === 'admin');
         if (r.allowedPages.length > 0 && !r.allowedPages.includes(requested) && !independentAccess) {
@@ -238,6 +241,7 @@ const MainLayout: React.FC<MainLayoutProps> = ({ onLogout }) => {
     // 批量提额只看独立权限，与页面权限无关
     if (key === BULK_QUOTA_PAGE_KEY) return bulkQuotaAccess;
     if (key === ROOT_RESET_PAGE_KEY) return rootResetAccess !== 'none';
+    if (key === 'cleanup') return accountReclaimAccess === 'operate' || isAdmin || allowedPages?.includes('cleanup') === true;
     // 运维监控：admin 恒有；其他角色仅在页面权限中显式授予后可见
     if (key === OPS_PAGE_KEY) return isAdmin || allowedPages?.includes(OPS_PAGE_KEY) === true;
     // POC Cash：admin 专属，不可通过页面权限授予（后端同样实时查库校验）
@@ -294,7 +298,8 @@ const MainLayout: React.FC<MainLayoutProps> = ({ onLogout }) => {
       );
       case 'regions': return <RegionsPage />;
       case 'billing': return <BillingPage />;
-      case 'cleanup': return <CleanupPage />;
+      case 'cleanup': return <CleanupPage canCleanup={isAdmin || allowedPages?.includes('cleanup') === true}
+        canReclaim={accountReclaimAccess === 'operate'} isAdmin={isAdmin} />;
       case 'tagcompliance': return <TagCompliancePage />;
       case 'audit': return <AuditLogPage />;
       case 'settings': return <SettingsPage onLogout={onLogout} />;
