@@ -78,7 +78,6 @@ pocCashRouter.get('/meta', (_req: Request, res: Response) => {
       key: p.key, label: p.label,
       titlePrefix: p.titlePrefix, titleSuffix: p.titleSuffix,
       requiredTags: p.requiredTags,
-      defaultSolutionId: p.defaultSolutionId,
       apnAccountId: p.apnAccountId,
       // 逐个主体报告可用性：某个主体没配 role 时前端能直接标出来，
       // 而不是等用户提交后才报错
@@ -94,10 +93,10 @@ pocCashRouter.get('/meta', (_req: Request, res: Response) => {
   });
 });
 
-/** 可关联的 Solutions（仅 Active） */
+/** 可关联的 Solutions（仅 Active）+ 后端算好的默认值 */
 pocCashRouter.get('/solutions', async (req: Request, res: Response) => {
   try {
-    res.json({ solutions: await poc.listSolutions(partnerKeyOf(req)) });
+    res.json(await poc.getSolutionChoice(partnerKeyOf(req)));
   } catch (e: any) {
     res.status(400).json({ error: e.message });
   }

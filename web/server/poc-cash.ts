@@ -51,10 +51,11 @@ export interface PartnerProfile {
    */
   requiredTags: string[];
   owner: { email: string; firstName: string; lastName: string; title: string };
-  /** 默认关联的 Solution。空串表示该主体在 Partner Central 里没有已发布的
-   *  Solution —— 此时商机照建，只是跳过关联并记一条 warning。
-   *  Mergebytes 实测 ListSolutions 返回 0 条。 */
-  defaultSolutionId: string;
+  /**
+   * 优先关联的 Solution。**只是偏好**：仅当它在该主体实时 Active 列表里时才作为默认值；
+   * 不在列表里就当没配置。缺省 = 无偏好（恰好 1 个 Active 时自动用它，多个时必须手选）。
+   */
+  preferredSolutionId?: string;
   /** 该主体的 APN 账户（跨账户 role 所在账户），用于前端展示与排错 */
   apnAccountId: string;
   /** config.json -> partnerCentral 下的键名。缺省走顶层配置（兼容旧结构） */
@@ -91,7 +92,7 @@ export const PARTNERS: PartnerProfile[] = [
       lastName: 'Siow',
       title: 'OpportunityOwner',
     },
-    defaultSolutionId: 'S-0070517', // Migration services
+    preferredSolutionId: 'S-0070517', // Migration services
     apnAccountId: '105673812363',
     configKey: 'webby',
     // 11/11 已批准件完全一致
@@ -126,7 +127,6 @@ export const PARTNERS: PartnerProfile[] = [
       lastName: 'Siow',
       title: 'OpportunityOwner',
     },
-    defaultSolutionId: '',  // 实测账户内无已发布 Solution
     apnAccountId: '072471709462',
     configKey: 'mergebytes',
     // 该账户此前从未提过 POC，以下由业务方 2026-10-14 提供，没有已批准件可对照
@@ -604,8 +604,24 @@ export interface CreateResult {
   warnings: string[];
 }
 
+export interface SolutionSummary { id: string; name: string; category: string; status: string }
+
+/** 创建表单的 Solution 选择信息：列表 + 后端算好的默认值 */
+export interface SolutionChoice {
+  solutions: SolutionSummary[];
+  /** null = 没有可自动选的（0 个 Active，或多个且无可用优先项） */
+  defaultSolutionId: string | null;
+}
+
+/** createOpportunity 拿到的实时列表；查询失败也要能表达 */
+export type LiveSolutions =
+  | { ok: true; activeIds: string[] }
+  | { ok: false; error: string };
+
 /** 列出可关联的 Solutions（只返回 Active 的，Delete/Inactive 关联会失败） */
-export async function listSolutions(partnerKey: string = DEFAULT_PARTNER_KEY) {
+export async function listSolutions(
+  partnerKey: string = DEFAULT_PARTNER_KEY,
+): Promise<SolutionSummary[]> {
   const c = await client(partnerKey);
   const out: any[] = [];
   let token: string | undefined;
@@ -619,6 +635,74 @@ export async function listSolutions(partnerKey: string = DEFAULT_PARTNER_KEY) {
   return out
     .filter(s => s.Status === 'Active')
     .map(s => ({ id: s.Id, name: s.Name, category: s.Category, status: s.Status }));
+}
+
+/**
+ * Solution 默认值规则（前后端唯一实现）。
+ *
+ * 默认值以 Partner Central 实时 Active 列表为准，代码里只有偏好 —— 硬编码的默认值
+ * 曾让 Mergebytes 发布了 Solution 之后仍静默跳过关联。
+ */
+export function resolveSolutionDefault(activeIds: string[], preferredId?: string): string | null {
+  if (activeIds.length === 0) return null;
+  if (preferredId && activeIds.includes(preferredId)) return preferredId;
+  if (activeIds.length === 1) return activeIds[0];
+  return null;
+}
+
+/** 创建表单用：实时 Active 列表 + 默认值。查询失败直接抛，由路由返回 400 */
+export async function getSolutionChoice(
+  partnerKey: string = DEFAULT_PARTNER_KEY,
+): Promise<SolutionChoice> {
+  const partner = getPartner(partnerKey);
+  const solutions = await listSolutions(partnerKey);
+  return {
+    solutions,
+    defaultSolutionId: resolveSolutionDefault(
+      solutions.map(s => s.id), partner.preferredSolutionId),
+  };
+}
+
+/**
+ * 建商机前决定关联哪个 Solution。抛错时还没建商机。
+ *
+ * 有 Active Solution 时必须关联其中一个（多个却没选、选了不在列表都拒绝）；
+ * 列表为空或查询失败时放行，只记 warning —— 不能因为查不到 Solution 卡住建商机。
+ */
+export function decideSolutionForCreate(
+  partner: PartnerProfile,
+  requested: string | undefined,
+  live: LiveSolutions,
+): { solutionId?: string; warnings: string[] } {
+  const wanted = (requested || '').trim();
+
+  if (!live.ok) {
+    if (wanted) return { solutionId: wanted, warnings: [] };
+    if (partner.preferredSolutionId) {
+      return {
+        solutionId: partner.preferredSolutionId,
+        warnings: [`查询 Solution 列表失败（${live.error}），按优先项 ${partner.preferredSolutionId} 关联。`],
+      };
+    }
+    return { warnings: [`查询 Solution 列表失败（${live.error}），已跳过关联。`] };
+  }
+
+  if (wanted) {
+    if (live.activeIds.includes(wanted)) return { solutionId: wanted, warnings: [] };
+    throw new Error(
+      `Solution ${wanted} 不是 ${partner.label} 的 Active Solution，请刷新页面后重新选择`);
+  }
+
+  const def = resolveSolutionDefault(live.activeIds, partner.preferredSolutionId);
+  if (def) return { solutionId: def, warnings: [] };
+  if (live.activeIds.length === 0) {
+    return {
+      warnings: [`${partner.label} 没有 Active 的 Solution，已跳过关联。`
+        + '在 Partner Central 发布 Solution 后会自动关联。'],
+    };
+  }
+  throw new Error(
+    `${partner.label} 有 ${live.activeIds.length} 个 Active Solution，请选择要关联的 Solution`);
 }
 
 /** Date | string | undefined → YYYY-MM-DD（UTC）。用于显示与排序。 */
@@ -1024,7 +1108,16 @@ export async function createOpportunity(input: OpportunityInput): Promise<Create
     warnings.push(`商机标题已补上必填标签 ${added.join(' ')}：「${title}」。`);
   }
 
-  const solutionId = input.solutionId || partner.defaultSolutionId;
+  // Solution 以实时 Active 列表为准：不合法直接抛错（此时还没建商机）
+  let live: LiveSolutions;
+  try {
+    live = { ok: true, activeIds: (await listSolutions(input.partnerKey)).map(s => s.id) };
+  } catch (e: any) {
+    live = { ok: false, error: e?.message || String(e) };
+  }
+  const decision = decideSolutionForCreate(partner, input.solutionId, live);
+  warnings.push(...decision.warnings);
+  const solutionId = decision.solutionId;
   const c = await client(input.partnerKey);
 
   const created: any = await c.send(new CreateOpportunityCommand({
@@ -1079,14 +1172,9 @@ export async function createOpportunity(input: OpportunityInput): Promise<Create
     solutionAssociated: false, submitted: false, amounts, warnings,
   };
 
-  // Mergebytes 等主体在 Partner Central 里没有已发布的 Solution。
-  // 传空的 RelatedEntityIdentifier 会被 AWS 拒绝，所以直接跳过关联 ——
-  // 商机本身不依赖 Solution，只是少一层关联信息。
-  if (!solutionId) {
-    warnings.push(
-      `${partner.label} 没有可关联的 Solution，已跳过关联。`
-      + '若后续在 Partner Central 发布了 Solution，可在创建时手动指定。');
-  } else {
+  // 没有可关联的 Solution 时不调用 Associate —— 传空 RelatedEntityIdentifier 会被 AWS 拒。
+  // 跳过原因已由 decideSolutionForCreate 写进 warnings。
+  if (solutionId) {
     try {
       await c.send(new AssociateOpportunityCommand({
         Catalog: CATALOG,

@@ -76,13 +76,12 @@ test('未知 partner 抛错而不是静默回退', () => {
 
 test('已开放的主体及其 Solution 约定', () => {
   const webby = getPartner('webby');
-  assert.equal(webby.defaultSolutionId, 'S-0070517');
+  // 默认值来自 Partner Central 实时 Active 列表，这里只有偏好（见 poc-cash-solution-default.test.ts）
+  assert.equal(webby.preferredSolutionId, 'S-0070517');
   assert.equal(webby.apnAccountId, '105673812363');
 
-  // Mergebytes 账户里 ListSolutions 实测返回 0 条，故意留空。
-  // 留空不是遗漏 —— createOpportunity 会据此跳过关联而不是传空串给 AWS。
   const mb = getPartner('mergebytes');
-  assert.equal(mb.defaultSolutionId, '');
+  assert.equal(mb.preferredSolutionId, undefined);
   assert.equal(mb.apnAccountId, '072471709462');
 });
 
