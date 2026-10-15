@@ -61,7 +61,7 @@ function withUnfundedPartner(fn: (key: string) => Promise<void> | void) {
     key, label: 'Unfunded', titlePrefix: 'Unfunded - ', titleSuffix: ' #ADPL',
     requiredTags: ['#ADPL'],
     owner: { email: 'x@example.com', firstName: 'X', lastName: 'Y', title: 'OpportunityOwner' },
-    defaultSolutionId: '', apnAccountId: '000000000000',
+    apnAccountId: '000000000000',
   });
   const cleanup = () => {
     const i = PARTNERS.findIndex(p => p.key === key);
