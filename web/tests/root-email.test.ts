@@ -408,6 +408,54 @@ test('batch request identifiers are idempotent and cannot be reused with another
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
+test('reclaim origin survives reload and safe retries but cannot be changed by a replay', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'root-email-origin-'));
+  try {
+    const file = path.join(dir, 'jobs.json');
+    const store = new RootEmailStore(file);
+    const reclaimInput = { ...input, origin: 'account-reclaim' as const, reclaimJobId: randomUUID() };
+    const meta = { batchId: randomUUID(), autoSetPassword: true as const,
+      payerAccountId: '999999999999', payerName: 'payer-a' };
+    assert.throws(() => store.create(reclaimInput), /内部自动改密批次/);
+    const root = store.createBatchGroup([reclaimInput], meta).jobs[0];
+    assert.equal(new RootEmailStore(file).get(root.id)?.reclaimJobId, reclaimInput.reclaimJobId);
+    assert.equal(store.createBatchGroup([reclaimInput], meta).reused, true);
+    for (const changed of [input, { ...reclaimInput, reclaimJobId: randomUUID() },
+      { ...reclaimInput, origin: undefined }]) {
+      assert.throws(() => store.createBatchGroup([changed], meta), /请求标识/);
+    }
+    store.update(root.id, { status: 'failed', phase: 'done', emailSubmitAttempted: false,
+      createdAt: new Date(Date.now() - 120_000).toISOString() });
+    const retryMeta = { ...meta, batchId: randomUUID() };
+    assert.throws(() => store.createRetry(root.id, input, retryMeta), /参数与原任务不匹配/);
+    assert.throws(() => store.createRetry(root.id, { ...reclaimInput, reclaimJobId: randomUUID() }, retryMeta), /参数与原任务不匹配/);
+    const retried = store.createRetry(root.id, reclaimInput, retryMeta).job;
+    assert.equal(retried.origin, 'account-reclaim');
+    assert.equal(retried.reclaimJobId, reclaimInput.reclaimJobId);
+    assert.equal(new RootEmailStore(file).get(retried.id)?.retryOfJobId, root.id);
+    const broken = JSON.parse(fs.readFileSync(file, 'utf8'));
+    broken[1].reclaimJobId = randomUUID();
+    fs.writeFileSync(file, JSON.stringify(broken));
+    assert.throws(() => new RootEmailStore(file), /重试血缘无效/);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('malformed reclaim origin fails closed while legacy jobs remain loadable', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'root-email-origin-load-'));
+  try {
+    const file = path.join(dir, 'jobs.json');
+    const store = new RootEmailStore(file);
+    const legacy = store.create(input);
+    assert.equal(new RootEmailStore(file).get(legacy.id)?.origin, undefined);
+    for (const change of [
+      { origin: 'account-reclaim' }, { origin: 'unexpected' }, { reclaimJobId: randomUUID() },
+    ]) {
+      fs.writeFileSync(file, JSON.stringify([{ ...legacy, ...change }]));
+      assert.throws(() => new RootEmailStore(file), /文件格式无效/);
+    }
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
 test('20 accounts fit in one automatic batch; larger batches are rejected and cancellation preserves active results', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'root-email-batch-'));
   try {
