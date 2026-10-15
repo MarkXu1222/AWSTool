@@ -587,6 +587,28 @@ test('newer Root task disables retry and explains the manual resolution path', a
   await assert.rejects(service.retryAccountReclaimJob(view.id, actor), { statusCode: 409 });
 });
 
+test('catalog exposes all configured payers independently of pagination and filtering', async t => {
+  mocks(t); user = actor; restricted = [];
+  accounts = Array.from({ length: 12 }, (_, index) => ({
+    ...account(String(700000000000 + index)), _payer: index < 6 ? 'test' : 'other',
+  }));
+  t.mock.method(service.accountReclaimDeps, 'listConfiguredPayers', () => [
+    { name: 'test', accountId: '999999999999' }, { name: 'other', accountId: '888888888888' },
+  ]);
+  const first = await service.getAccountReclaimCatalog({}, actor);
+  assert.equal(first.pageSize, 5);
+  assert.equal(first.accounts.length, 5);
+  assert.deepEqual(first.payers, ['test', 'other']);
+  const second = await service.getAccountReclaimCatalog({ payer: 'other', page: 2, pageSize: 5 }, actor);
+  assert.equal(second.total, 6);
+  assert.equal(second.accounts.length, 1);
+  assert.equal(second.accounts[0].payer, 'other');
+  assert.deepEqual(second.payers, ['test', 'other']);
+  const empty = await service.getAccountReclaimCatalog({ q: 'no-matching-account' }, actor);
+  assert.equal(empty.accounts.length, 0);
+  assert.deepEqual(empty.payers, ['test', 'other']);
+});
+
 test('catalog rejects invalid pagination and unknown payer without lookup', async t => {
   mocks(t); accounts = [account('585858585858')]; user = actor; restricted = [];
   for (const query of [{ page: 0 }, { page: 1.2 }, { pageSize: 10 }, { payer: 'missing' }]) {

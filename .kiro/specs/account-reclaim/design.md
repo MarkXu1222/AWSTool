@@ -307,16 +307,17 @@ export interface AccountReclaimBatchView {
   jobs: AccountReclaimJobView[];
 }
 export interface AccountReclaimCatalogQuery {
-  q?: string; payer?: string; page?: number; pageSize?: 20 | 50 | 100;
+  q?: string; payer?: string; page?: number; pageSize?: 5 | 20 | 50 | 100;
 }
 export interface AccountReclaimCatalog {
+  payers: string[];
   accounts: Array<{
     accountId: string; accountName: string; email: string; payer: string;
     payerAccountId: string; eligible: boolean; reasonCode?: string; reason?: string; restricted?: boolean;
   }>;
   total: number;
   page: number;
-  pageSize: 20 | 50 | 100;
+  pageSize: 5 | 20 | 50 | 100;
   cachedAt: string;
   maxBatchSize: 20;
   readiness: { ready: boolean; message: string };
@@ -382,7 +383,7 @@ export const accountReclaimDeps = {
 
 TOTP 只在路由层用 `verifyStepUpTotp` 校验，不进该对象。`ensureAccountReclaimRootJob` 等五个 bridge 函数由 `root-email-jobs.ts` 导出（§5.5）。
 
-**catalog**：默认 page=1/pageSize=50，非法分页返回 400；q 匹配账户 ID/名称/邮箱，payer 为配置名。先按当前账户缓存做结构校验，再对本页最多 100 个邮箱批量 lookup；可缓存 lookup 60 秒用于列表显示，创建/重试不依赖该缓存。账户缓存为空时返回空列表与“请先同步账户”。lookup 不可用时本页显示“邮箱状态暂无法确认”，不能把未知当作托管成功。
+**catalog**：默认 page=1/pageSize=5，支持 5/20/50/100，非法分页返回 400；q 匹配账户 ID/名称/邮箱，payer 为配置名。响应的 payers 为全部已配置 payer 名称，不随分页、搜索或当前 payer 筛选缩减。先按当前账户缓存做结构校验，再对本页最多 100 个邮箱批量 lookup；可缓存 lookup 60 秒用于列表显示，创建/重试不依赖该缓存。账户缓存为空时返回空列表与“请先同步账户”。lookup 不可用时本页显示“邮箱状态暂无法确认”，不能把未知当作托管成功。
 
 **创建批次**：
 
@@ -517,7 +518,7 @@ P4 通知实现：回收调用 `sendNotification(title, content, {strict:true})`
 
 ### 6.2 交互
 
-账户表支持 ID/名称/邮箱搜索、payer 筛选和服务端分页；跨搜索/分页保留已选 ID，最多 20 个，打开确认框前按当前 catalog 结果复核并展示完整已选快照。置灰行显示明确原因；受限账户对非 admin 固定显示「受限账户（敏感权限客户）仅 Admin 可回收」，对 admin 可勾选并带「受限账户」Tag，确认框单独列出所选受限账户。请求不可用时顶部显示未就绪原因，禁用创建按钮。
+账户表支持 ID/名称/邮箱搜索、payer 筛选和服务端分页，默认每页 5 个。payer 使用带下拉箭头的可搜索 Select，选项来自 catalog.payers，可清空恢复全部 payer；切换/清空时回到第 1 页。跨搜索/分页保留已选 ID，最多 20 个，打开确认框前按当前 catalog 结果复核并展示完整已选快照。置灰行显示明确原因；受限账户对非 admin 固定显示「受限账户（敏感权限客户）仅 Admin 可回收」，对 admin 可勾选并带「受限账户」Tag，确认框单独列出所选受限账户。请求不可用时顶部显示未就绪原因，禁用创建按钮。
 
 创建确认框展示五步顺序、已选账户及“停止未开始账户”的范围，输入准确数量和 TOTP。首次确认生成 requestId，网络失败再次提交沿用该 ID；目标选择变化才更换 UUID。409 TOTP 已使用时提示等待新验证码，不擅自重新生成批次请求 ID。
 

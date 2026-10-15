@@ -255,8 +255,8 @@ export async function getAccountReclaimCatalog(query: AccountReclaimCatalogQuery
     fail('INVALID_REQUEST', '筛选参数无效', 400);
   }
   const page = query.page === undefined ? 1 : Number(query.page);
-  const pageSize = query.pageSize === undefined ? 50 : Number(query.pageSize);
-  if (!Number.isInteger(page) || page < 1 || ![20, 50, 100].includes(pageSize)) fail('INVALID_REQUEST', '分页参数无效', 400);
+  const pageSize = query.pageSize === undefined ? 5 : Number(query.pageSize);
+  if (!Number.isInteger(page) || page < 1 || ![5, 20, 50, 100].includes(pageSize)) fail('INVALID_REQUEST', '分页参数无效', 400);
   const payers = accountReclaimDeps.listConfiguredPayers();
   if (query.payer && !payers.some(p => p.name === query.payer)) fail('INVALID_REQUEST', 'payer 无效', 400);
   const { accounts, cachedAt } = accountReclaimDeps.getAccountsCache();
@@ -287,8 +287,9 @@ export async function getAccountReclaimCatalog(query: AccountReclaimCatalogQuery
     return { accountId: String(a.Id), accountName: String(a.Name || ''), email,
       payer: String(a._payer || ''), payerAccountId: payers.find(p => p.name === a._payer)?.accountId || '',
       eligible: !reasonCode && ready, reasonCode, reason, restricted: restricted(String(a.Id)) };
-  }), total: filtered.length, page, pageSize: pageSize as 20 | 50 | 100,
-  cachedAt, maxBatchSize: 20, readiness: { ready, message: !accounts.length ? '请先同步账户' : ready ? '已就绪' : '运行依赖未就绪' } };
+  }), total: filtered.length, page, pageSize: pageSize as 5 | 20 | 50 | 100,
+  payers: payers.map(p => p.name), cachedAt, maxBatchSize: 20,
+  readiness: { ready, message: !accounts.length ? '请先同步账户' : ready ? '已就绪' : '运行依赖未就绪' } };
 }
 
 export function findAccountReclaimBatchReplay(values: Values, actor: AccountReclaimActor): AccountReclaimBatchView | null {

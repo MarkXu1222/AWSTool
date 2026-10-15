@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Alert, AutoComplete, Button, Input, Modal, Select, Space, Table, Tag, Typography, message } from 'antd';
+import { Alert, Button, Input, Modal, Select, Space, Table, Tag, Typography, message } from 'antd';
 import { CopyOutlined, EyeOutlined, ReloadOutlined, SafetyCertificateOutlined, StopOutlined } from '@ant-design/icons';
 import { api, AccountReclaimBatchView, AccountReclaimCatalog, AccountReclaimCredentials,
   AccountReclaimJobView, AccountReclaimStep, AccountReclaimStepKey } from '../api';
@@ -73,7 +73,7 @@ export default function AccountReclaimPanel({ isAdmin = false }: { isAdmin?: boo
   const [search, setSearch] = useState('');
   const [payer, setPayer] = useState('');
   const [page, setPage] = useState(1);
-  const [pageSize, setPageSize] = useState<20 | 50 | 100>(50);
+  const [pageSize, setPageSize] = useState<5 | 20 | 50 | 100>(5);
   const [selected, setSelected] = useState<Record<string, CatalogItem>>({});
   const [batches, setBatches] = useState<AccountReclaimBatchView[]>([]);
   const [activeBatchId, setActiveBatchId] = useState('');
@@ -93,9 +93,8 @@ export default function AccountReclaimPanel({ isAdmin = false }: { isAdmin?: boo
   const activeBatch = batches.find(batch => batch.id === activeBatchId);
   const pollingBatch = activeBatch && !TERMINAL.has(activeBatch.status)
     ? activeBatch : batches.find(batch => !TERMINAL.has(batch.status));
-  const payerOptions = useMemo(() => [...new Set(Object.values(selected).map(item => item.payer)
-    .concat(catalog?.accounts.map(item => item.payer) || []))].filter(Boolean).map(value => ({ value, label: value })),
-  [catalog, selected]);
+  const payerOptions = useMemo(() => (catalog?.payers || []).map(value => ({ value, label: value })),
+    [catalog?.payers]);
 
   const deny = useCallback(() => {
     setAccessDenied(true); setConfirmOpen(false); setCredentialsJob(null); setCaptchaJob(null); setRetryJob(null);
@@ -248,7 +247,7 @@ export default function AccountReclaimPanel({ isAdmin = false }: { isAdmin?: boo
     <div className="reclaim-toolbar">
       <Input.Search aria-label="搜索账户" value={query} onChange={event => setQuery(event.target.value)}
         onSearch={value => { setSearch(value.trim()); setPage(1); }} placeholder="账户 ID、名称或邮箱" allowClear />
-      <AutoComplete aria-label="筛选 payer" value={payer} allowClear placeholder="筛选 payer"
+      <Select aria-label="筛选 payer" value={payer || undefined} allowClear showSearch optionFilterProp="label" placeholder="筛选 payer"
         options={payerOptions} onChange={value => { setPayer(value || ''); setPage(1); }} />
       <Button icon={<ReloadOutlined />} aria-label="刷新账户" onClick={() => void loadCatalog()} />
       <Button type="primary" icon={<SafetyCertificateOutlined />} disabled={!catalog?.readiness.ready || !selectedCount}
@@ -261,8 +260,8 @@ export default function AccountReclaimPanel({ isAdmin = false }: { isAdmin?: boo
       }}>{item.accountName} ({item.accountId})</Tag>)}
     </div>}
     <div className="reclaim-table-scroll"><Table<CatalogItem> rowKey="accountId" size="small" dataSource={catalog?.accounts || []}
-      pagination={{ current: page, pageSize, total: catalog?.total || 0, showSizeChanger: true, pageSizeOptions: [20, 50, 100],
-        onChange: (next, size) => { setPage(next); setPageSize(size as 20 | 50 | 100); } }}
+      pagination={{ current: page, pageSize, total: catalog?.total || 0, showSizeChanger: true, pageSizeOptions: [5, 20, 50, 100],
+        onChange: (next, size) => { setPage(next); setPageSize(size as 5 | 20 | 50 | 100); } }}
       rowSelection={{ selectedRowKeys: Object.keys(selected), onSelect: toggle, hideSelectAll: true,
         getCheckboxProps: item => ({ disabled: !item.eligible || (!!item.restricted && !isAdmin),
           name: item.eligible ? item.accountName : item.reason }) }}

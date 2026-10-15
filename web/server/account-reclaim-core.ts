@@ -99,9 +99,10 @@ export interface AccountReclaimBatchView {
   jobs: AccountReclaimJobView[];
 }
 export interface AccountReclaimCatalogQuery {
-  q?: string; payer?: string; page?: number; pageSize?: 20 | 50 | 100;
+  q?: string; payer?: string; page?: number; pageSize?: 5 | 20 | 50 | 100;
 }
 export interface AccountReclaimCatalog {
+  payers: string[];
   accounts: Array<{
     accountId: string; accountName: string; email: string; payer: string;
     payerAccountId: string; eligible: boolean; reasonCode?: string; reason?: string;
@@ -109,7 +110,7 @@ export interface AccountReclaimCatalog {
   }>;
   total: number;
   page: number;
-  pageSize: 20 | 50 | 100;
+  pageSize: 5 | 20 | 50 | 100;
   cachedAt: string;
   maxBatchSize: 20;
   readiness: { ready: boolean; message: string };

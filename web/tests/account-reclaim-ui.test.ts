@@ -16,23 +16,24 @@ const getComputedStyle = dom.window.getComputedStyle.bind(dom.window);
 dom.window.getComputedStyle = (element: Element) => getComputedStyle(element);
 globalThis.getComputedStyle = (element: Element) => getComputedStyle(element);
 
-async function setupPanel(options: { isAdmin?: boolean; accounts?: any[]; batches?: any[] } = {}) {
+async function setupPanel(options: { isAdmin?: boolean; accounts?: any[]; batches?: any[]; payers?: string[] } = {}) {
   const React = await import('react');
   const { createRoot } = await import('react-dom/client');
   const { api } = await import('../client/src/api');
   const { default: AccountReclaimPanel } = await import('../client/src/components/AccountReclaimPanel');
   const original = { accountReclaimCatalog: api.accountReclaimCatalog, accountReclaimBatches: api.accountReclaimBatches,
     accountReclaimBatch: api.accountReclaimBatch, accountReclaimCredentials: api.accountReclaimCredentials };
-  api.accountReclaimCatalog = async () => ({ success: true, data: {
-    accounts: options.accounts || [], total: options.accounts?.length || 0, page: 1, pageSize: 50,
+  const catalogQueries: any[] = [];
+  api.accountReclaimCatalog = async query => { catalogQueries.push(query); return { success: true, data: {
+    accounts: options.accounts || [], payers: options.payers || ['payer-a'], total: options.accounts?.length || 0, page: 1, pageSize: 5,
     cachedAt: '', maxBatchSize: 20, readiness: { ready: true, message: '' },
-  } });
+  } }; };
   api.accountReclaimBatches = async () => ({ success: true, data: options.batches || [] });
   const container = document.createElement('div');
   document.body.append(container);
   const root = createRoot(container);
   await React.act(async () => { root.render(React.createElement(AccountReclaimPanel, { isAdmin: options.isAdmin })); });
-  return { React, api, container, root, cleanup: async () => {
+  return { React, api, container, root, catalogQueries, cleanup: async () => {
     await React.act(async () => { root.unmount(); }); container.remove();
     Object.assign(api, original);
   } };
@@ -45,6 +46,28 @@ function click(element: Element | null) {
 
 const catalogAccount = { accountId: '123456789012', accountName: '客户账户', email: 'root@example.test',
   payer: 'payer-a', payerAccountId: '999999999999', eligible: true, restricted: true };
+
+test('payer dropdown includes payers outside the current page and supports selecting and clearing', async () => {
+  const panel = await setupPanel({ accounts: [{ ...catalogAccount, restricted: false }], payers: ['payer-a', 'payer-b'] });
+  try {
+    assert.equal(panel.catalogQueries[0].pageSize, 5);
+    const select = panel.container.querySelector('.reclaim-toolbar .ant-select');
+    assert.ok(select?.querySelector('.ant-select-arrow'), 'payer filter needs a visible dropdown arrow');
+    await panel.React.act(async () => {
+      select!.querySelector('.ant-select-selector')!.dispatchEvent(new window.MouseEvent('mousedown', { bubbles: true }));
+    });
+    const option = [...document.querySelectorAll('.ant-select-item-option-content')]
+      .find(item => item.textContent === 'payer-b');
+    assert.ok(option, 'payer-b must remain selectable even when the visible account belongs to payer-a');
+    await panel.React.act(async () => { click(option!.closest('.ant-select-item-option')); });
+    assert.equal(panel.catalogQueries.at(-1).payer, 'payer-b');
+    assert.equal(panel.catalogQueries.at(-1).page, 1);
+    await panel.React.act(async () => {
+      select!.querySelector('.ant-select-clear')!.dispatchEvent(new window.MouseEvent('mousedown', { bubbles: true }));
+    });
+    assert.equal(panel.catalogQueries.at(-1).payer, undefined);
+  } finally { await panel.cleanup(); }
+});
 
 test('account selection exposes working row controls without an inert select-all checkbox', async () => {
   const panel = await setupPanel({ accounts: [{ ...catalogAccount, restricted: false }] });
