@@ -6,7 +6,9 @@
 > 用户选择 **T2–T7 由用户在 Orca 托管终端派 codex（gpt-6-sol / high）实现**，Claude 只做审核、串行合并到 `integration/account-reclaim` 与后续阶段。
 > 派发简报见同目录 `briefs.md`。四道闸门不变。
 >
-> **实际执行记录**：T1 `0083ed5`（Claude）；T3 `7ac57c7`；T7 `02a1b8a`；T2 `57896d5` + 审核返工 `96afc7f`（codex，Run `run_bd066de5c0e9`）；T4–T6 进行中。
+> **实际执行记录**：T1 `0083ed5`（Claude）；codex（Run `run_bd066de5c0e9`）：T3 `7ac57c7`；T7 `02a1b8a`；T2 `57896d5` + 审核返工 `96afc7f`；
+> T4 `5244073`；协调者补 bridge `hasNewerRootEmailJobForAccountReclaim` `4ad411e`（应 T5 提问）；T5 `bcabcd8` + 审核返工 `9d74718`（未入队 Root 重试卡死、关停中止邮箱请求）；T6 `6d87f60`。
+> 集成分支 `9fd1530`：`npm test` 444/444、`npm run typecheck`、`npm run build` 全绿（主仓库，含 config.json）。各 worktree 因缺 config.json 有 56 个基线失败，均与 base 一致。
 > T1 相对 design 的增补：catalog 账户项增加 `restricted?: boolean`（前端给 admin 显示「受限账户」Tag 用），P5 回写 design.md §5.4。
 
 | # | 任务名 | 独占文件 | 依赖 | design.md 章节 | 验收命令 |

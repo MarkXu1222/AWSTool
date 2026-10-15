@@ -53,11 +53,12 @@
       **波次 1 已全部合入 `integration/account-reclaim`**：T3 `7ac57c7`→merge `941f88e`；T7 `02a1b8a`→merge `c15e21c`；
       T2 `57896d5` + 审核返工 `96afc7f`（配置错误码、非 JSON 4xx 判明确失败、MAILBOX_INVALID_RESPONSE）→merge `92c72f3`。
       主仓库全量 403/403 通过、typecheck 通过。worktree 内全量有 56 个基线失败（缺 config.json），与 aa397a9 一致。
-      下一步：派 T4（base = 集成分支最新提交）。
+      波次 2–4 完成：T4 `5244073`→`1cd8f91`；bridge 补充 `4ad411e`；T5 `bcabcd8`→`0f45f92`，返工 `9d74718`→`3d91b8c`；T6 `6d87f60`→`9fd1530`。
+      **P3 完成**：集成分支 `9fd1530` 全量 444/444、typecheck、build 全绿；Run 内无 reclaimable worker。
+- [ ] P4：独立审核子代理进行中（main...integration/account-reclaim），按结果修复后进 P5 / 闸门 G3。
       拆分规则见 `.claude/skills/orca-dev-flow/references/task-split.md`，可参照 `.kiro/specs/admin-console-on-demand/tasks.md`。
       提醒：`root-email-jobs.ts` / `root-email-core.ts` / `root-reset-permissions.ts` 三个文件须归同一任务（来源隔离、互斥、验证码注入互相牵连），
       该任务简报写明「先读 `web/ROOT_EMAIL.md`」；`db.ts`、`auth.ts`、`routes/aws.ts`、`index.ts`、`MainLayout.tsx`、`api.ts`、`Settings.tsx` 为枢纽文件，同一波次各只能归一个任务。
-- [ ] P4 集成分支串行合并 + 审核 + `npm test && npm run typecheck && npm run build` 全绿。
 - [ ] P5 发版（改 `web/client/src/version.ts` 的 `APP_VERSION`、README、project-context）→ 闸门 G3。
 - [ ] P6 Claude 亲自部署 EC2 → 闸门 G4。邮箱侧接口上线后用授权测试账户联调五步。
 
