@@ -1954,7 +1954,7 @@ export async function getEnabledRegions(payerAccountId: string): Promise<string[
   return (await getRegionAvailability(payerAccountId)).enabledRegions;
 }
 
-export type PayerRegionEnableOutcome = 'enabled' | 'enabling' | 'submitted' | 'failed';
+export type PayerRegionEnableOutcome = 'enabled' | 'enabling' | 'submitted' | 'deferred' | 'failed';
 
 export interface PayerRegionEnableResult {
   region: string;
@@ -1971,33 +1971,54 @@ export async function enablePayerRegions(payerAccountId: string, regions: string
   const creds = await assumePayer(payerAccountId);
   if (!creds) throw new Error('该 payer 不在平台配置（config.payers）中，无法启用区域');
   const client = new AccountClient({ region: 'us-east-1', credentials: creds });
-  const results: PayerRegionEnableResult[] = [];
   try {
-    for (const region of [...new Set(regions)].sort()) {
-      if (!REGION_RE.test(region)) {
-        results.push({ region, outcome: 'failed', detail: '区域名称不合法' });
-        continue;
+    return await enableRegionsWithClient(client, regions);
+  } finally {
+    client.destroy();
+  }
+}
+
+/**
+ * enablePayerRegions 的逐区域判定（便于注入假 client 测试）。
+ * AWS 限制单账户同时进行的区域开通请求数：被限流的区域记为 deferred，由接入任务下一轮再提交，
+ * 不能当失败 —— 否则一次提交多个区域就会让整个任务失败、要人去控制台点。
+ * 同一轮里一旦被限流，后面尚未开通的区域也直接 deferred，不再继续撞限额。
+ */
+export async function enableRegionsWithClient(
+  client: { send(command: GetRegionOptStatusCommand | EnableRegionCommand): Promise<{ RegionOptStatus?: string }> },
+  regions: string[],
+): Promise<PayerRegionEnableResult[]> {
+  const results: PayerRegionEnableResult[] = [];
+  let throttled = false;
+  for (const region of [...new Set(regions)].sort()) {
+    if (!REGION_RE.test(region)) {
+      results.push({ region, outcome: 'failed', detail: '区域名称不合法' });
+      continue;
+    }
+    try {
+      const current = await client.send(new GetRegionOptStatusCommand({ RegionName: region }));
+      const status = current.RegionOptStatus;
+      if (status === 'ENABLED' || status === 'ENABLED_BY_DEFAULT') {
+        results.push({ region, outcome: 'enabled' });
+      } else if (status === 'ENABLING') {
+        results.push({ region, outcome: 'enabling' });
+      } else if (status === 'DISABLING') {
+        // 停用中的区域不能立即重新启用，下一轮再试。
+        results.push({ region, outcome: 'enabling', detail: '区域正在停用，等待结束后再启用' });
+      } else if (throttled) {
+        results.push({ region, outcome: 'deferred', detail: '等待并发开通名额' });
+      } else {
+        await client.send(new EnableRegionCommand({ RegionName: region }));
+        results.push({ region, outcome: 'submitted' });
       }
-      try {
-        const current = await client.send(new GetRegionOptStatusCommand({ RegionName: region }));
-        const status = current.RegionOptStatus;
-        if (status === 'ENABLED' || status === 'ENABLED_BY_DEFAULT') {
-          results.push({ region, outcome: 'enabled' });
-        } else if (status === 'ENABLING') {
-          results.push({ region, outcome: 'enabling' });
-        } else if (status === 'DISABLING') {
-          // 停用中的区域不能立即重新启用，下一轮再试。
-          results.push({ region, outcome: 'enabling', detail: '区域正在停用，等待结束后再启用' });
-        } else {
-          await client.send(new EnableRegionCommand({ RegionName: region }));
-          results.push({ region, outcome: 'submitted' });
-        }
-      } catch (error) {
+    } catch (error) {
+      if (isTransientAwsError(error)) {
+        throttled = true;
+        results.push({ region, outcome: 'deferred', detail: `${awsErrorDetail(error)}，下一轮自动重新提交` });
+      } else {
         results.push({ region, outcome: 'failed', detail: awsErrorDetail(error) });
       }
     }
-  } finally {
-    client.destroy();
   }
   return results;
 }

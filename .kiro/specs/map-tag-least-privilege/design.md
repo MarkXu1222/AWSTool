@@ -384,3 +384,18 @@ npx tsx scripts/tag-keys-canary.ts --payer 724772095868 --status                
 
 已核实：中央 RE-AUTOTAG Lambda 代码不调用 `tag:GetResources`（仅旧 StackSet 模板 yaml 中出现），摘掉 payer 的 `ReadOnlyAccess` 不影响扫描。
 
+## 15. payer 区域开通限流不再终止任务（2026-10-15 用户批准「开始」）
+
+现象：taoVolt 重试 `deploy_re_indexes` 时一次提交多个区域开通，`ap-southeast-6` / `il-central-1` 返回
+`TooManyRequestsException`（单账户并发开通请求数限额），被判 `failed` → `PermanentOnboardingError`，任务终止。
+
+约束（AWS 文档 stacksets-opt-in-regions）：StackSet 实例所在区域必须在管理账户也启用，所以成员在用的可选区域 payer 必须启用；
+平台只开「成员已启用、payer 未启用」的区域，不要求 payer 开全部区域。
+
+修正：
+- `enablePayerRegions` 的逐区域判定抽成 `enableRegionsWithClient(client, regions)`（可注入假 client 测试）。
+- 新增结果 `deferred`：`isTransientAwsError` 为真（限流/超时/5xx）时记 `deferred`，同一轮后续 DISABLED 区域也直接 `deferred` 不再提交；
+  接入任务把 `deferred` 视为进行中，`waitForRetry` 1 分钟后重跑并补交。权限拒绝等仍为 `failed`。
+- `PAYER_REGION_ENABLE_TIMEOUT_MS` 60 分钟 → 4 小时（排队逐批开通 + 个别区域开通较慢）。
+- 测试：`tests/tag-onboarding-payer-regions.test.ts` 新增限流 deferred 与权限拒绝 failed 两条。
+

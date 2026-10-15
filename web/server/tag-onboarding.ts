@@ -278,8 +278,8 @@ export function findPayerMissingRegions(
   return { regions: [...regions].sort(), affectedAccountsByRegion };
 }
 
-// 区域开通通常几分钟，偶尔更久；超时后才转为人工处理。
-const PAYER_REGION_ENABLE_TIMEOUT_MS = 60 * 60_000;
+// 区域开通通常几分钟，偶尔数小时；受单账户并发开通限额影响，多个区域要排队逐批提交。超时后才转为人工处理。
+const PAYER_REGION_ENABLE_TIMEOUT_MS = 4 * 60 * 60_000;
 
 async function runDeployReIndexes(job: TagOnboardingJob): Promise<void> {
   const [payerEnabledRegions, defaultRegions, discovery] = await Promise.all([
@@ -306,7 +306,7 @@ async function runDeployReIndexes(job: TagOnboardingJob): Promise<void> {
       const failedDetail = failed.map(item => `${item.region}: ${item.detail || '未知错误'}`).join('；');
       const reason = failed.length > 0
         ? `平台自动开通 payer 管理账户 ${job.payerAccountId} 的区域失败（涉及 ${affectedAccountCount} 个成员账户）：${failedDetail}`
-        : `payer 管理账户 ${job.payerAccountId} 的区域在 60 分钟内仍未启用完成：${regionList}`;
+        : `payer 管理账户 ${job.payerAccountId} 的区域在 4 小时内仍未启用完成：${regionList}`;
       throw new PermanentOnboardingError(reason, {
         code: 'PAYER_REGIONS_NOT_ENABLED',
         reason,
@@ -322,7 +322,8 @@ async function runDeployReIndexes(job: TagOnboardingJob): Promise<void> {
       });
     }
     const submitted = results.filter(item => item.outcome === 'submitted').map(item => item.region);
-    const progress = results.map(item => `${item.region}(${item.outcome === 'submitted' ? '已提交开通' : item.outcome === 'enabled' ? '已启用，等待生效' : '启用中'})`).join(', ');
+    const progressLabel: Record<string, string> = { submitted: '已提交开通', enabled: '已启用，等待生效', deferred: '排队等待并发名额' };
+    const progress = results.map(item => `${item.region}(${progressLabel[item.outcome] || '启用中'})`).join(', ');
     console.log(`[MAP Onboarding] payer ${job.payerAccountId} 自动开通区域: ${progress}`);
     if (submitted.length > 0) {
       db.addAuditLog(null, 'REGION_ENABLE',
