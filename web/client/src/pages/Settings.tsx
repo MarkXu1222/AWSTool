@@ -353,7 +353,7 @@ const SettingsPage: React.FC<SettingsPageProps> = ({ onLogout }) => {
             ) : (
               <>
                 <Form.Item name="allowedPages" label="页面权限"
-                  extra="勾选该用户可见的左侧菜单页面；运维监控包含系统指标，默认不授权">
+                  extra="勾选可访问的页面；「账户回收（资源清理）」开放资源清理 Tab，回收操作由下方「账户回收权限」单独授权。运维监控默认不授权。">
                   <Checkbox.Group options={PAGE_META.map(p => ({ label: p.label, value: p.key }))} />
                 </Form.Item>
                 <Form.Item name="rootAccess" valuePropName="checked" label="根用户凭证权限"
@@ -365,7 +365,7 @@ const SettingsPage: React.FC<SettingsPageProps> = ({ onLogout }) => {
                   <Select options={ROOT_RESET_OPTIONS} />
                 </Form.Item>
                 <Form.Item name="accountReclaimAccess" label="账户回收权限"
-                  extra="独立于资源清理和批量 Root 权限；可进入回收 Tab 操作本人批次。受限账户仅管理员可回收。">
+                  extra="独立授权，可进入「账户回收」页面并操作本人回收批次，无需勾选上方的资源清理项。受限账户仅管理员可回收。">
                   <Select options={RECLAIM_OPTIONS} />
                 </Form.Item>
                 <Form.Item name="bulkQuotaAccess" valuePropName="checked" label="批量提额权限"
@@ -391,7 +391,7 @@ const SettingsPage: React.FC<SettingsPageProps> = ({ onLogout }) => {
             ) : (
               <>
                 <Form.Item name="allowedPages" label="页面权限"
-                  extra="勾选该用户可见的左侧菜单页面；运维监控包含系统指标，默认不授权">
+                  extra="勾选可访问的页面；「账户回收（资源清理）」开放资源清理 Tab，回收操作由下方「账户回收权限」单独授权。运维监控默认不授权。">
                   <Checkbox.Group options={PAGE_META.map(p => ({ label: p.label, value: p.key }))} />
                 </Form.Item>
                 <Form.Item name="rootAccess" valuePropName="checked" label="根用户凭证权限"
@@ -403,7 +403,7 @@ const SettingsPage: React.FC<SettingsPageProps> = ({ onLogout }) => {
                   <Select options={ROOT_RESET_OPTIONS} />
                 </Form.Item>
                 <Form.Item name="accountReclaimAccess" label="账户回收权限"
-                  extra="独立于资源清理和批量 Root 权限；可进入回收 Tab 操作本人批次。受限账户仅管理员可回收。">
+                  extra="独立授权，可进入「账户回收」页面并操作本人回收批次，无需勾选上方的资源清理项。受限账户仅管理员可回收。">
                   <Select options={RECLAIM_OPTIONS} />
                 </Form.Item>
                 <Form.Item name="bulkQuotaAccess" valuePropName="checked" label="批量提额权限"

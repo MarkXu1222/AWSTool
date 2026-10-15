@@ -33,7 +33,7 @@ export const PAGE_META: { key: string; label: string }[] = [
   { key: 'bedrock', label: 'Bedrock 工具' },
   { key: 'regions', label: '区域管理' },
   { key: 'billing', label: '账单导出' },
-  { key: 'cleanup', label: '资源清理' },
+  { key: 'cleanup', label: '账户回收（资源清理）' },
   { key: 'tagcompliance', label: 'MAP 标签' },
   { key: 'audit', label: '审计日志' },
   { key: 'ops', label: '运维监控' },
