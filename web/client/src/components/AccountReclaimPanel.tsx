@@ -14,6 +14,13 @@ const STATE_LABELS: Record<AccountReclaimStep['state'], string> = {
   pending: '待执行', running: '执行中', succeeded: '完成', skipped: '已满足',
   failed: '失败', unknown: '结果未知', not_run: '未执行',
 };
+const STEP_RESULT_LABELS: Record<AccountReclaimStepKey, { succeeded: string; skipped: string }> = {
+  forward: { succeeded: '已删除转发', skipped: '无邮件转发' },
+  mailbox_password: { succeeded: '已修改邮箱密码', skipped: '已修改邮箱密码' },
+  root_mfa: { succeeded: '已删除 Root MFA', skipped: '未配置 Root MFA' },
+  root_recovery: { succeeded: '已允许恢复密码', skipped: '已允许恢复密码' },
+  aws_password: { succeeded: '已修改 AWS Root 密码', skipped: '已修改 AWS Root 密码' },
+};
 const STATUS_LABELS: Record<AccountReclaimJobView['status'], string> = {
   queued: '排队中', running: '执行中', completed: '已完成', partial: '部分完成',
   failed: '失败', cancelled: '已停止',
@@ -224,8 +231,10 @@ export default function AccountReclaimPanel({ isAdmin = false }: { isAdmin?: boo
   const displayStep = (step: AccountReclaimStep) => <div key={step.key} className="reclaim-step">
     <span className="reclaim-step-title">{STEP_LABELS[step.key]}</span>
     <Tag color={step.state === 'failed' || step.state === 'unknown' ? 'red'
-      : step.state === 'succeeded' || step.state === 'skipped' ? 'green' : 'default'}>{STATE_LABELS[step.state]}</Tag>
-    {(step.state === 'failed' || step.state === 'unknown' || step.state === 'not_run' || step.state === 'skipped') &&
+      : step.state === 'succeeded' || step.state === 'skipped' ? 'green' : 'default'}>
+      {step.state === 'succeeded' || step.state === 'skipped' ? STEP_RESULT_LABELS[step.key][step.state] : STATE_LABELS[step.state]}
+    </Tag>
+    {(step.state === 'failed' || step.state === 'unknown' || step.state === 'not_run') &&
       <div className="reclaim-step-reason">{step.message}
         {step.recommendation && <div>建议：{step.recommendation}</div>}
       </div>}
