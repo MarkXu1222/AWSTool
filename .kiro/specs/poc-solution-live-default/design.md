@@ -279,3 +279,13 @@ L1082-1089 的「`!solutionId` → push warning 跳过」分支：**删除其中
 - 不改「商机阶段检查」Tab、POC 申请 Tab、`poc-cash-funding.ts`。
 - 不重构 PocCash.tsx 其它部分（inline 样式债等），不改 `api.ts`。
 - `version.ts`、`README.md`、`project-context.md` 由协调者在 P5 统一改，实现任务不碰。
+
+## 12. 实现后修正（P4 独立审核，2026-10-15）
+
+审核未发现可绕过后端校验的问题，以下为前端边界修正，已实现：
+
+1. 切换主体时同步清空表单 `solutionId` 与其校验错误 —— 否则新主体列表加载中/失败时，表单仍带着旧主体的 Solution。
+2. `applyTemplate` 通过 `solutionsInfoRef` 读取最新的 Solution 状态（不用点击时的闭包值）；等待模板期间切换了主体则丢弃结果。
+3. 确认框：字段为空且列表未成功加载时显示「未选（由服务端按默认规则决定）」，只有列表加载成功且为空时才显示「不关联」。
+4. `meta` 已加载但没有可用主体时，Solution 状态置为 `error`，不一直显示加载中。
+5. 列表加载完成后清除 `solutionId` 的残留校验错误。

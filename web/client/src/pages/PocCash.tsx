@@ -153,6 +153,9 @@ const PocCashPage: React.FC = () => {
   const [solutions, setSolutions] = useState<Solution[]>([]);
   const [solutionsState, setSolutionsState] = useState<'loading' | 'ok' | 'error'>('loading');
   const [solutionDefault, setSolutionDefault] = useState<string | null>(null);
+  // 异步回调（套用模板）要读最新的 Solution 状态，不能用点击那一刻闭包里的旧值
+  const solutionsInfoRef = useRef({ state: solutionsState, list: solutions, def: solutionDefault });
+  solutionsInfoRef.current = { state: solutionsState, list: solutions, def: solutionDefault };
   // 参考已有商机
   const [opps, setOpps] = useState<OppBrief[]>([]);
   const [oppsLoading, setOppsLoading] = useState(false);
@@ -213,12 +216,15 @@ const PocCashPage: React.FC = () => {
    * Mergebytes 的表单里列出 Webby 的 Solution / 商机，选中即出错。
    */
   useEffect(() => {
-    // 凭证未配置时不会去查，Solution 区按「查询失败」展示，别一直显示加载中
-    if (meta && !meta.configured) setSolutionsState('error');
+    // 凭证未配置或没有可用主体时不会去查，Solution 区按「查询失败」展示，别一直显示加载中
+    if (meta && (!meta.configured || !activePartner)) setSolutionsState('error');
     if (!meta?.configured || !activePartner) return;
     let stale = false;   // 快速切换时丢弃过期响应，避免回填错主体的数据
 
+    // 旧主体选中的 Solution 不属于新主体，清掉；新列表到了再预选
     setSolutions([]); setSolutionDefault(null); setSolutionsState('loading');
+    form.setFieldValue('solutionId', undefined);
+    form.setFields([{ name: 'solutionId', errors: [] }]);
     api.pocCashSolutions(activePartner)
       .then((r: any) => {
         if (stale) return;
@@ -230,6 +236,8 @@ const PocCashPage: React.FC = () => {
         // 已选的（例如套用模板带来的）仍在列表里就保留，否则换成默认值
         const cur = form.getFieldValue('solutionId');
         if (!cur || !list.some(s => s.id === cur)) form.setFieldValue('solutionId', def ?? undefined);
+        // 必选规则随列表变化，清掉切换前残留的「请选择」报错
+        form.setFields([{ name: 'solutionId', errors: [] }]);
       })
       .catch(() => { if (!stale) setSolutionsState('error'); });
 
@@ -250,8 +258,12 @@ const PocCashPage: React.FC = () => {
    * 否则旧项目的内容会与新标题不一致。
    */
   const applyTemplate = async (id: string) => {
+    const requested = activePartner;
     try {
-      const t = await api.pocCashTemplate(id, activePartner);
+      const t = await api.pocCashTemplate(id, requested);
+      // 等待期间切了主体：模板属于旧主体，丢弃
+      if (activePartnerRef.current !== requested) return;
+      const sol = solutionsInfoRef.current;
       form.setFieldsValue({
         companyName: t.companyName,
         industry: t.industry,
@@ -266,9 +278,9 @@ const PocCashPage: React.FC = () => {
         marketingSource: t.marketingSource === 'Marketing Activity'
           ? 'Marketing Activity' : 'None',
         marketingAwsFundingUsed: t.marketingAwsFundingUsed === 'Yes' ? 'Yes' : 'No',
-        solutionId: solutionsState === 'ok'
-          ? (t.solutionIds?.find((id: string) => solutions.some(s => s.id === id))
-            ?? solutionDefault ?? undefined)
+        solutionId: sol.state === 'ok'
+          ? (t.solutionIds?.find((sid: string) => sol.list.some(s => s.id === sid))
+            ?? sol.def ?? undefined)
           : t.solutionIds?.[0],
       });
       setRefFrom(id);
@@ -357,7 +369,8 @@ const PocCashPage: React.FC = () => {
               const s = solutions.find(x => x.id === values.solutionId);
               return s ? ` — ${s.name}` : '';
             })()}`
-            : '不关联'}</div>
+            // 列表没加载成功时留空不等于不关联 —— 服务端会按默认规则决定
+            : solutionsState === 'ok' ? '不关联' : '未选（由服务端按默认规则决定）'}</div>
           <div>
             MRR：{Number(values.mrrUsd).toLocaleString()} USD/月
             {amounts && <Text type="secondary">
