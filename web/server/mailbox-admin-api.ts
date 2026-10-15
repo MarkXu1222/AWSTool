@@ -30,17 +30,20 @@ const KNOWN_CODES = new Set([
 let ssmCache: { parameter: string; expires: number; value: Promise<MailApiConfig> } | undefined;
 
 export function mailboxAdminApiConfigured(): boolean {
-  return !!process.env.MAIL_ADMIN_API_SSM_PARAMETER?.trim();
+  const parameter = process.env.MAIL_ADMIN_API_SSM_PARAMETER?.trim();
+  return !!parameter && parameter !== process.env.MAIL_API_SSM_PARAMETER?.trim();
 }
 
 async function adminConfig(): Promise<MailApiConfig> {
   const parameter = process.env.MAIL_ADMIN_API_SSM_PARAMETER?.trim();
-  if (!parameter) throw new MailboxAdminApiError('邮箱写接口凭据未配置', 'AUTH_FAILED', 0, false);
+  if (!parameter || parameter === process.env.MAIL_API_SSM_PARAMETER?.trim()) {
+    throw new MailboxAdminApiError('邮箱写接口凭据未配置或与只读凭据共用', 'MAILBOX_CONFIG_UNAVAILABLE', 503, false);
+  }
   if (!ssmCache || ssmCache.parameter !== parameter || ssmCache.expires <= Date.now()) {
     const entry = { parameter, expires: Date.now() + 600_000, value: readMailApiSsmConfig(parameter) };
     entry.value = entry.value.catch(() => {
       if (ssmCache === entry) ssmCache = undefined;
-      throw new MailboxAdminApiError('邮箱写接口安全配置读取失败', 'AUTH_FAILED', 0, false);
+      throw new MailboxAdminApiError('邮箱写接口安全配置读取失败', 'MAILBOX_CONFIG_UNAVAILABLE', 503, false);
     });
     ssmCache = entry;
   }
@@ -69,7 +72,16 @@ function retryAfterMs(header: string | null): number {
 }
 
 function invalidResponse(write: boolean, statusCode: number): MailboxAdminApiError {
-  return new MailboxAdminApiError('邮箱接口响应格式无效', 'INVALID_RESPONSE', statusCode, write);
+  return new MailboxAdminApiError('邮箱接口响应格式无效', 'MAILBOX_INVALID_RESPONSE', statusCode, write);
+}
+
+function nonJsonResponse(write: boolean, statusCode: number): MailboxAdminApiError {
+  if (statusCode >= 400 && statusCode < 500) {
+    const fallback: Record<number, string> = { 400: 'INVALID_REQUEST', 401: 'AUTH_FAILED',
+      403: 'IP_NOT_ALLOWED', 404: 'NOT_FOUND' };
+    return providerError(fallback[statusCode] || 'INVALID_REQUEST', statusCode, undefined);
+  }
+  return invalidResponse(write, statusCode);
 }
 
 function providerError(code: string, statusCode: number, msg: unknown): MailboxAdminApiError {
@@ -137,7 +149,7 @@ export class MailboxAdminApiClient {
       }
 
       const reader = response.body?.getReader();
-      if (!reader) throw invalidResponse(write, response.status);
+      if (!reader) throw nonJsonResponse(write, response.status);
       const chunks: Uint8Array[] = [];
       let bytes = 0;
       let onAbort: (() => void) | undefined;
@@ -165,7 +177,7 @@ export class MailboxAdminApiClient {
       }
       let envelope: unknown;
       try { envelope = JSON.parse(Buffer.concat(chunks).toString('utf8')); }
-      catch { throw invalidResponse(write, response.status); }
+      catch { throw nonJsonResponse(write, response.status); }
       if (!envelope || typeof envelope !== 'object') throw invalidResponse(write, response.status);
       const result = envelope as Record<string, unknown>;
       if (result.status === 0 && typeof result.code === 'string') {

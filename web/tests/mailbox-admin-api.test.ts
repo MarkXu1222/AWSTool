@@ -52,7 +52,7 @@ test('POST signs the exact sent bytes, normalizes emails, uses HTTPS and forbids
   assert.deepEqual(await api.setPassword(email, 'Example123!ABC'), { updated: true, sessionsKicked: 2 });
   assert.equal(new Set(signatures).size, 3);
   const rejected = client(async () => Response.redirect('https://untrusted.test/', 302));
-  await assert.rejects(rejected.deleteForwards(email), errorIs('INVALID_RESPONSE', true));
+  await assert.rejects(rejected.deleteForwards(email), errorIs('MAILBOX_INVALID_RESPONSE', true));
 });
 
 test('signature changes if one byte of the POST body changes', async () => {
@@ -81,7 +81,16 @@ test('only the dedicated SSM parameter enables the admin API; old read credentia
   try {
     assert.equal(mailboxAdminApiConfigured(), false);
     const api = new MailboxAdminApiClient(undefined, async () => { throw new Error('must not fetch'); }, 0);
-    await assert.rejects(api.lookup([email]), errorIs('AUTH_FAILED'));
+    await assert.rejects(api.lookup([email]), (error: MailboxAdminApiError) => {
+      assert.equal(error.statusCode, 503);
+      return errorIs('MAILBOX_CONFIG_UNAVAILABLE')(error);
+    });
+    process.env.MAIL_ADMIN_API_SSM_PARAMETER = '/legacy-test-only';
+    assert.equal(mailboxAdminApiConfigured(), false);
+    await assert.rejects(api.deleteForwards(email), (error: MailboxAdminApiError) => {
+      assert.equal(error.statusCode, 503);
+      return errorIs('MAILBOX_CONFIG_UNAVAILABLE')(error);
+    });
     process.env.MAIL_ADMIN_API_SSM_PARAMETER = '/toolbox/mail-api-reclaim';
     assert.equal(mailboxAdminApiConfigured(), true);
   } finally {
@@ -91,6 +100,29 @@ test('only the dedicated SSM parameter enables the admin API; old read credentia
     else process.env.MAIL_API_SECRET = oldSecret;
     if (oldParameter === undefined) delete process.env.MAIL_API_SSM_PARAMETER;
     else process.env.MAIL_API_SSM_PARAMETER = oldParameter;
+  }
+});
+
+test('failed SSM credential read is a configuration outage, not a token failure', async () => {
+  const before = process.env.MAIL_ADMIN_API_SSM_PARAMETER;
+  const oldParameter = process.env.MAIL_API_SSM_PARAMETER;
+  const oldPath = process.env.PATH;
+  process.env.MAIL_ADMIN_API_SSM_PARAMETER = '/toolbox/test-reclaim-unavailable';
+  delete process.env.MAIL_API_SSM_PARAMETER;
+  process.env.PATH = '/nonexistent/ssm-test-bin';
+  try {
+    const api = new MailboxAdminApiClient(undefined, async () => { throw new Error('must not fetch'); }, 0);
+    await assert.rejects(api.lookup([email]), (error: MailboxAdminApiError) => {
+      assert.equal(error.statusCode, 503);
+      return errorIs('MAILBOX_CONFIG_UNAVAILABLE')(error);
+    });
+  } finally {
+    if (before === undefined) delete process.env.MAIL_ADMIN_API_SSM_PARAMETER;
+    else process.env.MAIL_ADMIN_API_SSM_PARAMETER = before;
+    if (oldParameter === undefined) delete process.env.MAIL_API_SSM_PARAMETER;
+    else process.env.MAIL_API_SSM_PARAMETER = oldParameter;
+    if (oldPath === undefined) delete process.env.PATH;
+    else process.env.PATH = oldPath;
   }
 });
 
@@ -104,7 +136,7 @@ test('lookup rejects invalid lengths, missing, duplicate and malformed result en
   for (const items of [[], [item, item], [{ ...item, email: 'other@example.test' }],
     [{ ...item, active: 'yes' }], [{ ...item, forwards: [42] }]]) {
     const bad = client(async () => ok({ items }));
-    await assert.rejects(bad.lookup([email]), errorIs('INVALID_RESPONSE'));
+    await assert.rejects(bad.lookup([email]), errorIs('MAILBOX_INVALID_RESPONSE'));
   }
   const valid = client(async () => ok({ items: [item] }));
   assert.deepEqual(await valid.lookup([email, email]), [item]);
@@ -114,20 +146,39 @@ test('lookup rejects invalid lengths, missing, duplicate and malformed result en
     .deleteForwards(email), { deleted: 1, removed: mixed.forwards });
   const second = { ...item, email: 'other@example.test' };
   await assert.rejects(client(async () => ok({ items: [second, item] }))
-    .lookup([email, second.email]), errorIs('INVALID_RESPONSE'));
+    .lookup([email, second.email]), errorIs('MAILBOX_INVALID_RESPONSE'));
 });
 
 test('write results are validated, input password and body size bounded', async () => {
   let calls = 0;
   const api = client(async () => { calls++; return ok({ deleted: -1, removed: [] }); });
-  await assert.rejects(api.deleteForwards(email), errorIs('INVALID_RESPONSE', true));
+  await assert.rejects(api.deleteForwards(email), errorIs('MAILBOX_INVALID_RESPONSE', true));
   for (const password of ['short', 'with space 123456', 'Example123\'ABC', 'Example123"ABC', 'Example123\\ABC']) {
     await assert.rejects(api.setPassword(email, password), errorIs('INVALID_PASSWORD'));
   }
   await assert.rejects(api.lookup([`${'x'.repeat(17_000)}@example.test`]), errorIs('INVALID_REQUEST'));
   assert.equal(calls, 1);
   await assert.rejects(client(async () => ok({ updated: true, sessionsKicked: -1 }))
-    .setPassword(email, 'Example123!ABC'), errorIs('INVALID_RESPONSE', true));
+    .setPassword(email, 'Example123!ABC'), errorIs('MAILBOX_INVALID_RESPONSE', true));
+});
+
+test('non-JSON HTTP 4xx responses map by status without uncertain writes', async () => {
+  const cases: [number, string][] = [
+    [400, 'INVALID_REQUEST'], [401, 'AUTH_FAILED'], [403, 'IP_NOT_ALLOWED'],
+    [404, 'NOT_FOUND'], [422, 'INVALID_REQUEST'],
+  ];
+  for (const [status, code] of cases) {
+    const api = client(async () => new Response('<html>private upstream detail</html>', { status }));
+    await assert.rejects(api.deleteForwards(email), (error: MailboxAdminApiError) => {
+      assert.equal(error.statusCode, status);
+      return errorIs(code)(error);
+    });
+  }
+  const unavailable = client(async () => new Response('<html>private upstream detail</html>', { status: 502 }));
+  await assert.rejects(unavailable.deleteForwards(email), (error: MailboxAdminApiError) => {
+    assert.equal(error.statusCode, 502);
+    return errorIs('MAILBOX_INVALID_RESPONSE', true)(error);
+  });
 });
 
 test('HTTP and business codes map to safe typed errors, including password subactions', async () => {
@@ -196,9 +247,9 @@ test('timeout, interrupted or oversized response is unknown for writes and never
   await assert.rejects(api.setPassword(email, password), errorIs('MAILBOX_WRITE_UNKNOWN', true));
   assert.equal(calls, 1);
   await assert.rejects(client(async () => new Response('x'.repeat(1_048_577)))
-    .setPassword(email, password), errorIs('INVALID_RESPONSE', true));
+    .setPassword(email, password), errorIs('MAILBOX_INVALID_RESPONSE', true));
   await assert.rejects(client(async () => new Response('{private password'))
-    .deleteForwards(email), errorIs('INVALID_RESPONSE', true));
+    .deleteForwards(email), errorIs('MAILBOX_INVALID_RESPONSE', true));
   const stalled = client(async () => new Response(new ReadableStream({ start(controller) {
     controller.enqueue(new TextEncoder().encode('{'));
   } })), 0, 20);
