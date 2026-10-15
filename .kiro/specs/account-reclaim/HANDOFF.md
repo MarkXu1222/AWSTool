@@ -1,7 +1,7 @@
 # 账户回收 —— 进度交接（供新会话续作）
 
 > 最后更新：2026-10-15。本需求走 **orca-dev-flow 七阶段四闸门**。
-> G1/G2 已批，T1–T7 已完成；**P4 审核、六项修复及独立复查通过**，修复提交 `785456e`。发布候选 0.56.0 已准备，待 G3；尚未部署。见 P4-REVIEW.md 与 RELEASE-CHECKLIST.md。
+> G1–G4 已获用户批准，T1–T7 已完成；**P4 六项修复及独立复查通过，0.56.0 已于 2026-10-15 15:40（UTC+8）部署**。运行代码 `main` / `b9db13b`，最终主干测试 469/469、typecheck、build 通过；生产只读检查通过，真实账户五步验收待执行。见 DEPLOYMENT-RESULT.md 与 RELEASE-CHECKLIST.md。
 > 五步编号已统一；具体接口与状态设计以当前 `design.md` 为准。
 
 ## 需求一句话
@@ -59,8 +59,9 @@
       拆分规则见 `.claude/skills/orca-dev-flow/references/task-split.md`，可参照 `.kiro/specs/admin-console-on-demand/tasks.md`。
       提醒：`root-email-jobs.ts` / `root-email-core.ts` / `root-reset-permissions.ts` 三个文件须归同一任务（来源隔离、互斥、验证码注入互相牵连），
       该任务简报写明「先读 `web/ROOT_EMAIL.md`」；`db.ts`、`auth.ts`、`routes/aws.ts`、`index.ts`、`MainLayout.tsx`、`api.ts`、`Settings.tsx` 为枢纽文件，同一波次各只能归一个任务。
-- [ ] P5 发布材料已准备：APP_VERSION `0.55.1 → 0.56.0`，README/project-context/ROOT_EMAIL/设计已同步，上线清单已落盘；待 G3 批准上线内容。
-- [ ] P6 待 G4 批准部署操作，随后在 EC2 用授权测试账户联调五步；本轮没有推送、部署或真实改密。
+- [x] P5：发布材料已完成，APP_VERSION `0.55.1 → 0.56.0`，README/project-context/ROOT_EMAIL/设计同步；用户明确批准 G3。
+- [x] P6 部署：用户明确批准 G4，已合入/推送 main、备份、EC2 构建及 PM2 重启；保留最新 POC Solution 主干更新 `c44f637` 后的 `b9db13b` 再次独立复查，469/469、typecheck、build 通过。生产页面、只读邮箱联调与数据保全核验通过。
+- [ ] P6 业务验收：指定授权测试账户，核验完整五步、旧密码/旧邮箱会话失效及转发阻断。部署检查没有创建回收任务或执行真实改密。
 
 ## 当前设计摘要（实现细节见 design.md）
 
@@ -176,5 +177,5 @@ AWSTool 侧新增环境变量 `MAIL_ADMIN_API_SSM_PARAMETER=/toolbox/mail-api-re
 - 实现一律 `gpt-6-sol --effort high`，核对回执 `launch.effective`。
 
 ## 新会话怎么起
-先读本文件、P4-REVIEW.md、RELEASE-CHECKLIST.md。P0–P4 已完成，发布候选已准备；保留“组合已有功能、收回交付入口”的业务定位。
-下一步为 G3 上线内容审阅，再按 G4 授权部署与生产五步验收，不重新派 T1–T7，不在未授权时操作真实账户。
+先读本文件、DEPLOYMENT-RESULT.md、RELEASE-CHECKLIST.md。P0–P6 部署与只读检查已完成；保留“组合已有功能、收回交付入口”的业务定位。
+下一步为指定授权测试账户后完成生产五步验收及真实角色权限矩阵，不重新派 T1–T7、不重复部署，也不把已上线等同于业务验收完成。

@@ -32,6 +32,8 @@
 
 候选版本更新后再构建，结果见 RELEASE-CHECKLIST.md。测试记录位于本轮临时验证目录 `/tmp/account-reclaim-p4.KRbHry/`；本文件保留可长期复核的结果摘要。
 
+2026-10-15 上线前主干并发更新补验：`origin/main` 新增 POC Solution `c44f637`，保留后合并为 `b9db13b`。独立窄范围复查确认账户回收运行代码未变、双方文档合并完整、路由/权限/依赖无冲突；该提交全量 469/469、typecheck、build 通过。生产构建及部署检查见 DEPLOYMENT-RESULT.md。
+
 非阻断警告：npm 提示已有 `shamefully-hoist` 项目配置不被识别；Vite 提示 vendor chunk 超过 1200 kB。两者不影响本轮退出状态，不在本需求内修改依赖或拆包。
 
 ## 验证边界

@@ -1,6 +1,6 @@
 # 任务拆分 —— account-reclaim
 
-> 最新状态：T1–T7 已完成，P4 六项问题已修复并独立复查通过（`785456e`）；全量 456/456、typecheck、build 通过。发布候选及待执行验收见 RELEASE-CHECKLIST.md。下方 9fd1530 / 444 项是 P3 的历史记录。
+> 最新状态：T1–T7、P4 六项修复及复查已完成；G3/G4 获批，0.56.0 已上线。最终主干 `b9db13b` 保留最新 POC Solution 更新，独立复查及全量 469/469、typecheck、build 通过，EC2 构建与生产只读检查通过。真实账户五步及真实角色权限矩阵待验收，见 DEPLOYMENT-RESULT.md / RELEASE-CHECKLIST.md。下方 9fd1530 / 444 项是 P3 历史记录。
 
 > 前置：`design.md` 已通过闸门 G1（2026-10-15）。所有任务的唯一依据是同目录 `design.md`；邮箱接口以 `mailbox-api-spec.md`（含顶部「上线差异」）为准。
 > P2 回写 design.md（不改设计思路，见其顶部状态行）：邮箱改密不做认证缓存刷新；补 `NOT_FOUND`/`HTTPS_REQUIRED`；新增测试注入点 `accountReclaimDeps`（§5.4）；受限账户矩阵测试归 service 测试（§9）。

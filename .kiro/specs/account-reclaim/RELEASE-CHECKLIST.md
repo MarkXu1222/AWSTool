@@ -1,10 +1,11 @@
 # 账户回收上线清单
 
-日期：2026-10-15（Asia/Kuala_Lumpur）。状态：P4 已通过，发布材料已准备，待 G3 上线内容确认；G4 部署授权及生产五步验收未执行。
+日期：2026-10-15（Asia/Kuala_Lumpur）。状态：G3/G4 已获用户明确批准；0.56.0 已合入 main 并部署，生产只读检查通过，真实账户五步验收待执行。上线记录见 DEPLOYMENT-RESULT.md。
 
 ## 发布候选
 
 - 分支：`integration/account-reclaim`，P4 修复提交 `785456e`。
+- 已上线运行代码：`main` / `b9db13b07e6d77d239b7a8448d1b0ef4b0aaeadb`；发布时保留刚进入主干的 POC Solution 更新 `c44f637`，合并差异已独立复查。
 - 候选版本：`0.55.1 → 0.56.0`，APP_VERSION、README、project-context、ROOT_EMAIL 与设计/交接已同步。
 - 内容：账户回收 Tab、最多 20 个成员账户、TOTP、固定五步、逐步失败说明、安全重试、人工验证码、密码查看/复制、审计与通知。
 - 固定顺序：删转发 → 改邮箱密码并踢旧会话 → 删 Root MFA → 允许恢复密码 → 改 AWS Root 密码。
@@ -20,6 +21,7 @@
 - [x] `npm run build`：client/server/runtime assets 全部通过。
 - [x] 运行数据、密钥、其他工作区变更未纳入提交。已有 package-lock 改动属于其他工作，本次没有新增依赖。
 - [x] 候选版本 0.56.0 最终重构建通过，已回读生成的 client JS 确认包含 0.56.0。
+- [x] 最终主干合并提交 `b9db13b` 重跑：469/469，typecheck 与 build 全通过；EC2 生产构建通过。
 
 ## 数据与运行配置
 
@@ -35,14 +37,15 @@
 
 ## 待确认与待执行
 
-- [ ] G3：批准此候选版本、功能范围、schema/权限变化与验证结果。
-- [ ] G4：批准实际合入/推送及 EC2 部署命令；本轮尚未执行。
-- [ ] 部署前选定一个可用于改密、删转发、移除 Root MFA 的授权测试账户，准备旧邮箱会话及受控转发测试。
-- [ ] 部署前记录当前服务版本/提交；将配置、两份业务 JSON 与 keyring 备份到受控位置并核验成功。
-- [ ] 部署后验证 PM2、首页/登录、API 未登录拒绝，以及回收 Tab 的权限矩阵。
+- [x] G3：用户明确确认 0.56.0 上线内容。
+- [x] G4：用户明确授权合入主干、推送及按本清单部署；实际部署与只读验证已完成。
+- [x] 部署前记录 `b98118d` / 0.55.1；配置、两份业务 JSON 与独立匹配 keyring 已备份并核验，目录 0700、文件 0600。
+- [x] PM2 单进程在线、首页 200、现有 admin 登录会话、回收目录与确认弹窗、未登录 API 401；邮箱 SSM 读取及托管邮箱 lookup 通过。PM2 环境已保存。
+- [ ] 选定可用于改密、删转发、移除 Root MFA 的授权测试账户，准备旧邮箱会话及受控转发测试；部署检查没有创建回收任务。
+- [ ] 使用不同真实角色验证完整权限矩阵；本次生产页面检查使用现有 admin 会话，其他角色由本地测试覆盖，尚未做生产账号验收。
 - [ ] 用授权测试账户完成五步并核验下方业务结果。
 
-下列命令仅为部署预览，须在 G4 获批后按当时分支与服务器状态复核再执行：
+下列命令保留为部署操作模板；本次实际命令、主干并发更新与结果见 DEPLOYMENT-RESULT.md。未来执行仍需当次授权和状态复核：
 
 ```sh
 # 本地：工作区其他改动保持原样，确认集成候选提交后合入并推送。
@@ -57,6 +60,7 @@ git pull --ff-only
 cd web
 npm run build
 MAIL_ADMIN_API_SSM_PARAMETER=/toolbox/mail-api-reclaim MAIL_API_SSM_REGION=us-east-1 pm2 restart aws-toolbox --update-env
+pm2 save
 pm2 status
 curl -s -o /dev/null -w '%{http_code}\n' https://markxu.co/
 ```

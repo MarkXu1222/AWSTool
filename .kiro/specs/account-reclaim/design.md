@@ -1,6 +1,6 @@
 # 实现方案：账户回收
 
-> 状态：**G1/G2 已批准，P3 实现完成，P4 审核修复及复查通过（2026-10-15）**。候选发布准备见 RELEASE-CHECKLIST.md；G3/G4 及生产五步验收尚未执行。
+> 状态：**G1–G4 已批准，P3/P4 完成，0.56.0 已于 2026-10-15 部署，生产只读检查通过**。最终运行代码 `main` / `b9db13b`；真实账户五步与真实角色权限矩阵待验收。见 DEPLOYMENT-RESULT.md / RELEASE-CHECKLIST.md。
 > 2026-10-15 P2 回写（对齐已上线邮箱接口 + 拆分补充，不改设计思路）：① 邮箱改密不做认证缓存刷新（邮箱服务器未开 Dovecot 认证缓存，改密即时生效），成功只代表密码写入 + 踢会话；② 补 404 `NOT_FOUND`、403 `HTTPS_REQUIRED` 映射；③ §5.4 新增测试注入点 `accountReclaimDeps`；④ 受限账户矩阵测试归 service 测试（§9）。
 > 起草日期：2026-10-15（Asia/Kuala_Lumpur）。依据：同目录 `HANDOFF.md`、`requirements.md`、`mailbox-api-spec.md`，并复核当前源码、`web/ROOT_EMAIL.md` 与项目 steering。
 > 本次用户补充确认（2026-10-15 最终版）：**受限账户（敏感权限客户）仅 admin 可回收**。非 admin 预检置灰；admin 可勾选，确认框单独提示。回收由批次创建者身份执行，因此「创建者当前为 admin」是受限账户每一步的前置条件。该结论取代此前「禁止回收」与「只提醒」两种写法。
