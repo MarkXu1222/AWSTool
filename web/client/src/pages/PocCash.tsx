@@ -23,7 +23,7 @@ const { Text, Paragraph } = Typography;
 interface Meta {
   configured: boolean;
   partners: {
-    key: string; label: string; defaultSolutionId: string;
+    key: string; label: string;
     apnAccountId: string;
     requiredTags: string[];
     /** 该主体是否配了跨账户 role；false 时前端置灰不可选 */
@@ -151,6 +151,8 @@ const PocCashPage: React.FC = () => {
   const [form] = Form.useForm();
   const [meta, setMeta] = useState<Meta | null>(null);
   const [solutions, setSolutions] = useState<Solution[]>([]);
+  const [solutionsState, setSolutionsState] = useState<'loading' | 'ok' | 'error'>('loading');
+  const [solutionDefault, setSolutionDefault] = useState<string | null>(null);
   // 参考已有商机
   const [opps, setOpps] = useState<OppBrief[]>([]);
   const [oppsLoading, setOppsLoading] = useState(false);
@@ -211,13 +213,25 @@ const PocCashPage: React.FC = () => {
    * Mergebytes 的表单里列出 Webby 的 Solution / 商机，选中即出错。
    */
   useEffect(() => {
+    // 凭证未配置时不会去查，Solution 区按「查询失败」展示，别一直显示加载中
+    if (meta && !meta.configured) setSolutionsState('error');
     if (!meta?.configured || !activePartner) return;
     let stale = false;   // 快速切换时丢弃过期响应，避免回填错主体的数据
 
-    setSolutions([]);
+    setSolutions([]); setSolutionDefault(null); setSolutionsState('loading');
     api.pocCashSolutions(activePartner)
-      .then((r: any) => { if (!stale) setSolutions(r.solutions || []); })
-      .catch(() => { /* 凭证问题已由 configured 提示，不重复报错 */ });
+      .then((r: any) => {
+        if (stale) return;
+        // request() 对非 2xx 不抛错，{ error } 会被 resolve 回来
+        if (r?.error || !Array.isArray(r?.solutions)) { setSolutionsState('error'); return; }
+        const list: Solution[] = r.solutions;
+        const def: string | null = r.defaultSolutionId ?? null;
+        setSolutions(list); setSolutionDefault(def); setSolutionsState('ok');
+        // 已选的（例如套用模板带来的）仍在列表里就保留，否则换成默认值
+        const cur = form.getFieldValue('solutionId');
+        if (!cur || !list.some(s => s.id === cur)) form.setFieldValue('solutionId', def ?? undefined);
+      })
+      .catch(() => { if (!stale) setSolutionsState('error'); });
 
     setOppsLoading(true);
     setOpps([]);
@@ -252,7 +266,10 @@ const PocCashPage: React.FC = () => {
         marketingSource: t.marketingSource === 'Marketing Activity'
           ? 'Marketing Activity' : 'None',
         marketingAwsFundingUsed: t.marketingAwsFundingUsed === 'Yes' ? 'Yes' : 'No',
-        solutionId: t.solutionIds?.[0],
+        solutionId: solutionsState === 'ok'
+          ? (t.solutionIds?.find((id: string) => solutions.some(s => s.id === id))
+            ?? solutionDefault ?? undefined)
+          : t.solutionIds?.[0],
       });
       setRefFrom(id);
       setTitleMode('auto');
@@ -335,6 +352,12 @@ const PocCashPage: React.FC = () => {
         <div style={{ lineHeight: 1.9 }}>
           <Text strong>{preview.title}</Text>
           <div style={{ marginTop: 8 }}>客户：{preview.companyName || values.companyName}</div>
+          <div>Solution：{values.solutionId
+            ? `${values.solutionId}${(() => {
+              const s = solutions.find(x => x.id === values.solutionId);
+              return s ? ` — ${s.name}` : '';
+            })()}`
+            : '不关联'}</div>
           <div>
             MRR：{Number(values.mrrUsd).toLocaleString()} USD/月
             {amounts && <Text type="secondary">
@@ -406,6 +429,7 @@ const PocCashPage: React.FC = () => {
     // resetFields 会清空 partnerKey，这里把当前主体写回去，
     // 避免重置后表单主体与 activePartner（及已加载的列表）不一致
     if (activePartner) form.setFieldValue('partnerKey', activePartner);
+    form.setFieldValue('solutionId', solutionDefault ?? undefined);
   };
 
   /**
@@ -1330,10 +1354,11 @@ const PocCashPage: React.FC = () => {
         <Divider orientation="left">Partner</Divider>
         <Form.Item name="partnerKey" label="Partner 主体" rules={[{ required: true }]}
           extra={activeP
-            ? `APN 账户 ${activeP.apnAccountId}｜`
-              + (activeP.defaultSolutionId
-                ? `默认 Solution ${activeP.defaultSolutionId}`
-                : '该主体暂无可关联的 Solution，创建时会自动跳过关联')
+            ? `APN 账户 ${activeP.apnAccountId}｜` + (
+                solutionsState === 'loading' ? '正在查询 Solution…'
+                : solutionsState === 'error' ? '查询 Solution 失败，留空将跳过关联'
+                : solutions.length ? `${solutions.length} 个 Active Solution`
+                : '暂无 Active Solution，创建时跳过关联')
             : '切换主体会同时切换 Solution 与商机列表（各主体数据互相隔离）'}>
           <Select style={{ maxWidth: 320 }}
             onChange={(v: string) => setActivePartner(v)}
@@ -1429,9 +1454,17 @@ const PocCashPage: React.FC = () => {
 
         <Space align="start" wrap size="large">
           <Form.Item name="solutionId" label="关联 Solution"
-            extra={solutions.length ? undefined : '未加载（凭证未配置或查询失败）'}>
+            rules={[{ required: solutionsState === 'ok' && solutions.length > 0,
+              message: '请选择要关联的 Solution' }]}
+            extra={solutionsState === 'ok' && solutions.length > 1 && !solutionDefault
+              ? '该主体有多个 Active Solution，请选择' : undefined}>
             <Select style={{ width: 400 }} allowClear showSearch optionFilterProp="label"
-              placeholder="默认 S-0070517 Migration services"
+              loading={solutionsState === 'loading'}
+              disabled={solutionsState === 'ok' && solutions.length === 0}
+              placeholder={solutionsState === 'loading' ? '加载中…'
+                : solutionsState === 'error' ? '查询失败，留空将跳过关联'
+                : solutions.length ? '请选择 Solution'
+                : '该主体暂无 Active Solution，将跳过关联'}
               options={solutions.map(s => ({ value: s.id, label: `${s.id} — ${s.name}` }))} />
           </Form.Item>
           <Form.Item name="targetCloseDate" label="预计成交日期" rules={[{ required: true }]}>

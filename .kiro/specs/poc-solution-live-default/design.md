@@ -199,6 +199,9 @@ L1082-1089 的「`!solutionId` → push warning 跳过」分支：**删除其中
      })
      .catch(() => { if (!stale) setSolutionsState('error'); });
    ```
+   另外在该 effect 开头的 `if (!meta?.configured || !activePartner) return;` **之前**加一行
+   `if (meta && !meta.configured) setSolutionsState('error');` —— 凭证未配置时不会发请求，否则会一直停在「加载中」。
+   （P3 实现时补充）
 4. `applyTemplate`：`solutionId` 改为
    ```ts
    solutionId: solutionsState === 'ok'
