@@ -219,6 +219,11 @@ function provisionOptions(job: TagOnboardingJob): tagCompliance.ProvisionOptions
   return { allowedTagKeys: tagCompliance.normalizeAllowedTagKeys(job.extraTagKey) };
 }
 
+/** 区域发现时无法进入的账户：StackSet 覆盖核验跳过它们，否则会因缺少区域信息直接报错 */
+function skippedAccountIds(job: TagOnboardingJob): string[] {
+  return (job.artifacts.unreachableAccounts || []).map(item => item.accountId);
+}
+
 async function runProvision(job: TagOnboardingJob): Promise<void> {
   const result = await tagCompliance.provisionOrg(job.payerAccountId, provisionOptions(job));
   job = persistArtifacts(job, result);
@@ -364,8 +369,9 @@ async function runWaitStackSets(job: TagOnboardingJob): Promise<void> {
     throw new PermanentOnboardingError('任务缺少索引区域或成员区域矩阵，无法核验 StackSet');
   }
 
+  const skipped = skippedAccountIds(job);
   const result = await tagCompliance.getOnboardingStackSetStatus(
-    job.payerAccountId, aggregatorRegion, localRegions, memberEnabledRegions,
+    job.payerAccountId, aggregatorRegion, localRegions, memberEnabledRegions, skipped,
   );
   const detail = stackSetSummary(result);
   if (result.failed) throw new PermanentOnboardingError(`StackSet 配置无效或不存在：${detail}`);
@@ -392,7 +398,7 @@ async function runWaitStackSets(job: TagOnboardingJob): Promise<void> {
       throw new PermanentOnboardingError(`Resource Explorer / AutoTaggerRole StackSet 在 90 分钟内仍未完成：${detail}`);
     }
     const repair = await tagCompliance.repairOnboardingStackSetCoverage(
-      job.payerAccountId, aggregatorRegion, localRegions, memberEnabledRegions, result,
+      job.payerAccountId, aggregatorRegion, localRegions, memberEnabledRegions, result, skipped,
     );
     waitForRetry(job, `${repair.detail}；${detail}`);
     return;
@@ -432,7 +438,7 @@ async function runVerify(job: TagOnboardingJob): Promise<void> {
     tagCompliance.precheckOrg(job.payerAccountId),
     tagCompliance.getOrgsConfig(),
     tagCompliance.getOnboardingStackSetStatus(
-      job.payerAccountId, aggregatorRegion, localRegions, memberEnabledRegions,
+      job.payerAccountId, aggregatorRegion, localRegions, memberEnabledRegions, skippedAccountIds(job),
     ),
   ]);
   const org = orgs.find(item => item?.org_id === orgId);

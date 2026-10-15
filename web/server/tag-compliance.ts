@@ -22,7 +22,7 @@ import {
 } from '@aws-sdk/client-iam';
 import {
   ResourceExplorer2Client, ListViewsCommand, CreateViewCommand,
-  GetIndexCommand, CreateIndexCommand, UpdateIndexTypeCommand,
+  GetIndexCommand, CreateIndexCommand, UpdateIndexTypeCommand, ListIndexesForMembersCommand,
 } from '@aws-sdk/client-resource-explorer-2';
 import {
   CloudFormationClient, DescribeStackSetCommand, CreateStackSetCommand, UpdateStackSetCommand,
@@ -2163,6 +2163,29 @@ export function classifyExistingIndex(
   return (index.ReplicatingTo || []).includes(aggregatorRegion) ? 'ready' : 'pending';
 }
 
+/**
+ * payer 侧 ListIndexesForMembers 只给出索引类型，看不到 State 与复制状态，
+ * 所以只在成员侧读取被拒（受限账户）时使用：类型符合约定即视为可复用。
+ * 聚合区是 LOCAL 需要升级 —— 受限账户不能临时开通 admin，只能人工处理，按 invalid 报出。
+ */
+export function classifyIndexFromMemberListing(
+  stackSetName: string, aggregatorRegion: string, region: string, type: string | undefined,
+): ExistingIndexVerdict {
+  if (!type || !RE_INDEX_STACKSETS.includes(stackSetName)) return 'invalid';
+  if (stackSetName === RE_AGGREGATOR_STACKSET) {
+    return region === aggregatorRegion && type === 'AGGREGATOR' ? 'ready' : 'invalid';
+  }
+  return type === 'LOCAL' ? 'ready' : 'invalid';
+}
+
+/** 权限不足类错误（IAM 拒绝），与网络/限流等可重试错误区分 */
+export function isAccessDeniedError(error: unknown): boolean {
+  const e = error as { name?: string; Code?: string; message?: string } | undefined;
+  const code = e?.name || e?.Code || '';
+  return ['AccessDeniedException', 'AccessDenied', 'UnauthorizedOperation', 'UnauthorizedException'].includes(code)
+    || /not authorized to perform/i.test(e?.message || '');
+}
+
 export interface OnboardingStackSetStatus extends ReIndexStackSetStatus {
   requiredRegions: string[];
   rootRequiredRegions: string[];
@@ -2204,6 +2227,8 @@ export async function getOnboardingStackSetStatus(
   aggregatorRegion: string,
   localRegions: string[],
   memberEnabledRegions: Record<string, string[]>,
+  /** 区域发现时无法进入、已明确跳过的账户；其它缺区域信息的账户仍按不安全处理并报错 */
+  skippedAccountIds: string[] = [],
 ): Promise<OnboardingStackSetsStatus> {
   const creds = await assumePayer(payerAccountId);
   if (!creds) throw new Error('该 payer 不在平台配置（config.payers）中');
@@ -2220,7 +2245,9 @@ export async function getOnboardingStackSetStatus(
     const page = await org.send(new ListAccountsCommand({ NextToken: accountToken }));
     for (const account of page.Accounts || []) {
       const active = account.State ? account.State === 'ACTIVE' : account.Status === 'ACTIVE';
-      if (active && account.Id && account.Id !== payerAccountId) memberAccounts.push(account.Id);
+      if (active && account.Id && account.Id !== payerAccountId && !skippedAccountIds.includes(account.Id)) {
+        memberAccounts.push(account.Id);
+      }
     }
     accountToken = page.NextToken;
   } while (accountToken);
@@ -2392,6 +2419,29 @@ export async function getOnboardingStackSetStatus(
       return credentials;
     }
 
+    // 受限账户的 support-quota 收窄后没有 GetIndex：改从 payer 侧只读列出该账户的索引类型核对。
+    const memberIndexTypesByAccount = new Map<string, Promise<Map<string, string>>>();
+    function memberIndexTypes(accountId: string) {
+      let types = memberIndexTypesByAccount.get(accountId);
+      if (!types) {
+        types = (async () => {
+          const re = new ResourceExplorer2Client({ region: aggregatorRegion, credentials: creds! });
+          const byRegion = new Map<string, string>();
+          let next: string | undefined;
+          do {
+            const page = await re.send(new ListIndexesForMembersCommand({ AccountIdList: [accountId], NextToken: next }));
+            for (const index of page.Indexes || []) {
+              if (index.Region && index.Type) byRegion.set(index.Region, index.Type);
+            }
+            next = page.NextToken;
+          } while (next);
+          return byRegion;
+        })();
+        memberIndexTypesByAccount.set(accountId, types);
+      }
+      return types;
+    }
+
     // 只读校验走成员账户的 support-quota（ReadOnlyAccess 含 resource-explorer-2:GetIndex）。
     async function classifyTargetIndex(accountId: string, region: string): Promise<ExistingIndexVerdict> {
       let client: ResourceExplorer2Client | undefined;
@@ -2404,6 +2454,15 @@ export async function getOnboardingStackSetStatus(
         const index = await client.send(new GetIndexCommand({}), { abortSignal: controller.signal });
         return classifyExistingIndex(definition.name, aggregatorRegion, index);
       } catch (error) {
+        if (isAccessDeniedError(error)) {
+          try {
+            const type = (await memberIndexTypes(accountId)).get(region);
+            return classifyIndexFromMemberListing(definition.name, aggregatorRegion, region, type);
+          } catch (fallbackError) {
+            console.warn(`[MAP Onboarding] payer 侧索引核对失败 ${accountId}/${region}: ${awsErrorDetail(fallbackError)}`);
+            return 'invalid';
+          }
+        }
         console.warn(`[MAP Onboarding] 已有索引校验失败 ${accountId}/${region}: ${awsErrorDetail(error)}`);
         return 'invalid';
       } finally {
@@ -2521,9 +2580,10 @@ export async function repairOnboardingStackSetCoverage(
   localRegions: string[],
   memberEnabledRegions: Record<string, string[]>,
   inspected?: OnboardingStackSetsStatus,
+  skippedAccountIds: string[] = [],
 ): Promise<StackSetRepairResult> {
   const status = inspected || await getOnboardingStackSetStatus(
-    payerAccountId, aggregatorRegion, localRegions, memberEnabledRegions,
+    payerAccountId, aggregatorRegion, localRegions, memberEnabledRegions, skippedAccountIds,
   );
   if (status.complete) return { submitted: false, detail: 'StackSet 覆盖已完整' };
   const creds = await assumePayer(payerAccountId);

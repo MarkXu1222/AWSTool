@@ -348,3 +348,20 @@ npx tsx scripts/tag-keys-canary.ts --payer 724772095868 --status                
 3. 选一个有未打标资源的普通成员账户作为 canary：`tag-keys-canary.ts --account <id> --enforce true` → 再扫描 → 该账户失败数不增加。
 4. `tag-keys-canary.ts --all` → 再扫描一次确认。
 5. 只读核验：临时脚本读取 StackSet 参数/模板一致性、两个受限账户实例状态、payer 两个角色的托管策略与信任，跑完删除。
+
+## 13. 方案增补（P3 实现中发现，用户 2026-10-15 批准「从 payer 侧只读核验」）
+
+实现中发现两处会让 taoVolt 接入在 `wait_stacksets` 失败，原方案遗漏：
+
+1. **受限账户读不到既有索引。** `getOnboardingStackSetStatus` 对 StackSet 因 AlreadyExists 失败的目标，用成员 `support-quota`
+   `GetIndex` 判断既有索引能否复用；受限账户收窄后无 `GetIndex` → 判 `invalid` → 索引冲突。taoVolt 全组织已有 Quick Setup 索引，必然触发。
+   - 修正：`classifyTargetIndex` 捕获到权限拒绝（`isAccessDeniedError`）时，改用 payer 凭证调
+     `resource-explorer-2:ListIndexesForMembers({ AccountIdList: [accountId] })`（按账户缓存）取各区域索引类型，交给
+     `classifyIndexFromMemberListing(stackSetName, aggregatorRegion, region, type)`：聚合 StackSet 要求聚合区为 `AGGREGATOR`；
+     本地 StackSet 要求 `LOCAL`；其它（含查不到、聚合区为 LOCAL 需升级）→ `invalid`。看不到 State/复制状态，仅用于成员侧读取被拒时。
+   - 不改受限账户的收窄策略。只读核对：两个受限账户均为 us-east-1 AGGREGATOR + 其它区域 LOCAL，无需升级。
+2. **不可达账户导致覆盖核验直接抛错。** 该函数自行从 Organizations 列全部 ACTIVE 成员，`623581626210` 不在区域矩阵里 →
+   抛「缺少成员账户 … 的区域启用状态」。
+   - 修正：`getOnboardingStackSetStatus(..., skippedAccountIds: string[] = [])`、`repairOnboardingStackSetCoverage(..., inspected?, skippedAccountIds = [])`
+     只排除明确跳过的账户；其它缺区域信息的账户仍报错（保留原安全检查）。`tag-onboarding.ts` 的 `runWaitStackSets`/`runVerify`
+     传入 `job.artifacts.unreachableAccounts` 的账户 ID。

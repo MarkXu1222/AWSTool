@@ -12,6 +12,7 @@ import assert from 'node:assert/strict';
 import {
   AUTO_TAGGER_ROLE_TEMPLATE, normalizeAllowedTagKeys, resolveAutoTaggerParams, autoTaggerDrift,
   buildCentralTrust, buildSearchRolePolicy, enabledRegionsFromListRegions, samePolicyDocument,
+  classifyIndexFromMemberListing, isAccessDeniedError,
 } from '../server/tag-compliance';
 
 const CENTRAL = '382309211956';
@@ -126,4 +127,29 @@ test('samePolicyDocument 忽略 key 顺序与 URL 编码', () => {
     Version: '2012-10-17',
     Statement: [{ Effect: 'Allow', Principal: { AWS: `arn:aws:iam::${CENTRAL}:root` }, Action: 'sts:AssumeRole' }],
   }, trust));
+});
+
+test('受限账户读不到索引时，按 payer 侧列出的类型核对', () => {
+  const agg = 'ResourceExplorerAggregatorIndex';
+  const local = 'ResourceExplorerLocalIndexes';
+  const scoped = 'ResourceExplorerScopedLocalIndexes';
+  // taoVolt 两个受限账户的实际情况：us-east-1 聚合、其它区域 LOCAL
+  assert.equal(classifyIndexFromMemberListing(agg, 'us-east-1', 'us-east-1', 'AGGREGATOR'), 'ready');
+  assert.equal(classifyIndexFromMemberListing(local, 'us-east-1', 'ap-southeast-1', 'LOCAL'), 'ready');
+  assert.equal(classifyIndexFromMemberListing(scoped, 'us-east-1', 'ap-southeast-5', 'LOCAL'), 'ready');
+  // 聚合区是 LOCAL 需要升级 —— 受限账户不能临时开通 admin，交人工
+  assert.equal(classifyIndexFromMemberListing(agg, 'us-east-1', 'us-east-1', 'LOCAL'), 'invalid');
+  // 非聚合区出现 AGGREGATOR、或查不到索引
+  assert.equal(classifyIndexFromMemberListing(local, 'us-east-1', 'eu-west-1', 'AGGREGATOR'), 'invalid');
+  assert.equal(classifyIndexFromMemberListing(local, 'us-east-1', 'eu-west-1', undefined), 'invalid');
+  assert.equal(classifyIndexFromMemberListing('AutoTaggerRole', 'us-east-1', 'us-east-1', 'AGGREGATOR'), 'invalid');
+});
+
+test('isAccessDeniedError 只认权限拒绝', () => {
+  assert.ok(isAccessDeniedError({ name: 'AccessDeniedException', message: 'x' }));
+  assert.ok(isAccessDeniedError({ name: 'UnauthorizedOperation' }));
+  assert.ok(isAccessDeniedError({ name: 'Error', message: 'User: arn:aws:sts::1:assumed-role/support-quota/x is not authorized to perform: resource-explorer-2:GetIndex' }));
+  assert.ok(!isAccessDeniedError({ name: 'ThrottlingException', message: 'Rate exceeded' }));
+  assert.ok(!isAccessDeniedError({ name: 'TimeoutError' }));
+  assert.ok(!isAccessDeniedError(undefined));
 });

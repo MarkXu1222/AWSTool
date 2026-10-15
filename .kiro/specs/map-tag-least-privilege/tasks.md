@@ -6,6 +6,7 @@
 |---|--------|----------|------|---------------------|----------|
 | T1 | 最小权限模板、纯函数、provisionOrg、区域发现 | `web/server/tag-compliance.ts`、`web/tests/tag-compliance-policy.test.ts`、`web/tests/tag-least-privilege.test.ts`（新建） | 无 | §5、§10 | `cd web && node --import tsx --test tests/tag-*.test.ts && npx tsc --noEmit -p server/tsconfig.json` |
 | T2 | 接入任务传参与不可达账户记录 | `web/server/tag-onboarding.ts`、`web/server/db.ts` | T1（`provisionOrg` 新签名、`normalizeAllowedTagKeys`、`getMemberEnabledRegions` 新返回值） | §4、§6 | `cd web && node --import tsx --test tests/tag-*.test.ts && npx tsc --noEmit -p server/tsconfig.json` |
+| T1b | 方案增补 §13：受限账户索引 payer 侧核验、跳过不可达账户 | `web/server/tag-compliance.ts`、`web/server/tag-onboarding.ts`、`web/tests/tag-least-privilege.test.ts` | T1、T2 | §13 | 同 T1 |
 | T3 | TagKeys 金丝雀运维脚本 | `web/scripts/tag-keys-canary.ts`（新建） | T1（`AUTO_TAGGER_INLINE_POLICY` 新签名） | §7 | `cd web && npx tsx scripts/tag-keys-canary.ts`（无参数打印用法、退出码 2）+ `npx tsc --noEmit -p server/tsconfig.json` |
 
 ## 波次
