@@ -365,3 +365,22 @@ npx tsx scripts/tag-keys-canary.ts --payer 724772095868 --status                
    - 修正：`getOnboardingStackSetStatus(..., skippedAccountIds: string[] = [])`、`repairOnboardingStackSetCoverage(..., inspected?, skippedAccountIds = [])`
      只排除明确跳过的账户；其它缺区域信息的账户仍报错（保留原安全检查）。`tag-onboarding.ts` 的 `runWaitStackSets`/`runVerify`
      传入 `job.artifacts.unreachableAccounts` 的账户 ID。
+
+## 14. 独立审核后的修正（P4，2026-10-15）
+
+审核子代理（只读）提出的问题与处理：
+
+| 问题 | 处理 |
+|---|---|
+| CFN 条件与参数同名 `EnforceTagKeys`（逻辑名须模板内唯一） | 条件改名 `EnforceTagKeysEnabled`，测试锁定 |
+| 步骤 5 抛错时步骤 6 按「不限制」重写 payer 策略，会放宽已开启的限制 | `taggerPolicyOpts` 未取到时步骤 6 直接失败待重跑，不改策略 |
+| 区域发现把限流/超时也记为不可达，账户被永久跳过 | 取凭证阶段：瞬时错误（`isTransientAwsError`）抛出，其余记不可达；`ListRegions` 阶段：只有权限拒绝记不可达，其余抛出 |
+| `--all` 留下单账户覆盖；没有回滚脚本 | `--all [true\|false]`，相反覆盖存在时拒绝执行；新增 `--enforce reset`；`--status` 列出全部覆盖；payer 角色先于 StackSet 更新 |
+| search-role 的 view 区域为 `*` | 收紧为接入区域（`us-east-1`），`buildSearchRolePolicy(payer, region)` |
+| S3 ABAC：`tag:TagResources` 可能走 `s3:TagResource`；`PutBucketTagging` 整组替换可能被 `aws:TagKeys` 拒 | 模板补 `s3:TagResource`；金丝雀/全量后的扫描重点看 S3 失败数，上升即 `--all false` |
+
+未采纳：`EnforceTagKeys` 默认值改 true（用户已定「先在一个账户实测」，taoVolt 当天全量开启；默认值待金丝雀通过后另议）；
+信任条件收窄到 `tag-compliance-prod-*`（中央账户为平台自有，收益小、需另核实 SAM 角色名）；`MaxResults: 1` 取最新操作（与既有代码一致，且 `OperationInProgressException` 已兜底）。
+
+已核实：中央 RE-AUTOTAG Lambda 代码不调用 `tag:GetResources`（仅旧 StackSet 模板 yaml 中出现），摘掉 payer 的 `ReadOnlyAccess` 不影响扫描。
+

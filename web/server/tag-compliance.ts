@@ -619,7 +619,7 @@ Parameters:
     Description: Restrict writes to AllowedTagKeys via aws:TagKeys
 
 Conditions:
-  EnforceTagKeys: !Equals [!Ref EnforceTagKeys, "true"]
+  EnforceTagKeysEnabled: !Equals [!Ref EnforceTagKeys, "true"]
 
 Resources:
   AutoTaggerRole:
@@ -656,6 +656,7 @@ Resources:
                   - elasticbeanstalk:AddTags
                   - batch:TagResource
                   - s3:PutBucketTagging
+                  - s3:TagResource
                   - s3:GetBucketTagging
                   - elasticfilesystem:TagResource
                   - fsx:TagResource
@@ -777,7 +778,7 @@ Resources:
                   - glacier:TagResource
                 Resource: "*"
                 Condition: !If
-                  - EnforceTagKeys
+                  - EnforceTagKeysEnabled
                   - "ForAllValues:StringEquals":
                       "aws:TagKeys": !Ref AllowedTagKeys
                   - !Ref "AWS::NoValue"
@@ -789,7 +790,7 @@ Resources:
                 Resource:
                   - "arn:aws:apigateway:*::/tags/*"
                 Condition: !If
-                  - EnforceTagKeys
+                  - EnforceTagKeysEnabled
                   - "ForAllValues:StringEquals":
                       "aws:TagKeys": !Ref AllowedTagKeys
                   - !Ref "AWS::NoValue"
@@ -973,7 +974,7 @@ export async function provisionOrg(payerAccountId: string, opts: ProvisionOption
     // 先写最小内联策略，再摘旧托管策略 —— 中间任何一步失败都不会让扫描器无权限
     await iam.send(new PutRolePolicyCommand({
       RoleName: SEARCH_ROLE_NAME, PolicyName: 'SearchPolicy',
-      PolicyDocument: JSON.stringify(buildSearchRolePolicy(payerAccountId)),
+      PolicyDocument: JSON.stringify(buildSearchRolePolicy(payerAccountId, region)),
     }));
     const attached = await iam.send(new ListAttachedRolePoliciesCommand({ RoleName: SEARCH_ROLE_NAME }));
     for (const policy of attached.AttachedPolicies || []) {
@@ -992,8 +993,9 @@ export async function provisionOrg(payerAccountId: string, opts: ProvisionOption
   }
 
   // ---- 5. AutoTaggerRole StackSet + 部署到根 OU ----
-  // 步骤 6 的 payer 角色要与成员模板使用同一组 TagKeys 设置；步骤 5 失败时按不限制处理
-  let taggerPolicyOpts = { allowedTagKeys: opts.allowedTagKeys ?? [MAP_TAG_KEY], enforceTagKeys: false };
+  // 步骤 6 的 payer 角色要与成员模板使用同一组 TagKeys 设置；步骤 5 没取到设置时步骤 6 不改策略，
+  // 否则已开启的 TagKeys 限制会被一次瞬时失败悄悄放宽
+  let taggerPolicyOpts: { allowedTagKeys: string[]; enforceTagKeys: boolean } | null = null;
   try {
     let existing: { TemplateBody?: string; Parameters?: CfnParam[] } | null = null;
     try {
@@ -1100,6 +1102,7 @@ export async function provisionOrg(payerAccountId: string, opts: ProvisionOption
   // 也要打 MAP 标签，就必须在 payer 账户里单独建一份同样的角色，否则扫描器能发现
   // 资源却 AssumeRole 失败，报告里每天多一批 failed。
   try {
+    if (!taggerPolicyOpts) throw new Error('打标角色 StackSet 参数未取到，本次不改动 payer 角色，稍后重跑');
     const { created, changes } = await ensurePayerTaggerRole(creds, central, taggerPolicyOpts);
     steps.push({
       key: 'payerTaggerRole', label: 'payer 自身打标角色 (auto-tagger-role)',
@@ -1220,13 +1223,13 @@ export function buildCentralTrust(central: string) {
  * search-role 的全部权限。中央 search_handler 只调 OrgView 上的 ListResources 与
  * organizations:ListAccounts；此前挂的两个托管只读策略远超所需（含 SCP、账户邮箱等组织细节）。
  */
-export function buildSearchRolePolicy(payerAccountId: string) {
+export function buildSearchRolePolicy(payerAccountId: string, viewRegion: string) {
   return {
     Version: '2012-10-17',
     Statement: [
       {
         Sid: 'ListOrgViewResources', Effect: 'Allow', Action: ['resource-explorer-2:ListResources'],
-        Resource: `arn:aws:resource-explorer-2:*:${payerAccountId}:view/${ORG_VIEW_NAME}/*`,
+        Resource: `arn:aws:resource-explorer-2:${viewRegion}:${payerAccountId}:view/${ORG_VIEW_NAME}/*`,
       },
       { Sid: 'ListOrgAccounts', Effect: 'Allow', Action: ['organizations:ListAccounts'], Resource: '*' },
     ],
@@ -2040,8 +2043,16 @@ export async function getMemberEnabledRegions(payerAccountId: string): Promise<M
   for (let index = 0; index < memberAccountIds.length; index += batchSize) {
     const batch = memberAccountIds.slice(index, index + batchSize);
     await Promise.all(batch.map(async accountId => {
+      let credentials: AwsCredentials;
       try {
-        const credentials = await assumeToAccount(accountId);
+        credentials = await assumeToAccount(accountId);
+      } catch (e: any) {
+        // 拿不到凭证（角色不存在/被拒）才算不可达；限流、超时抛出让任务重试，否则该账户会被永久跳过
+        if (isTransientAwsError(e)) throw e;
+        result.unreachable.push({ accountId, error: awsErrorDetail(e) });
+        return;
+      }
+      try {
         const account = new AccountClient({ region: 'us-east-1', credentials });
         const listed: Array<{ RegionName?: string; RegionOptStatus?: string }> = [];
         let next: string | undefined;
@@ -2053,9 +2064,13 @@ export async function getMemberEnabledRegions(payerAccountId: string): Promise<M
           next = page.NextToken;
         } while (next);
         const regions = enabledRegionsFromListRegions(listed);
-        if (regions.length === 0) throw new Error('ListRegions 返回空');
+        if (regions.length === 0) {
+          result.unreachable.push({ accountId, error: 'ListRegions 返回空' });
+          return;
+        }
         result.regions[accountId] = regions;
       } catch (e: any) {
+        if (!isAccessDeniedError(e)) throw e;
         result.unreachable.push({ accountId, error: awsErrorDetail(e) });
       }
     }));
@@ -2179,6 +2194,15 @@ export function classifyIndexFromMemberListing(
 }
 
 /** 权限不足类错误（IAM 拒绝），与网络/限流等可重试错误区分 */
+/** 限流、超时、服务端瞬时故障：应重试，不能据此判定账户不可达 */
+export function isTransientAwsError(error: unknown): boolean {
+  const e = error as { name?: string; $retryable?: unknown; $metadata?: { httpStatusCode?: number } } | undefined;
+  const name = e?.name || '';
+  return e?.$retryable != null
+    || /Throttl|TooManyRequests|RequestLimitExceeded|Timeout|AbortError|ServiceUnavailable|InternalFailure|InternalError|NetworkingError|ECONNRESET|ETIMEDOUT/i.test(name)
+    || (e?.$metadata?.httpStatusCode ?? 0) >= 500;
+}
+
 export function isAccessDeniedError(error: unknown): boolean {
   const e = error as { name?: string; Code?: string; message?: string } | undefined;
   const code = e?.name || e?.Code || '';

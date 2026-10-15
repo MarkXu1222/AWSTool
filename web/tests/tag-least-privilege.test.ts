@@ -12,7 +12,7 @@ import assert from 'node:assert/strict';
 import {
   AUTO_TAGGER_ROLE_TEMPLATE, normalizeAllowedTagKeys, resolveAutoTaggerParams, autoTaggerDrift,
   buildCentralTrust, buildSearchRolePolicy, enabledRegionsFromListRegions, samePolicyDocument,
-  classifyIndexFromMemberListing, isAccessDeniedError,
+  classifyIndexFromMemberListing, isAccessDeniedError, isTransientAwsError,
 } from '../server/tag-compliance';
 
 const CENTRAL = '382309211956';
@@ -22,9 +22,13 @@ test('成员模板去掉多余权限并带 TagKeys 参数', () => {
     assert.ok(!AUTO_TAGGER_ROLE_TEMPLATE.includes(banned), `模板不应包含 ${banned}`);
   }
   for (const required of ['AllowedTagKeys', 'EnforceTagKeys', 'aws:TagKeys', 'ForAllValues:StringEquals',
-    'aws:PrincipalArn', 'role/tag-compliance*', 'arn:aws:apigateway:*::/tags/*']) {
+    'aws:PrincipalArn', 'role/tag-compliance*', 'arn:aws:apigateway:*::/tags/*', 's3:TagResource']) {
     assert.ok(AUTO_TAGGER_ROLE_TEMPLATE.includes(required), `模板缺少 ${required}`);
   }
+  // 条件与参数不能同名（CFN 要求逻辑名在模板内唯一），两条语句都引用这个条件
+  assert.ok(AUTO_TAGGER_ROLE_TEMPLATE.includes('  EnforceTagKeysEnabled: !Equals [!Ref EnforceTagKeys, "true"]'));
+  assert.equal(AUTO_TAGGER_ROLE_TEMPLATE.split('- EnforceTagKeysEnabled\n').length - 1, 2);
+  assert.ok(!/^  EnforceTagKeys: !Equals/m.test(AUTO_TAGGER_ROLE_TEMPLATE));
 });
 
 test('normalizeAllowedTagKeys 总包含 map-migrated 且去重', () => {
@@ -89,12 +93,12 @@ test('中央信任只放行 tag-compliance* 角色', () => {
 });
 
 test('search-role 只能列 OrgView 资源与组织账户', () => {
-  assert.deepEqual(buildSearchRolePolicy('724772095868'), {
+  assert.deepEqual(buildSearchRolePolicy('724772095868', 'us-east-1'), {
     Version: '2012-10-17',
     Statement: [
       {
         Sid: 'ListOrgViewResources', Effect: 'Allow', Action: ['resource-explorer-2:ListResources'],
-        Resource: 'arn:aws:resource-explorer-2:*:724772095868:view/OrgView/*',
+        Resource: 'arn:aws:resource-explorer-2:us-east-1:724772095868:view/OrgView/*',
       },
       { Sid: 'ListOrgAccounts', Effect: 'Allow', Action: ['organizations:ListAccounts'], Resource: '*' },
     ],
@@ -152,4 +156,14 @@ test('isAccessDeniedError 只认权限拒绝', () => {
   assert.ok(!isAccessDeniedError({ name: 'ThrottlingException', message: 'Rate exceeded' }));
   assert.ok(!isAccessDeniedError({ name: 'TimeoutError' }));
   assert.ok(!isAccessDeniedError(undefined));
+});
+
+test('isTransientAwsError：瞬时错误重试，权限拒绝与角色缺失不算', () => {
+  assert.ok(isTransientAwsError({ name: 'ThrottlingException' }));
+  assert.ok(isTransientAwsError({ name: 'TimeoutError' }));
+  assert.ok(isTransientAwsError({ name: 'Error', $metadata: { httpStatusCode: 503 } }));
+  assert.ok(isTransientAwsError({ name: 'Whatever', $retryable: {} }));
+  assert.ok(!isTransientAwsError({ name: 'AccessDenied', $metadata: { httpStatusCode: 403 } }));
+  assert.ok(!isTransientAwsError(new Error('无法 AssumeRole 到 623581626210')));
+  assert.ok(!isTransientAwsError(undefined));
 });
