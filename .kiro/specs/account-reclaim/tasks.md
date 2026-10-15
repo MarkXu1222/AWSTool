@@ -1,5 +1,7 @@
 # 任务拆分 —— account-reclaim
 
+> 最新状态：T1–T7 已完成，P4 六项问题已修复并独立复查通过（`785456e`）；全量 456/456、typecheck、build 通过。发布候选及待执行验收见 RELEASE-CHECKLIST.md。下方 9fd1530 / 444 项是 P3 的历史记录。
+
 > 前置：`design.md` 已通过闸门 G1（2026-10-15）。所有任务的唯一依据是同目录 `design.md`；邮箱接口以 `mailbox-api-spec.md`（含顶部「上线差异」）为准。
 > P2 回写 design.md（不改设计思路，见其顶部状态行）：邮箱改密不做认证缓存刷新；补 `NOT_FOUND`/`HTTPS_REQUIRED`；新增测试注入点 `accountReclaimDeps`（§5.4）；受限账户矩阵测试归 service 测试（§9）。
 > 执行方式（2026-10-15 调整）：T1 由 Claude 在 VSCode 会话直接实现。实现 T2 时 Claude 的输出被安全审查拦截（与此前起草 tasks.md 被拦同类），

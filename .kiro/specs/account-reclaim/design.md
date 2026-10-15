@@ -1,6 +1,6 @@
 # 实现方案：账户回收
 
-> 状态：**G1 已批准（2026-10-15）**，进入 P2（见同目录 `tasks.md`）；本文件不代表实现、测试或上线已完成。
+> 状态：**G1/G2 已批准，P3 实现完成，P4 审核修复及复查通过（2026-10-15）**。候选发布准备见 RELEASE-CHECKLIST.md；G3/G4 及生产五步验收尚未执行。
 > 2026-10-15 P2 回写（对齐已上线邮箱接口 + 拆分补充，不改设计思路）：① 邮箱改密不做认证缓存刷新（邮箱服务器未开 Dovecot 认证缓存，改密即时生效），成功只代表密码写入 + 踢会话；② 补 404 `NOT_FOUND`、403 `HTTPS_REQUIRED` 映射；③ §5.4 新增测试注入点 `accountReclaimDeps`；④ 受限账户矩阵测试归 service 测试（§9）。
 > 起草日期：2026-10-15（Asia/Kuala_Lumpur）。依据：同目录 `HANDOFF.md`、`requirements.md`、`mailbox-api-spec.md`，并复核当前源码、`web/ROOT_EMAIL.md` 与项目 steering。
 > 本次用户补充确认（2026-10-15 最终版）：**受限账户（敏感权限客户）仅 admin 可回收**。非 admin 预检置灰；admin 可勾选，确认框单独提示。回收由批次创建者身份执行，因此「创建者当前为 admin」是受限账户每一步的前置条件。该结论取代此前「禁止回收」与「只提醒」两种写法。
@@ -312,7 +312,7 @@ export interface AccountReclaimCatalogQuery {
 export interface AccountReclaimCatalog {
   accounts: Array<{
     accountId: string; accountName: string; email: string; payer: string;
-    payerAccountId: string; eligible: boolean; reasonCode?: string; reason?: string;
+    payerAccountId: string; eligible: boolean; reasonCode?: string; reason?: string; restricted?: boolean;
   }>;
   total: number;
   page: number;
@@ -458,6 +458,8 @@ export function answerRootEmailManualCaptcha(
 
 ### 5.6 路由与审计
 
+P4 补充：Root retry child 尚未回填回收指针时，仅允许该指针等于当前 attempt 的 retryOfJobId，其他关联字段仍逐一匹配；这保证立即执行与跨文件重启恢复使用同一 child。普通 Root 任务保留 admin 重试他人任务的原行为，创建者不可改变仅约束回收来源。
+
 在 `web/server/routes/aws.ts` 加 `awsRouter.use('/account-reclaim', createAccountReclaimGuard(...))`，挂在回收具体路由之前，所有新路径置于任何通配/泛化账户路由之前。沿用 `{success:true,data:...}` 成功 envelope；错误 `{error,code}`，保留 StepUpMfaError 的 statusCode。
 
 下表路径均带前缀 `/api/aws/account-reclaim`，守卫均为 `createAccountReclaimGuard`；按 ID 操作另做所有权校验：
@@ -494,6 +496,8 @@ credentials 仅允许终态 job，且至少一个凭证已确认可用，否则 
 批次创建、每账户 completed/failed/partial 及凭证查看发送飞书通知，内容仅为相同脱敏元数据。终态审计/通知将完成标记与 **outcomeRevision** 比较，独立于每次 DB 更新递增的 revision；先写事件再记标记，中断允许重复、不允许静默永久丢失，补标记本身不会生成新终态事件。创建审计/通知用同一 batchId 在持久化审计日志查重，tick 对缺失事件补记；创建通知失败由维护告警记录，不重建批次。查看审计失败则请求失败，查看通知失败只告警、不撤销已完成的审计。轮询不记业务审计/通知。
 
 ### 5.7 AWS 函数与启动关停
+
+P4 通知实现：回收调用 `sendNotification(title, content, {strict:true})`，15 秒截止，HTTP/业务/网络失败均向调用方报告；旧两参数调用保持兼容。终态通知独立发送、按 job 去重，只在确认后用最新 DB revision 回写匹配 outcomeRevision 的完成标记；失败等待补发，旧通知完成不能确认新结果。关停等待这些有界通知，第五步尚未入队的运行中 attempt 保留原 UUID 供重启接续。
 
 `aws-service.ts` 的 `deleteRootMFA()` 无设备错误补 `code:'ROOT_MFA_NOT_ENABLED'`，保留原 message 和原调用方语义。回收处理返回 failed 数组；不把整个函数改为“从不抛错”。第 3/4 步 IAM 请求复用 `withAbortTimeout(AWS_REQUEST_TIMEOUT_MS, ...)` 的 30 秒可中止调用和 `finally` 释放 client，不能只用 Promise.race 在真实请求未结束时放开编排锁。`recoverRootPassword()` 的已有冲突码及省略 Password 的语义保持。
 

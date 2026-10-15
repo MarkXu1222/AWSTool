@@ -1,7 +1,7 @@
 # 账户回收 —— 进度交接（供新会话续作）
 
 > 最后更新：2026-10-15。本需求走 **orca-dev-flow 七阶段四闸门**。
-> G1、G2 已批（2026-10-15）；处于 **P3**：T1 完成，T2–T7 待用户在 Orca 终端派 codex（见 `briefs.md`）。
+> G1/G2 已批，T1–T7 已完成；**P4 审核、六项修复及独立复查通过**，修复提交 `785456e`。发布候选 0.56.0 已准备，待 G3；尚未部署。见 P4-REVIEW.md 与 RELEASE-CHECKLIST.md。
 > 五步编号已统一；具体接口与状态设计以当前 `design.md` 为准。
 
 ## 需求一句话
@@ -43,7 +43,7 @@
 
 - [x] 闸门 **G1**：2026-10-15 用户已批准 design.md（受限账户已统一为「仅 admin 可回收」）。
 - [x] P2 `tasks.md` 7 个任务 / 4 波次，**G2 已于 2026-10-15 批准**；同时回写 design.md（对齐上线邮箱接口、补 `accountReclaimDeps` 测试注入点）。
-- [ ] P3：分支 `integration/account-reclaim`。T1 已完成 `0083ed5`（Claude）。T2 起 Claude 输出被安全审查拦截，
+- [x] P3：分支 `integration/account-reclaim`。T1 已完成 `0083ed5`（Claude）。T2 起 Claude 输出被安全审查拦截，
       **用户决定 T2–T7 由 codex 实现**，简报在 `briefs.md`；Claude 负责审核与串行合并。
       2026-10-15 11:55 波次 1 已派（Claude 新建专用协调者终端 `term_56e2623f-ad4a-4a7c-a5b7-7abb861c2350`
       「account-reclaim 协调者」，在其中执行编排命令；VSCode 会话本身无 Orca 句柄）。Run `run_bd066de5c0e9`：
@@ -55,12 +55,12 @@
       主仓库全量 403/403 通过、typecheck 通过。worktree 内全量有 56 个基线失败（缺 config.json），与 aa397a9 一致。
       波次 2–4 完成：T4 `5244073`→`1cd8f91`；bridge 补充 `4ad411e`；T5 `bcabcd8`→`0f45f92`，返工 `9d74718`→`3d91b8c`；T6 `6d87f60`→`9fd1530`。
       **P3 完成**：集成分支 `9fd1530` 全量 444/444、typecheck、build 全绿；Run 内无 reclaimable worker。
-- [ ] P4：独立审核子代理进行中（main...integration/account-reclaim），按结果修复后进 P5 / 闸门 G3。
+- [x] P4：2026-10-15 已完成独立审核、复现与修复六项问题，独立复查无遗留阻断。最新修复树 `npm test` 456/456、typecheck、build 全绿；修复提交 `785456e`。详见 P4-REVIEW.md。
       拆分规则见 `.claude/skills/orca-dev-flow/references/task-split.md`，可参照 `.kiro/specs/admin-console-on-demand/tasks.md`。
       提醒：`root-email-jobs.ts` / `root-email-core.ts` / `root-reset-permissions.ts` 三个文件须归同一任务（来源隔离、互斥、验证码注入互相牵连），
       该任务简报写明「先读 `web/ROOT_EMAIL.md`」；`db.ts`、`auth.ts`、`routes/aws.ts`、`index.ts`、`MainLayout.tsx`、`api.ts`、`Settings.tsx` 为枢纽文件，同一波次各只能归一个任务。
-- [ ] P5 发版（改 `web/client/src/version.ts` 的 `APP_VERSION`、README、project-context）→ 闸门 G3。
-- [ ] P6 Claude 亲自部署 EC2 → 闸门 G4。邮箱侧接口上线后用授权测试账户联调五步。
+- [ ] P5 发布材料已准备：APP_VERSION `0.55.1 → 0.56.0`，README/project-context/ROOT_EMAIL/设计已同步，上线清单已落盘；待 G3 批准上线内容。
+- [ ] P6 待 G4 批准部署操作，随后在 EC2 用授权测试账户联调五步；本轮没有推送、部署或真实改密。
 
 ## 当前设计摘要（实现细节见 design.md）
 
@@ -176,5 +176,5 @@ AWSTool 侧新增环境变量 `MAIL_ADMIN_API_SSM_PARAMETER=/toolbox/mail-api-re
 - 实现一律 `gpt-6-sol --effort high`，核对回执 `launch.effective`。
 
 ## 新会话怎么起
-先读本文件、requirements.md、design.md、mailbox-api-spec.md。设计草案已经完成，保留“组合已有功能、收回交付入口”
-的业务定位，按用户评审意见修订并完成 G1；用户明确批准后才进入 P2，不重新从零起草或重写现有邮箱/Root 能力。
+先读本文件、P4-REVIEW.md、RELEASE-CHECKLIST.md。P0–P4 已完成，发布候选已准备；保留“组合已有功能、收回交付入口”的业务定位。
+下一步为 G3 上线内容审阅，再按 G4 授权部署与生产五步验收，不重新派 T1–T7，不在未授权时操作真实账户。

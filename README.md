@@ -84,7 +84,7 @@
 | `poccash` | `PocCash.tsx` | `/api/poc-cash/*` | POC Cash：创建 AWS Partner Central 商机、阶段检查、POC 资金申请与进展台账。**admin 专属**，连「页面权限」勾选都无法授予（创建的是提交给 AWS 的真实商机）。四 Tab：创建商机 / 商机阶段检查 / POC 申请 / POC 进展 |
 | `regions` | `Regions.tsx` | `/api/regions/*` | opt-in 区域开通状态扫描与单个/批量开通 |
 | `billing` | `Billing.tsx` | `/api/aws/billing/*` | AWS 官方账单 PDF 批量导出、历史任务、取消与 ZIP 下载 |
-| `cleanup` | `Cleanup.tsx` | `/api/aws/resources/*` | 扫描最近 7 天的 EC2/EBS/S3/Lambda/IAM 用户，展示 IAM 非敏感详情并手动勾选删除；S3 只读 |
+| `cleanup` | `Cleanup.tsx`、`AccountReclaimPanel.tsx` | `/api/aws/resources/*`、`/api/aws/account-reclaim/*` | 「资源清理」保留原扫描/删除；「账户回收」以独立权限组合邮箱删转发/改密与既有 Root 操作，最多 20 个账户、逐步进度及失败原因。两个 Tab 按各自权限显示 |
 | `tagcompliance` | `TagCompliance.tsx` | `/api/aws/tag-compliance/*` | MAP 标签合规扫描与报告 |
 | `audit` | `AuditLog.tsx` | `/api/aws/audit*` | 审计日志查询与 CSV 导出 |
 | `ops` | `OpsMonitor.tsx` | `/api/ops/overview` | 运维监控（健康评分/资源趋势/请求延迟/端点排行/后台任务）。admin 恒有；其他角色需在页面权限中显式授权，旧用户默认不授予；后端实时校验数据库权限且不写审计日志（30s 轮询）。指标存进程内存，重启清零 |
@@ -165,6 +165,11 @@ AWS/
     │   ├── root-mail-links.ts      # AWS RootUser 链接解析；任务不存正文或重置 URL
     │   ├── mail-api.ts             # 自建邮箱 HMAC 只读客户端，共用节流队列
     │   ├── mail-api-config.ts      # 邮箱 API 端点与密钥配置
+    │   # —— 账户回收（复用现有邮箱与 Root 能力）——
+    │   ├── account-reclaim.ts      # 五步编排、结果归并、重试、查看密码、通知补偿
+    │   ├── account-reclaim-core.ts # 类型、状态机、密码生成与脱敏错误说明
+    │   ├── account-reclaim-permissions.ts # account_reclaim_access 实时守卫与所有权
+    │   ├── mailbox-admin-api.ts    # 独立 SSM 凭据、签名 POST、节流及错误映射
     │   # —— POC Cash ——
     │   ├── poc-cash.ts             # Partner Central 商机：创建 / 关联 Solution / 提交 / 阶段检查
     │   ├── poc-cash-funding.ts     # POC 资金申请、进展查询、CSV 台账
@@ -278,6 +283,7 @@ Admin 临时凭证时长默认 1 小时。数据库当前角色为 `admin` 的�
 |------|------|
 | 账户 | `GET /accounts`、`POST /accounts/refresh`、`GET /accounts/:id/detail`、`GET /connection` |
 | 账户角色自愈 | `GET /accounts/roles-status`、`POST /accounts/roles-check`（均 `requireStrictAdmin`） |
+| 账户回收 | `/account-reclaim` 下的 catalog、batches 列表/创建/详情、jobs 重试/凭证/验证码、批次停止未开始账户；全部走实时 `createAccountReclaimGuard`，创建/重试另需 TOTP；完整契约见 `.kiro/specs/account-reclaim/design.md` §5.6 |
 | 离场账户 | `GET /accounts/departed`、`POST /accounts/departed/backfill`（后者 `requireStrictAdmin`） |
 | 临时 Admin（0.54.0） | `GET /temp-admin/grants`（未结束的开通记录，只含元数据）、`POST /temp-admin`（`requireStrictAdmin` + TOTP step-up；body `{accountId, hours: 1\|2\|3, mfaCode}`）、`DELETE /temp-admin/:accountId`（`requireStrictAdmin`，提前关闭）；均单独写审计 |
 | 敏感权限客户账户 | `GET /accounts/restricted`（不返回 ExternalId 明文）、`POST /accounts/restricted`、`DELETE /accounts/restricted/:accountId`、`GET /accounts/restricted/:accountId/external-id`（后三个均 `requireStrictAdmin` 且单独写审计） |
@@ -357,12 +363,13 @@ Admin 临时凭证时长默认 1 小时。数据库当前角色为 `admin` 的�
 
 `allowed_pages` 控制可见页面（admin 视为全部）。`ops` 包含敏感系统指标，non-admin 只有被显式勾选后才能显示菜单并调用接口；旧用户和新用户默认都不授予。`authMiddleware` 会拦住未绑 MFA 用户访问业务接口。
 
-### 三个独立权限开关
+### 四个独立权限开关
 
 admin 恒有，其他角色必须显式授予，且**都不受 `allowed_pages` 影响**：
 
 - `root_access` → 账户页「根用户」敏感操作（Admin 临时凭证 / 删除 Root MFA / 恢复根密码 / 删除 Root Access Key）以及 Admin 控制台登录；`GET /root-credentials/:accountId` 的状态读取当前不经过该守卫
 - `bulk_quota_access` → 「批量提额」页；未授予时菜单完全不可见，后端 `requireBulkQuotaAccess` 也会拒绝
+- `account_reclaim_access` → `/cleanup` 的「账户回收」Tab，值为 `none` / `operate`，不授予资源清理或其他 Root 权限；仅持此权限也可直链进入。非 admin 仅能操作本人批次，admin 全局可见；受限账户只允许当前为 admin 的创建者回收
 - `root_reset_access` → 「批量设置 Root 密码」页，值为 `none` / `view` / `operate`；非 admin 只看本人批次，admin 查看/管理全部。创建批次仍要求 step-up TOTP；CSV 下载不再额外 MFA，Owner 可重复下载本人永久归档，Admin 可重复下载全部永久归档
 
 `poccash` 页**不是开关**：它既不在 `ALL_PAGE_KEYS` 里（勾不到），也没有对应的独立权限字段，`isPageAllowed()` 直接判 `role === 'admin'`，后端 router 层 `requireStrictAdmin` 实时查库。这是全站最严的一档，理由是它创建的是提交给 AWS 的真实商机。
@@ -1282,6 +1289,16 @@ StackSets 要求 payer 管理账户先启用全部目标区域。以前 `deploy_
 独立页面 `/rootreset` 受 `root_reset_access` 控制。每批最多 20 个 ACTIVE 成员账户；创建前必须精确输入 payer 名称、账户数量和当前 TOTP。任务严格串行执行：选择 Root 登录 → 如 AWS 要求则先完成登录安全验证码 → 打开 Forgot password → 完成恢复邮件验证码 → 精确匹配收件人/时间 → 校验 `signin.aws.amazon.com/resetpassword` 一次性链接 → 生成 24 位 CSPRNG 强密码 → 在 AWS 页面填写两处密码并提交。AWS 发信提交结果不明时只读查询邮箱而不重复发信；有效 reset 页面初始执行上下文短暂切换时会在提交前等待稳定。只有 AWS 页面出现明确成功文案才记为 `password_set`；确认尚未进入提交边界的浏览器加载异常最多执行 3 次独立 Chrome 尝试，同时只记录不含 URL/token 的阶段码和错误分类；提交后超时或页面异常记为 `password_unknown`，绝不自动重试。自动尝试耗尽且确认未提交密码时，任务创建者可在 2 小时内通过新的 MFA 按需重扫邮件、直接打开或显式复制链接；手工设置的密码不会进入平台 CSV。发恢复邮件阶段会记录独立 Chrome 尝试次数和不含 URL/token 的 `failureStage/failureCategory`；仅明确未跨过恢复邮件提交边界的 `failed` 任务可通过 MFA 创建新的单账户重试批次，旧任务保留并记录双向重试血缘，`interrupted`、已提交或结果未知任务不开放重试。
 
 确认成功的密码以任务 ID、账户 ID、创建者 ID 作为 AAD，使用用途分离密钥和 AES-256-GCM 永久写入 `data/root-email-jobs.json`，不会因下载或时间到期自动销毁。新记录使用 `gcm2` 并携带非敏感 key ID；旧 `gcm1` 通过 current + `web.encryptionKeyPrevious` 兼容解密。CSV 不再要求下载时额外 MFA：Owner 可重复下载本人批次，Admin 可重复下载全部批次；每次请求仍使用短期 durable claim 防止同一视图并发生成，并记录真实操作者。非 admin 只看本人批次，Admin 查看全部。`root-email-jobs.json` 每日与 `db.json` 分别做 7 天本地轮换备份；服务器文件、独立备份的匹配 keyring 和异机快照共同构成永久 Root 凭证库，必须按最高敏感级别保护。列表 API、审计和飞书通知都不包含密码或 reset URL。完整运行与恢复语义见 [`web/ROOT_EMAIL.md`](web/ROOT_EMAIL.md)。
+
+### 账户回收
+
+交付给客户的根邮箱、邮箱密码、AWS Root 密码及邮件转发，由一个回收入口统一收回：删除转发 → 改邮箱密码并踢旧 IMAP/POP3 会话 → 删除 Root MFA → 允许恢复密码 → 改 AWS Root 密码。每批 1–20 个 ACTIVE 成员账户，先核对数量并验证 TOTP；payer 自身和邮箱未托管/不存在/禁用的账户拒绝，受限账户仅 admin 创建者可执行。
+
+前四步复用既有邮箱/AWS 操作，第五步复用原 Root 执行器和全局浏览器槽。前四步失败/未知即停，后续注明未执行；第五步失败为部分完成，`password_unknown` 禁止重试。服务重启保留原密码及 Root 尝试 ID，跨文件中断补关联；旧 `/rootreset` 不能查看或操作回收来源。普通 Root 任务的管理员重试语义保持。
+
+新邮箱密码与已确认的 AWS 密码永久加密保留，页面可反复查看/复制，每次查看审计；列表、审计及通知不含密码或 reset URL。终态飞书通知独立于执行队列，15 秒截止，明确送达后才记完成，失败后补发。数据在 db.json 的 `account_reclaim_jobs` 与既有 Root store；旧库缺少数组自动读为空，不裁剪永久记录。
+
+邮箱写调用使用 `MAIL_ADMIN_API_SSM_PARAMETER=/toolbox/mail-api-reclaim`，区域沿 `MAIL_API_SSM_REGION=us-east-1`；保留只读邮件的独立 `/toolbox/mail-api`，不混用 token。本功能保留账户与邮箱，资源删除仍走资源清理；IAM/SSO/Access Key 撤销不在五步内。上线须在授权测试账户验证新/旧登录、转发及已登录 webmail/IMAP/POP3 会话。设计、审核与上线清单见 `.kiro/specs/account-reclaim/`。
 
 ### 临时开通 Admin（0.54.0）
 
