@@ -12,17 +12,20 @@
  */
 import { STSClient, AssumeRoleCommand } from '@aws-sdk/client-sts';
 import { EC2Client, DescribeRegionsCommand } from '@aws-sdk/client-ec2';
-import { AccountClient, GetRegionOptStatusCommand, EnableRegionCommand } from '@aws-sdk/client-account';
+import { AccountClient, GetRegionOptStatusCommand, EnableRegionCommand, ListRegionsCommand } from '@aws-sdk/client-account';
 import { SFNClient, StartExecutionCommand, ListExecutionsCommand } from '@aws-sdk/client-sfn';
 import { S3Client, GetObjectCommand, PutObjectCommand, ListObjectsV2Command } from '@aws-sdk/client-s3';
 import { SNSClient, ListSubscriptionsByTopicCommand, SubscribeCommand, UnsubscribeCommand } from '@aws-sdk/client-sns';
-import { IAMClient, GetRoleCommand, CreateRoleCommand, AttachRolePolicyCommand, ListAttachedRolePoliciesCommand, PutRolePolicyCommand } from '@aws-sdk/client-iam';
+import {
+  IAMClient, GetRoleCommand, CreateRoleCommand, ListAttachedRolePoliciesCommand, PutRolePolicyCommand,
+  DetachRolePolicyCommand, UpdateAssumeRolePolicyCommand,
+} from '@aws-sdk/client-iam';
 import {
   ResourceExplorer2Client, ListViewsCommand, CreateViewCommand,
   GetIndexCommand, CreateIndexCommand, UpdateIndexTypeCommand,
 } from '@aws-sdk/client-resource-explorer-2';
 import {
-  CloudFormationClient, DescribeStackSetCommand, CreateStackSetCommand,
+  CloudFormationClient, DescribeStackSetCommand, CreateStackSetCommand, UpdateStackSetCommand,
   CreateStackInstancesCommand, UpdateStackInstancesCommand, DeleteStackInstancesCommand,
   ListStackInstancesCommand, ListStackSetOperationsCommand,
   ListStackSetAutoDeploymentTargetsCommand,
@@ -585,25 +588,45 @@ export async function getOrgPayerMap(): Promise<Record<string, { payerAccountId:
 
 const AUTO_TAGGER_STACKSET_NAME = 'AutoTaggerRole';
 const SEARCH_ROLE_NAME = 'resource-explorer-search-role';
+/** 早期挂在 search-role 上的托管只读策略，已由内联 SearchPolicy 取代 */
+const SEARCH_ROLE_LEGACY_POLICIES = [
+  'arn:aws:iam::aws:policy/AWSResourceExplorerReadOnlyAccess',
+  'arn:aws:iam::aws:policy/AWSOrganizationsReadOnlyAccess',
+];
+const AUTO_TAGGER_STACKSET_DESCRIPTION = 'IAM role for central tag-compliance auto-tagger (managed by AWSTool)';
+const READ_ONLY_ACCESS_ARN = 'arn:aws:iam::aws:policy/ReadOnlyAccess';
 const ORG_VIEW_NAME = 'OrgView';
 
 // auto-tagger-role StackSet 模板（与 RE-AUTOTAG 项目 stacksets/auto-tagger-role.yaml 保持一致）。
 // 打标用 TagResources API，除 tag:TagResources 外还需各服务自身的打标权限，故权限列表很长。
-const AUTO_TAGGER_ROLE_TEMPLATE = `AWSTemplateFormatVersion: "2010-09-09"
+export const AUTO_TAGGER_ROLE_TEMPLATE = `AWSTemplateFormatVersion: "2010-09-09"
 Description: >
-  StackSet #3 - IAM Role for central auto-tagger Lambda to assume.
-  Deploy to ONE region per account (IAM is global).
+  IAM role for the central MAP tag-compliance auto-tagger (managed by AWSTool).
+  Least privilege: tag-write actions only. Deploy to ONE region per account (IAM is global).
 
 Parameters:
   CentralToolingAccountId:
     Type: String
-    Description: Account ID of the central tooling account where Lambda runs
+    Description: Account ID of the central tooling account where the tagger Lambda runs
+  AllowedTagKeys:
+    Type: CommaDelimitedList
+    Default: map-migrated
+    Description: Tag keys the role may write when EnforceTagKeys is true
+  EnforceTagKeys:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+    Description: Restrict writes to AllowedTagKeys via aws:TagKeys
+
+Conditions:
+  EnforceTagKeys: !Equals [!Ref EnforceTagKeys, "true"]
 
 Resources:
   AutoTaggerRole:
     Type: AWS::IAM::Role
     Properties:
       RoleName: auto-tagger-role
+      Description: Central MAP tag-compliance auto-tagger (managed by AWSTool)
       AssumeRolePolicyDocument:
         Version: "2012-10-17"
         Statement:
@@ -619,13 +642,10 @@ Resources:
           PolicyDocument:
             Version: "2012-10-17"
             Statement:
-              - Effect: Allow
+              - Sid: TagWrite
+                Effect: Allow
                 Action:
                   - tag:TagResources
-                  - tag:GetResources
-                Resource: "*"
-              - Effect: Allow
-                Action:
                   - ec2:CreateTags
                   - lambda:TagResource
                   - ecs:TagResource
@@ -756,23 +776,28 @@ Resources:
                   - aoss:TagResource
                   - glacier:TagResource
                 Resource: "*"
-              - Effect: Allow
+                Condition: !If
+                  - EnforceTagKeys
+                  - "ForAllValues:StringEquals":
+                      "aws:TagKeys": !Ref AllowedTagKeys
+                  - !Ref "AWS::NoValue"
+              - Sid: ApiGatewayTagWrite
+                Effect: Allow
                 Action:
                   - apigateway:PUT
                   - apigateway:POST
-                  - apigateway:DELETE
-                  - apigateway:GET
                 Resource:
-                  - !Sub "arn:aws:apigateway:*::/tags/*"
-              - Effect: Allow
-                Action:
-                  - apigateway:GET
-                  - apigateway:PATCH
-                Resource:
-                  - !Sub "arn:aws:apigateway:*::*"
+                  - "arn:aws:apigateway:*::/tags/*"
+                Condition: !If
+                  - EnforceTagKeys
+                  - "ForAllValues:StringEquals":
+                      "aws:TagKeys": !Ref AllowedTagKeys
+                  - !Ref "AWS::NoValue"
       Tags:
         - Key: Purpose
           Value: AutoTagger
+        - Key: ManagedBy
+          Value: AWSTool
 `;
 
 export type ProvisionStatus = 'ok' | 'created' | 'skipped' | 'pending' | 'failed';
@@ -801,7 +826,12 @@ const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
  * 步骤：开启 RE 跨账户访问 → payer 聚合索引 → OrgView → search-role → AutoTaggerRole StackSet。
  * 任一步失败不会中断后续独立步骤；RE 索引尚未 ACTIVE 时相关步骤标为 pending，稍后重跑即可。
  */
-export async function provisionOrg(payerAccountId: string): Promise<ProvisionResult> {
+export interface ProvisionOptions {
+  /** 接入任务传入；手工「一键接入」不传则沿用 StackSet 现值 */
+  allowedTagKeys?: string[];
+}
+
+export async function provisionOrg(payerAccountId: string, opts: ProvisionOptions = {}): Promise<ProvisionResult> {
   const central = centralAccountId();
   const region = 'us-east-1';
   const steps: ProvisionStep[] = [];
@@ -915,21 +945,19 @@ export async function provisionOrg(payerAccountId: string): Promise<ProvisionRes
     out.needsRetry = true;
   }
 
-  // ---- 4. search-role（信任中央工具账户） ----
+  // ---- 4. search-role（只信任中央 tag-compliance* 角色，只能列 OrgView 资源与组织账户） ----
   try {
-    const trust = {
-      Version: '2012-10-17',
-      Statement: [{
-        Effect: 'Allow',
-        Principal: { AWS: `arn:aws:iam::${central}:root` },
-        Action: 'sts:AssumeRole',
-      }],
-    };
+    const trust = buildCentralTrust(central);
+    const changes: string[] = [];
     let exists = false;
     try {
       const r = await iam.send(new GetRoleCommand({ RoleName: SEARCH_ROLE_NAME }));
       exists = true;
       out.searchRoleArn = r.Role?.Arn;
+      if (!samePolicyDocument(r.Role?.AssumeRolePolicyDocument || '{}', trust)) {
+        await iam.send(new UpdateAssumeRolePolicyCommand({ RoleName: SEARCH_ROLE_NAME, PolicyDocument: JSON.stringify(trust) }));
+        changes.push('信任策略已收紧为中央 tag-compliance* 角色');
+      }
     } catch (e: any) { if (e.name !== 'NoSuchEntityException') throw e; }
 
     if (!exists) {
@@ -942,20 +970,21 @@ export async function provisionOrg(payerAccountId: string): Promise<ProvisionRes
       }));
       out.searchRoleArn = r.Role?.Arn;
     }
-    // 幂等挂策略
-    const wanted = [
-      'arn:aws:iam::aws:policy/AWSResourceExplorerReadOnlyAccess',
-      'arn:aws:iam::aws:policy/AWSOrganizationsReadOnlyAccess',
-    ];
+    // 先写最小内联策略，再摘旧托管策略 —— 中间任何一步失败都不会让扫描器无权限
+    await iam.send(new PutRolePolicyCommand({
+      RoleName: SEARCH_ROLE_NAME, PolicyName: 'SearchPolicy',
+      PolicyDocument: JSON.stringify(buildSearchRolePolicy(payerAccountId)),
+    }));
     const attached = await iam.send(new ListAttachedRolePoliciesCommand({ RoleName: SEARCH_ROLE_NAME }));
-    const have = new Set((attached.AttachedPolicies || []).map(p => p.PolicyArn));
-    for (const arn of wanted) {
-      if (!have.has(arn)) await iam.send(new AttachRolePolicyCommand({ RoleName: SEARCH_ROLE_NAME, PolicyArn: arn }));
+    for (const policy of attached.AttachedPolicies || []) {
+      if (!SEARCH_ROLE_LEGACY_POLICIES.includes(policy.PolicyArn || '')) continue;
+      await iam.send(new DetachRolePolicyCommand({ RoleName: SEARCH_ROLE_NAME, PolicyArn: policy.PolicyArn }));
+      changes.push(`已移除 ${policy.PolicyName}`);
     }
     steps.push({
       key: 'searchRole', label: 'Resource Explorer 搜索角色',
-      status: exists ? 'skipped' : 'created',
-      detail: out.searchRoleArn,
+      status: !exists || changes.length ? 'created' : 'skipped',
+      detail: changes.length ? changes.join('；') : out.searchRoleArn,
     });
   } catch (e: any) {
     steps.push({ key: 'searchRole', label: 'Resource Explorer 搜索角色', status: 'failed', detail: awsErrorDetail(e) });
@@ -963,51 +992,102 @@ export async function provisionOrg(payerAccountId: string): Promise<ProvisionRes
   }
 
   // ---- 5. AutoTaggerRole StackSet + 部署到根 OU ----
+  // 步骤 6 的 payer 角色要与成员模板使用同一组 TagKeys 设置；步骤 5 失败时按不限制处理
+  let taggerPolicyOpts = { allowedTagKeys: opts.allowedTagKeys ?? [MAP_TAG_KEY], enforceTagKeys: false };
   try {
-    let stackSetExists = false;
+    let existing: { TemplateBody?: string; Parameters?: CfnParam[] } | null = null;
     try {
-      await cfn.send(new DescribeStackSetCommand({ StackSetName: AUTO_TAGGER_STACKSET_NAME, CallAs: 'SELF' }));
-      stackSetExists = true;
+      const d = await cfn.send(new DescribeStackSetCommand({ StackSetName: AUTO_TAGGER_STACKSET_NAME, CallAs: 'SELF' }));
+      existing = { TemplateBody: d.StackSet?.TemplateBody, Parameters: d.StackSet?.Parameters };
     } catch (e: any) { if (e.name !== 'StackSetNotFoundException') throw e; }
+    const stackSetExists = !!existing;
+    const desired = resolveAutoTaggerParams(central, opts.allowedTagKeys, existing?.Parameters);
+    taggerPolicyOpts = { allowedTagKeys: desired.AllowedTagKeys.split(','), enforceTagKeys: desired.EnforceTagKeys === 'true' };
 
     if (!stackSetExists) {
       await cfn.send(new CreateStackSetCommand({
         StackSetName: AUTO_TAGGER_STACKSET_NAME,
-        Description: 'IAM role for central tag-compliance auto-tagger (managed by AWSTool)',
+        Description: AUTO_TAGGER_STACKSET_DESCRIPTION,
         TemplateBody: AUTO_TAGGER_ROLE_TEMPLATE,
         PermissionModel: 'SERVICE_MANAGED',
         AutoDeployment: { Enabled: true, RetainStacksOnAccountRemoval: false },
         ManagedExecution: { Active: true },
         Capabilities: ['CAPABILITY_NAMED_IAM'],
-        Parameters: [{ ParameterKey: 'CentralToolingAccountId', ParameterValue: central }],
+        Parameters: autoTaggerParamList(desired),
         CallAs: 'SELF',
         Tags: [{ Key: 'ManagedBy', Value: 'AWSTool' }, { Key: 'Purpose', Value: 'TagCompliance' }],
       }));
     }
 
-    // 仅在还没有任何实例时才下发，避免重复触发操作
-    const instances = await cfn.send(new ListStackInstancesCommand({ StackSetName: AUTO_TAGGER_STACKSET_NAME, CallAs: 'SELF' }));
-    const instanceCount = (instances.Summaries || []).length;
-    if (instanceCount === 0) {
-      if (!out.rootOuId) throw new Error('未取到根 OU，无法下发 StackSet 实例');
-      await cfn.send(new CreateStackInstancesCommand({
-        StackSetName: AUTO_TAGGER_STACKSET_NAME,
-        DeploymentTargets: { OrganizationalUnitIds: [out.rootOuId] },
-        Regions: [region],
-        OperationPreferences: { FailureTolerancePercentage: 100, MaxConcurrentPercentage: 100 },
-        CallAs: 'SELF',
-      }));
-      steps.push({
-        key: 'stackSet', label: '打标角色 StackSet (AutoTaggerRole)',
-        status: 'created',
-        detail: stackSetExists ? '已存在 StackSet，已下发到根 OU（异步进行中）' : '已创建 StackSet 并下发到根 OU（异步进行中）',
-      });
-    } else {
-      steps.push({
-        key: 'stackSet', label: '打标角色 StackSet (AutoTaggerRole)',
-        status: 'skipped',
-        detail: `已有 ${instanceCount} 个成员账户实例；新成员由 AutoDeployment 自动覆盖`,
-      });
+    // 已存在：按名字存在就跳过曾让 taoVolt 一直信任旧中央账户。模板或参数不符就原地更新。
+    if (existing) {
+      const ops = await cfn.send(new ListStackSetOperationsCommand({ StackSetName: AUTO_TAGGER_STACKSET_NAME, CallAs: 'SELF', MaxResults: 1 }));
+      const latest = ops.Summaries?.[0]?.Status;
+      const diffs = autoTaggerDrift(existing, desired);
+      if (latest && ['RUNNING', 'QUEUED', 'STOPPING'].includes(latest)) {
+        steps.push({ key: 'stackSet', label: '打标角色 StackSet (AutoTaggerRole)', status: 'pending', detail: 'StackSet 操作进行中，稍后重跑' });
+        out.needsRetry = true;
+      } else if (diffs.length > 0) {
+        try {
+          await cfn.send(new UpdateStackSetCommand({
+            StackSetName: AUTO_TAGGER_STACKSET_NAME,
+            Description: AUTO_TAGGER_STACKSET_DESCRIPTION,
+            TemplateBody: AUTO_TAGGER_ROLE_TEMPLATE,
+            Parameters: autoTaggerParamList(desired),
+            Capabilities: ['CAPABILITY_NAMED_IAM'],
+            OperationPreferences: { FailureTolerancePercentage: 100, MaxConcurrentPercentage: 100 },
+            CallAs: 'SELF',
+          }));
+          steps.push({ key: 'stackSet', label: '打标角色 StackSet (AutoTaggerRole)', status: 'pending', detail: `已提交更新：${diffs.join('；')}` });
+        } catch (e: any) {
+          if (e.name !== 'OperationInProgressException') throw e;
+          steps.push({ key: 'stackSet', label: '打标角色 StackSet (AutoTaggerRole)', status: 'pending', detail: 'StackSet 操作进行中，稍后重跑' });
+        }
+        out.needsRetry = true;
+      } else {
+        const instances: any[] = [];
+        let token: string | undefined;
+        do {
+          const page = await cfn.send(new ListStackInstancesCommand({ StackSetName: AUTO_TAGGER_STACKSET_NAME, CallAs: 'SELF', NextToken: token }));
+          instances.push(...(page.Summaries || []));
+          token = page.NextToken;
+        } while (token);
+        const stale = instances.filter(i => i.Status !== 'CURRENT').map(i => i.Account as string);
+        if (instances.length > 0) {
+          steps.push({
+            key: 'stackSet', label: '打标角色 StackSet (AutoTaggerRole)', status: 'skipped',
+            detail: `模板与参数一致（最小权限）`
+              + (stale.length ? `；${stale.length} 个实例未更新：${stale.slice(0, 5).join(', ')}` : ''),
+          });
+        }
+      }
+    }
+
+    // 仅在还没有任何实例时才下发，避免重复触发操作；上面已给出结论（更新中/一致）时不再处理
+    if (!steps.some(step => step.key === 'stackSet')) {
+      const instances = await cfn.send(new ListStackInstancesCommand({ StackSetName: AUTO_TAGGER_STACKSET_NAME, CallAs: 'SELF' }));
+      const instanceCount = (instances.Summaries || []).length;
+      if (instanceCount === 0) {
+        if (!out.rootOuId) throw new Error('未取到根 OU，无法下发 StackSet 实例');
+        await cfn.send(new CreateStackInstancesCommand({
+          StackSetName: AUTO_TAGGER_STACKSET_NAME,
+          DeploymentTargets: { OrganizationalUnitIds: [out.rootOuId] },
+          Regions: [region],
+          OperationPreferences: { FailureTolerancePercentage: 100, MaxConcurrentPercentage: 100 },
+          CallAs: 'SELF',
+        }));
+        steps.push({
+          key: 'stackSet', label: '打标角色 StackSet (AutoTaggerRole)',
+          status: 'created',
+          detail: stackSetExists ? '已存在 StackSet，已下发到根 OU（异步进行中）' : '已创建 StackSet 并下发到根 OU（异步进行中）',
+        });
+      } else {
+        steps.push({
+          key: 'stackSet', label: '打标角色 StackSet (AutoTaggerRole)',
+          status: 'skipped',
+          detail: `已有 ${instanceCount} 个成员账户实例；新成员由 AutoDeployment 自动覆盖`,
+        });
+      }
     }
   } catch (e: any) {
     steps.push({ key: 'stackSet', label: '打标角色 StackSet (AutoTaggerRole)', status: 'failed', detail: awsErrorDetail(e) });
@@ -1020,11 +1100,12 @@ export async function provisionOrg(payerAccountId: string): Promise<ProvisionRes
   // 也要打 MAP 标签，就必须在 payer 账户里单独建一份同样的角色，否则扫描器能发现
   // 资源却 AssumeRole 失败，报告里每天多一批 failed。
   try {
-    const created = await ensurePayerTaggerRole(creds, central);
+    const { created, changes } = await ensurePayerTaggerRole(creds, central, taggerPolicyOpts);
     steps.push({
       key: 'payerTaggerRole', label: 'payer 自身打标角色 (auto-tagger-role)',
-      status: created ? 'created' : 'skipped',
-      detail: created ? '已在 payer 管理账户创建（StackSet 覆盖不到管理账户）' : '已存在',
+      status: created || changes.length ? 'created' : 'skipped',
+      detail: created ? '已在 payer 管理账户创建（StackSet 覆盖不到管理账户）'
+        : changes.length ? changes.join('；') : '已存在，权限与成员模板一致',
     });
   } catch (e: any) {
     steps.push({
@@ -1047,37 +1128,157 @@ export async function provisionOrg(payerAccountId: string): Promise<ProvisionRes
  * 而 TagResources 底层是代调 athena:TagResource、logs:TagResource、
  * s3:PutBucketTagging 这些，缺了就全线 AccessDenied（已实测踩过）。
  */
-export function AUTO_TAGGER_INLINE_POLICY(): any {
+export function AUTO_TAGGER_INLINE_POLICY(
+  opts: { allowedTagKeys?: string[]; enforceTagKeys?: boolean } = {},
+): { Version: string; Statement: Record<string, unknown>[] } {
   // 模板里形如 "                  - ec2:CreateTags" 的行即 Action
   const actions = [...AUTO_TAGGER_ROLE_TEMPLATE.matchAll(/^\s+- ([a-z0-9-]+:[A-Za-z*]+)$/gm)]
     .map(m => m[1])
     .filter(a => !a.startsWith('apigateway:'));  // apigateway 走独立资源级语句
+  // 与模板的 EnforceTagKeys 条件一致：开启后只能写允许的 key
+  const condition = opts.enforceTagKeys
+    ? { Condition: { 'ForAllValues:StringEquals': { 'aws:TagKeys': opts.allowedTagKeys ?? [MAP_TAG_KEY] } } }
+    : {};
   return {
     Version: '2012-10-17',
     Statement: [
-      { Effect: 'Allow', Action: [...new Set(actions)], Resource: '*' },
+      { Sid: 'TagWrite', Effect: 'Allow', Action: [...new Set(actions)], Resource: '*', ...condition },
       {
+        Sid: 'ApiGatewayTagWrite',
         Effect: 'Allow',
-        Action: ['apigateway:PUT', 'apigateway:POST', 'apigateway:DELETE', 'apigateway:GET', 'apigateway:PATCH'],
-        Resource: ['arn:aws:apigateway:*::/tags/*', 'arn:aws:apigateway:*::*'],
+        Action: ['apigateway:PUT', 'apigateway:POST'],
+        Resource: ['arn:aws:apigateway:*::/tags/*'],
+        ...condition,
       },
     ],
   };
+}
+
+type AwsCredentials = { accessKeyId: string; secretAccessKey: string; sessionToken?: string };
+type CfnParam = { ParameterKey?: string; ParameterValue?: string };
+
+/** ['map-migrated', extra?]：额外标签 key 也要能写，否则开启 TagKeys 限制后额外标签全部被拒 */
+export function normalizeAllowedTagKeys(extraTagKey?: string): string[] {
+  const extra = (extraTagKey || '').trim();
+  return extra && extra !== MAP_TAG_KEY ? [MAP_TAG_KEY, extra] : [MAP_TAG_KEY];
+}
+
+export interface AutoTaggerParams {
+  CentralToolingAccountId: string;
+  /** 逗号分隔 */
+  AllowedTagKeys: string;
+  EnforceTagKeys: 'true' | 'false';
+}
+
+/**
+ * 中央账户永远以平台配置为准。AllowedTagKeys：接入任务传入优先，否则沿用现值。
+ * EnforceTagKeys 只沿用现值 —— 它由 tag-keys-canary.ts 先单账户、再全量开启，重跑接入不能把它关掉。
+ */
+export function resolveAutoTaggerParams(
+  central: string, requestedKeys: string[] | undefined, existing: CfnParam[] | undefined,
+): AutoTaggerParams {
+  const current = (key: string) => existing?.find(p => p.ParameterKey === key)?.ParameterValue;
+  const keys = requestedKeys?.length ? requestedKeys.join(',') : (current('AllowedTagKeys') || MAP_TAG_KEY);
+  const enforce = current('EnforceTagKeys') === 'true' ? 'true' : 'false';
+  return { CentralToolingAccountId: central, AllowedTagKeys: keys, EnforceTagKeys: enforce };
+}
+
+/** 现有 StackSet 与平台最小权限版本的差异；[] 表示一致 */
+export function autoTaggerDrift(
+  current: { TemplateBody?: string; Parameters?: CfnParam[] }, desired: AutoTaggerParams,
+): string[] {
+  const diffs: string[] = [];
+  if ((current.TemplateBody || '').trim() !== AUTO_TAGGER_ROLE_TEMPLATE.trim()) {
+    diffs.push('模板不是平台当前的最小权限版本');
+  }
+  for (const key of ['CentralToolingAccountId', 'AllowedTagKeys', 'EnforceTagKeys'] as const) {
+    const was = current.Parameters?.find(p => p.ParameterKey === key)?.ParameterValue;
+    if (was !== desired[key]) diffs.push(`${key}: ${was || '(无)'} → ${desired[key]}`);
+  }
+  return diffs;
+}
+
+function autoTaggerParamList(params: AutoTaggerParams) {
+  return (Object.keys(params) as (keyof AutoTaggerParams)[])
+    .map(key => ({ ParameterKey: key, ParameterValue: params[key] }));
+}
+
+/** 只信任中央工具账户里 tag-compliance* 前缀的角色（SAM 栈 tag-compliance-prod 生成的 Lambda 角色） */
+export function buildCentralTrust(central: string) {
+  return {
+    Version: '2012-10-17',
+    Statement: [{
+      Effect: 'Allow',
+      Principal: { AWS: `arn:aws:iam::${central}:root` },
+      Action: 'sts:AssumeRole',
+      Condition: { StringLike: { 'aws:PrincipalArn': `arn:aws:iam::${central}:role/tag-compliance*` } },
+    }],
+  };
+}
+
+/**
+ * search-role 的全部权限。中央 search_handler 只调 OrgView 上的 ListResources 与
+ * organizations:ListAccounts；此前挂的两个托管只读策略远超所需（含 SCP、账户邮箱等组织细节）。
+ */
+export function buildSearchRolePolicy(payerAccountId: string) {
+  return {
+    Version: '2012-10-17',
+    Statement: [
+      {
+        Sid: 'ListOrgViewResources', Effect: 'Allow', Action: ['resource-explorer-2:ListResources'],
+        Resource: `arn:aws:resource-explorer-2:*:${payerAccountId}:view/${ORG_VIEW_NAME}/*`,
+      },
+      { Sid: 'ListOrgAccounts', Effect: 'Allow', Action: ['organizations:ListAccounts'], Resource: '*' },
+    ],
+  };
+}
+
+/** account:ListRegions 结果 → 已启用区域（等价于 DescribeRegions 的 opted-in + opt-in-not-required） */
+export function enabledRegionsFromListRegions(
+  regions: Array<{ RegionName?: string; RegionOptStatus?: string }>,
+): string[] {
+  return regions
+    .filter(r => r.RegionName && (r.RegionOptStatus === 'ENABLED' || r.RegionOptStatus === 'ENABLED_BY_DEFAULT'))
+    .map(r => r.RegionName!)
+    .sort();
+}
+
+function canonicalJson(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonicalJson);
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(Object.keys(value as object).sort()
+      .map(key => [key, canonicalJson((value as Record<string, unknown>)[key])]));
+  }
+  return value;
+}
+
+/** 策略文档比较：GetRole 返回的是 URL 编码的 JSON 字符串，两边都规范化后比较 */
+export function samePolicyDocument(a: unknown, b: unknown): boolean {
+  const parse = (v: unknown) => (typeof v === 'string' ? JSON.parse(decodeURIComponent(v)) : v);
+  return JSON.stringify(canonicalJson(parse(a))) === JSON.stringify(canonicalJson(parse(b)));
 }
 
 /**
  * 在 payer 管理账户内直接创建 auto-tagger-role（幂等）。
  * SERVICE_MANAGED StackSet 不部署到管理账户，所以只能这样单独建。
  *
- * 权限用 AUTO_TAGGER_INLINE_POLICY()（与 CFN 模板同源），
- * 外加 ReadOnlyAccess 供扫描器读取资源现有 tag。
+ * 权限只有 AUTO_TAGGER_INLINE_POLICY()（与 CFN 模板同源，同一组 TagKeys 设置），不挂任何托管策略。
  * 信任策略与模板一致：只信任中央工具账户下 tag-compliance* 前缀的角色。
  */
-async function ensurePayerTaggerRole(creds: any, centralAccount: string): Promise<boolean> {
+async function ensurePayerTaggerRole(
+  creds: AwsCredentials, centralAccount: string,
+  policyOpts: { allowedTagKeys: string[]; enforceTagKeys: boolean },
+): Promise<{ created: boolean; changes: string[] }> {
   const iam = new IAMClient({ region: REGION, credentials: creds });
+  const trust = buildCentralTrust(centralAccount);
+  const changes: string[] = [];
   let exists = true;
   try {
-    await iam.send(new GetRoleCommand({ RoleName: 'auto-tagger-role' }));
+    const r = await iam.send(new GetRoleCommand({ RoleName: 'auto-tagger-role' }));
+    if (!samePolicyDocument(r.Role?.AssumeRolePolicyDocument || '{}', trust)) {
+      await iam.send(new UpdateAssumeRolePolicyCommand({ RoleName: 'auto-tagger-role', PolicyDocument: JSON.stringify(trust) }));
+      changes.push('信任策略已对齐中央 tag-compliance*');
+    }
   } catch (e: any) {
     if (e.name !== 'NoSuchEntityException') throw e;
     exists = false;
@@ -1087,29 +1288,26 @@ async function ensurePayerTaggerRole(creds: any, centralAccount: string): Promis
     await iam.send(new CreateRoleCommand({
       RoleName: 'auto-tagger-role',
       Description: 'Central tag-compliance auto-tagger (payer account, managed by AWSTool)',
-      AssumeRolePolicyDocument: JSON.stringify({
-        Version: '2012-10-17',
-        Statement: [{
-          Effect: 'Allow',
-          Principal: { AWS: `arn:aws:iam::${centralAccount}:root` },
-          Action: 'sts:AssumeRole',
-          Condition: { StringLike: { 'aws:PrincipalArn': `arn:aws:iam::${centralAccount}:role/tag-compliance*` } },
-        }],
-      }),
+      AssumeRolePolicyDocument: JSON.stringify(trust),
       Tags: [{ Key: 'ManagedBy', Value: 'AWSTool' }, { Key: 'Purpose', Value: 'AutoTagger' }],
-    }));
-    await iam.send(new AttachRolePolicyCommand({
-      RoleName: 'auto-tagger-role', PolicyArn: 'arn:aws:iam::aws:policy/ReadOnlyAccess',
     }));
   }
 
-  // 内联策略每次都覆盖写：模板增补了新服务时，重跑一键接入即可同步权限
+  // 内联策略每次都覆盖写：模板增补了新服务、或 TagKeys 限制切换时，重跑一键接入即可同步权限
   await iam.send(new PutRolePolicyCommand({
     RoleName: 'auto-tagger-role',
     PolicyName: 'AutoTagPolicy',
-    PolicyDocument: JSON.stringify(AUTO_TAGGER_INLINE_POLICY()),
+    PolicyDocument: JSON.stringify(AUTO_TAGGER_INLINE_POLICY(policyOpts)),
   }));
-  return !exists;
+
+  // 早期版本挂了 ReadOnlyAccess（可读 S3 对象等业务数据），中央打标只调 TagResources，用不到。
+  // 放在写完内联策略之后摘，保证中间不会无打标权限。
+  const attached = await iam.send(new ListAttachedRolePoliciesCommand({ RoleName: 'auto-tagger-role' }));
+  if ((attached.AttachedPolicies || []).some(p => p.PolicyArn === READ_ONLY_ACCESS_ARN)) {
+    await iam.send(new DetachRolePolicyCommand({ RoleName: 'auto-tagger-role', PolicyArn: READ_ONLY_ACCESS_ARN }));
+    changes.push('已移除 ReadOnlyAccess');
+  }
+  return { created: !exists, changes };
 }
 
 // ============================================================
@@ -1810,7 +2008,19 @@ export async function getDefaultRegions(payerAccountId: string): Promise<string[
  * 查询每个 ACTIVE 成员账户自己的区域启用状态。可选区域是账户级设置，不能用 payer 的状态代替成员。
  * 结果会持久化进 onboarding job，后续轮询不重复扫描全部成员。
  */
-export async function getMemberEnabledRegions(payerAccountId: string): Promise<Record<string, string[]>> {
+export interface MemberRegionDiscovery {
+  regions: Record<string, string[]>;
+  /** 平台进不去或查不到区域的账户：记录后跳过，不让一个账户拖垮整个组织的接入 */
+  unreachable: Array<{ accountId: string; error: string }>;
+}
+
+/**
+ * 读取每个 ACTIVE 成员账户的已启用区域。
+ *
+ * 用 account:ListRegions 而不是 ec2:DescribeRegions：受限账户的 support-quota 收窄后只保留了前者，
+ * 用后者会让受限账户（taoVolt 的两个 tor 账户）每次都 UnauthorizedOperation、整个组织接入失败。
+ */
+export async function getMemberEnabledRegions(payerAccountId: string): Promise<MemberRegionDiscovery> {
   const payerCreds = await assumePayer(payerAccountId);
   if (!payerCreds) throw new Error('该 payer 不在平台配置（config.payers）中，无法查询成员区域');
   const org = new OrganizationsClient({ region: 'us-east-1', credentials: payerCreds });
@@ -1825,22 +2035,32 @@ export async function getMemberEnabledRegions(payerAccountId: string): Promise<R
     token = page.NextToken;
   } while (token);
 
-  const result: Record<string, string[]> = {};
+  const result: MemberRegionDiscovery = { regions: {}, unreachable: [] };
   const batchSize = 5;
   for (let index = 0; index < memberAccountIds.length; index += batchSize) {
     const batch = memberAccountIds.slice(index, index + batchSize);
-    const resolved = await Promise.all(batch.map(async accountId => {
-      const credentials = await assumeToAccount(accountId);
-      const ec2 = new EC2Client({ region: 'us-east-1', credentials });
-      const response = await ec2.send(new DescribeRegionsCommand({ AllRegions: true }));
-      const regions = (response.Regions || [])
-        .filter(item => item.RegionName && (item.OptInStatus === 'opt-in-not-required' || item.OptInStatus === 'opted-in'))
-        .map(item => item.RegionName!)
-        .sort();
-      return { accountId, regions };
+    await Promise.all(batch.map(async accountId => {
+      try {
+        const credentials = await assumeToAccount(accountId);
+        const account = new AccountClient({ region: 'us-east-1', credentials });
+        const listed: Array<{ RegionName?: string; RegionOptStatus?: string }> = [];
+        let next: string | undefined;
+        do {
+          const page = await account.send(new ListRegionsCommand({
+            RegionOptStatusContains: ['ENABLED', 'ENABLED_BY_DEFAULT'], MaxResults: 50, NextToken: next,
+          }));
+          listed.push(...(page.Regions || []));
+          next = page.NextToken;
+        } while (next);
+        const regions = enabledRegionsFromListRegions(listed);
+        if (regions.length === 0) throw new Error('ListRegions 返回空');
+        result.regions[accountId] = regions;
+      } catch (e: any) {
+        result.unreachable.push({ accountId, error: awsErrorDetail(e) });
+      }
     }));
-    for (const item of resolved) result[item.accountId] = item.regions;
   }
+  result.unreachable.sort((a, b) => a.accountId.localeCompare(b.accountId));
   return result;
 }
 
@@ -1853,6 +2073,8 @@ export interface OrgEnabledRegionsResult {
   memberAccountCount: number;
   memberEnabledRegions: Record<string, string[]>;
   regionAccountCounts: Record<string, number>;
+  /** 无法进入、未纳入区域统计的成员账户 */
+  unreachableAccounts: Array<{ accountId: string; error: string }>;
 }
 
 /**
@@ -1860,10 +2082,11 @@ export interface OrgEnabledRegionsResult {
  * 手工索引部署必须使用这份动态结果，不能依赖会随 AWS 新区域发布而过期的固定列表。
  */
 export async function getOrgEnabledRegions(payerAccountId: string): Promise<OrgEnabledRegionsResult> {
-  const [payerAvailability, memberEnabledRegions] = await Promise.all([
+  const [payerAvailability, discovery] = await Promise.all([
     getRegionAvailability(payerAccountId),
     getMemberEnabledRegions(payerAccountId),
   ]);
+  const memberEnabledRegions = discovery.regions;
   const { enabledRegions: payerRegions, defaultRegions } = payerAvailability;
   const allRegions = new Set(payerRegions);
   const regionAccountCounts: Record<string, number> = {};
@@ -1889,6 +2112,7 @@ export async function getOrgEnabledRegions(payerAccountId: string): Promise<OrgE
     memberAccountCount: memberAccountIds.length,
     memberEnabledRegions,
     regionAccountCounts,
+    unreachableAccounts: discovery.unreachable,
   };
 }
 
