@@ -228,6 +228,8 @@ export interface TagOnboardingJob {
     aggregatorRegion?: string;
     localRegions?: string[];
     memberEnabledRegions?: Record<string, string[]>;
+    /** 区域发现时无法进入的成员账户（未纳入索引与打标） */
+    unreachableAccounts?: Array<{ accountId: string; error: string }>;
   };
   attempts: Partial<Record<TagOnboardingPhase, number>>;
   phaseStartedAt: string;

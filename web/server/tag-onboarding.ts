@@ -214,8 +214,13 @@ function handleRunError(jobId: string, error: unknown): void {
   });
 }
 
+/** 打标角色允许写的 key：map-migrated + 该组织的额外标签 key（开启 TagKeys 限制后才生效） */
+function provisionOptions(job: TagOnboardingJob): tagCompliance.ProvisionOptions {
+  return { allowedTagKeys: tagCompliance.normalizeAllowedTagKeys(job.extraTagKey) };
+}
+
 async function runProvision(job: TagOnboardingJob): Promise<void> {
-  const result = await tagCompliance.provisionOrg(job.payerAccountId);
+  const result = await tagCompliance.provisionOrg(job.payerAccountId, provisionOptions(job));
   job = persistArtifacts(job, result);
   const failed = result.steps.filter(step => step.status === 'failed');
   if (failed.length > 0) throw new Error(provisionSummary(result));
@@ -229,7 +234,7 @@ async function runProvision(job: TagOnboardingJob): Promise<void> {
 }
 
 async function runWaitManagementIndex(job: TagOnboardingJob): Promise<void> {
-  const result = await tagCompliance.provisionOrg(job.payerAccountId);
+  const result = await tagCompliance.provisionOrg(job.payerAccountId, provisionOptions(job));
   job = persistArtifacts(job, result);
   const failed = result.steps.filter(step => step.status === 'failed');
   if (failed.length > 0) throw new Error(provisionSummary(result));
@@ -272,11 +277,17 @@ export function findPayerMissingRegions(
 const PAYER_REGION_ENABLE_TIMEOUT_MS = 60 * 60_000;
 
 async function runDeployReIndexes(job: TagOnboardingJob): Promise<void> {
-  const [payerEnabledRegions, defaultRegions, memberEnabledRegions] = await Promise.all([
+  const [payerEnabledRegions, defaultRegions, discovery] = await Promise.all([
     tagCompliance.getEnabledRegions(job.payerAccountId),
     tagCompliance.getDefaultRegions(job.payerAccountId),
     tagCompliance.getMemberEnabledRegions(job.payerAccountId),
   ]);
+  const memberEnabledRegions = discovery.regions;
+  const unreachableIds = discovery.unreachable.map(item => item.accountId);
+  if (unreachableIds.length > 0) {
+    console.warn(`[MAP Onboarding] payer ${job.payerAccountId} 有 ${unreachableIds.length} 个成员账户无法进入，跳过：`
+      + discovery.unreachable.map(item => `${item.accountId}(${item.error})`).join('; '));
+  }
   const aggregatorRegion = 'us-east-1';
 
   const missing = findPayerMissingRegions(aggregatorRegion, payerEnabledRegions, memberEnabledRegions);
@@ -339,8 +350,9 @@ async function runDeployReIndexes(job: TagOnboardingJob): Promise<void> {
   if (failed.length > 0) {
     throw new Error(failed.map(step => `${step.label}: ${step.detail || step.status}`).join('；'));
   }
-  advance(job, 'wait_stacksets', `已按 ${Object.keys(memberEnabledRegions).length} 个成员账户的实际区域状态提交索引部署`, {
-    artifacts: { aggregatorRegion, localRegions, memberEnabledRegions },
+  advance(job, 'wait_stacksets', `已按 ${Object.keys(memberEnabledRegions).length} 个成员账户的实际区域状态提交索引部署`
+    + (unreachableIds.length ? `；跳过 ${unreachableIds.length} 个无法进入的账户：${unreachableIds.join(', ')}` : ''), {
+    artifacts: { aggregatorRegion, localRegions, memberEnabledRegions, unreachableAccounts: discovery.unreachable },
   });
 }
 
@@ -449,7 +461,11 @@ async function runVerify(job: TagOnboardingJob): Promise<void> {
     ].join('；'));
     return;
   }
-  completeJob(job, `组织 ${orgId} 已完成前置资源、索引覆盖和 S3 配置校验`);
+  const unreachable = job.artifacts.unreachableAccounts || [];
+  completeJob(job, `组织 ${orgId} 已完成前置资源、索引覆盖和 S3 配置校验`
+    + (unreachable.length
+      ? `；${unreachable.length} 个账户无法进入、未纳入打标：${unreachable.map(item => item.accountId).join(', ')}`
+      : ''));
 }
 
 async function runJob(jobId: string): Promise<void> {
