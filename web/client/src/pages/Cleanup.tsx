@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { Alert, Button, Card, Descriptions, Input, Select, Space, Table, Tag, message } from 'antd';
+import { Alert, Button, Card, Descriptions, Input, Select, Space, Table, Tag, Tabs, message } from 'antd';
 import { ArrowRightOutlined, DeleteOutlined, ExclamationCircleOutlined, SearchOutlined } from '@ant-design/icons';
 import {
   api,
@@ -11,6 +11,7 @@ import {
   CleanupTimeBasis,
 } from '../api';
 import DangerConfirm from '../components/DangerConfirm';
+import AccountReclaimPanel from '../components/AccountReclaimPanel';
 
 const DEFAULT_REGIONS = [
   'us-east-1', 'us-east-2', 'us-west-1', 'us-west-2',
@@ -151,7 +152,7 @@ function IamUserDetails({ details }: { details: CleanupIamDetails }) {
   );
 }
 
-const CleanupPage: React.FC = () => {
+const ResourceCleanupPanel: React.FC = () => {
   const [accounts, setAccounts] = useState<any[]>([]);
   const [regionData, setRegionData] = useState<any[]>([]);
   const [selectedAccount, setSelectedAccount] = useState('');
@@ -513,5 +514,14 @@ const CleanupPage: React.FC = () => {
     </div>
   );
 };
+
+const CleanupPage: React.FC<{ canCleanup: boolean; canReclaim: boolean; isAdmin?: boolean }> =
+  ({ canCleanup, canReclaim, isAdmin = false }) => {
+    const tabs = [
+      ...(canReclaim ? [{ key: 'reclaim', label: '账户回收', children: <AccountReclaimPanel isAdmin={isAdmin} /> }] : []),
+      ...(canCleanup ? [{ key: 'resources', label: '资源清理', children: <ResourceCleanupPanel /> }] : []),
+    ];
+    return tabs.length ? <Tabs items={tabs} defaultActiveKey={tabs[0].key} destroyOnHidden /> : null;
+  };
 
 export default CleanupPage;

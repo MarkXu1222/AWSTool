@@ -42,6 +42,7 @@ const SettingsPage: React.FC<SettingsPageProps> = ({ onLogout }) => {
     { label: '仅查看：账户清单与全部批次进度', value: 'view' },
     { label: '可使用：发信、停止本人任务、获取本人链接', value: 'operate' },
   ];
+  const RECLAIM_OPTIONS = [{ label: '不开放', value: 'none' }, { label: '可使用账户回收', value: 'operate' }];
 
   useEffect(() => { checkStatus(); loadUsers(); }, []);
 
@@ -93,7 +94,8 @@ const SettingsPage: React.FC<SettingsPageProps> = ({ onLogout }) => {
     try {
       // admin 忽略 allowedPages (后端会视为全部)；viewer 传勾选的
       const allowedPages = values.role === 'admin' ? undefined : (values.allowedPages || []);
-      const res = await api.createUser(values.username, values.password, values.role, allowedPages, !!values.rootAccess, !!values.bulkQuotaAccess, values.rootResetAccess || 'none');
+      const res = await api.createUser(values.username, values.password, values.role, allowedPages, !!values.rootAccess,
+        !!values.bulkQuotaAccess, values.rootResetAccess || 'none', values.accountReclaimAccess || 'none');
       if (res.success) { message.success(res.message); setAddUserOpen(false); addForm.resetFields(); loadUsers(); }
       else message.error(res.error);
     } catch (e: any) { message.error(e.message); }
@@ -102,7 +104,9 @@ const SettingsPage: React.FC<SettingsPageProps> = ({ onLogout }) => {
   const openEditUser = (record: any) => {
     // 未设置 allowed_pages 的旧 non-admin 只默认勾选常规页面，不自动授予运维监控
     const initialPages = Array.isArray(record.allowed_pages) ? record.allowed_pages : DEFAULT_PAGE_KEYS;
-    editForm.setFieldsValue({ role: record.role, allowedPages: initialPages, rootAccess: !!record.root_access, bulkQuotaAccess: !!record.bulk_quota_access, rootResetAccess: record.root_reset_access || 'none' });
+    editForm.setFieldsValue({ role: record.role, allowedPages: initialPages, rootAccess: !!record.root_access,
+      bulkQuotaAccess: !!record.bulk_quota_access, rootResetAccess: record.root_reset_access || 'none',
+      accountReclaimAccess: record.account_reclaim_access || 'none' });
     setEditUserOpen(record);
   };
 
@@ -110,7 +114,9 @@ const SettingsPage: React.FC<SettingsPageProps> = ({ onLogout }) => {
     const values = await editForm.validateFields();
     try {
       const allowedPages = values.role === 'admin' ? undefined : (values.allowedPages || []);
-      const res = await api.updateUser(editUserOpen.id, { role: values.role, allowedPages, rootAccess: !!values.rootAccess, bulkQuotaAccess: !!values.bulkQuotaAccess, rootResetAccess: values.rootResetAccess || 'none' });
+      const res = await api.updateUser(editUserOpen.id, { role: values.role, allowedPages, rootAccess: !!values.rootAccess,
+        bulkQuotaAccess: !!values.bulkQuotaAccess, rootResetAccess: values.rootResetAccess || 'none',
+        accountReclaimAccess: values.accountReclaimAccess || 'none' });
       if (res.success) { message.success(res.message || '已更新'); setEditUserOpen(null); editForm.resetFields(); loadUsers(); }
       else message.error(res.error);
     } catch (e: any) { message.error(e.message); }
@@ -304,6 +310,10 @@ const SettingsPage: React.FC<SettingsPageProps> = ({ onLogout }) => {
                   record.role === 'admin' ? <span>全部（管理员）</span>
                     : <Tag color={v === 'operate' ? 'purple' : v === 'view' ? 'blue' : 'default'}>{v === 'operate' ? '可使用' : v === 'view' ? '仅查看' : '不开放'}</Tag>
                 )},
+                { title: '账户回收', dataIndex: 'account_reclaim_access', width: 110, align: 'center' as const, render: (v: string, record: any) => (
+                  record.role === 'admin' ? <span>可使用（管理员）</span>
+                    : <Tag color={v === 'operate' ? 'blue' : 'default'}>{v === 'operate' ? '可使用' : '不开放'}</Tag>
+                )},
                 { title: '批量提额', dataIndex: 'bulk_quota_access', width: 100, align: 'center' as const, render: (v: boolean, record: any) => (
                   record.role === 'admin'
                     ? <span style={{ color: '#8a94a6', fontSize: 12 }}>恒有</span>
@@ -331,7 +341,7 @@ const SettingsPage: React.FC<SettingsPageProps> = ({ onLogout }) => {
 
       {/* Add user modal */}
       <Modal title="添加用户" open={addUserOpen} onOk={handleAddUser} onCancel={() => setAddUserOpen(false)} okText="创建" destroyOnClose>
-        <Form form={addForm} layout="vertical" initialValues={{ role: 'viewer', allowedPages: DEFAULT_PAGE_KEYS, rootAccess: false, bulkQuotaAccess: false, rootResetAccess: 'none' }}>
+        <Form form={addForm} layout="vertical" initialValues={{ role: 'viewer', allowedPages: DEFAULT_PAGE_KEYS, rootAccess: false, bulkQuotaAccess: false, rootResetAccess: 'none', accountReclaimAccess: 'none' }}>
           <Form.Item name="username" label="用户名" rules={[{ required: true }]}><Input /></Form.Item>
           <Form.Item name="password" label="密码" rules={[{ required: true }, { min: 6, message: '至少 6 位' }]}><Input.Password /></Form.Item>
           <Form.Item name="role" label="角色" extra="admin: 全权限 · partadmin: 能操作但页面受限 · viewer: 只读">
@@ -353,6 +363,10 @@ const SettingsPage: React.FC<SettingsPageProps> = ({ onLogout }) => {
                 <Form.Item name="rootResetAccess" label="批量重置 Root 密码权限"
                   extra="独立控制此功能；仅查看不提供重置链接。可使用允许操作本人任务，不授予 Admin 凭证或删除 MFA 的权限。">
                   <Select options={ROOT_RESET_OPTIONS} />
+                </Form.Item>
+                <Form.Item name="accountReclaimAccess" label="账户回收权限"
+                  extra="独立于资源清理和批量 Root 权限；可进入回收 Tab 操作本人批次。受限账户仅管理员可回收。">
+                  <Select options={RECLAIM_OPTIONS} />
                 </Form.Item>
                 <Form.Item name="bulkQuotaAccess" valuePropName="checked" label="批量提额权限"
                   extra="允许使用『批量提额』页：对某 payer 及其组织下所有账户在多区域批量提交提额请求。未授予时该菜单不可见">
@@ -387,6 +401,10 @@ const SettingsPage: React.FC<SettingsPageProps> = ({ onLogout }) => {
                 <Form.Item name="rootResetAccess" label="批量重置 Root 密码权限"
                   extra="独立控制此功能；仅查看不提供重置链接。可使用允许操作本人任务，不授予 Admin 凭证或删除 MFA 的权限。">
                   <Select options={ROOT_RESET_OPTIONS} />
+                </Form.Item>
+                <Form.Item name="accountReclaimAccess" label="账户回收权限"
+                  extra="独立于资源清理和批量 Root 权限；可进入回收 Tab 操作本人批次。受限账户仅管理员可回收。">
+                  <Select options={RECLAIM_OPTIONS} />
                 </Form.Item>
                 <Form.Item name="bulkQuotaAccess" valuePropName="checked" label="批量提额权限"
                   extra="允许使用『批量提额』页：对某 payer 及其组织下所有账户在多区域批量提交提额请求。未授予时该菜单不可见">

@@ -2,10 +2,17 @@ import React, { useEffect, useRef, useState } from 'react';
 import { Alert, Button, Input, Modal, Space, Spin, Typography } from 'antd';
 import { api, RootEmailJobView, RootManualCaptchaView } from '../api';
 
+type ManualCaptchaJob = Pick<RootEmailJobView, 'id' | 'accountId' | 'status' | 'detail' | 'manualCaptchaAvailable'>;
+type ManualCaptchaApiResult<T> = { success: boolean; data?: T; error?: string };
+type ManualCaptchaProps = {
+  job: ManualCaptchaJob | null; onClose: () => void; onProgress: () => void;
+  fetchCaptcha?: (id: string) => Promise<ManualCaptchaApiResult<RootManualCaptchaView>>;
+  submitCaptcha?: (id: string, values: { challengeId: string; action: 'refresh' | 'submit'; captchaAnswer?: string }) =>
+    Promise<ManualCaptchaApiResult<{ accepted: true }>>;
+};
 /** Keep the live image and answer only in component memory, and discard them when closed. */
-export default function RootManualCaptchaModal({ job, onClose, onProgress }: {
-  job: RootEmailJobView | null; onClose: () => void; onProgress: () => void;
-}) {
+export default function RootManualCaptchaModal({ job, onClose, onProgress,
+  fetchCaptcha = api.rootEmailManualCaptcha, submitCaptcha = api.answerRootEmailManualCaptcha }: ManualCaptchaProps) {
   const [challenge, setChallenge] = useState<RootManualCaptchaView | null>(null);
   const [answer, setAnswer] = useState('');
   const [busy, setBusy] = useState(false);
@@ -24,10 +31,11 @@ export default function RootManualCaptchaModal({ job, onClose, onProgress }: {
     const load = async () => {
       try {
         if (inFlight.current) return;
-        const result = await api.rootEmailManualCaptcha(jobId);
+        const result = await fetchCaptcha(jobId);
         if (disposed || inFlight.current) return;
         if (!result.success) { setChallenge(null); return; }
-        const next: RootManualCaptchaView = result.data;
+        const next = result.data;
+        if (!next) throw new Error('验证码图片不可用');
         if (!/^data:image\/png;base64,[A-Za-z0-9+/=]+$/.test(next.image)) throw new Error('验证码图片格式无效');
         if (challengeId.current !== next.challengeId) {
           challengeId.current = next.challengeId;
@@ -39,7 +47,7 @@ export default function RootManualCaptchaModal({ job, onClose, onProgress }: {
     };
     void load();
     return () => { disposed = true; clearTimeout(timer); };
-  }, [jobId, job?.manualCaptchaAvailable, revision]);
+  }, [jobId, job?.manualCaptchaAvailable, fetchCaptcha, revision]);
 
   const act = async (action: 'refresh' | 'submit') => {
     if (!jobId || !challenge || inFlight.current) return;
@@ -48,7 +56,7 @@ export default function RootManualCaptchaModal({ job, onClose, onProgress }: {
     const current = challenge;
     setChallenge(null);
     try {
-      const result = await api.answerRootEmailManualCaptcha(jobId, { challengeId: current.challengeId, action,
+      const result = await submitCaptcha(jobId, { challengeId: current.challengeId, action,
         ...(action === 'submit' ? { captchaAnswer: answer.trim() } : {}) });
       if (!result.success) throw new Error(result.error || '操作未确认，请刷新验证码后查看');
     } catch (cause: any) { setError(cause.message); }
@@ -57,7 +65,7 @@ export default function RootManualCaptchaModal({ job, onClose, onProgress }: {
     }
   };
   return <Modal title={`手工输入验证码 · ${job?.accountId || ''}`} open={!!job} onCancel={onClose}
-    maskClosable={false} destroyOnClose footer={<Space>
+    maskClosable={false} destroyOnHidden footer={<Space>
       <Button onClick={onClose}>关闭</Button>
       <Button disabled={!challenge || busy} onClick={() => void act('refresh')}>换一张图片</Button>
       <Button type="primary" loading={busy} disabled={!challenge || !/^[A-Za-z0-9]{6}$/.test(answer.trim())}

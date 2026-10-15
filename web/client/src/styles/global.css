@@ -1134,3 +1134,29 @@ code, pre {
   gap: 4px;
   margin-top: 4px;
 }
+
+.reclaim-panel { max-width: 1200px; }
+.reclaim-toolbar, .reclaim-section-heading, .reclaim-batch-selector {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+.reclaim-toolbar .ant-input-search { max-width: 360px; }
+.reclaim-toolbar .ant-select { min-width: 180px; }
+.reclaim-selected { margin-bottom: 12px; display: flex; gap: 4px; align-items: center; flex-wrap: wrap; }
+.reclaim-section-heading { justify-content: space-between; margin-top: 24px; }
+.reclaim-section-heading h3 { font-weight: 600; margin: 0; }
+.reclaim-table-scroll { overflow-x: auto; }
+.reclaim-table-scroll .ant-table { min-width: 820px; }
+.reclaim-steps { display: grid; gap: 6px; }
+.reclaim-step { border-bottom: 1px solid var(--color-border-split); padding: 3px 0 6px; }
+.reclaim-step:last-child { border-bottom: 0; }
+.reclaim-step-title { display: inline-block; min-width: 125px; font-weight: 500; }
+.reclaim-step-reason { color: var(--color-text-secondary); overflow-wrap: anywhere; }
+.reclaim-credentials { width: 100%; }
+.reclaim-credential-row { display: grid; gap: 4px; padding: 8px 0; border-bottom: 1px solid var(--color-border-split); }
+.reclaim-credential-row strong { font-weight: 600; }
+.reclaim-credential-row code { overflow-wrap: anywhere; white-space: normal; }
+.reclaim-form-input { margin-bottom: 12px; }
