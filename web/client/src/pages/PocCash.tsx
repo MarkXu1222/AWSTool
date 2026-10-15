@@ -408,82 +408,6 @@ const PocCashPage: React.FC = () => {
     if (activePartner) form.setFieldValue('partnerKey', activePartner);
   };
 
-  if (result) {
-    return (
-      <Card>
-        <Result
-          status={result.warnings?.length ? 'warning' : 'success'}
-          title={`商机 ${result.opportunityId} ${result.submitted ? '已提交' : '已创建'}`}
-          subTitle={result.title}
-          extra={[
-            <Button key="stage" type="primary" onClick={() => {
-              const id = result.opportunityId;
-              setResult(null); setTab('stage'); setCheckId(id); doCheck(id);
-            }}>查看阶段</Button>,
-            <Button key="new" onClick={resetAll}>再建一个</Button>,
-            <Button key="copy" icon={<CopyOutlined />} onClick={() => {
-              navigator.clipboard.writeText(result.opportunityId);
-              message.success('已复制商机 ID');
-            }}>复制 ID</Button>,
-          ]}
-        />
-        <Descriptions bordered size="small" column={2}>
-          <Descriptions.Item label="Opportunity ID">{result.opportunityId}</Descriptions.Item>
-          <Descriptions.Item label="状态">
-            <Tag color={result.reviewStatus === 'Submitted' ? 'processing' : 'default'}>
-              {result.stage} / {result.reviewStatus}
-            </Tag>
-          </Descriptions.Item>
-          <Descriptions.Item label="Solution">
-            {result.solutionAssociated
-              ? <Tag color="success">{result.solutionId}</Tag>
-              : <Tag color="error">未关联</Tag>}
-          </Descriptions.Item>
-          <Descriptions.Item label="Engagement">{result.engagementId || '—'}</Descriptions.Item>
-          {/* amounts 理论上必有，但残缺响应不该让整页崩掉 —— 这里的
-              解引用曾是「商机 undefined 已创建」白屏的直接崩溃点 */}
-          <Descriptions.Item label="MRR">
-            {result.amounts ? `${result.amounts.mrrUsd.toLocaleString()} USD/月` : '—'}
-          </Descriptions.Item>
-          <Descriptions.Item label="ARR">
-            {result.amounts ? `${result.amounts.arrUsd.toLocaleString()} USD` : '—'}
-          </Descriptions.Item>
-          <Descriptions.Item label="POC 可申请" span={2}>
-            {result.amounts ? (
-              <>
-                <Text strong>{result.amounts.pocUsd.toLocaleString()} USD</Text>
-                <Text type="secondary">
-                  {' '}≈ {(result.amounts.pocUsd * MYR_RATE).toLocaleString(undefined,
-                    { maximumFractionDigits: 2 })} MYR
-                </Text>
-              </>
-            ) : '—'}
-          </Descriptions.Item>
-          {result.arn && (
-            <Descriptions.Item label="ARN" span={2}>
-              <Text copyable style={{ fontSize: 12 }}>{result.arn}</Text>
-            </Descriptions.Item>
-          )}
-        </Descriptions>
-
-        {(result.warnings?.length ?? 0) > 0 && (
-          <Alert style={{ marginTop: 16 }} type="warning" showIcon
-            message="以下步骤未成功，但商机本身已创建"
-            description={<ul style={{ margin: 0, paddingLeft: 18 }}>
-              {(result.warnings || []).map((w, i) => <li key={i}>{w}</li>)}
-            </ul>} />
-        )}
-
-        <Alert style={{ marginTop: 16 }} type="info" showIcon message="下一步"
-          description={`等 AWS 审批通过（ReviewStatus 变为 Approved）后才能把阶段推到 `
-            + `Technical Validation，然后做定价计算器`
-            + (result.amounts
-              ? `（目标 ARR ${result.amounts.arrUsd.toLocaleString()} USD）` : '')
-            + `并提交 POC 资金申请。`} />
-      </Card>
-    );
-  }
-
   /**
    * 补提交商机给 AWS。
    *
@@ -601,6 +525,84 @@ const PocCashPage: React.FC = () => {
     setPocRows([]);
     if (activePartner && tab === 'progress') loadPocRows();
   }, [activePartner]);
+
+  // 结果页的提前 return 必须放在所有 hook 之后：放在 hook 前面时，
+  // 创建成功那次渲染会少跑 hook，触发 React #300 整页崩溃。
+  if (result) {
+    return (
+      <Card>
+        <Result
+          status={result.warnings?.length ? 'warning' : 'success'}
+          title={`商机 ${result.opportunityId} ${result.submitted ? '已提交' : '已创建'}`}
+          subTitle={result.title}
+          extra={[
+            <Button key="stage" type="primary" onClick={() => {
+              const id = result.opportunityId;
+              setResult(null); setTab('stage'); setCheckId(id); doCheck(id);
+            }}>查看阶段</Button>,
+            <Button key="new" onClick={resetAll}>再建一个</Button>,
+            <Button key="copy" icon={<CopyOutlined />} onClick={() => {
+              navigator.clipboard.writeText(result.opportunityId);
+              message.success('已复制商机 ID');
+            }}>复制 ID</Button>,
+          ]}
+        />
+        <Descriptions bordered size="small" column={2}>
+          <Descriptions.Item label="Opportunity ID">{result.opportunityId}</Descriptions.Item>
+          <Descriptions.Item label="状态">
+            <Tag color={result.reviewStatus === 'Submitted' ? 'processing' : 'default'}>
+              {result.stage} / {result.reviewStatus}
+            </Tag>
+          </Descriptions.Item>
+          <Descriptions.Item label="Solution">
+            {result.solutionAssociated
+              ? <Tag color="success">{result.solutionId}</Tag>
+              : <Tag color="error">未关联</Tag>}
+          </Descriptions.Item>
+          <Descriptions.Item label="Engagement">{result.engagementId || '—'}</Descriptions.Item>
+          {/* amounts 理论上必有，但残缺响应不该让整页崩掉 —— 这里的
+              解引用曾是「商机 undefined 已创建」白屏的直接崩溃点 */}
+          <Descriptions.Item label="MRR">
+            {result.amounts ? `${result.amounts.mrrUsd.toLocaleString()} USD/月` : '—'}
+          </Descriptions.Item>
+          <Descriptions.Item label="ARR">
+            {result.amounts ? `${result.amounts.arrUsd.toLocaleString()} USD` : '—'}
+          </Descriptions.Item>
+          <Descriptions.Item label="POC 可申请" span={2}>
+            {result.amounts ? (
+              <>
+                <Text strong>{result.amounts.pocUsd.toLocaleString()} USD</Text>
+                <Text type="secondary">
+                  {' '}≈ {(result.amounts.pocUsd * MYR_RATE).toLocaleString(undefined,
+                    { maximumFractionDigits: 2 })} MYR
+                </Text>
+              </>
+            ) : '—'}
+          </Descriptions.Item>
+          {result.arn && (
+            <Descriptions.Item label="ARN" span={2}>
+              <Text copyable style={{ fontSize: 12 }}>{result.arn}</Text>
+            </Descriptions.Item>
+          )}
+        </Descriptions>
+
+        {(result.warnings?.length ?? 0) > 0 && (
+          <Alert style={{ marginTop: 16 }} type="warning" showIcon
+            message="以下步骤未成功，但商机本身已创建"
+            description={<ul style={{ margin: 0, paddingLeft: 18 }}>
+              {(result.warnings || []).map((w, i) => <li key={i}>{w}</li>)}
+            </ul>} />
+        )}
+
+        <Alert style={{ marginTop: 16 }} type="info" showIcon message="下一步"
+          description={`等 AWS 审批通过（ReviewStatus 变为 Approved）后才能把阶段推到 `
+            + `Technical Validation，然后做定价计算器`
+            + (result.amounts
+              ? `（目标 ARR ${result.amounts.arrUsd.toLocaleString()} USD）` : '')
+            + `并提交 POC 资金申请。`} />
+      </Card>
+    );
+  }
 
   /** 账户 ID → 项目桶。不在任何 payer 下的账户（客户自有/APN 账户）
    *  查不到属正常，留空即可，不编造。 */
