@@ -1,6 +1,9 @@
 import path from 'path';
 import { randomUUID } from 'crypto';
 import { db } from './db';
+import type { AccountReclaimJob } from './account-reclaim-core';
+import { isAccountReclaimPending } from './account-reclaim-core';
+import { canManageAccountReclaimRootJob } from './account-reclaim-permissions';
 import { AwsRootEmailSession, AwsRootPasswordSession, MAX_ROOT_PASSWORD_BROWSER_ATTEMPTS,
   RootEmailBrowserAutomationError, RootPasswordAutomationError, runRootEmailOcr } from './root-email-browser';
 import { canRetryFailedRootEmailJob, canRecheckRootEmailJob, type RootEmailRetryMode, canRetryRootEmailBrowser, type CredentialDownloadSlot, hasNewerRootEmailJob,
@@ -8,7 +11,7 @@ import { canRetryFailedRootEmailJob, canRecheckRootEmailJob, type RootEmailRetry
   manualRootResetFallbackExpiresAt, sendRootEmail, selectRootEmailBatchTargets, rootEmailCatalogAccounts, MAX_ROOT_EMAIL_BROWSER_ATTEMPTS,
   MAX_ROOT_PASSWORD_BATCH, MAX_ROOT_EMAIL_TASKS, ROOT_MANUAL_FALLBACK_TTL_MS } from './root-email-core';
 import { rootEmailDeliveryState, rootEmailMailTimeoutDetail } from './root-email-core';
-import { RootEmailManualInput, ROOT_MANUAL_CAPTCHA_TTL_MS } from './root-email-manual';
+import { RootEmailManualInput, ROOT_MANUAL_CAPTCHA_TTL_MS, type RootManualCaptchaView } from './root-email-manual';
 import { RootEmailExecutionSlot } from './root-email-execution-slot';
 import { reconcileRootEmailSubmission } from './root-email-reconcile';
 import { listConfiguredPayers } from './aws-service';
@@ -49,9 +52,44 @@ function accountEmail(accountId: string) {
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(account.Email || '')) throw new RootEmailError('账户缓存缺少有效的根邮箱，请先同步账户');
   return String(account.Email).trim();
 }
-function authorize(job: Pick<RootEmailJob, 'createdBy' | 'createdByUserId' | 'accountId' | 'email' | 'payerAccountId' | 'payerName'>) {
+function currentReclaimAttempt(job: AccountReclaimJob) {
+  const attempt = job.rootAttempts[job.rootAttempts.length - 1];
+  if (!attempt || job.steps[4]?.key !== 'aws_password') throw new RootEmailError('回收 Root 关联无效', 409);
+  return attempt;
+}
+function linkedReclaim(root: RootEmailJob, requireRunning = false): AccountReclaimJob {
+  const matches = db.listAccountReclaimJobs().filter(job => job.id === root.reclaimJobId);
+  if (root.origin !== 'account-reclaim' || matches.length !== 1) throw new RootEmailError('回收 Root 关联无效', 409);
+  const reclaim = matches[0];
+  const attempt = currentReclaimAttempt(reclaim);
+  if (root.batchId !== attempt.requestId || (attempt.rootEmailJobId && attempt.rootEmailJobId !== root.id)
+    || (reclaim.rootEmailJobId && reclaim.rootEmailJobId !== root.id
+      && reclaim.rootEmailJobId !== attempt.retryOfJobId)
+    || root.accountId !== reclaim.accountId || root.email.toLowerCase() !== reclaim.email.toLowerCase()
+    || root.payerAccountId !== reclaim.payerAccountId || root.payerName !== reclaim.payer
+    || root.createdBy !== reclaim.createdBy || root.createdByUserId !== reclaim.createdByUserId
+    || root.retryOfJobId !== attempt.retryOfJobId) throw new RootEmailError('回收 Root 关联无效', 409);
+  if (requireRunning && (reclaim.status !== 'running' || reclaim.steps[4].state !== 'running')) {
+    throw new RootEmailError('回收任务不在 Root 执行步骤', 409);
+  }
+  return reclaim;
+}
+function assertNoPendingReclaim(accountIds: readonly string[]) {
+  const pending = new Set(db.listAccountReclaimJobs().filter(isAccountReclaimPending).map(job => job.accountId));
+  if (accountIds.some(id => pending.has(id))) throw new RootEmailError('账户已有未结束的回收任务', 409);
+}
+function authorize(job: Pick<RootEmailJob, 'createdBy' | 'createdByUserId' | 'accountId' | 'email'>
+  & Partial<Pick<RootEmailJob, 'id' | 'payerAccountId' | 'payerName' | 'origin' | 'reclaimJobId' | 'batchId' | 'retryOfJobId'>>) {
   const user = db.getUser(job.createdBy);
-  if (!user || String(user.id) !== job.createdByUserId || resolveRootResetAccess(user) !== 'operate') {
+  if (!user || String(user.id) !== job.createdByUserId) throw new RootEmailError('创建者身份已失效，任务已停止', 403);
+  if (job.origin === 'account-reclaim') {
+    const reclaim = linkedReclaim(job as RootEmailJob, true);
+    if (!canManageAccountReclaimRootJob(user, job)) throw new RootEmailError('创建者的回收操作权限已失效，任务已停止', 403);
+    if (db.getRestrictedAccounts().some((record: any) => record.account_id === job.accountId) && user.role !== 'admin') {
+      throw new RootEmailError('受限账户仅 Admin 可回收', 403);
+    }
+    if (reclaim.createdByUserId !== String(user.id)) throw new RootEmailError('回收任务创建者已变化', 403);
+  } else if (job.origin !== undefined || resolveRootResetAccess(user) !== 'operate') {
     throw new RootEmailError('创建者的批量重置操作权限已失效，任务已停止', 403);
   }
   if (accountEmail(job.accountId).toLowerCase() !== job.email.toLowerCase()) throw new RootEmailError('账户邮箱已变化，请重新创建任务', 409);
@@ -108,7 +146,134 @@ export async function rootEmailAvailability() {
     encryptionReady, encryptionDetail };
 }
 
-type RootEmailUser = { id: number | string; username: string; role: string; root_reset_access?: unknown };
+type RootEmailUser = { id: number | string; username: string; role: string; root_reset_access?: unknown;
+  account_reclaim_access?: unknown };
+
+function currentReclaimJob(job: AccountReclaimJob): AccountReclaimJob {
+  const matches = db.listAccountReclaimJobs().filter(item => item.id === job.id);
+  if (matches.length !== 1) throw new RootEmailError('回收任务不存在', 404);
+  const current = matches[0];
+  const attempt = currentReclaimAttempt(current);
+  if (current.status !== 'running' || current.steps[4].state !== 'running'
+    || current.accountId !== job.accountId || current.email !== job.email
+    || current.payerAccountId !== job.payerAccountId || current.payer !== job.payer
+    || current.createdBy !== job.createdBy || current.createdByUserId !== job.createdByUserId
+    || attempt.requestId !== job.rootAttempts[job.rootAttempts.length - 1]?.requestId
+    || attempt.retryOfJobId !== job.rootAttempts[job.rootAttempts.length - 1]?.retryOfJobId) {
+    throw new RootEmailError('回收 Root 入队关联已变化', 409);
+  }
+  const user = db.getUser(current.createdBy);
+  if (!user || String(user.id) !== current.createdByUserId
+    || !canManageAccountReclaimRootJob(user, { origin: 'account-reclaim', reclaimJobId: current.id,
+      createdByUserId: current.createdByUserId })
+    || (db.getRestrictedAccounts().some((record: any) => record.account_id === current.accountId)
+      && user.role !== 'admin')) throw new RootEmailError('创建者的回收操作权限已失效', 403);
+  if (accountEmail(current.accountId).toLowerCase() !== current.email.toLowerCase()) {
+    throw new RootEmailError('账户邮箱已变化，请重新创建任务', 409);
+  }
+  const [target] = selectRootEmailBatchTargets(db.getAccountsCache().accounts, listConfiguredPayers(),
+    [current.accountId], current.payerAccountId);
+  if (target.payerName !== current.payer) throw new RootEmailError('账户所属 payer 已变化', 409);
+  return current;
+}
+
+function findReclaimAttemptRoot(job: AccountReclaimJob): RootEmailJob | null {
+  const attempt = currentReclaimAttempt(job);
+  const candidates = getStore().list().filter(root => root.batchId === attempt.requestId
+    || root.id === attempt.rootEmailJobId);
+  if (candidates.length > 1) throw new RootEmailError('回收 Root 关联重复，禁止重新入队', 409);
+  if (!candidates.length) {
+    if (attempt.rootEmailJobId || (job.rootEmailJobId && job.rootEmailJobId !== attempt.retryOfJobId)) {
+      throw new RootEmailError('已记录的 Root 任务缺失，禁止重新发送', 409);
+    }
+    return null;
+  }
+  linkedReclaim(candidates[0]);
+  return candidates[0];
+}
+
+/** Internal recovery bridge: never create a second Root store or a second browser runner. */
+export async function ensureAccountReclaimRootJob(job: AccountReclaimJob): Promise<RootEmailJob> {
+  let current = currentReclaimJob(job);
+  const existing = findReclaimAttemptRoot(current);
+  if (existing) return existing;
+  const available = await rootEmailAvailability();
+  if (!available.ready || !available.mailboxConfigured || !available.encryptionReady) {
+    throw new RootEmailError(!available.ready ? available.detail : 'Root 自动改密运行依赖不可用', 503);
+  }
+  current = currentReclaimJob(job);
+  const afterWait = findReclaimAttemptRoot(current);
+  if (afterWait) return afterWait;
+  const attempt = currentReclaimAttempt(current);
+  const input = { accountId: current.accountId, email: current.email, createdBy: current.createdBy,
+    createdByUserId: current.createdByUserId, createdFromIp: current.createdFromIp,
+    payerAccountId: current.payerAccountId, payerName: current.payer,
+    origin: 'account-reclaim' as const, reclaimJobId: current.id };
+  let root: RootEmailJob;
+  if (attempt.retryOfJobId) {
+    const source = getStore().get(attempt.retryOfJobId);
+    if (!source || source.origin !== 'account-reclaim' || source.reclaimJobId !== current.id
+      || source.createdByUserId !== current.createdByUserId) throw new RootEmailError('回收重试来源无效', 409);
+    if (source.retriedByJobId) {
+      const child = getStore().get(source.retriedByJobId);
+      if (!child || child.batchId !== attempt.requestId || child.retryOfJobId !== source.id) {
+        throw new RootEmailError('回收重试任务已关联其他请求', 409);
+      }
+      linkedReclaim(child);
+      return child;
+    }
+    const mode: RootEmailRetryMode = canRecheckRootEmailJob(source) ? 'mailbox' : 'resend';
+    root = getStore().createRetry(source.id, input, { batchId: attempt.requestId,
+      payerAccountId: current.payerAccountId, payerName: current.payer, autoSetPassword: true }, mode).job;
+  } else {
+    root = getStore().createBatchGroup([input], { batchId: attempt.requestId, autoSetPassword: true }).jobs[0];
+  }
+  audit(root, 'ROOT_PASSWORD_BATCH_CREATE');
+  tick();
+  if (root.status === 'waiting_mail') tickMail();
+  return root;
+}
+
+export function getAccountReclaimRootJob(job: AccountReclaimJob): RootEmailJob | null {
+  const current = db.listAccountReclaimJobs().find(item => item.id === job.id);
+  if (!current || !current.rootAttempts.length) return null;
+  return findReclaimAttemptRoot(current);
+}
+
+/** A reclaim retry must never supersede a later Root job for the same account (e.g. one created from /rootreset). */
+export function hasNewerRootEmailJobForAccountReclaim(job: AccountReclaimJob): boolean {
+  const root = getAccountReclaimRootJob(job);
+  return !!root && hasNewerRootEmailJob(getStore().list(), root);
+}
+
+export function hasPendingRootEmailForAccount(accountId: string): boolean {
+  return getStore().list().some(root => root.accountId === accountId && isPendingEmailJob(root));
+}
+
+export function assertAccountReclaimRootAdmission(accountIds: readonly string[]): void {
+  const jobs = getStore().list();
+  if (!accountIds.length || new Set(accountIds).size !== accountIds.length
+    || accountIds.some(id => !/^\d{12}$/.test(id))) throw new RootEmailError('回收账户清单无效');
+  for (const accountId of accountIds) {
+    if (jobs.some(root => root.accountId === accountId && isPendingEmailJob(root))) {
+      throw new RootEmailError(`账户 ${accountId} 已有恢复邮件任务，请等待结果`, 409);
+    }
+    if (jobs.some(root => root.accountId === accountId && Date.now() - Date.parse(root.createdAt) < 60_000)) {
+      throw new RootEmailError(`账户 ${accountId} 请至少间隔 60 秒再创建恢复邮件任务`, 429);
+    }
+  }
+  if (jobs.filter(isPendingEmailJob).length + accountIds.length > MAX_ROOT_EMAIL_TASKS) {
+    throw new RootEmailError(`当前队列容量不足（上限 ${MAX_ROOT_EMAIL_TASKS} 个账户），本批次未创建`, 429);
+  }
+}
+
+export function getAccountReclaimRootPassword(job: AccountReclaimJob): string | null {
+  const root = getAccountReclaimRootJob(job);
+  if (!root || !credentialAvailable(root)) return null;
+  return decryptRootPassword(root.encryptedPassword!, {
+    jobId: root.id, accountId: root.accountId, createdByUserId: root.createdByUserId,
+  });
+}
 
 export async function submitRootEmail(accountId: string, user: RootEmailUser, clientIp?: string) {
   const currentStore = getStore();
@@ -116,10 +281,12 @@ export async function submitRootEmail(accountId: string, user: RootEmailUser, cl
   const input = { accountId, email: accountEmail(accountId), createdBy: user.username,
     createdByUserId: String(user.id), createdFromIp: clientIp };
   authorize(input);
+  assertNoPendingReclaim([accountId]);
   const available = await rootEmailAvailability();
   if (!available.ready) throw new RootEmailError(available.detail, 503);
   getStore();
   authorize(input);
+  assertNoPendingReclaim([accountId]);
   const job = currentStore.create(input);
   audit(job, 'ROOT_EMAIL_REQUEST');
   tick();
@@ -173,12 +340,17 @@ function jobView(job: RootEmailJob, user: RootEmailUser) {
     canManage: canManageRootEmailJob(user, job) };
 }
 
-function authorizedManualInput(id: string, user: RootEmailUser) {
+type RootManualPermissionCheck = (user: RootEmailUser, job: RootEmailJob) => boolean;
+function authorizedManualInput(id: string, user: RootEmailUser, check?: RootManualPermissionCheck): {
+  job: RootEmailJob; input: RootEmailManualInput; current: RootEmailUser;
+} {
   const job = getStore().get(id);
   const current = db.getUser(user.username);
-  if (!job || !current || String(current.id) !== String(user.id) || !canManageRootEmailJob(current, job)) {
+  if (!job || !current || String(current.id) !== String(user.id) || !(check || canManageRootEmailJob)(current, job)
+    || (job.origin === 'account-reclaim' && !canManageAccountReclaimRootJob(current, job))) {
     throw new RootEmailError('无权操作此任务的验证码', 403);
   }
+  if (job.origin === 'account-reclaim') linkedReclaim(job, true);
   authorize(job);
   const input = manualInputs.get(id);
   if (job.status !== 'running' || job.phase !== 'manual_captcha' || !input?.available) {
@@ -188,14 +360,17 @@ function authorizedManualInput(id: string, user: RootEmailUser) {
 }
 
 /** Serve only the active cropped challenge to its operator, never in ordinary task lists. */
-export function getRootEmailManualCaptcha(id: string, user: RootEmailUser) {
-  return authorizedManualInput(id, user).input.view();
+export function getRootEmailManualCaptcha(
+  id: string, user: RootEmailUser, check?: RootManualPermissionCheck,
+): RootManualCaptchaView {
+  return authorizedManualInput(id, user, check).input.view();
 }
 
 /** Consume a challenge once; the existing runner performs the subsequent AWS action. */
 export function answerRootEmailManualCaptcha(id: string, user: RootEmailUser,
-  values: { challengeId?: unknown; action?: unknown; captchaAnswer?: unknown }, clientIp?: string) {
-  const { job, input, current } = authorizedManualInput(id, user);
+  values: { challengeId?: unknown; action?: unknown; captchaAnswer?: unknown }, clientIp?: string,
+  check?: RootManualPermissionCheck): { accepted: true } {
+  const { job, input, current } = authorizedManualInput(id, user, check);
   input.respond(values.challengeId, values.action, values.captchaAnswer);
   auditAs(job, current, 'ROOT_EMAIL_MANUAL_CAPTCHA',
     values.action === 'refresh' ? '操作员请求刷新人工验证码' : '操作员提交人工验证码；等待 AWS 确认结果', clientIp);
@@ -273,6 +448,7 @@ export async function submitRootEmailBatch(payerAccountId: string, accountIds: u
   const collect = () => selectRootEmailBatchTargets(db.getAccountsCache().accounts, listConfiguredPayers(), accountIds, payerAccountId, MAX_ROOT_EMAIL_TASKS)
     .map(a => ({ ...a, createdBy: user.username, createdByUserId: String(user.id), createdFromIp: clientIp }));
   const initial = collect();
+  assertNoPendingReclaim(initial.map(input => input.accountId));
   if (confirmation.accountCount !== initial.length) {
     throw new RootEmailError('高风险确认不匹配：请准确输入账户数量');
   }
@@ -284,6 +460,7 @@ export async function submitRootEmailBatch(payerAccountId: string, accountIds: u
   const inputs = collect();
   if (JSON.stringify(inputs) !== JSON.stringify(initial)) throw new RootEmailError('账户信息已变化，请刷新后重新确认', 409);
   inputs.forEach(authorize);
+  assertNoPendingReclaim(inputs.map(input => input.accountId));
   const result = currentStore.createBatchGroup(inputs, { batchId: requestId, autoSetPassword: true });
   if (!result.reused) {
     const payerNames = [...new Set(inputs.map(input => input.payerName))].join('、');
@@ -307,6 +484,7 @@ export async function retryRootEmailJob(id: string, user: RootEmailUser, clientI
   if (!canRetryFailedRootEmailJob(source) || hasNewerRootEmailJob(currentStore.list(), source)) {
     throw new RootEmailError('该任务不满足安全重试条件，可能已提交新密码、已重试或存在更新任务', 409);
   }
+  assertNoPendingReclaim([source.accountId]);
   if (!['resend', 'mailbox'].includes(mode) || (mode === 'mailbox' && !canRecheckRootEmailJob(source))) {
     throw new RootEmailError('该任务不能重新查询邮件', 409);
   }
@@ -327,6 +505,7 @@ export async function retryRootEmailJob(id: string, user: RootEmailUser, clientI
   const input = { accountId: source.accountId, email, createdBy: current.username,
     createdByUserId: String(current.id), createdFromIp: clientIp };
   authorize({ ...input, payerAccountId: source.payerAccountId, payerName: source.payerName });
+  assertNoPendingReclaim([source.accountId]);
   const meta = { batchId: randomUUID(), payerAccountId: source.payerAccountId!, payerName: source.payerName!,
     autoSetPassword: true as const };
   const result = readyStore.createRetry(source.id, input, meta, mode);
@@ -748,6 +927,7 @@ export function prepareRootCredentialCsv(id: string, user: RootEmailUser,
   slot: CredentialDownloadSlot, requestIp?: string) {
   const currentStore = getStore();
   const jobs = batchJobs(id);
+  if (jobs.some(job => job.origin !== undefined)) throw new RootEmailError('回收任务不提供 Root CSV', 403);
   const current = db.getUser(user.username);
   if (!current || String(current.id) !== String(user.id) || resolveRootResetAccess(current) !== 'operate') {
     throw new RootEmailError('当前用户无 Root 凭证下载权限', 403);

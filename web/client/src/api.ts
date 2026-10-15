@@ -6,6 +6,44 @@ import { cacheGet, cacheSet } from './utils/cache';
 
 const BASE = '/api';
 export type RootResetAccess = 'none' | 'view' | 'operate';
+export type AccountReclaimAccess = 'none' | 'operate';
+export type ApiResponse<T> = { success: true; data: T } | { success: false; error: string; code?: string };
+export interface MeResponse {
+  username: string; role: string; mfaEnabled: boolean; allowedPages: string[];
+  rootAccess: boolean; bulkQuotaAccess: boolean; rootResetAccess: RootResetAccess;
+  accountReclaimAccess: AccountReclaimAccess; unauthorized?: boolean; error?: string;
+}
+export type AccountReclaimStepKey = 'forward' | 'mailbox_password' | 'root_mfa' | 'root_recovery' | 'aws_password';
+export type AccountReclaimStepState = 'pending' | 'running' | 'succeeded' | 'skipped' | 'failed' | 'unknown' | 'not_run';
+export type AccountReclaimStatus = 'queued' | 'running' | 'completed' | 'partial' | 'failed' | 'cancelled';
+export interface AccountReclaimStep {
+  key: AccountReclaimStepKey; state: AccountReclaimStepState; message: string;
+  errorCode?: string; recommendation?: string; startedAt?: string; finishedAt?: string; attempts: number;
+}
+export interface AccountReclaimJobView {
+  id: string; batchId: string; accountId: string; accountName: string; email: string;
+  payer: string; payerAccountId: string; createdBy: string; createdAt: string; updatedAt: string;
+  startedAt?: string; finishedAt?: string; status: AccountReclaimStatus;
+  steps: AccountReclaimStep[]; retryCount: number; canRetry: boolean; retryAvailableAt?: string;
+  manualCaptchaAvailable: boolean; manualCaptchaExpiresAt?: string;
+  credentialsAvailable: { aws: boolean; mailbox: boolean };
+}
+export interface AccountReclaimBatchView {
+  id: string; createdBy: string; createdAt: string; updatedAt: string; status: AccountReclaimStatus;
+  total: number; queued: number; running: number; completed: number; partial: number;
+  failed: number; cancelled: number; canCancel: boolean; jobs: AccountReclaimJobView[];
+}
+export interface AccountReclaimCatalogQuery { q?: string; payer?: string; page?: number; pageSize?: 20 | 50 | 100 }
+export interface AccountReclaimCatalog {
+  accounts: Array<{ accountId: string; accountName: string; email: string; payer: string;
+    payerAccountId: string; eligible: boolean; reasonCode?: string; reason?: string; restricted?: boolean }>;
+  total: number; page: number; pageSize: 20 | 50 | 100; cachedAt: string; maxBatchSize: 20;
+  readiness: { ready: boolean; message: string };
+}
+export interface AccountReclaimCredentials {
+  accountId: string; email: string; awsPassword: string | null; mailboxPassword: string | null;
+  awsMessage: string; mailboxMessage: string;
+}
 
 export interface RootEmailJobView {
   canManage: boolean;
@@ -119,7 +157,11 @@ async function request(path: string, options: RequestInit = {}) {
     return { ...body, unauthorized: true };
   }
 
-  return res.json();
+  const body = await res.json();
+  if (path.startsWith('/aws/account-reclaim/') && res.status === 403 && !body.code) {
+    return { ...body, code: 'FORBIDDEN' };
+  }
+  return body;
 }
 
 export type BillingExportJobStatus =
@@ -377,7 +419,7 @@ export const api = {
     }
     return res;
   },
-  me: () => request('/auth/me'),
+  me: (): Promise<MeResponse> => request('/auth/me'),
   // 运维监控（仅 admin）。range: '1h' | '6h' | '24h'
   getOpsOverview: (range: '1h' | '6h' | '24h' = '1h') => request(`/ops/overview?range=${range}`),
   setupMFA: () => request('/auth/mfa/setup', { method: 'POST' }),
@@ -804,6 +846,27 @@ export const api = {
     request(`/aws/root-email/jobs/${encodeURIComponent(id)}/manual-captcha/answer`, {
       method: 'POST', cache: 'no-store', body: JSON.stringify(body),
     }),
+  accountReclaimCatalog: (query: AccountReclaimCatalogQuery = {}): Promise<ApiResponse<AccountReclaimCatalog>> =>
+    request(`/aws/account-reclaim/catalog${qs({ q: query.q, payer: query.payer,
+      page: query.page?.toString(), pageSize: query.pageSize?.toString() })}`),
+  createAccountReclaimBatch: (input: { accountIds: string[]; requestId: string; confirmAccountCount: number; totpCode: string }):
+    Promise<ApiResponse<{ batch: AccountReclaimBatchView; reused: boolean }>> =>
+    request('/aws/account-reclaim/batches', { method: 'POST', body: JSON.stringify(input) }),
+  accountReclaimBatches: (): Promise<ApiResponse<AccountReclaimBatchView[]>> => request('/aws/account-reclaim/batches'),
+  accountReclaimBatch: (id: string): Promise<ApiResponse<AccountReclaimBatchView>> =>
+    request(`/aws/account-reclaim/batches/${encodeURIComponent(id)}`),
+  retryAccountReclaimJob: (id: string, totpCode: string): Promise<ApiResponse<AccountReclaimJobView>> =>
+    request(`/aws/account-reclaim/jobs/${encodeURIComponent(id)}/retry`, { method: 'POST', body: JSON.stringify({ totpCode }) }),
+  cancelAccountReclaimBatch: (id: string): Promise<ApiResponse<{ cancelled: number; remaining: number }>> =>
+    request(`/aws/account-reclaim/batches/${encodeURIComponent(id)}/cancel`, { method: 'POST', body: '{}' }),
+  accountReclaimCredentials: (id: string): Promise<ApiResponse<AccountReclaimCredentials>> =>
+    request(`/aws/account-reclaim/jobs/${encodeURIComponent(id)}/credentials`, { method: 'POST', cache: 'no-store' }),
+  accountReclaimManualCaptcha: (id: string): Promise<ApiResponse<RootManualCaptchaView>> =>
+    request(`/aws/account-reclaim/jobs/${encodeURIComponent(id)}/manual-captcha`, { method: 'POST', cache: 'no-store' }),
+  answerAccountReclaimManualCaptcha: (id: string, input: { challengeId: string; action: 'refresh' | 'submit'; captchaAnswer?: string }):
+    Promise<ApiResponse<{ accepted: true }>> => request(`/aws/account-reclaim/jobs/${encodeURIComponent(id)}/manual-captcha/answer`, {
+      method: 'POST', cache: 'no-store', body: JSON.stringify(input),
+    }),
   rootEmailCatalog: () => request('/aws/root-email/catalog'),
   rootEmailBatches: () => request('/aws/root-email/batches'),
   rootEmailBatch: (id: string) => request(`/aws/root-email/batches/${encodeURIComponent(id)}`),
@@ -855,9 +918,9 @@ export const api = {
     request('/auth/change-password', { method: 'POST', body: JSON.stringify({ currentPassword, newPassword }) }),
   // User management
   listUsers: () => request('/auth/users'),
-  createUser: (username: string, password: string, role: string, allowedPages?: string[], rootAccess?: boolean, bulkQuotaAccess?: boolean, rootResetAccess?: RootResetAccess) =>
-    request('/auth/users', { method: 'POST', body: JSON.stringify({ username, password, role, allowedPages, rootAccess, bulkQuotaAccess, rootResetAccess }) }),
-  updateUser: (id: number, patch: { role?: string; allowedPages?: string[]; rootAccess?: boolean; bulkQuotaAccess?: boolean; rootResetAccess?: RootResetAccess }) =>
+  createUser: (username: string, password: string, role: string, allowedPages?: string[], rootAccess?: boolean, bulkQuotaAccess?: boolean, rootResetAccess?: RootResetAccess, accountReclaimAccess?: AccountReclaimAccess) =>
+    request('/auth/users', { method: 'POST', body: JSON.stringify({ username, password, role, allowedPages, rootAccess, bulkQuotaAccess, rootResetAccess, accountReclaimAccess }) }),
+  updateUser: (id: number, patch: { role?: string; allowedPages?: string[]; rootAccess?: boolean; bulkQuotaAccess?: boolean; rootResetAccess?: RootResetAccess; accountReclaimAccess?: AccountReclaimAccess }) =>
     request(`/auth/users/${id}`, { method: 'PUT', body: JSON.stringify(patch) }),
   deleteUser: (id: number) => request(`/auth/users/${id}`, { method: 'DELETE' }),
   resetUserPassword: (id: number, newPassword: string) =>

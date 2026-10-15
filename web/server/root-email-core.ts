@@ -23,6 +23,8 @@ export interface RootEmailJob {
   email: string;
   createdBy: string;
   createdByUserId: string;
+  origin?: 'account-reclaim';
+  reclaimJobId?: string;
   createdFromIp?: string;
   status: RootEmailStatus;
   phase: RootEmailPhase;
@@ -167,7 +169,7 @@ export function hasNewerRootEmailJob(jobs: Pick<RootEmailJob, 'id' | 'accountId'
     && Date.parse(job.createdAt) > createdAt);
 }
 type RootEmailInput = Pick<RootEmailJob, 'accountId' | 'email' | 'createdBy' | 'createdByUserId'>
-  & Partial<Pick<RootEmailJob, 'createdFromIp' | 'payerAccountId' | 'payerName'>>;
+  & Partial<Pick<RootEmailJob, 'createdFromIp' | 'payerAccountId' | 'payerName' | 'origin' | 'reclaimJobId'>>;
 export type RootEmailBatchMeta = Required<Pick<RootEmailJob, 'batchId' | 'payerAccountId' | 'payerName'>>
   & { autoSetPassword: true };
 type RootEmailBatchRequest = Pick<RootEmailBatchMeta, 'batchId' | 'autoSetPassword'>
@@ -259,6 +261,10 @@ export class RootEmailStore {
       || (j.failureCategory !== undefined && !ROOT_EMAIL_BROWSER_CATEGORIES.includes(j.failureCategory))
       || (j.retryOfJobId !== undefined && !JOB_ID.test(j.retryOfJobId))
       || (j.retriedByJobId !== undefined && !JOB_ID.test(j.retriedByJobId))
+      || (j.origin !== undefined && j.origin !== 'account-reclaim')
+      || (j.origin === 'account-reclaim' && (typeof j.reclaimJobId !== 'string' || !JOB_ID.test(j.reclaimJobId)
+        || j.autoSetPassword !== true || !j.batchId))
+      || (j.origin !== 'account-reclaim' && j.reclaimJobId !== undefined)
       || (j.manualFallbackReason !== undefined && !ROOT_MANUAL_FALLBACK_REASONS.includes(j.manualFallbackReason))
       || (j.manualFallbackExpiresAt !== undefined && (typeof j.manualFallbackExpiresAt !== 'string'
         || !Number.isFinite(Date.parse(j.manualFallbackExpiresAt)))))) {
@@ -270,6 +276,7 @@ export class RootEmailStore {
     const validRetryPair = (source: RootEmailJob, child: RootEmailJob) => source.id !== child.id
       && canRetryFailedRootEmailJob({ ...source, retriedByJobId: undefined }) && child.autoSetPassword === true
       && source.accountId === child.accountId && source.email.toLowerCase() === child.email.toLowerCase()
+      && source.origin === child.origin && source.reclaimJobId === child.reclaimJobId
       && source.payerAccountId === child.payerAccountId && source.payerName === child.payerName
       && source.batchId !== child.batchId && Date.parse(child.createdAt) > Date.parse(source.createdAt);
     for (const job of jobs) {
@@ -325,6 +332,11 @@ export class RootEmailStore {
     if (!/^\d{12}$/.test(input.accountId) || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(input.email)) {
       throw new RootEmailError('账户 ID 或根邮箱无效');
     }
+    if ((input.origin !== undefined && input.origin !== 'account-reclaim')
+      || (input.origin === 'account-reclaim' && (!input.reclaimJobId || !JOB_ID.test(input.reclaimJobId)))
+      || (input.origin !== 'account-reclaim' && input.reclaimJobId !== undefined)) {
+      throw new RootEmailError('任务来源或回收关联无效', 409);
+    }
     if (this.jobs.some(j => j.accountId === input.accountId && isPendingEmailJob(j))) {
       throw new RootEmailError(`账户 ${input.accountId} 已有恢复邮件任务，请等待结果`, 409);
     }
@@ -339,6 +351,9 @@ export class RootEmailStore {
       createdAt: now, updatedAt: now, detail: '等待发送恢复邮件' };
   }
   create(input: RootEmailInput): RootEmailJob {
+    if (input.origin !== undefined || input.reclaimJobId !== undefined) {
+      throw new RootEmailError('回收任务必须通过内部自动改密批次入队', 409);
+    }
     this.validate(input);
     if (this.jobs.filter(isPendingEmailJob).length >= MAX_ROOT_EMAIL_TASKS) throw new RootEmailError('队列已满，请稍后重试', 429);
     const job = this.makeJob(input);
@@ -357,6 +372,9 @@ export class RootEmailStore {
       throw new RootEmailError('该任务不能重新查询邮件', 409);
     }
     if (input.accountId !== source.accountId || input.email.toLowerCase() !== source.email.toLowerCase()
+      || input.origin !== source.origin || input.reclaimJobId !== source.reclaimJobId
+      || (source.origin === 'account-reclaim'
+        && (input.createdBy !== source.createdBy || input.createdByUserId !== source.createdByUserId))
       || meta.payerAccountId !== source.payerAccountId || meta.payerName !== source.payerName
       || !JOB_ID.test(meta.batchId) || this.jobs.some(job => job.batchId === meta.batchId)) {
       throw new RootEmailError('重试任务参数与原任务不匹配', 409);
@@ -398,6 +416,7 @@ export class RootEmailStore {
     if (previous.length) {
       if (previous.length !== targets.length || previous.some(j => j.autoSetPassword !== true
         || !targets.some(i => i.accountId === j.accountId && i.createdByUserId === j.createdByUserId
+          && i.createdBy === j.createdBy && i.origin === j.origin && i.reclaimJobId === j.reclaimJobId
           && i.payerAccountId === j.payerAccountId && i.payerName === j.payerName
           && i.email.toLowerCase() === j.email.toLowerCase()))) {
         throw new RootEmailError('请求标识已用于另一个批次，请刷新后重试', 409);

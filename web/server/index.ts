@@ -15,6 +15,7 @@ import { startScheduler, getSchedulerStatus } from './scheduler';
 import { startTagOnboardingRunner } from './tag-onboarding';
 import { startBillingExportRunner, stopBillingExportRunner } from './billing-export-jobs';
 import { startRootEmailRunner, stopRootEmailRunner } from './root-email-jobs';
+import { startAccountReclaimRunner, stopAccountReclaimRunner } from './account-reclaim';
 import { opsRouter, requireOpsAccess, recordRequest, startOpsMonitor, stopOpsMonitor } from './ops-monitor';
 import { recordHttpStatus } from './security-alerts';
 
@@ -175,6 +176,7 @@ const server = app.listen(Number(PORT), '127.0.0.1', async () => {
     // 先取得 billing runner 的 OS 单实例锁；失败时不允许此进程继续提供可能竞争写 DB 的 API。
     await startBillingExportRunner();
     startRootEmailRunner();
+    startAccountReclaimRunner();
     startScheduler();
     startTagOnboardingRunner();
     startOpsMonitor();
@@ -188,8 +190,9 @@ let shutdownPromise: Promise<void> | null = null;
 function shutdown(signal: NodeJS.Signals): Promise<void> {
   if (shutdownPromise) return shutdownPromise;
   shutdownPromise = (async () => {
-    console.log(`[Shutdown] 收到 ${signal}，停止接收请求并清理账单导出进程`);
+    console.log(`[Shutdown] 收到 ${signal}，停止接收请求并清理后台任务`);
     try { stopOpsMonitor(); } catch {}
+    const stopReclaim = stopAccountReclaimRunner();
     const closeServer = new Promise<void>((resolve, reject) => {
       server.close(error => error ? reject(error) : resolve());
     });
@@ -199,10 +202,10 @@ function shutdown(signal: NodeJS.Signals): Promise<void> {
     });
     try {
       await Promise.race([
-        Promise.all([stopBillingExportRunner(), stopRootEmailRunner(), closeServer]),
+        Promise.all([stopReclaim, stopBillingExportRunner(), stopRootEmailRunner(), closeServer]),
         deadline,
       ]);
-      console.log('[Shutdown] 账单导出进程与 HTTP server 已安全停止');
+      console.log('[Shutdown] 后台任务与 HTTP server 已安全停止');
       process.exit(0);
     } catch (error) {
       console.error('[Shutdown] 优雅停机失败:', error);

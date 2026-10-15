@@ -5,6 +5,8 @@ import fs from 'fs';
 import path from 'path';
 import { createCipheriv, createDecipheriv, randomBytes, createHash, createHmac, randomUUID } from 'crypto';
 import { isRootResetAccess } from './root-reset-permissions';
+import { isValidMailboxPassword, type AccountReclaimJob } from './account-reclaim-core';
+import { isAccountReclaimAccess } from './account-reclaim-permissions';
 
 const DB_PATH = process.env.DB_PATH || path.join(__dirname, '../../data/db.json');
 
@@ -80,9 +82,10 @@ export function deriveEncryptionKey(purpose: string): Buffer {
   return deriveEncryptionKeyring(purpose)[0].key;
 }
 
-export type EncryptedFieldKind = 'mfa' | 'external-id';
+export type EncryptedFieldKind = 'mfa' | 'external-id' | 'mailbox-password';
 
 function validateDecryptedField(value: string, kind: EncryptedFieldKind): boolean {
+  if (kind === 'mailbox-password') return isValidMailboxPassword(value);
   if (kind === 'mfa') return value.length >= 16 && value.length <= 128 && /^[A-Z2-7]+={0,6}$/i.test(value);
   return value.length >= 2 && value.length <= 1224 && /^[A-Za-z0-9_+=,.@:/-]+$/.test(value);
 }
@@ -133,6 +136,8 @@ export function decryptLegacyFieldWithKeys(
 
 /** Authenticate the current field format, or strictly validate legacy CBC plaintext before accepting a rotation key. */
 export function decryptField(data: string, kind: EncryptedFieldKind): string {
+  // Mailbox passwords were only ever written as authenticated ciphertext; no plaintext/CBC compatibility.
+  if (kind === 'mailbox-password' && !data.startsWith('gcmf1:')) throw new Error('敏感字段密文格式无效');
   if (!data.includes(':')) {
     if (!validateDecryptedField(data, kind)) throw new Error('敏感字段明文格式无效');
     return data; // Plaintext migration compatibility.
@@ -355,12 +360,13 @@ interface DBSchema {
   billing_export_jobs: BillingExportJob[];
   poc_calculator_ledger: PocCalculatorLedgerEntry[];
   temp_admin_grants: TempAdminGrant[];
+  account_reclaim_jobs: AccountReclaimJob[];
   [key: string]: any;
 }
 
 const ARRAY_FIELDS = [
   'users', 'quota_requests', 'audit_log', 'region_data', 'accounts_cache', 'tag_onboarding_jobs',
-  'billing_export_jobs', 'poc_calculator_ledger', 'temp_admin_grants',
+  'billing_export_jobs', 'poc_calculator_ledger', 'temp_admin_grants', 'account_reclaim_jobs',
 ] as const;
 
 // In-memory cache to avoid reading file on every request
@@ -376,7 +382,7 @@ function emptyDB(): DBSchema {
   return {
     users: [], quota_requests: [], audit_log: [], region_data: [], accounts_cache: [],
     accounts_cache_time: '', tag_onboarding_jobs: [], billing_export_jobs: [], poc_calculator_ledger: [],
-    temp_admin_grants: [],
+    temp_admin_grants: [], account_reclaim_jobs: [],
   };
 }
 
@@ -832,6 +838,36 @@ export function listPocCalculatorEntries(): PocCalculatorLedgerEntry[] {
   return readDB().poc_calculator_ledger.map(entry => ({ ...entry }));
 }
 
+// === 账户回收记录（account-reclaim.ts）：永久保留，不按条数或时间裁剪 ===
+
+export class AccountReclaimStoreError extends Error {
+  constructor(message: string, readonly code: string, readonly statusCode: 404 | 409) {
+    super(message);
+    this.name = 'AccountReclaimStoreError';
+  }
+}
+
+const ACCOUNT_RECLAIM_IMMUTABLE_FIELDS = [
+  'id', 'batchId', 'accountId', 'accountName', 'email', 'payer', 'payerAccountId',
+  'createdBy', 'createdByUserId', 'createdFromIp', 'createdAt',
+] as const;
+
+const cloneReclaimJob = (job: AccountReclaimJob): AccountReclaimJob => structuredClone(job);
+
+function assertRootAttemptsAppendOnly(current: AccountReclaimJob, next: AccountReclaimJob['rootAttempts']) {
+  if (!Array.isArray(next) || next.length < current.rootAttempts.length) {
+    throw new AccountReclaimStoreError('Root 尝试记录只能追加', 'ACCOUNT_RECLAIM_ATTEMPTS_IMMUTABLE', 409);
+  }
+  current.rootAttempts.forEach((attempt, index) => {
+    const candidate = next[index];
+    if (!candidate || candidate.requestId !== attempt.requestId || candidate.createdAt !== attempt.createdAt
+      || candidate.retryOfJobId !== attempt.retryOfJobId
+      || (attempt.rootEmailJobId !== undefined && candidate.rootEmailJobId !== attempt.rootEmailJobId)) {
+      throw new AccountReclaimStoreError('Root 尝试记录只能补关联，不能覆盖', 'ACCOUNT_RECLAIM_ATTEMPTS_IMMUTABLE', 409);
+    }
+  });
+}
+
 // === Auto-backup: keep validated daily rotating copies of both permanent stores ===
 const BACKUP_RETENTION_DAYS = 7;
 let lastBackupDay = '';
@@ -1072,6 +1108,8 @@ export const db = {
       root_access: (u as any).root_access === true,
       bulk_quota_access: (u as any).bulk_quota_access === true,
       root_reset_access: isRootResetAccess((u as any).root_reset_access) ? (u as any).root_reset_access : 'none',
+      account_reclaim_access: isAccountReclaimAccess((u as any).account_reclaim_access)
+        ? (u as any).account_reclaim_access : 'none',
       created_at: u.created_at,
     }));
   },
@@ -1184,6 +1222,64 @@ export const db = {
     return { ...grant };
   },
 
+  // 账户回收任务（account-reclaim.ts）
+  listAccountReclaimJobs(): AccountReclaimJob[] {
+    return readDB().account_reclaim_jobs.map(cloneReclaimJob);
+  },
+
+  /** Insert a whole batch with one durable write; any conflict rejects every job. */
+  insertAccountReclaimJobs(jobs: AccountReclaimJob[]) {
+    if (!jobs.length) throw new AccountReclaimStoreError('回收批次不能为空', 'ACCOUNT_RECLAIM_EMPTY', 409);
+    const data = readDB();
+    const existing = data.account_reclaim_jobs;
+    const ids = new Set(existing.map(job => job.id));
+    const batchIds = new Set(existing.map(job => job.batchId));
+    const activeAccounts = new Set(existing
+      .filter(job => job.status === 'queued' || job.status === 'running').map(job => job.accountId));
+    const seenAccounts = new Set<string>();
+    for (const job of jobs) {
+      if (ids.has(job.id)) throw new AccountReclaimStoreError('回收任务 ID 重复', 'ACCOUNT_RECLAIM_DUPLICATE_ID', 409);
+      ids.add(job.id);
+      if (batchIds.has(job.batchId)) {
+        throw new AccountReclaimStoreError('请求标识已用于另一个回收批次', 'ACCOUNT_RECLAIM_REQUEST_REUSED', 409);
+      }
+      if (activeAccounts.has(job.accountId) || seenAccounts.has(job.accountId)) {
+        throw new AccountReclaimStoreError(`账户 ${job.accountId} 已有未结束的回收任务`, 'ACCOUNT_RECLAIM_ACTIVE', 409);
+      }
+      seenAccounts.add(job.accountId);
+      if (job.retryCount !== 0 || job.revision !== 0 || job.outcomeRevision !== 0 || job.status !== 'queued') {
+        throw new AccountReclaimStoreError('新回收任务的计数字段必须为初始值', 'ACCOUNT_RECLAIM_INVALID', 409);
+      }
+    }
+    if (new Set(jobs.map(job => job.batchId)).size !== 1) {
+      throw new AccountReclaimStoreError('同一批次必须共用 batchId', 'ACCOUNT_RECLAIM_INVALID', 409);
+    }
+    data.account_reclaim_jobs = [...existing, ...jobs.map(cloneReclaimJob)];
+    writeDB(data);
+  },
+
+  /** Compare-and-swap update: immutable identity fields are preserved and revision must match. */
+  updateAccountReclaimJob(id: string, expectedRevision: number, updates: Partial<AccountReclaimJob>): AccountReclaimJob {
+    const data = readDB();
+    const job = data.account_reclaim_jobs.find(item => item.id === id);
+    if (!job) throw new AccountReclaimStoreError('回收任务不存在', 'ACCOUNT_RECLAIM_NOT_FOUND', 404);
+    if (job.revision !== expectedRevision) {
+      throw new AccountReclaimStoreError('回收任务已被其他操作更新，请刷新后重试', 'ACCOUNT_RECLAIM_REVISION_CONFLICT', 409);
+    }
+    if (updates.rootAttempts !== undefined) assertRootAttemptsAppendOnly(job, updates.rootAttempts);
+    if (updates.outcomeRevision !== undefined && updates.outcomeRevision < job.outcomeRevision) {
+      throw new AccountReclaimStoreError('结果版本不能回退', 'ACCOUNT_RECLAIM_INVALID', 409);
+    }
+    const immutable: Record<string, unknown> = {};
+    for (const field of ACCOUNT_RECLAIM_IMMUTABLE_FIELDS) immutable[field] = job[field];
+    const next = { ...job, ...structuredClone(updates), ...immutable,
+      revision: job.revision + 1, updatedAt: new Date().toISOString() } as AccountReclaimJob;
+    if (job.createdFromIp === undefined) delete (next as any).createdFromIp;
+    data.account_reclaim_jobs = data.account_reclaim_jobs.map(item => item.id === id ? next : item);
+    writeDB(data);
+    return cloneReclaimJob(next);
+  },
+
   // 账户角色自愈状态 —— support-quota 可用性 + 是否存在常驻 admin-console（应为无）
   getAccountRoles(): any[] {
     const data = readDB() as any;
@@ -1236,6 +1332,7 @@ export function migrateEncryptMFASecrets() {
   const data = readDB();
   let mfaMigrated = 0;
   let externalIdsMigrated = 0;
+  let mailboxPasswordsMigrated = 0;
   for (const user of data.users) {
     if (!user.mfa_secret) continue;
     const plaintext = decryptField(user.mfa_secret, 'mfa');
@@ -1250,7 +1347,14 @@ export function migrateEncryptMFASecrets() {
     record.external_id_enc = encryptField(plaintext, 'external-id');
     externalIdsMigrated++;
   }
-  if (mfaMigrated > 0 || externalIdsMigrated > 0) {
+  for (const job of data.account_reclaim_jobs) {
+    if (!job.encryptedMailboxPassword) continue;
+    const plaintext = decryptField(job.encryptedMailboxPassword, 'mailbox-password');
+    if (encryptedFieldUsesCurrentKey(job.encryptedMailboxPassword, 'mailbox-password')) continue;
+    job.encryptedMailboxPassword = encryptField(plaintext, 'mailbox-password');
+    mailboxPasswordsMigrated++;
+  }
+  if (mfaMigrated > 0 || externalIdsMigrated > 0 || mailboxPasswordsMigrated > 0) {
     const now = new Date().toISOString();
     const lastAuditId = data.audit_log.reduce((max, log) => Math.max(max, Number(log.id) || 0), 0);
     data.audit_log.push({
@@ -1258,13 +1362,13 @@ export function migrateEncryptMFASecrets() {
       user_id: null,
       username: 'system',
       action: 'ENCRYPTION_KEY_ROTATION_MIGRATE',
-      detail: `已将 ${mfaMigrated} 个 MFA 密钥和 ${externalIdsMigrated} 个 ExternalId 原子重加密到 current key`,
+      detail: `已将 ${mfaMigrated} 个 MFA 密钥、${externalIdsMigrated} 个 ExternalId 和 ${mailboxPasswordsMigrated} 个回收邮箱密码原子重加密到 current key`,
       ip: null,
       created_at: now,
     });
     if (data.audit_log.length > 5000) data.audit_log = data.audit_log.slice(-5000);
     // Sensitive fields and their audit event share one durable DB replacement.
     writeDB(data);
-    console.log(`✅ Re-encrypted sensitive fields: MFA=${mfaMigrated}, ExternalId=${externalIdsMigrated}`);
+    console.log(`✅ Re-encrypted sensitive fields: MFA=${mfaMigrated}, ExternalId=${externalIdsMigrated}, MailboxPassword=${mailboxPasswordsMigrated}`);
   }
 }

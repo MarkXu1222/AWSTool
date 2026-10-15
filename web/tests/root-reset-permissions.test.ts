@@ -32,6 +32,19 @@ test('operators manage only their own jobs; viewers cannot retrieve even their o
   assert.equal(user.root_access, false);
 });
 
+test('reclaim-origin jobs are invisible to every legacy Root permission, including admin', () => {
+  const reclaim = { createdByUserId: '2', origin: 'account-reclaim' };
+  for (const user of [
+    { id: 2, role: 'viewer', root_reset_access: 'operate' },
+    { id: 3, role: 'admin', root_reset_access: 'operate' },
+  ]) {
+    assert.equal(canViewRootEmailJob(user, reclaim), false);
+    assert.equal(canManageRootEmailJob(user, reclaim), false);
+    assert.equal(canRetrieveRootEmailManualLink(user, reclaim), false);
+    assert.equal(canViewRootEmailJob(user, { ...reclaim, origin: 'unknown' }), false);
+  }
+});
+
 test('live HTTP guard protects every read/write endpoint and applies grants/revocations to existing sessions', async () => {
   let current: any = { id: 2, username: 'test-viewer', role: 'viewer', root_reset_access: 'view' };
   const token = { userId: 2, username: 'test-viewer', role: 'admin' }; // deliberately stale role

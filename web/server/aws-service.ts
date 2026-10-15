@@ -541,37 +541,47 @@ export async function deleteRootMFA(accountId: string) {
   // 1) 先换取目标账户的 root 特权会话
   const rootCreds = await assumeRoot(accountId, ROOT_TASK_POLICY.delete);
   const iamRoot = new IAMClient({ region: DEFAULT_REGION, credentials: rootCreds });
-
-  // 2) 在目标账户 root 会话内枚举它自己的 MFA 设备
-  const mfaList = await iamRoot.send(new ListMFADevicesCommand({}));
-  const devices = (mfaList.MFADevices || []).filter(d => !!d.SerialNumber);
-  if (devices.length === 0) {
-    throw new Error(`账户 ${accountId} 的根用户未启用 MFA，无需删除`);
-  }
-
-  // 3) 逐个停用并删除（root 会话须省略 UserName）
-  const removed: string[] = [];
-  const failed: { serial: string; reason: string }[] = [];
-  for (const d of devices) {
-    const serial = d.SerialNumber!;
-    // 安全校验：序列号必须属于目标账户，避免跨账户误删
-    if (serial.startsWith('arn:') && !serial.includes(`::${accountId}:`) && !serial.includes(`:${accountId}:`)) {
-      failed.push({ serial, reason: '该 MFA 序列号不属于目标账户，已跳过' });
-      continue;
+  try {
+    // 2) 在目标账户 root 会话内枚举它自己的 MFA 设备
+    const mfaList = await withAbortTimeout(AWS_REQUEST_TIMEOUT_MS, signal =>
+      iamRoot.send(new ListMFADevicesCommand({}), { abortSignal: signal }));
+    const devices = (mfaList.MFADevices || []).filter(d => !!d.SerialNumber);
+    if (devices.length === 0) {
+      throw Object.assign(new Error(`账户 ${accountId} 的根用户未启用 MFA，无需删除`), {
+        code: 'ROOT_MFA_NOT_ENABLED',
+      });
     }
-    try {
-      await iamRoot.send(new DeactivateMFADeviceCommand({ SerialNumber: serial }));
-      // 仅虚拟设备可删除；硬件 MFA 停用即可
-      try { await iamRoot.send(new DeleteVirtualMFADeviceCommand({ SerialNumber: serial })); } catch { /* 非虚拟设备忽略 */ }
-      removed.push(serial);
-    } catch (e: any) {
-      failed.push({ serial, reason: `${e?.name || 'Error'}: ${e?.message || ''}`.slice(0, 200) });
+
+    // 3) 逐个停用并删除（root 会话须省略 UserName）
+    const removed: string[] = [];
+    const failed: { serial: string; reason: string }[] = [];
+    for (const d of devices) {
+      const serial = d.SerialNumber!;
+      // 安全校验：序列号必须属于目标账户，避免跨账户误删
+      if (serial.startsWith('arn:') && !serial.includes(`::${accountId}:`) && !serial.includes(`:${accountId}:`)) {
+        failed.push({ serial, reason: '该 MFA 序列号不属于目标账户，已跳过' });
+        continue;
+      }
+      try {
+        await withAbortTimeout(AWS_REQUEST_TIMEOUT_MS, signal =>
+          iamRoot.send(new DeactivateMFADeviceCommand({ SerialNumber: serial }), { abortSignal: signal }));
+        // 仅虚拟设备可删除；硬件 MFA 停用即可
+        try {
+          await withAbortTimeout(AWS_REQUEST_TIMEOUT_MS, signal =>
+            iamRoot.send(new DeleteVirtualMFADeviceCommand({ SerialNumber: serial }), { abortSignal: signal }));
+        } catch { /* 非虚拟设备忽略 */ }
+        removed.push(serial);
+      } catch (e: any) {
+        failed.push({ serial, reason: `${e?.name || 'Error'}: ${e?.message || ''}`.slice(0, 200) });
+      }
     }
+    if (removed.length === 0 && failed.length > 0) {
+      throw new Error(`删除失败：${failed.map(f => `${f.serial} (${f.reason})`).join('; ')}`);
+    }
+    return { accountId, removed, failed };
+  } finally {
+    iamRoot.destroy();
   }
-  if (removed.length === 0 && failed.length > 0) {
-    throw new Error(`删除失败：${failed.map(f => `${f.serial} (${f.reason})`).join('; ')}`);
-  }
-  return { accountId, removed, failed };
 }
 
 /**
@@ -585,7 +595,8 @@ export async function recoverRootPassword(accountId: string) {
   const rootCreds = await assumeRoot(accountId, ROOT_TASK_POLICY.createPassword);
   const iamRoot = new IAMClient({ region: DEFAULT_REGION, credentials: rootCreds });
   try {
-    await iamRoot.send(new CreateLoginProfileCommand({}));
+    await withAbortTimeout(AWS_REQUEST_TIMEOUT_MS, signal =>
+      iamRoot.send(new CreateLoginProfileCommand({}), { abortSignal: signal }));
     return { accountId, ok: true, recoveryAllowed: true };
   } catch (e: any) {
     if (e?.name === 'EntityAlreadyExistsException' || e?.name === 'EntityAlreadyExists') {

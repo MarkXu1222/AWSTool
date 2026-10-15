@@ -61,6 +61,8 @@ AWS 多账户管理平台。跨组织管理成员账户：配额提升、账单 
 | `rootreset` | `BulkRootReset.tsx` | 独立权限 `root_reset_access`（`none`/`view`/`operate`） |
 | `poccash` | `PocCash.tsx` | **仅 `role === 'admin'`**，没有对应权限字段，连勾选都无法授予 |
 
+`cleanup` 内新增独立权限 Tab「账户回收」：`account_reclaim_access=operate` 或 admin 可见，单独授予它不授予资源清理权限；允许直链 `/cleanup`。非 admin 仅本人批次，受限账户仅当前 admin 创建者可回收。此 Tab 不新增页面 key。
+
 页面 ↔ 后端前缀的完整对照表见 **README「功能模块」**。
 
 ---
@@ -75,6 +77,7 @@ AWS 多账户管理平台。跨组织管理成员账户：配额提升、账单 
 | AWS 接入 | `aws-service.ts`★（AssumeRole 链）、`account-roles.ts`★、`account-lifecycle.ts`、`restricted-accounts.ts`★、`temp-admin.ts`★（admin-console 按需临时开通） |
 | 提额文档 | `doc-generator.ts`、`doc-templates.ts`★、`case-doc-submitter.ts`★ |
 | 账单导出 | `billing-export-jobs.ts`、`billing-exporter.ts` |
+| 账户回收 | `account-reclaim.ts`、`account-reclaim-core.ts`、`account-reclaim-permissions.ts`、`mailbox-admin-api.ts`；复用现有 AWS/Root 模块，设计与上线清单在 `.kiro/specs/account-reclaim/` |
 | Bedrock | `bedrock-tools.ts`、`bedrock-delivery.ts`★、`map-tag-rules.ts`★（前端 `utils/mapTag.ts` 逐字镜像） |
 | MAP 标签 | `tag-compliance.ts`、`tag-onboarding.ts` |
 | 批量 Root 改密 | `root-email-jobs.ts`、`root-email-core.ts`★、`root-email-browser.ts`、`root-email-execution-slot.ts`、`root-email-manual.ts`、`root-email-reconcile.ts`、`root-password-secrets.ts`、`root-reset-permissions.ts`、`root-mail-poll.ts`、`root-mail-links.ts`、`mail-api.ts`、`mail-api-config.ts` —— **改这块前先读 `web/ROOT_EMAIL.md`** |
@@ -104,6 +107,7 @@ AWS 多账户管理平台。跨组织管理成员账户：配额提升、账单 
 | `requireRootAccess` | `root_access` 或 admin |
 | `requireAuditAccess` / `requireBillingAccess` / `requireBulkQuotaAccess` | 对应页面可见者或独立权限 |
 | `root-reset-permissions.ts` | `root_reset_access` 的 `view`/`operate` |
+| `createAccountReclaimGuard` | 实时 `account_reclaim_access=operate` 或 admin；GET 也校验，业务层再校验本人/admin 所有权 |
 
 ⚠️ **MAP 标签的全部写端点用 `requireStrictAdmin`，不是 `requireAdmin`**（partadmin 进不去）。这条曾在文档里写反，以 `routes/aws.ts` 代码为准。
 
@@ -203,6 +207,7 @@ Bedrock 配额特意用 `/api/bedrock` 独立前缀，就是为了躲开 `/quota
 
 ## 十、关键决策记录
 
+- 账户回收组合已有五项操作，先收回邮箱与转发，再改 Root 密码；Root 来源隔离、跨文件幂等恢复、未知密码不重试，终态通知独立有界补发。实现与运维细节见 README「账户回收」及 `.kiro/specs/account-reclaim/RELEASE-CHECKLIST.md`
 - 生产以 **Web 版**为准，桌面版冻结
 - 后端 **tsx 直跑不编译**，改 `.ts` 即生效
 - 存储用 **JSON 文件 + 内存缓存 + 每日备份**，而非数据库（体量可控、零运维）
