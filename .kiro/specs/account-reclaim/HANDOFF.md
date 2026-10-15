@@ -61,6 +61,7 @@
       该任务简报写明「先读 `web/ROOT_EMAIL.md`」；`db.ts`、`auth.ts`、`routes/aws.ts`、`index.ts`、`MainLayout.tsx`、`api.ts`、`Settings.tsx` 为枢纽文件，同一波次各只能归一个任务。
 - [x] P5：发布材料已完成，APP_VERSION `0.55.1 → 0.56.0`，README/project-context/ROOT_EMAIL/设计同步；用户明确批准 G3。
 - [x] P6 部署：用户明确批准 G4，已合入/推送 main、备份、EC2 构建及 PM2 重启；保留最新 POC Solution 主干更新 `c44f637` 后的 `b9db13b` 再次独立复查，469/469、typecheck、build 通过。生产页面、只读邮箱联调与数据保全核验通过。
+- [x] 上线后只读复核 1 条 admin 业务任务（账户 `778091236384`）：completed，邮箱/AWS 改密 succeeded，其余三步已满足；密文、完成/查看审计及结果通知确认存在。部署检查未发起该任务；实际效果验收仍见清单。
 - [ ] P6 业务验收：指定授权测试账户，核验完整五步、旧密码/旧邮箱会话失效及转发阻断。部署检查没有创建回收任务或执行真实改密。
 
 ## 当前设计摘要（实现细节见 design.md）
